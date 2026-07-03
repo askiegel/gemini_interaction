@@ -1,0 +1,7 @@
+{"timestamp": "2026-07-02T21:19:51", "user_text": "follow tony", "intent_json": {"intent": "FOLLOW_PERSON", "speech": "Okay, I'll follow the person.", "target": null}}
+{"timestamp": "2026-07-02T21:20:02", "user_text": "follow tony", "intent_json": {"intent": "FOLLOW_PERSON", "speech": "Okay, I'll follow the person.", "target": null}}
+{"timestamp": "2026-07-02T21:20:02", "user_text": "stop", "intent_json": {"intent": "STOP", "speech": "Okay, I'll stop.", "target": null}}
+{"timestamp": "2026-07-02T21:20:03", "user_text": "what do you see", "intent_json": {"intent": "DESCRIBE_SCENE", "speech": "I'll describe what I see.", "target": null}}
+{"timestamp": "2026-07-02T21:20:04", "user_text": "find the backpack", "intent_json": {"intent": "FIND_OBJECT", "speech": "Okay, I'll look for the backpack.", "target": "backpack"}}
+{"timestamp": "2026-07-02T21:20:05", "user_text": "go attack the chair", "intent_json": {"intent": "UNKNOWN", "speech": "I cannot fulfill that request. Please provide a safe and clear command.", "target": null}}
+{"timestamp": "2026-07-02T21:21:03", "user_text": "follow me", "intent_json": {"intent": "FOLLOW_PERSON", "speech": "Okay, I'll follow the person.", "target": null}}
