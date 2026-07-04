@@ -20,6 +20,23 @@ def extract_json(text):
     return json.loads(text)
 
 
+def normalize_target(target):
+    if target is None:
+        return None
+
+    target = str(target).strip().lower()
+
+    aliases = {
+        "back pack": "backpack",
+        "book bag": "backpack",
+        "person": "person",
+        "human": "person",
+        "tony": "tony",
+    }
+
+    return aliases.get(target, target)
+
+
 def validate_intent(data):
     if not isinstance(data, dict):
         raise ValueError("Gemini response is not a JSON object")
@@ -39,6 +56,6 @@ def validate_intent(data):
     return {
         "intent": data["intent"],
         "speech": data["speech"],
-        "target": data["target"],
+        "target": normalize_target(data["target"]),
     }
 
