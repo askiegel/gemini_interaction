@@ -1,7 +1,7 @@
 import json
 
 from config import load_config
-from gemini_client import GeminiClient
+from provider_factory import create_provider
 from logger import InteractionLogger
 from mission_manager import MissionManager
 from behavior_manager import BehaviorManager
@@ -19,16 +19,13 @@ def fallback_intent(error):
 def main():
     config = load_config()
 
-    gemini = GeminiClient(
-        api_key=config["api_key"],
-        model=config["model"],
-    )
-
+    provider = create_provider(config)
     logger = InteractionLogger(config["log_file"])
     mission_manager = MissionManager()
     behavior_manager = BehaviorManager()
 
-    print("Gemini Interaction Manager")
+    print("Cognitive Interface")
+    print(f"Provider: {config['provider']}")
     print("Mission Manager Simulator Active")
     print("Type a command. Type 'quit' to exit.")
     print()
@@ -44,7 +41,7 @@ def main():
             continue
 
         try:
-            intent = gemini.get_intent(user_text)
+            intent = provider.get_intent(user_text)
         except Exception as e:
             intent = fallback_intent(e)
 
@@ -52,6 +49,7 @@ def main():
         behavior = behavior_manager.simulate(mission)
 
         log_entry = {
+            "provider": config["provider"],
             "intent": intent,
             "mission": mission.to_dict(),
             "behavior": behavior,
