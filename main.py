@@ -3,6 +3,8 @@ import json
 from config import load_config
 from gemini_client import GeminiClient
 from logger import InteractionLogger
+from mission_manager import MissionManager
+from behavior_manager import BehaviorManager
 
 
 def fallback_intent(error):
@@ -23,8 +25,11 @@ def main():
     )
 
     logger = InteractionLogger(config["log_file"])
+    mission_manager = MissionManager()
+    behavior_manager = BehaviorManager()
 
     print("Gemini Interaction Manager")
+    print("Mission Manager Simulator Active")
     print("Type a command. Type 'quit' to exit.")
     print()
 
@@ -43,10 +48,26 @@ def main():
         except Exception as e:
             intent = fallback_intent(e)
 
-        logger.log(user_text, intent)
+        mission = mission_manager.handle_intent(intent)
+        behavior = behavior_manager.simulate(mission)
+
+        log_entry = {
+            "intent": intent,
+            "mission": mission.to_dict(),
+            "behavior": behavior,
+        }
+
+        logger.log(user_text, log_entry)
 
         print("Intent JSON:")
         print(json.dumps(intent, indent=2))
+        print()
+
+        print("Mission:")
+        print(json.dumps(mission.to_dict(), indent=2))
+        print()
+
+        print(behavior)
         print()
 
 
