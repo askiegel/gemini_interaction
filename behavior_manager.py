@@ -7,6 +7,9 @@ class BehaviorManager:
         if status == "REJECTED":
             return "Behavior: Mission rejected. No robot action taken."
 
+        if status == "CANCELLED":
+            return "Behavior: Active mission cancelled. Robot should stop."
+
         if mission_type == "FOLLOW_PERSON":
             return (
                 f"Behavior: Tracking target '{target}'. "
@@ -33,8 +36,5 @@ class BehaviorManager:
 
         if mission_type == "STOP":
             return "Behavior: Robot stopped."
-
-        if status == "CANCELLED":
-            return "Behavior: Active mission cancelled. Robot should stop."
 
         return "Behavior: No simulated behavior available."
