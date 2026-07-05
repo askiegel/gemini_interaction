@@ -12,6 +12,11 @@ DEFAULT_VISION_SERVER_URL = os.getenv(
     "http://localhost:8000/detect"
 )
 
+DEFAULT_VISION_IMAGE_PATH = os.getenv(
+    "VISION_IMAGE_PATH",
+    ""
+)
+
 
 class VisionAdapter:
     """
@@ -19,24 +24,51 @@ class VisionAdapter:
 
     This layer does NOT depend on ROS2.
     It converts vision detections into persistent semantic entities.
+
+    Current Vision Server contract:
+    POST /detect with an uploaded image file.
     """
 
     def __init__(
         self,
         world_model: WorldModel,
         vision_url: str = DEFAULT_VISION_SERVER_URL,
+        image_path: str = DEFAULT_VISION_IMAGE_PATH,
         poll_interval: float = 1.0
     ):
         self.world_model = world_model
         self.registry = EntityRegistry(world_model)
         self.vision_url = vision_url
+        self.image_path = image_path
         self.poll_interval = poll_interval
         self.running = False
 
     def fetch_detections(self) -> List[Dict[str, Any]]:
-        response = requests.get(self.vision_url, timeout=5)
-        response.raise_for_status()
+        if not self.image_path:
+            raise RuntimeError(
+                "VISION_IMAGE_PATH is not set. "
+                "Current Vision Server requires an image upload to POST /detect."
+            )
 
+        if not os.path.exists(self.image_path):
+            raise FileNotFoundError(f"Vision image not found: {self.image_path}")
+
+        with open(self.image_path, "rb") as image_file:
+            files = {
+                "file": (
+                    os.path.basename(self.image_path),
+                    image_file,
+                    "image/jpeg"
+                )
+            }
+
+            response = requests.post(
+                self.vision_url,
+                files=files,
+                timeout=10
+            )
+
+        response.raise_for_status()
         data = response.json()
 
         if isinstance(data, list):
@@ -45,12 +77,15 @@ class VisionAdapter:
         if "detections" in data:
             return data["detections"]
 
-        if "objects" in data:
+        if "objects" in data and isinstance(data["objects"], list):
             return data["objects"]
 
         return []
 
     def process_detection(self, detection: Dict[str, Any]) -> Optional[str]:
+        if isinstance(detection, str):
+            detection = {"label": detection, "confidence": 0.0}
+
         label = (
             detection.get("label")
             or detection.get("class")
@@ -67,7 +102,6 @@ class VisionAdapter:
         )
 
         entity_type = self._infer_entity_type(label)
-
         location = self._extract_location(detection)
 
         attributes = {
@@ -104,7 +138,6 @@ class VisionAdapter:
 
     def process_once(self) -> List[str]:
         entity_ids = []
-
         detections = self.fetch_detections()
 
         for detection in detections:
@@ -120,6 +153,11 @@ class VisionAdapter:
 
         print("Vision Adapter started")
         print(f"Vision URL: {self.vision_url}")
+
+        if self.image_path:
+            print(f"Vision image source: {self.image_path}")
+        else:
+            print("Vision image source: NOT SET")
 
         while self.running:
             try:
@@ -158,6 +196,12 @@ class VisionAdapter:
         if "cy" in detection:
             location["cy"] = detection["cy"]
 
+        if "center_x" in detection:
+            location["cx"] = detection["center_x"]
+
+        if "center_y" in detection:
+            location["cy"] = detection["center_y"]
+
         if "area" in detection:
             location["area"] = detection["area"]
 
@@ -174,5 +218,11 @@ class VisionAdapter:
 
             location["cx"] = (detection["x1"] + detection["x2"]) / 2
             location["cy"] = (detection["y1"] + detection["y2"]) / 2
+
+        if "image_width" in detection:
+            location["image_width"] = detection["image_width"]
+
+        if "image_height" in detection:
+            location["image_height"] = detection["image_height"]
 
         return location
