@@ -42,10 +42,18 @@ class VisionAdapter:
         self.image_path = image_path
         self.poll_interval = poll_interval
         self.running = False
+        self.last_payload = {}
 
-    def fetch_detections(self) -> List[Dict[str, Any]]:
+    def fetch_vision_payload(self) -> Dict[str, Any]:
         if self.image_path:
-            return self._fetch_from_post_image()
+            detections = self._fetch_from_post_image()
+            return {
+                "timestamp": None,
+                "detections": detections,
+                "description": "Image upload detection result.",
+                "camera_running": None,
+                "vision_status": "IMAGE_UPLOAD_MODE"
+            }
 
         response = requests.get(self.vision_url, timeout=5)
         response.raise_for_status()
@@ -53,15 +61,69 @@ class VisionAdapter:
         data = response.json()
 
         if isinstance(data, list):
-            return data
+            return {
+                "timestamp": None,
+                "detections": data,
+                "description": "",
+                "camera_running": None,
+                "vision_status": "LEGACY_LIST_RESPONSE"
+            }
 
-        if "detections" in data:
-            return data["detections"]
+        return data
 
-        if "objects" in data and isinstance(data["objects"], list):
-            return [{"label": item, "confidence": 0.0} for item in data["objects"]]
+    def fetch_detections(self) -> List[Dict[str, Any]]:
+        payload = self.fetch_vision_payload()
+        self.last_payload = payload
+        self.update_vision_health(payload)
+
+        detections = payload.get("detections", [])
+
+        if isinstance(detections, list):
+            return detections
+
+        objects = payload.get("objects", [])
+
+        if isinstance(objects, list):
+            return [{"label": item, "confidence": 0.0} for item in objects]
 
         return []
+
+    def update_vision_health(self, payload: Dict[str, Any]):
+        camera_running = payload.get("camera_running")
+        timestamp = payload.get("timestamp")
+        detections = payload.get("detections", [])
+        description = payload.get("description", "")
+
+        if camera_running is False:
+            vision_status = "WAITING_FOR_CAMERA"
+        elif timestamp is None:
+            vision_status = "WAITING_FOR_FRAME"
+        elif detections:
+            vision_status = "DETECTIONS_AVAILABLE"
+        else:
+            vision_status = "NO_DETECTIONS"
+
+        if payload.get("vision_status"):
+            vision_status = payload["vision_status"]
+
+        health = {
+            "camera_running": camera_running,
+            "last_frame_time": timestamp,
+            "detections_available": bool(detections),
+            "detection_count": len(detections) if isinstance(detections, list) else 0,
+            "description": description,
+            "vision_status": vision_status,
+            "vision_url": self.vision_url
+        }
+
+        self.world_model.environment["vision"] = health
+
+        self.world_model.add_event(
+            "vision_health_updated",
+            health
+        )
+
+        self.world_model.save()
 
     def _fetch_from_post_image(self) -> List[Dict[str, Any]]:
         if not os.path.exists(self.image_path):
@@ -174,12 +236,32 @@ class VisionAdapter:
             try:
                 entity_ids = self.process_once()
 
+                vision_health = self.world_model.environment.get("vision", {})
+                vision_status = vision_health.get("vision_status", "UNKNOWN")
+
                 if entity_ids:
-                    print("Updated entities:", entity_ids)
+                    print("Updated entities:", entity_ids, "| vision:", vision_status)
                 else:
-                    print("No detections")
+                    print("No detections | vision:", vision_status)
 
             except Exception as exc:
+                self.world_model.environment["vision"] = {
+                    "camera_running": None,
+                    "last_frame_time": None,
+                    "detections_available": False,
+                    "detection_count": 0,
+                    "description": str(exc),
+                    "vision_status": "VISION_SERVER_ERROR",
+                    "vision_url": self.vision_url
+                }
+
+                self.world_model.add_event(
+                    "vision_health_error",
+                    self.world_model.environment["vision"]
+                )
+
+                self.world_model.save()
+
                 print("Vision Adapter error:", exc)
 
             time.sleep(self.poll_interval)
