@@ -9,6 +9,13 @@ from mission_types import (
     MISSION_REJECTED,
 )
 
+from event_types import (
+    EVENT_MISSION_COMPLETE,
+    EVENT_TARGET_FOUND,
+    EVENT_LOW_BATTERY,
+    EVENT_OBSTACLE_DETECTED,
+)
+
 
 class MissionManager:
     def __init__(self):
@@ -74,6 +81,69 @@ class MissionManager:
         )
         self.mission_history.append(mission)
         return mission
+
+    def handle_event(self, event):
+        event_type = event.event_type
+        payload = event.payload
+
+        if event_type == EVENT_MISSION_COMPLETE:
+            return self.complete_active_mission()
+
+        if event_type == EVENT_TARGET_FOUND:
+            return self._handle_target_found(payload)
+
+        if event_type == EVENT_LOW_BATTERY:
+            return self._handle_low_battery(payload)
+
+        if event_type == EVENT_OBSTACLE_DETECTED:
+            return self._handle_obstacle_detected(payload)
+
+        return None
+
+    def _handle_target_found(self, payload):
+        found_target = str(payload.get("target", "")).lower()
+
+        if not self.active_mission:
+            return None
+
+        active_target = str(self.active_mission.target).lower()
+
+        if (
+            self.active_mission.mission_type == "FIND_OBJECT"
+            and found_target == active_target
+        ):
+            return self.complete_active_mission()
+
+        return None
+
+    def _handle_low_battery(self, payload):
+        battery_percent = payload.get("battery_percent")
+
+        if battery_percent is None or battery_percent > 15:
+            return None
+
+        mission = create_mission(
+            mission_type="RETURN_HOME",
+            target="home",
+            speech=f"Battery is low at {battery_percent} percent. Returning home.",
+            status=MISSION_ACTIVE,
+            priority=10,
+        )
+
+        if self.active_mission:
+            self.active_mission.status = MISSION_QUEUED
+            self.active_mission.started_at = None
+            self.mission_queue.insert(0, self.active_mission)
+            self.active_mission = None
+
+        return self.submit_mission(mission)
+
+    def _handle_obstacle_detected(self, payload):
+        if not self.active_mission:
+            return None
+
+        self.active_mission.speech = "Obstacle detected. Mission is paused."
+        return self.active_mission
 
     def submit_mission(self, mission):
         if self.active_mission is None:
