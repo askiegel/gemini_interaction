@@ -16,6 +16,12 @@ def fallback_intent(error):
     }
 
 
+def print_mission_state(mission_manager):
+    print("Mission State:")
+    print(json.dumps(mission_manager.get_state(), indent=2))
+    print()
+
+
 def main():
     config = load_config()
 
@@ -26,8 +32,8 @@ def main():
 
     print("Cognitive Interface")
     print(f"Provider: {config['provider']}")
-    print("Mission Manager Simulator Active")
-    print("Type a command. Type 'quit' to exit.")
+    print("Mission Queue Simulator Active")
+    print("Commands: complete, queue, state, quit")
     print()
 
     while True:
@@ -38,6 +44,20 @@ def main():
             break
 
         if not user_text:
+            continue
+
+        if user_text.lower() == "complete":
+            completed = mission_manager.complete_active_mission()
+            if completed:
+                print("Completed Mission:")
+                print(json.dumps(completed.to_dict(), indent=2))
+            else:
+                print("No active mission to complete.")
+            print_mission_state(mission_manager)
+            continue
+
+        if user_text.lower() in {"queue", "state"}:
+            print_mission_state(mission_manager)
             continue
 
         try:
@@ -52,6 +72,7 @@ def main():
             "provider": config["provider"],
             "intent": intent,
             "mission": mission.to_dict(),
+            "mission_state": mission_manager.get_state(),
             "behavior": behavior,
         }
 
@@ -67,6 +88,7 @@ def main():
 
         print(behavior)
         print()
+        print_mission_state(mission_manager)
 
 
 if __name__ == "__main__":
