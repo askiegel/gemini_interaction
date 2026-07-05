@@ -1,15 +1,20 @@
-from datetime import datetime
-
 from vision_context import get_vision_context
+from world_model import WorldModel
+
+
+_WORLD_MODEL = WorldModel()
+
+
+def get_world_model():
+    return _WORLD_MODEL
 
 
 def get_robot_context():
     vision = get_vision_context()
+    detections = vision.get("detections", [])
 
-    detected_objects = vision.get("detections", [])
-
-    if not detected_objects:
-        detected_objects = [
+    if not detections:
+        detections = [
             {
                 "label": "person",
                 "confidence": 0.92,
@@ -26,20 +31,12 @@ def get_robot_context():
             },
         ]
 
-    return {
-        "timestamp": datetime.now().isoformat(timespec="seconds"),
-        "robot_name": "Mini Pupper 2",
-        "current_mission": "IDLE",
-        "navigation_state": "STANDBY",
-        "tracked_target": None,
-        "vision": vision,
-        "detected_objects": detected_objects,
-        "battery_percent": 84,
-        "safety": {
-            "front_clear": True,
-            "nearest_obstacle_m": 1.2,
-        },
-    }
+    _WORLD_MODEL.update_from_detections(detections, source=vision.get("source", "mock"))
+
+    snapshot = _WORLD_MODEL.snapshot()
+    snapshot["vision"] = vision
+
+    return snapshot
 
 
 def format_robot_context(context):
@@ -47,13 +44,14 @@ def format_robot_context(context):
 
     lines.append("Robot Context")
     lines.append("-------------")
-    lines.append(f"Robot: {context['robot_name']}")
-    lines.append(f"Mission: {context['current_mission']}")
-    lines.append(f"Navigation: {context['navigation_state']}")
-    lines.append(f"Tracked Target: {context['tracked_target']}")
-    lines.append(f"Battery: {context['battery_percent']}%")
-    lines.append(f"Front Clear: {context['safety']['front_clear']}")
-    lines.append(f"Nearest Obstacle: {context['safety']['nearest_obstacle_m']} m")
+
+    robot = context["robot"]
+    lines.append(f"Robot: {robot.get('name')}")
+    lines.append(f"Mission: {robot.get('mission')}")
+    lines.append(f"Navigation: {robot.get('navigation_state')}")
+    lines.append(f"Battery: {robot.get('battery_percent')}%")
+    lines.append(f"Front Clear: {robot.get('front_clear')}")
+    lines.append(f"Nearest Obstacle: {robot.get('nearest_obstacle_m')} m")
     lines.append("")
 
     vision = context.get("vision", {})
@@ -66,15 +64,16 @@ def format_robot_context(context):
         lines.append(f"- Error: {vision.get('error')}")
     lines.append("")
 
-    lines.append("Detected Objects:")
+    lines.append("World Entities:")
 
-    for obj in context["detected_objects"]:
+    for entity in context["entities"]:
         lines.append(
-            f"- {obj.get('label')} "
-            f"confidence={obj.get('confidence')} "
-            f"distance={obj.get('distance_m')}m "
-            f"position={obj.get('position')} "
-            f"tracking={obj.get('tracking')}"
+            f"- {entity.get('label')} "
+            f"type={entity.get('entity_type')} "
+            f"confidence={entity.get('confidence')} "
+            f"distance={entity.get('distance_m')}m "
+            f"position={entity.get('position')} "
+            f"tracking={entity.get('tracking')}"
         )
 
     return "\n".join(lines)
