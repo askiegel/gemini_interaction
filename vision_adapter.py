@@ -9,7 +9,7 @@ from entity_registry import EntityRegistry
 
 DEFAULT_VISION_SERVER_URL = os.getenv(
     "VISION_SERVER_URL",
-    "http://localhost:8000/detect"
+    "http://localhost:8000/detections/latest"
 )
 
 DEFAULT_VISION_IMAGE_PATH = os.getenv(
@@ -22,10 +22,10 @@ class VisionAdapter:
     """
     Connects the external Vision Server to the cognitive World Model.
 
-    This layer does NOT depend on ROS2.
-    It converts vision detections into persistent semantic entities.
+    Preferred contract:
+    GET /detections/latest
 
-    Current Vision Server contract:
+    Compatibility contract:
     POST /detect with an uploaded image file.
     """
 
@@ -44,12 +44,26 @@ class VisionAdapter:
         self.running = False
 
     def fetch_detections(self) -> List[Dict[str, Any]]:
-        if not self.image_path:
-            raise RuntimeError(
-                "VISION_IMAGE_PATH is not set. "
-                "Current Vision Server requires an image upload to POST /detect."
-            )
+        if self.image_path:
+            return self._fetch_from_post_image()
 
+        response = requests.get(self.vision_url, timeout=5)
+        response.raise_for_status()
+
+        data = response.json()
+
+        if isinstance(data, list):
+            return data
+
+        if "detections" in data:
+            return data["detections"]
+
+        if "objects" in data and isinstance(data["objects"], list):
+            return [{"label": item, "confidence": 0.0} for item in data["objects"]]
+
+        return []
+
+    def _fetch_from_post_image(self) -> List[Dict[str, Any]]:
         if not os.path.exists(self.image_path):
             raise FileNotFoundError(f"Vision image not found: {self.image_path}")
 
@@ -78,14 +92,11 @@ class VisionAdapter:
             return data["detections"]
 
         if "objects" in data and isinstance(data["objects"], list):
-            return data["objects"]
+            return [{"label": item, "confidence": 0.0} for item in data["objects"]]
 
         return []
 
     def process_detection(self, detection: Dict[str, Any]) -> Optional[str]:
-        if isinstance(detection, str):
-            detection = {"label": detection, "confidence": 0.0}
-
         label = (
             detection.get("label")
             or detection.get("class")
@@ -157,7 +168,7 @@ class VisionAdapter:
         if self.image_path:
             print(f"Vision image source: {self.image_path}")
         else:
-            print("Vision image source: NOT SET")
+            print("Vision source: latest detections endpoint")
 
         while self.running:
             try:
