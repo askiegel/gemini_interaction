@@ -2,3 +2,10 @@
 .venv/
 __pycache__/
 *.pyc
+
+# Runtime state
+*_state.json
+world_model_state.json
+
+# Logs
+logs/*.log
