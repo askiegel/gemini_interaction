@@ -3,6 +3,9 @@ import json
 
 VALID_INTENTS = {
     "FOLLOW_PERSON",
+    "MOVE_FORWARD",
+    "TURN_LEFT",
+    "TURN_RIGHT",
     "STOP",
     "DESCRIBE_SCENE",
     "FIND_OBJECT",

@@ -25,6 +25,24 @@ class BehaviorManager:
                 "Robot Bridge is ready for safe motion execution."
             )
 
+        if mission_type == "MOVE_FORWARD":
+            return (
+                "Behavior: Moving forward briefly through the Robot Bridge. "
+                "Automatic stop is enabled."
+            )
+
+        if mission_type == "TURN_LEFT":
+            return (
+                "Behavior: Turning left briefly through the Robot Bridge. "
+                "Automatic stop is enabled."
+            )
+
+        if mission_type == "TURN_RIGHT":
+            return (
+                "Behavior: Turning right briefly through the Robot Bridge. "
+                "Automatic stop is enabled."
+            )
+
         if mission_type == "FIND_OBJECT":
             return (
                 f"Behavior: Searching for object '{target}'. "
@@ -90,6 +108,48 @@ class BehaviorManager:
                 "behavior": "FOLLOW_PERSON",
                 "target": target,
                 "reason": "Safe forward test motion completed.",
+                "robot_result": robot_result,
+            }
+
+        if mission_type == "MOVE_FORWARD":
+            robot_result = self.robot.move_forward(
+                speed=0.08,
+                seconds=0.50,
+            )
+
+            return {
+                "ok": bool(robot_result.get("ok")),
+                "executed": True,
+                "behavior": "MOVE_FORWARD",
+                "reason": "Executed short forward movement.",
+                "robot_result": robot_result,
+            }
+
+        if mission_type == "TURN_LEFT":
+            robot_result = self.robot.turn_left(
+                speed=0.50,
+                seconds=0.40,
+            )
+
+            return {
+                "ok": bool(robot_result.get("ok")),
+                "executed": True,
+                "behavior": "TURN_LEFT",
+                "reason": "Executed short left turn.",
+                "robot_result": robot_result,
+            }
+
+        if mission_type == "TURN_RIGHT":
+            robot_result = self.robot.turn_right(
+                speed=0.50,
+                seconds=0.40,
+            )
+
+            return {
+                "ok": bool(robot_result.get("ok")),
+                "executed": True,
+                "behavior": "TURN_RIGHT",
+                "reason": "Executed short right turn.",
                 "robot_result": robot_result,
             }
 

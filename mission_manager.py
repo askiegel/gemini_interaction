@@ -41,6 +41,36 @@ class MissionManager:
             )
             return self.submit_mission(mission)
 
+        if intent == "MOVE_FORWARD":
+            mission = create_mission(
+                mission_type="MOVE_FORWARD",
+                target=None,
+                speech=speech,
+                status=MISSION_ACTIVE,
+                priority=7,
+            )
+            return self.submit_mission(mission)
+
+        if intent == "TURN_LEFT":
+            mission = create_mission(
+                mission_type="TURN_LEFT",
+                target=None,
+                speech=speech,
+                status=MISSION_ACTIVE,
+                priority=7,
+            )
+            return self.submit_mission(mission)
+
+        if intent == "TURN_RIGHT":
+            mission = create_mission(
+                mission_type="TURN_RIGHT",
+                target=None,
+                speech=speech,
+                status=MISSION_ACTIVE,
+                priority=7,
+            )
+            return self.submit_mission(mission)
+
         if intent == "FIND_OBJECT":
             mission = create_mission(
                 mission_type="FIND_OBJECT",
