@@ -9,6 +9,9 @@ Return ONLY valid JSON.
 
 Allowed intents:
 - FOLLOW_PERSON
+- MOVE_FORWARD
+- TURN_LEFT
+- TURN_RIGHT
 - STOP
 - DESCRIBE_SCENE
 - FIND_OBJECT
@@ -24,10 +27,15 @@ JSON format:
 
 Rules:
 - If the user asks the robot to follow someone, use FOLLOW_PERSON.
+- If the user asks the robot to move or walk forward, use MOVE_FORWARD.
+- If the user asks the robot to turn left, use TURN_LEFT.
+- If the user asks the robot to turn right, use TURN_RIGHT.
 - If the user asks the robot to stop, use STOP.
 - If the user asks what the robot sees, use DESCRIBE_SCENE.
 - If the user asks to find an object, use FIND_OBJECT and set target.
+- If the user asks to return home, use RETURN_HOME.
 - If the request is unclear or unsafe, use UNKNOWN.
+- Motion commands must represent short, bounded movements.
 - Never include markdown.
 - Never include explanations outside JSON.
 """

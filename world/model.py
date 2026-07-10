@@ -163,6 +163,136 @@ class WorldModel:
             "recent_events": self.recent_events
         }
 
+    def update_robot_state(self, **updates):
+        """
+        Compatibility interface for updating multiple robot-state fields.
+
+        The World Model remains the single source of truth. Each call stores
+        all supplied values and persists the resulting state.
+        """
+        if not updates:
+            return self.robot_state
+
+        self.robot_state.update(updates)
+        self.robot_state["updated_at"] = now_iso()
+
+        self.add_event(
+            "robot_state_updated",
+            {"updates": updates},
+        )
+
+        self.save()
+        return self.robot_state
+
+    def update_from_detections(self, detections, source="vision"):
+        """
+        Compatibility interface for importing normalized vision detections.
+
+        Each detection is converted into a WorldEntity observation using the
+        existing update_entity() implementation.
+        """
+        updated_entity_ids = []
+
+        for index, detection in enumerate(detections):
+            label = str(detection.get("label", "unknown")).strip().lower()
+            entity_id = detection.get("entity_id")
+
+            if not entity_id:
+                entity_id = f"{label}-{index + 1:03d}"
+
+            entity_type = detection.get("entity_type")
+            if not entity_type:
+                entity_type = "human" if label == "person" else "object"
+
+            location = detection.get("location")
+
+            if location is None:
+                location = {
+                    key: detection[key]
+                    for key in (
+                        "cx",
+                        "cy",
+                        "center_x",
+                        "center_y",
+                        "distance_m",
+                        "position",
+                    )
+                    if key in detection
+                }
+
+            attributes = dict(detection.get("attributes", {}))
+
+            for key in (
+                "distance_m",
+                "position",
+                "tracking",
+                "bbox",
+                "reid",
+                "image_width",
+                "image_height",
+            ):
+                if key in detection:
+                    attributes[key] = detection[key]
+
+            self.update_entity(
+                entity_id=entity_id,
+                label=label,
+                entity_type=entity_type,
+                confidence=float(detection.get("confidence", 0.0)),
+                source=source,
+                location=location or None,
+                attributes=attributes,
+            )
+
+            updated_entity_ids.append(entity_id)
+
+        return updated_entity_ids
+
+    def snapshot(self) -> Dict[str, Any]:
+        """
+        Return the compatibility snapshot consumed by the cognitive interface.
+        """
+        robot = dict(self.robot_state)
+
+        if "battery_percent" not in robot:
+            robot["battery_percent"] = robot.get("battery")
+
+        robot.setdefault("name", "Mini Pupper 2")
+        robot.setdefault("mission", None)
+        robot.setdefault("navigation_state", "UNKNOWN")
+        robot.setdefault("front_clear", None)
+        robot.setdefault("nearest_obstacle_m", None)
+
+        entities = []
+
+        for entity in self.entities.values():
+            data = entity.to_dict()
+            location = {}
+
+            if entity.history:
+                location = entity.history[-1].location or {}
+
+            attributes = entity.attributes or {}
+
+            data["distance_m"] = attributes.get(
+                "distance_m",
+                location.get("distance_m"),
+            )
+            data["position"] = attributes.get(
+                "position",
+                location.get("position"),
+            )
+            data["tracking"] = attributes.get("tracking", False)
+
+            entities.append(data)
+
+        return {
+            "robot": robot,
+            "environment": self.environment,
+            "entities": entities,
+            "recent_events": list(self.recent_events),
+        }
+
     def save(self):
         data = {
             "robot_state": self.robot_state,
