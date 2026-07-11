@@ -1,0 +1,348 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+
+    <meta
+        name="viewport"
+        content="width=device-width, initial-scale=1.0"
+    >
+
+    <title>Mini Pupper Voice Relay</title>
+
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 760px;
+            margin: 40px auto;
+            padding: 0 20px;
+            background: #f4f6f8;
+            color: #1d2630;
+        }
+
+        .panel {
+            background: white;
+            border-radius: 12px;
+            padding: 28px;
+            box-shadow: 0 4px 18px rgba(0, 0, 0, 0.10);
+        }
+
+        h1 {
+            margin-top: 0;
+        }
+
+        .status {
+            padding: 14px;
+            margin-bottom: 20px;
+            border-left: 5px solid;
+            font-weight: bold;
+        }
+
+        .dry-run {
+            background: #e8f5e9;
+            border-color: #2e7d32;
+        }
+
+        .live {
+            background: #fff3e0;
+            border-color: #ef6c00;
+        }
+
+        .safety-panel {
+            border: 1px solid #ccd3da;
+            border-radius: 8px;
+            padding: 16px;
+            margin-bottom: 20px;
+        }
+
+        .toggle-row {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            font-size: 18px;
+        }
+
+        input[type="checkbox"] {
+            width: 22px;
+            height: 22px;
+        }
+
+        button {
+            font-size: 18px;
+            padding: 12px 22px;
+            margin: 6px 6px 6px 0;
+            cursor: pointer;
+        }
+
+        input[type="text"] {
+            width: calc(100% - 24px);
+            font-size: 18px;
+            padding: 12px;
+            margin: 10px 0;
+        }
+
+        pre {
+            white-space: pre-wrap;
+            overflow-wrap: anywhere;
+            background: #111827;
+            color: #f9fafb;
+            padding: 16px;
+            border-radius: 8px;
+            min-height: 170px;
+        }
+
+        #heard {
+            font-size: 22px;
+            font-weight: bold;
+            min-height: 32px;
+        }
+    </style>
+</head>
+
+<body>
+<div class="panel">
+    <h1>Mini Pupper 2 Voice Relay</h1>
+
+    <div
+        id="modeStatus"
+        class="status dry-run"
+    >
+        DRY-RUN MODE: The robot will not move.
+    </div>
+
+    <div class="safety-panel">
+        <div class="toggle-row">
+            <input
+                id="liveMode"
+                type="checkbox"
+            >
+
+            <label for="liveMode">
+                Enable live robot execution
+            </label>
+        </div>
+
+        <p>
+            Live mode sends commands to the Robot Bridge and may move
+            the Mini Pupper. Keep the robot on the floor with a clear
+            area around it.
+        </p>
+    </div>
+
+    <p>
+        Click <strong>Start Listening</strong>, allow microphone access,
+        and say a command.
+    </p>
+
+    <button id="listenButton">
+        Start Listening
+    </button>
+
+    <div id="heard"></div>
+
+    <hr>
+
+    <p>Manual command test:</p>
+
+    <input
+        id="manualCommand"
+        type="text"
+        value="Move forward"
+        aria-label="Manual robot command"
+    >
+
+    <button id="sendButton">
+        Send Command
+    </button>
+
+    <h2>Pipeline Output</h2>
+
+    <pre id="output">Ready.</pre>
+</div>
+
+<script>
+    const output =
+        document.getElementById("output");
+
+    const heard =
+        document.getElementById("heard");
+
+    const listenButton =
+        document.getElementById("listenButton");
+
+    const sendButton =
+        document.getElementById("sendButton");
+
+    const manualCommand =
+        document.getElementById("manualCommand");
+
+    const liveMode =
+        document.getElementById("liveMode");
+
+    const modeStatus =
+        document.getElementById("modeStatus");
+
+    function isLiveModeEnabled() {
+        return liveMode.checked;
+    }
+
+    function updateModeDisplay() {
+        if (isLiveModeEnabled()) {
+            modeStatus.className = "status live";
+            modeStatus.textContent =
+                "LIVE MODE: Voice commands may move the robot.";
+        }
+        else {
+            modeStatus.className = "status dry-run";
+            modeStatus.textContent =
+                "DRY-RUN MODE: The robot will not move.";
+        }
+    }
+
+    liveMode.addEventListener("change", () => {
+        if (liveMode.checked) {
+            const confirmed = window.confirm(
+                "Enable live robot execution?\n\n" +
+                "Commands may move the Mini Pupper. " +
+                "Confirm the robot is on the floor and " +
+                "the surrounding area is clear."
+            );
+
+            if (!confirmed) {
+                liveMode.checked = false;
+            }
+        }
+
+        updateModeDisplay();
+    });
+
+    async function sendCommand(command) {
+        const execute = isLiveModeEnabled();
+        const mode = execute ? "LIVE" : "DRY RUN";
+
+        output.textContent =
+            "Sending command to the cognitive pipeline:\n" +
+            command +
+            "\n\nMode: " +
+            mode;
+
+        try {
+            const response = await fetch("/command", {
+                method: "POST",
+
+                headers: {
+                    "Content-Type": "application/json"
+                },
+
+                body: JSON.stringify({
+                    command: command,
+                    execute: execute
+                })
+            });
+
+            const result = await response.json();
+
+            if (!response.ok) {
+                output.textContent =
+                    "Relay error:\n" +
+                    JSON.stringify(result, null, 2);
+
+                return;
+            }
+
+            output.textContent =
+                "Command: " + result.command + "\n\n" +
+                "Mode: " + result.mode + "\n\n" +
+                (result.stdout || "") +
+                (
+                    result.stderr
+                        ? "\nERROR:\n" + result.stderr
+                        : ""
+                );
+        }
+        catch (error) {
+            output.textContent =
+                "Relay error:\n" + error.toString();
+        }
+    }
+
+    sendButton.addEventListener("click", () => {
+        const command = manualCommand.value.trim();
+
+        if (command) {
+            sendCommand(command);
+        }
+    });
+
+    const SpeechRecognition =
+        window.SpeechRecognition ||
+        window.webkitSpeechRecognition;
+
+    if (!SpeechRecognition) {
+        listenButton.disabled = true;
+
+        heard.textContent =
+            "Chrome speech recognition is unavailable. " +
+            "Use the manual command box.";
+    }
+    else {
+        const recognition = new SpeechRecognition();
+
+        recognition.lang = "en-US";
+        recognition.continuous = false;
+        recognition.interimResults = false;
+        recognition.maxAlternatives = 3;
+
+        listenButton.addEventListener("click", () => {
+            heard.textContent = "Listening...";
+            output.textContent = "Waiting for speech...";
+
+            try {
+                recognition.start();
+            }
+            catch (error) {
+                output.textContent =
+                    "Could not start recognition:\n" +
+                    error.toString();
+            }
+        });
+
+        recognition.onresult = (event) => {
+            const command =
+                event.results[0][0].transcript.trim();
+
+            const confidence =
+                event.results[0][0].confidence;
+
+            heard.textContent =
+                'Heard: "' + command + '"';
+
+            output.textContent =
+                "Recognition confidence: " +
+                Math.round(confidence * 100) +
+                "%";
+
+            sendCommand(command);
+        };
+
+        recognition.onerror = (event) => {
+            heard.textContent =
+                "Recognition failed.";
+
+            output.textContent =
+                "Speech recognition error: " +
+                event.error;
+        };
+
+        recognition.onend = () => {
+            if (heard.textContent === "Listening...") {
+                heard.textContent =
+                    "No speech was recognized.";
+            }
+        };
+    }
+
+    updateModeDisplay();
+</script>
+</body>
+</html>
