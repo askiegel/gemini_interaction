@@ -16,7 +16,7 @@ DEFAULT_PORT = 8770
 
 class RuntimeAPIHandler(BaseHTTPRequestHandler):
     """
-    HTTP interface for submitting missions to the persistent cognitive runtime.
+    HTTP interface for the persistent cognitive runtime.
 
     Endpoints:
 
@@ -24,9 +24,26 @@ class RuntimeAPIHandler(BaseHTTPRequestHandler):
         GET  /status
         GET  /missions
         POST /missions
+
+    POST /missions accepts either:
+
+        {"command": "Find my backpack"}
+
+    or a provider-produced intent:
+
+        {
+          "intent": {
+            "intent": "FIND_OBJECT",
+            "speech": "Okay, I'll look for your backpack.",
+            "target": "backpack"
+          }
+        }
+
+    The parsed-intent form prevents voice_command.py and the runtime from
+    invoking the AI provider twice for the same spoken command.
     """
 
-    server_version = "MiniPupperRuntimeAPI/1.0"
+    server_version = "MiniPupperRuntimeAPI/1.1"
 
     def send_cors_headers(self):
         self.send_header("Access-Control-Allow-Origin", "*")
@@ -153,32 +170,76 @@ class RuntimeAPIHandler(BaseHTTPRequestHandler):
                     "The request body must be a JSON object."
                 )
 
-            command = str(
-                request_data.get("command", "")
-            ).strip()
+            command_value = request_data.get("command")
+            intent_value = request_data.get("intent")
 
-            if not command:
+            has_command = (
+                isinstance(command_value, str)
+                and bool(command_value.strip())
+            )
+
+            has_intent = isinstance(intent_value, dict)
+
+            if has_command and has_intent:
                 raise ValueError(
-                    "A non-empty command is required."
+                    "Provide either command or intent, not both."
                 )
 
-            submission = self.server.runtime.submit_text(
-                command
-            )
+            if not has_command and not has_intent:
+                raise ValueError(
+                    "A non-empty command or parsed intent is required."
+                )
+
+            if has_intent:
+                parsed_intent = dict(intent_value)
+
+                intent_name = str(
+                    parsed_intent.get("intent", "")
+                ).strip()
+
+                if not intent_name:
+                    raise ValueError(
+                        "The parsed intent must include an intent name."
+                    )
+
+                mission = self.server.runtime.submit_intent(
+                    parsed_intent
+                )
+
+                submission_mode = "parsed_intent"
+                command = str(
+                    request_data.get("source_text", "")
+                ).strip()
+
+                submission = {
+                    "command": command or None,
+                    "intent": parsed_intent,
+                    "mission": mission.to_dict(),
+                }
+
+            else:
+                command = command_value.strip()
+
+                submission = self.server.runtime.submit_text(
+                    command
+                )
+
+                submission_mode = "command"
 
             self.send_json(
                 202,
                 {
                     "ok": True,
                     "accepted": True,
-                    "command": command,
+                    "submission_mode": submission_mode,
+                    "command": submission.get("command"),
                     "intent": submission["intent"],
                     "mission": submission["mission"],
                     "runtime": self.server.runtime.get_status(),
                 },
             )
 
-        except ValueError as exc:
+        except (TypeError, ValueError) as exc:
             self.send_json(
                 400,
                 {
@@ -218,6 +279,7 @@ class CognitiveRuntimeHTTPServer(ThreadingHTTPServer):
             server_address,
             RuntimeAPIHandler,
         )
+
         self.runtime = runtime
 
 
@@ -287,14 +349,6 @@ def main():
     print("Status:   GET  /status")
     print("Missions: GET  /missions")
     print("Submit:   POST /missions")
-    print()
-    print("Example:")
-    print(
-        "curl -X POST "
-        f"http://{actual_host}:{actual_port}/missions "
-        "-H 'Content-Type: application/json' "
-        "-d '{\"command\":\"Find my backpack\"}'"
-    )
     print()
     print("Leave this terminal running.")
     print("Press Ctrl+C to stop.")

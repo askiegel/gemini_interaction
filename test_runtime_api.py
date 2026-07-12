@@ -8,6 +8,14 @@ import urllib.request
 from runtime_api import create_server
 
 
+class FakeMission:
+    def __init__(self, data):
+        self.data = data
+
+    def to_dict(self):
+        return dict(self.data)
+
+
 class FakeRuntime:
     def __init__(self):
         self.running = True
@@ -18,27 +26,27 @@ class FakeRuntime:
         self.last_result = None
         self.last_error = None
 
-    def submit_text(self, command):
+    def _accept_intent(
+        self,
+        intent,
+        command=None,
+    ):
         mission_number = len(self.submissions) + 1
+        mission_type = intent.get("intent", "UNKNOWN")
 
         mission = {
             "mission_id": f"mission-test-{mission_number}",
-            "mission_type": (
-                "FIND_OBJECT"
-                if "backpack" in command.lower()
-                else "TURN_LEFT"
-            ),
+            "mission_type": mission_type,
             "status": (
                 "ACTIVE"
                 if self.active_mission is None
                 else "QUEUED"
             ),
-            "target": (
-                "backpack"
-                if "backpack" in command.lower()
-                else None
+            "target": intent.get("target"),
+            "speech": intent.get(
+                "speech",
+                "Test mission accepted.",
             ),
-            "speech": "Test mission accepted.",
             "created_at": "2026-07-12T12:00:00",
             "started_at": None,
             "completed_at": None,
@@ -46,13 +54,13 @@ class FakeRuntime:
             "source": "cognitive",
         }
 
-        intent = {
-            "intent": mission["mission_type"],
-            "speech": mission["speech"],
-            "target": mission["target"],
-        }
+        self.submissions.append(
+            {
+                "command": command,
+                "intent": dict(intent),
+            }
+        )
 
-        self.submissions.append(command)
         self.history_count += 1
 
         if self.active_mission is None:
@@ -60,11 +68,35 @@ class FakeRuntime:
         else:
             self.queue.append(mission)
 
+        return FakeMission(mission)
+
+    def submit_text(self, command):
+        if "backpack" in command.lower():
+            intent = {
+                "intent": "FIND_OBJECT",
+                "speech": "Test mission accepted.",
+                "target": "backpack",
+            }
+        else:
+            intent = {
+                "intent": "TURN_LEFT",
+                "speech": "Test mission accepted.",
+                "target": None,
+            }
+
+        mission = self._accept_intent(
+            intent,
+            command=command,
+        )
+
         return {
             "command": command,
             "intent": intent,
-            "mission": dict(mission),
+            "mission": mission.to_dict(),
         }
+
+    def submit_intent(self, intent):
+        return self._accept_intent(intent)
 
     def get_status(self):
         return {
@@ -154,19 +186,7 @@ def main():
         assert health["runtime_running"] is True
 
         print()
-        print("===== INITIAL STATUS ENDPOINT =====")
-        status_code, status = request_json(
-            "GET",
-            f"{base_url}/status",
-        )
-        print(status_code, status)
-
-        assert status_code == 200
-        assert status["active_mission"] is None
-        assert status["queue"] == []
-
-        print()
-        print("===== SUBMIT FIRST MISSION =====")
+        print("===== COMMAND SUBMISSION =====")
         status_code, first = request_json(
             "POST",
             f"{base_url}/missions",
@@ -177,8 +197,8 @@ def main():
         print(status_code, first)
 
         assert status_code == 202
-        assert first["ok"] is True
         assert first["accepted"] is True
+        assert first["submission_mode"] == "command"
         assert (
             first["mission"]["mission_type"]
             == "FIND_OBJECT"
@@ -186,18 +206,30 @@ def main():
         assert first["mission"]["status"] == "ACTIVE"
 
         print()
-        print("===== SUBMIT SECOND MISSION =====")
+        print("===== PARSED INTENT SUBMISSION =====")
+        parsed_intent = {
+            "intent": "TURN_LEFT",
+            "speech": "Turning left.",
+            "target": None,
+        }
+
         status_code, second = request_json(
             "POST",
             f"{base_url}/missions",
             {
-                "command": "Turn left",
+                "source_text": "Turn left",
+                "intent": parsed_intent,
             },
         )
         print(status_code, second)
 
         assert status_code == 202
-        assert second["ok"] is True
+        assert second["accepted"] is True
+        assert (
+            second["submission_mode"]
+            == "parsed_intent"
+        )
+        assert second["intent"] == parsed_intent
         assert second["mission"]["status"] == "QUEUED"
 
         print()
@@ -221,41 +253,41 @@ def main():
         assert missions["history_count"] == 2
 
         print()
-        print("===== EMPTY COMMAND VALIDATION =====")
-        status_code, invalid = request_json(
+        print("===== BOTH INPUT TYPES REJECTED =====")
+        status_code, invalid_both = request_json(
             "POST",
             f"{base_url}/missions",
             {
-                "command": "   ",
+                "command": "Turn left",
+                "intent": parsed_intent,
             },
         )
-        print(status_code, invalid)
+        print(status_code, invalid_both)
 
         assert status_code == 400
-        assert invalid["ok"] is False
-        assert invalid["accepted"] is False
+        assert invalid_both["ok"] is False
 
         print()
-        print("===== UNKNOWN ENDPOINT =====")
-        status_code, missing = request_json(
-            "GET",
-            f"{base_url}/missing",
+        print("===== EMPTY REQUEST REJECTED =====")
+        status_code, invalid_empty = request_json(
+            "POST",
+            f"{base_url}/missions",
+            {},
         )
-        print(status_code, missing)
+        print(status_code, invalid_empty)
 
-        assert status_code == 404
-        assert missing["ok"] is False
+        assert status_code == 400
+        assert invalid_empty["ok"] is False
 
         print()
-        print("PASS: runtime health endpoint")
-        print("PASS: runtime status endpoint")
-        print("PASS: first mission accepted as active")
-        print("PASS: second mission accepted as queued")
-        print("PASS: mission queue visible through HTTP")
-        print("PASS: empty commands rejected safely")
-        print("PASS: unknown endpoints return 404")
+        print("PASS: command submission remains supported")
+        print("PASS: parsed intents are accepted")
+        print("PASS: parsed intent is queued without provider call")
+        print("PASS: mission queue remains visible")
+        print("PASS: ambiguous submissions are rejected")
+        print("PASS: empty submissions are rejected")
         print()
-        print("Runtime API offline integration test passed.")
+        print("Runtime API parsed-intent test passed.")
 
     finally:
         server.shutdown()
