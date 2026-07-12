@@ -173,6 +173,7 @@ def run_command(
     behavior_manager = BehaviorManager(
         robot_client=RobotBridgeClient(timeout=15.0),
         vision_adapter=vision_adapter,
+        world_model=world_model,
     )
 
     if not execute:

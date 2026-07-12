@@ -58,9 +58,33 @@ def make_mission(mission_type, target=None, status="ACTIVE"):
     )
 
 
+
+class LegacyFakeVisionAdapter:
+    """
+    Compatibility perception source for the legacy BehaviorManager test.
+
+    Production runtime behavior uses the shared World Model. This adapter
+    verifies that isolated legacy callers can still use find_target().
+    """
+
+    def find_target(self, target_name):
+        return {
+            "found": True,
+            "target": target_name,
+            "confidence": 0.90,
+            "cx": 320.0,
+            "cy": 240.0,
+            "area": 76000.0,
+            "image_width": 640.0,
+            "image_height": 480.0,
+        }
+
 def main():
     robot = FakeRobotBridgeClient()
-    manager = BehaviorManager(robot_client=robot)
+    manager = BehaviorManager(
+        robot_client=robot,
+        vision_adapter=LegacyFakeVisionAdapter(),
+    )
 
     result = manager.execute(make_mission("MOVE_FORWARD"))
     assert result["ok"] is True
@@ -93,9 +117,12 @@ def main():
         make_mission("FIND_OBJECT", target="backpack")
     )
     assert result["ok"] is True
-    assert result["executed"] is False
+    assert result["executed"] is True
     assert result["behavior"] == "FIND_OBJECT"
     assert result["target"] == "backpack"
+    assert result["state"] == "ARRIVED"
+    assert result["completed"] is True
+    assert robot.calls[-1][0] == "stop"
 
     result = manager.execute(make_mission("RETURN_HOME"))
     assert result["ok"] is True

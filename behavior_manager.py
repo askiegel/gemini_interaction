@@ -20,9 +20,20 @@ class BehaviorManager:
     MAX_FIND_CYCLES = 30
     FIND_CYCLE_PAUSE = 1.50
 
-    def __init__(self, robot_client=None, vision_adapter=None):
+    TARGET_MAX_AGE_SECONDS = 3.0
+
+    def __init__(
+        self,
+        robot_client=None,
+        vision_adapter=None,
+        world_model=None,
+    ):
         self.robot = robot_client or RobotBridgeClient()
         self.vision = vision_adapter
+        self.world_model = (
+            world_model
+            or getattr(vision_adapter, "world_model", None)
+        )
 
     def simulate(self, mission):
         """
@@ -204,13 +215,15 @@ class BehaviorManager:
                 "reason": "FIND_OBJECT requires a target.",
             }
 
-        if self.vision is None:
+        if self.world_model is None and self.vision is None:
             return {
                 "ok": False,
                 "executed": False,
                 "behavior": "FIND_OBJECT",
                 "target": target_name,
-                "reason": "Vision Adapter is not configured.",
+                "reason": (
+                    "World Model perception source is not configured."
+                ),
             }
 
         cycle_history = []
@@ -262,13 +275,45 @@ class BehaviorManager:
             "robot_result": stop_result,
         }
 
+    def _get_target_observation(self, target_name):
+        """
+        Read the newest target observation from the shared World Model.
+
+        The compatibility fallback is retained only for isolated legacy tests
+        that construct BehaviorManager without a World Model.
+        """
+        if (
+            self.world_model is not None
+            and hasattr(
+                self.world_model,
+                "find_latest_entity_by_label",
+            )
+        ):
+            return self.world_model.find_latest_entity_by_label(
+                target_name,
+                max_age_seconds=self.TARGET_MAX_AGE_SECONDS,
+                refresh=True,
+            )
+
+        if (
+            self.vision is not None
+            and hasattr(self.vision, "find_target")
+        ):
+            return self.vision.find_target(target_name)
+
+        raise RuntimeError(
+            "No World Model perception source is available."
+        )
+
     def _execute_find_object_cycle(
         self,
         target_name,
         cycle_number,
     ):
         try:
-            target = self.vision.find_target(target_name)
+            target = self._get_target_observation(
+                target_name
+            )
         except Exception as exc:
             stop_result = self.robot.stop()
 
@@ -277,9 +322,11 @@ class BehaviorManager:
                 "executed": True,
                 "behavior": "FIND_OBJECT",
                 "target": target_name,
-                "state": "VISION_ERROR",
+                "state": "PERCEPTION_ERROR",
                 "cycle": cycle_number,
-                "reason": f"Vision query failed: {exc}",
+                "reason": (
+                    f"World Model target query failed: {exc}"
+                ),
                 "robot_result": stop_result,
             }
 

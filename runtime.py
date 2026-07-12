@@ -68,6 +68,7 @@ class CognitiveRuntime:
         self.behavior_manager = behavior_manager or BehaviorManager(
             robot_client=self.robot_client,
             vision_adapter=self.vision_adapter,
+            world_model=self.world_model,
         )
 
         self.loop_interval = (
