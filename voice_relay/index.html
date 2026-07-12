@@ -8,58 +8,149 @@
         content="width=device-width, initial-scale=1.0"
     >
 
-    <title>Mini Pupper Voice Relay</title>
+    <title>Mini Pupper 2 Operator Dashboard</title>
 
     <style>
-        body {
-            font-family: Arial, sans-serif;
-            max-width: 760px;
-            margin: 40px auto;
-            padding: 0 20px;
-            background: #f4f6f8;
-            color: #1d2630;
+        :root {
+            color-scheme: light;
+            font-family:
+                Inter,
+                system-ui,
+                -apple-system,
+                BlinkMacSystemFont,
+                "Segoe UI",
+                sans-serif;
         }
 
-        .panel {
+        * {
+            box-sizing: border-box;
+        }
+
+        body {
+            margin: 0;
+            background: #eef2f6;
+            color: #17202a;
+        }
+
+        header {
+            background: #17202a;
+            color: white;
+            padding: 20px 28px;
+        }
+
+        header h1 {
+            margin: 0;
+            font-size: 25px;
+        }
+
+        header p {
+            margin: 6px 0 0;
+            opacity: 0.8;
+        }
+
+        main {
+            max-width: 1250px;
+            margin: 22px auto;
+            padding: 0 18px 36px;
+        }
+
+        .health-grid,
+        .dashboard-grid,
+        .command-grid {
+            display: grid;
+            gap: 14px;
+        }
+
+        .health-grid {
+            grid-template-columns:
+                repeat(auto-fit, minmax(180px, 1fr));
+            margin-bottom: 16px;
+        }
+
+        .dashboard-grid {
+            grid-template-columns:
+                repeat(auto-fit, minmax(320px, 1fr));
+        }
+
+        .command-grid {
+            grid-template-columns:
+                repeat(auto-fit, minmax(130px, 1fr));
+        }
+
+        .card {
             background: white;
             border-radius: 12px;
-            padding: 28px;
-            box-shadow: 0 4px 18px rgba(0, 0, 0, 0.10);
+            padding: 18px;
+            box-shadow:
+                0 3px 14px rgba(0, 0, 0, 0.08);
         }
 
-        h1 {
-            margin-top: 0;
+        .health-card {
+            display: flex;
+            align-items: center;
+            gap: 12px;
         }
 
-        .status {
-            padding: 14px;
-            margin-bottom: 20px;
-            border-left: 5px solid;
-            font-weight: bold;
+        .health-dot {
+            width: 14px;
+            height: 14px;
+            border-radius: 50%;
+            background: #9aa4ad;
+            flex: 0 0 auto;
         }
 
-        .dry-run {
-            background: #e8f5e9;
-            border-color: #2e7d32;
+        .health-dot.good {
+            background: #1c9b55;
         }
 
-        .live {
-            background: #fff3e0;
-            border-color: #ef6c00;
+        .health-dot.bad {
+            background: #d73a49;
         }
 
-        .safety-panel {
-            border: 1px solid #ccd3da;
-            border-radius: 8px;
-            padding: 16px;
-            margin-bottom: 20px;
+        .health-title {
+            font-weight: 700;
+        }
+
+        .health-detail {
+            margin-top: 3px;
+            color: #5f6b76;
+            font-size: 14px;
+        }
+
+        h2 {
+            margin: 0 0 14px;
+            font-size: 19px;
+        }
+
+        .mode-panel {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 16px;
+            background: white;
+            padding: 15px 18px;
+            border-radius: 12px;
+            margin-bottom: 16px;
+            box-shadow:
+                0 3px 14px rgba(0, 0, 0, 0.08);
+        }
+
+        .mode-label {
+            font-weight: 700;
+        }
+
+        .live-warning {
+            color: #b44900;
+        }
+
+        .dry-label {
+            color: #18794e;
         }
 
         .toggle-row {
             display: flex;
             align-items: center;
-            gap: 12px;
-            font-size: 18px;
+            gap: 10px;
         }
 
         input[type="checkbox"] {
@@ -68,49 +159,241 @@
         }
 
         button {
-            font-size: 18px;
-            padding: 12px 22px;
-            margin: 6px 6px 6px 0;
+            border: 0;
+            border-radius: 9px;
+            padding: 12px 16px;
+            font-size: 16px;
+            font-weight: 650;
             cursor: pointer;
+            background: #e3e8ed;
+            color: #17202a;
+        }
+
+        button:hover {
+            filter: brightness(0.96);
+        }
+
+        button:disabled {
+            cursor: not-allowed;
+            opacity: 0.55;
+        }
+
+        .primary {
+            background: #1666c5;
+            color: white;
+        }
+
+        .stop {
+            width: 100%;
+            background: #d62535;
+            color: white;
+            font-size: 20px;
+            padding: 17px;
+            margin-bottom: 12px;
+        }
+
+        .listening {
+            background: #d62535;
         }
 
         input[type="text"] {
-            width: calc(100% - 24px);
-            font-size: 18px;
+            width: 100%;
             padding: 12px;
-            margin: 10px 0;
+            border: 1px solid #c8d0d8;
+            border-radius: 8px;
+            font-size: 17px;
+            margin-bottom: 10px;
+        }
+
+        .heard {
+            min-height: 52px;
+            padding: 12px;
+            border-radius: 8px;
+            background: #f1f4f7;
+            font-size: 19px;
+            font-weight: 700;
+            margin-bottom: 12px;
+        }
+
+        .metric {
+            display: flex;
+            justify-content: space-between;
+            gap: 15px;
+            border-bottom: 1px solid #e5e9ed;
+            padding: 9px 0;
+        }
+
+        .metric:last-child {
+            border-bottom: 0;
+        }
+
+        .metric-name {
+            color: #63707b;
+        }
+
+        .metric-value {
+            text-align: right;
+            font-weight: 650;
+            overflow-wrap: anywhere;
+        }
+
+        .state-badge {
+            display: inline-block;
+            border-radius: 999px;
+            padding: 6px 10px;
+            background: #e3e8ed;
+            font-weight: 700;
+        }
+
+        .state-badge.active {
+            background: #fff0c7;
+            color: #744d00;
+        }
+
+        .state-badge.success {
+            background: #dff5e8;
+            color: #11623b;
+        }
+
+        .queue-item,
+        .detection-item {
+            padding: 9px 0;
+            border-bottom: 1px solid #e5e9ed;
         }
 
         pre {
             white-space: pre-wrap;
             overflow-wrap: anywhere;
-            background: #111827;
-            color: #f9fafb;
-            padding: 16px;
-            border-radius: 8px;
-            min-height: 170px;
+            background: #121923;
+            color: #f4f7fa;
+            border-radius: 9px;
+            padding: 14px;
+            min-height: 145px;
+            max-height: 360px;
+            overflow-y: auto;
+            margin-bottom: 0;
         }
 
-        #heard {
-            font-size: 22px;
-            font-weight: bold;
-            min-height: 32px;
+        .full-width {
+            grid-column: 1 / -1;
+        }
+
+        .small-text {
+            color: #64717c;
+            font-size: 13px;
+        }
+
+        @media (max-width: 650px) {
+            .mode-panel {
+                align-items: flex-start;
+                flex-direction: column;
+            }
         }
     </style>
 </head>
 
 <body>
-<div class="panel">
-    <h1>Mini Pupper 2 Voice Relay</h1>
+<header>
+    <h1>Mini Pupper 2 Cognitive Robotics Platform</h1>
+    <p>
+        Voice control, mission status, perception, and robot operations
+    </p>
+</header>
 
-    <div
-        id="modeStatus"
-        class="status dry-run"
-    >
-        DRY-RUN MODE: The robot will not move.
-    </div>
+<main>
+    <section class="health-grid">
+        <div class="card health-card">
+            <div
+                id="runtimeDot"
+                class="health-dot"
+            ></div>
 
-    <div class="safety-panel">
+            <div>
+                <div class="health-title">
+                    Cognitive Runtime
+                </div>
+
+                <div
+                    id="runtimeHealth"
+                    class="health-detail"
+                >
+                    Checking...
+                </div>
+            </div>
+        </div>
+
+        <div class="card health-card">
+            <div
+                id="visionDot"
+                class="health-dot"
+            ></div>
+
+            <div>
+                <div class="health-title">
+                    Vision
+                </div>
+
+                <div
+                    id="visionHealth"
+                    class="health-detail"
+                >
+                    Checking...
+                </div>
+            </div>
+        </div>
+
+        <div class="card health-card">
+            <div
+                id="robotDot"
+                class="health-dot"
+            ></div>
+
+            <div>
+                <div class="health-title">
+                    Robot Bridge
+                </div>
+
+                <div
+                    id="robotHealth"
+                    class="health-detail"
+                >
+                    Checking...
+                </div>
+            </div>
+        </div>
+
+        <div class="card health-card">
+            <div class="health-dot good"></div>
+
+            <div>
+                <div class="health-title">
+                    Voice Relay
+                </div>
+
+                <div class="health-detail">
+                    Connected
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <section class="mode-panel">
+        <div>
+            <div
+                id="modeLabel"
+                class="mode-label dry-label"
+            >
+                DRY-RUN MODE
+            </div>
+
+            <div
+                id="modeDescription"
+                class="small-text"
+            >
+                Commands will be interpreted without moving the robot.
+            </div>
+        </div>
+
         <div class="toggle-row">
             <input
                 id="liveMode"
@@ -121,228 +404,708 @@
                 Enable live robot execution
             </label>
         </div>
+    </section>
 
-        <p>
-            Live mode sends commands to the Robot Bridge and may move
-            the Mini Pupper. Keep the robot on the floor with a clear
-            area around it.
-        </p>
-    </div>
+    <section class="dashboard-grid">
+        <div class="card">
+            <h2>Voice Command</h2>
 
-    <p>
-        Click <strong>Start Listening</strong>, allow microphone access,
-        and say a command.
-    </p>
+            <button
+                id="listenButton"
+                class="primary"
+            >
+                Start Listening
+            </button>
 
-    <button id="listenButton">
-        Start Listening
-    </button>
+            <div
+                id="heard"
+                class="heard"
+            >
+                Ready for a command.
+            </div>
 
-    <div id="heard"></div>
+            <input
+                id="manualCommand"
+                type="text"
+                value="Find my backpack"
+                aria-label="Manual command"
+            >
 
-    <hr>
+            <button
+                id="sendButton"
+                class="primary"
+            >
+                Send Command
+            </button>
+        </div>
 
-    <p>Manual command test:</p>
+        <div class="card">
+            <h2>Mission</h2>
 
-    <input
-        id="manualCommand"
-        type="text"
-        value="Move forward"
-        aria-label="Manual robot command"
-    >
+            <div class="metric">
+                <span class="metric-name">
+                    Active
+                </span>
 
-    <button id="sendButton">
-        Send Command
-    </button>
+                <span
+                    id="activeMission"
+                    class="metric-value"
+                >
+                    None
+                </span>
+            </div>
 
-    <h2>Pipeline Output</h2>
+            <div class="metric">
+                <span class="metric-name">
+                    Runtime state
+                </span>
 
-    <pre id="output">Ready.</pre>
-</div>
+                <span
+                    id="runtimeState"
+                    class="state-badge"
+                >
+                    UNKNOWN
+                </span>
+            </div>
+
+            <div class="metric">
+                <span class="metric-name">
+                    Behavior state
+                </span>
+
+                <span
+                    id="behaviorState"
+                    class="metric-value"
+                >
+                    None
+                </span>
+            </div>
+
+            <div class="metric">
+                <span class="metric-name">
+                    Queue
+                </span>
+
+                <span
+                    id="queueCount"
+                    class="metric-value"
+                >
+                    0
+                </span>
+            </div>
+
+            <div class="metric">
+                <span class="metric-name">
+                    Mission history
+                </span>
+
+                <span
+                    id="historyCount"
+                    class="metric-value"
+                >
+                    0
+                </span>
+            </div>
+
+            <div id="queueList"></div>
+        </div>
+
+        <div class="card">
+            <h2>Quick Commands</h2>
+
+            <button
+                id="stopButton"
+                class="stop"
+            >
+                STOP ROBOT
+            </button>
+
+            <div class="command-grid">
+                <button data-command="Find my backpack">
+                    Find Backpack
+                </button>
+
+                <button data-command="Follow me">
+                    Follow Me
+                </button>
+
+                <button data-command="Move forward">
+                    Forward
+                </button>
+
+                <button data-command="Turn left">
+                    Turn Left
+                </button>
+
+                <button data-command="Turn right">
+                    Turn Right
+                </button>
+
+                <button data-command="Return home">
+                    Return Home
+                </button>
+            </div>
+        </div>
+
+        <div class="card">
+            <h2>Perception</h2>
+
+            <div class="metric">
+                <span class="metric-name">
+                    Camera
+                </span>
+
+                <span
+                    id="cameraState"
+                    class="metric-value"
+                >
+                    Unknown
+                </span>
+            </div>
+
+            <div class="metric">
+                <span class="metric-name">
+                    Detections
+                </span>
+
+                <span
+                    id="detectionCount"
+                    class="metric-value"
+                >
+                    0
+                </span>
+            </div>
+
+            <div
+                id="visionDescription"
+                class="small-text"
+            ></div>
+
+            <div id="detectionList"></div>
+        </div>
+
+        <div class="card full-width">
+            <h2>Pipeline Output</h2>
+            <pre id="output">Dashboard ready.</pre>
+        </div>
+    </section>
+</main>
 
 <script>
-    const output =
-        document.getElementById("output");
+    const elements = {
+        output: document.getElementById("output"),
+        heard: document.getElementById("heard"),
+        listenButton:
+            document.getElementById("listenButton"),
+        sendButton:
+            document.getElementById("sendButton"),
+        stopButton:
+            document.getElementById("stopButton"),
+        manualCommand:
+            document.getElementById("manualCommand"),
+        liveMode:
+            document.getElementById("liveMode"),
+        modeLabel:
+            document.getElementById("modeLabel"),
+        modeDescription:
+            document.getElementById("modeDescription"),
+        runtimeDot:
+            document.getElementById("runtimeDot"),
+        runtimeHealth:
+            document.getElementById("runtimeHealth"),
+        visionDot:
+            document.getElementById("visionDot"),
+        visionHealth:
+            document.getElementById("visionHealth"),
+        robotDot:
+            document.getElementById("robotDot"),
+        robotHealth:
+            document.getElementById("robotHealth"),
+        activeMission:
+            document.getElementById("activeMission"),
+        runtimeState:
+            document.getElementById("runtimeState"),
+        behaviorState:
+            document.getElementById("behaviorState"),
+        queueCount:
+            document.getElementById("queueCount"),
+        historyCount:
+            document.getElementById("historyCount"),
+        queueList:
+            document.getElementById("queueList"),
+        cameraState:
+            document.getElementById("cameraState"),
+        detectionCount:
+            document.getElementById("detectionCount"),
+        visionDescription:
+            document.getElementById(
+                "visionDescription"
+            ),
+        detectionList:
+            document.getElementById("detectionList")
+    };
 
-    const heard =
-        document.getElementById("heard");
+    function setHealth(dot, detail, ready, text) {
+        dot.className =
+            "health-dot " + (ready ? "good" : "bad");
 
-    const listenButton =
-        document.getElementById("listenButton");
-
-    const sendButton =
-        document.getElementById("sendButton");
-
-    const manualCommand =
-        document.getElementById("manualCommand");
-
-    const liveMode =
-        document.getElementById("liveMode");
-
-    const modeStatus =
-        document.getElementById("modeStatus");
+        detail.textContent = text;
+    }
 
     function isLiveModeEnabled() {
-        return liveMode.checked;
+        return elements.liveMode.checked;
     }
 
     function updateModeDisplay() {
         if (isLiveModeEnabled()) {
-            modeStatus.className = "status live";
-            modeStatus.textContent =
-                "LIVE MODE: Voice commands may move the robot.";
+            elements.modeLabel.className =
+                "mode-label live-warning";
+
+            elements.modeLabel.textContent =
+                "LIVE ROBOT MODE";
+
+            elements.modeDescription.textContent =
+                "Commands may move the Mini Pupper.";
         }
         else {
-            modeStatus.className = "status dry-run";
-            modeStatus.textContent =
-                "DRY-RUN MODE: The robot will not move.";
+            elements.modeLabel.className =
+                "mode-label dry-label";
+
+            elements.modeLabel.textContent =
+                "DRY-RUN MODE";
+
+            elements.modeDescription.textContent =
+                "Commands will be interpreted without moving the robot.";
         }
     }
 
-    liveMode.addEventListener("change", () => {
-        if (liveMode.checked) {
-            const confirmed = window.confirm(
-                "Enable live robot execution?\n\n" +
-                "Commands may move the Mini Pupper. " +
-                "Confirm the robot is on the floor and " +
-                "the surrounding area is clear."
-            );
+    elements.liveMode.addEventListener(
+        "change",
+        () => {
+            if (elements.liveMode.checked) {
+                const confirmed = window.confirm(
+                    "Enable live robot execution?\n\n" +
+                    "Confirm that the Mini Pupper is on the floor " +
+                    "with a clear area around it."
+                );
 
-            if (!confirmed) {
-                liveMode.checked = false;
+                if (!confirmed) {
+                    elements.liveMode.checked = false;
+                }
             }
-        }
 
-        updateModeDisplay();
-    });
+            updateModeDisplay();
+        }
+    );
 
     async function sendCommand(command) {
-        const execute = isLiveModeEnabled();
-        const mode = execute ? "LIVE" : "DRY RUN";
+        if (!command) {
+            return;
+        }
 
-        output.textContent =
-            "Sending command to the cognitive pipeline:\n" +
+        const execute = isLiveModeEnabled();
+
+        elements.output.textContent =
+            "Submitting command:\n" +
             command +
             "\n\nMode: " +
-            mode;
+            (execute ? "LIVE" : "DRY RUN");
 
         try {
-            const response = await fetch("/command", {
-                method: "POST",
+            const response = await fetch(
+                "/command",
+                {
+                    method: "POST",
 
-                headers: {
-                    "Content-Type": "application/json"
-                },
+                    headers: {
+                        "Content-Type":
+                            "application/json"
+                    },
 
-                body: JSON.stringify({
-                    command: command,
-                    execute: execute
-                })
-            });
+                    body: JSON.stringify({
+                        command: command,
+                        execute: execute
+                    })
+                }
+            );
 
             const result = await response.json();
 
-            if (!response.ok) {
-                output.textContent =
-                    "Relay error:\n" +
-                    JSON.stringify(result, null, 2);
+            elements.output.textContent =
+                JSON.stringify(result, null, 2);
 
-                return;
-            }
-
-            output.textContent =
-                "Command: " + result.command + "\n\n" +
-                "Mode: " + result.mode + "\n\n" +
-                (result.stdout || "") +
-                (
-                    result.stderr
-                        ? "\nERROR:\n" + result.stderr
-                        : ""
-                );
+            await refreshStatus();
         }
         catch (error) {
-            output.textContent =
-                "Relay error:\n" + error.toString();
+            elements.output.textContent =
+                "Command error:\n" +
+                error.toString();
         }
     }
 
-    sendButton.addEventListener("click", () => {
-        const command = manualCommand.value.trim();
+    async function stopRobot() {
+        const confirmed = window.confirm(
+            "Send an immediate stop request to the robot?"
+        );
 
-        if (command) {
-            sendCommand(command);
+        if (!confirmed) {
+            return;
         }
-    });
+
+        elements.stopButton.disabled = true;
+        elements.stopButton.textContent =
+            "STOPPING...";
+
+        elements.output.textContent =
+            "Sending stop request...";
+
+        try {
+            const response = await fetch(
+                "/stop",
+                {
+                    method: "POST",
+
+                    headers: {
+                        "Content-Type":
+                            "application/json"
+                    },
+
+                    body: JSON.stringify({})
+                }
+            );
+
+            const result = await response.json();
+
+            elements.output.textContent =
+                JSON.stringify(result, null, 2);
+
+            await refreshStatus();
+        }
+        catch (error) {
+            elements.output.textContent =
+                "Stop error:\n" +
+                error.toString();
+        }
+        finally {
+            elements.stopButton.disabled = false;
+            elements.stopButton.textContent =
+                "STOP ROBOT";
+        }
+    }
+
+    async function refreshStatus() {
+        try {
+            const response = await fetch(
+                "/dashboard/status",
+                {
+                    cache: "no-store"
+                }
+            );
+
+            const status = await response.json();
+
+            const runtime = status.runtime || {};
+            const vision = status.vision || {};
+            const robot = status.robot || {};
+            const missions = status.missions || {};
+
+            setHealth(
+                elements.runtimeDot,
+                elements.runtimeHealth,
+                Boolean(
+                    runtime.connected &&
+                    runtime.running
+                ),
+                runtime.connected
+                    ? (
+                        runtime.running
+                            ? "Running"
+                            : "Connected, not running"
+                    )
+                    : "Offline"
+            );
+
+            setHealth(
+                elements.visionDot,
+                elements.visionHealth,
+                Boolean(
+                    vision.connected &&
+                    vision.camera_running
+                ),
+                vision.connected
+                    ? (
+                        vision.camera_running
+                            ? "Camera active"
+                            : "Server active, camera unavailable"
+                    )
+                    : "Offline"
+            );
+
+            setHealth(
+                elements.robotDot,
+                elements.robotHealth,
+                Boolean(robot.ready),
+                robot.ready
+                    ? "READY"
+                    : (
+                        robot.connected
+                            ? "Connected, ROS2 not ready"
+                            : "Offline"
+                    )
+            );
+
+            const active = missions.active;
+
+            elements.activeMission.textContent =
+                active
+                    ? active.mission_type
+                    : "None";
+
+            elements.runtimeState.textContent =
+                runtime.state || "UNKNOWN";
+
+            elements.runtimeState.className =
+                "state-badge " +
+                (
+                    active
+                        ? "active"
+                        : "success"
+                );
+
+            const lastResult =
+                missions.last_result || {};
+
+            elements.behaviorState.textContent =
+                lastResult.state ||
+                lastResult.behavior ||
+                "None";
+
+            elements.queueCount.textContent =
+                String(
+                    missions.queue_count || 0
+                );
+
+            elements.historyCount.textContent =
+                String(
+                    missions.history_count || 0
+                );
+
+            const queue = missions.queue || [];
+
+            elements.queueList.innerHTML =
+                queue.length
+                    ? queue.map(
+                        (mission) =>
+                            '<div class="queue-item">' +
+                            mission.mission_type +
+                            (
+                                mission.target
+                                    ? " — " + mission.target
+                                    : ""
+                            ) +
+                            "</div>"
+                    ).join("")
+                    : (
+                        '<div class="small-text">' +
+                        "Queue is empty." +
+                        "</div>"
+                    );
+
+            elements.cameraState.textContent =
+                vision.camera_running
+                    ? "Running"
+                    : "Unavailable";
+
+            elements.detectionCount.textContent =
+                String(
+                    vision.detection_count || 0
+                );
+
+            elements.visionDescription.textContent =
+                vision.description || "";
+
+            const detections =
+                vision.detections || [];
+
+            elements.detectionList.innerHTML =
+                detections.length
+                    ? detections.map(
+                        (detection) =>
+                            '<div class="detection-item">' +
+                            "<strong>" +
+                            (
+                                detection.label ||
+                                "unknown"
+                            ) +
+                            "</strong>" +
+                            " — " +
+                            Math.round(
+                                (
+                                    detection.confidence ||
+                                    0
+                                ) * 100
+                            ) +
+                            "% confidence" +
+                            "</div>"
+                    ).join("")
+                    : (
+                        '<div class="small-text">' +
+                        "No current detections." +
+                        "</div>"
+                    );
+        }
+        catch (error) {
+            setHealth(
+                elements.runtimeDot,
+                elements.runtimeHealth,
+                false,
+                "Dashboard status unavailable"
+            );
+        }
+    }
+
+    elements.sendButton.addEventListener(
+        "click",
+        () => {
+            sendCommand(
+                elements.manualCommand.value.trim()
+            );
+        }
+    );
+
+    elements.manualCommand.addEventListener(
+        "keydown",
+        (event) => {
+            if (event.key === "Enter") {
+                sendCommand(
+                    elements.manualCommand.value.trim()
+                );
+            }
+        }
+    );
+
+    elements.stopButton.addEventListener(
+        "click",
+        stopRobot
+    );
+
+    document.querySelectorAll(
+        "[data-command]"
+    ).forEach(
+        (button) => {
+            button.addEventListener(
+                "click",
+                () => {
+                    const command =
+                        button.dataset.command;
+
+                    elements.heard.textContent =
+                        'Selected: "' +
+                        command +
+                        '"';
+
+                    sendCommand(command);
+                }
+            );
+        }
+    );
 
     const SpeechRecognition =
         window.SpeechRecognition ||
         window.webkitSpeechRecognition;
 
     if (!SpeechRecognition) {
-        listenButton.disabled = true;
+        elements.listenButton.disabled = true;
 
-        heard.textContent =
-            "Chrome speech recognition is unavailable. " +
-            "Use the manual command box.";
+        elements.heard.textContent =
+            "Chrome speech recognition is unavailable.";
     }
     else {
-        const recognition = new SpeechRecognition();
+        const recognition =
+            new SpeechRecognition();
 
         recognition.lang = "en-US";
         recognition.continuous = false;
         recognition.interimResults = false;
         recognition.maxAlternatives = 3;
 
-        listenButton.addEventListener("click", () => {
-            heard.textContent = "Listening...";
-            output.textContent = "Waiting for speech...";
+        elements.listenButton.addEventListener(
+            "click",
+            () => {
+                elements.heard.textContent =
+                    "Listening...";
 
-            try {
-                recognition.start();
+                elements.listenButton.textContent =
+                    "Listening...";
+
+                elements.listenButton.classList.add(
+                    "listening"
+                );
+
+                try {
+                    recognition.start();
+                }
+                catch (error) {
+                    elements.output.textContent =
+                        "Could not start recognition:\n" +
+                        error.toString();
+                }
             }
-            catch (error) {
-                output.textContent =
-                    "Could not start recognition:\n" +
-                    error.toString();
-            }
-        });
+        );
 
         recognition.onresult = (event) => {
             const command =
-                event.results[0][0].transcript.trim();
+                event.results[0][0]
+                .transcript
+                .trim();
 
             const confidence =
                 event.results[0][0].confidence;
 
-            heard.textContent =
-                'Heard: "' + command + '"';
-
-            output.textContent =
-                "Recognition confidence: " +
+            elements.heard.textContent =
+                'Heard: "' +
+                command +
+                '" (' +
                 Math.round(confidence * 100) +
-                "%";
+                "%)";
+
+            elements.manualCommand.value =
+                command;
 
             sendCommand(command);
         };
 
         recognition.onerror = (event) => {
-            heard.textContent =
-                "Recognition failed.";
-
-            output.textContent =
-                "Speech recognition error: " +
+            elements.heard.textContent =
+                "Recognition failed: " +
                 event.error;
         };
 
         recognition.onend = () => {
-            if (heard.textContent === "Listening...") {
-                heard.textContent =
+            elements.listenButton.textContent =
+                "Start Listening";
+
+            elements.listenButton.classList.remove(
+                "listening"
+            );
+
+            if (
+                elements.heard.textContent ===
+                "Listening..."
+            ) {
+                elements.heard.textContent =
                     "No speech was recognized.";
             }
         };
     }
 
     updateModeDisplay();
+    refreshStatus();
+
+    window.setInterval(
+        refreshStatus,
+        1000
+    );
 </script>
 </body>
 </html>
