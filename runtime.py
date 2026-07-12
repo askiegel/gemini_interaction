@@ -177,11 +177,27 @@ class CognitiveRuntime:
             active = self.mission_manager.get_active_mission()
 
             if active and active.mission_id == mission_id:
-                if result.get("ok"):
+                behavior_completed = result.get("completed")
+
+                # Backward compatibility:
+                # Existing bounded behaviors may not include a completed
+                # field. Those behaviors still complete after one execution.
+                if behavior_completed is None:
+                    behavior_completed = True
+
+                if result.get("ok") and behavior_completed:
                     finished_mission = (
                         self.mission_manager.complete_active_mission()
                     )
                     runtime_state = "MISSION_COMPLETED"
+
+                elif result.get("ok"):
+                    # The behavior completed one safe bounded step, but the
+                    # mission itself remains active. The persistent runtime
+                    # will invoke it again during the next loop cycle.
+                    finished_mission = None
+                    runtime_state = "MISSION_ACTIVE"
+
                 else:
                     finished_mission = (
                         self.mission_manager.cancel_active_mission(
@@ -198,20 +214,24 @@ class CognitiveRuntime:
 
             next_mission = self.mission_manager.get_active_mission()
 
-            self.world_model.update_robot_state(
-                runtime_state=runtime_state,
-                mission=(
+            world_updates = {
+                "runtime_state": runtime_state,
+                "mission": (
                     next_mission.to_dict()
                     if next_mission is not None
                     else None
                 ),
-                last_completed_mission=(
+                "mission_queue": self.mission_manager.get_queue(),
+                "last_behavior_result": result,
+            }
+
+            if finished_mission is not None:
+                world_updates["last_completed_mission"] = (
                     finished_mission.to_dict()
-                    if finished_mission is not None
-                    else None
-                ),
-                mission_queue=self.mission_manager.get_queue(),
-                last_behavior_result=result,
+                )
+
+            self.world_model.update_robot_state(
+                **world_updates
             )
 
         return result
