@@ -88,6 +88,208 @@ class VisionAdapter:
 
         return []
 
+    @staticmethod
+    def _normalize_label(value: Any) -> str:
+        """
+        Normalize target and detection labels for reliable comparisons.
+        """
+        label = str(value or "").strip().lower()
+        label = label.replace("_", " ").replace("-", " ")
+        label = " ".join(label.split())
+
+        aliases = {
+            "back pack": "backpack",
+            "rucksack": "backpack",
+            "person": "person",
+            "human": "person",
+        }
+
+        return aliases.get(label, label)
+
+    @staticmethod
+    def _extract_bbox(detection: Dict[str, Any]) -> Optional[Dict[str, float]]:
+        """
+        Convert common YOLO bounding-box formats into x1/y1/x2/y2.
+        """
+        bbox = detection.get("bbox")
+
+        if isinstance(bbox, dict):
+            x1 = bbox.get("x1", bbox.get("left"))
+            y1 = bbox.get("y1", bbox.get("top"))
+            x2 = bbox.get("x2", bbox.get("right"))
+            y2 = bbox.get("y2", bbox.get("bottom"))
+
+            if None not in (x1, y1, x2, y2):
+                return {
+                    "x1": float(x1),
+                    "y1": float(y1),
+                    "x2": float(x2),
+                    "y2": float(y2),
+                }
+
+        if isinstance(bbox, (list, tuple)) and len(bbox) >= 4:
+            return {
+                "x1": float(bbox[0]),
+                "y1": float(bbox[1]),
+                "x2": float(bbox[2]),
+                "y2": float(bbox[3]),
+            }
+
+        coordinate_sets = (
+            ("x1", "y1", "x2", "y2"),
+            ("left", "top", "right", "bottom"),
+        )
+
+        for keys in coordinate_sets:
+            if all(key in detection for key in keys):
+                return {
+                    "x1": float(detection[keys[0]]),
+                    "y1": float(detection[keys[1]]),
+                    "x2": float(detection[keys[2]]),
+                    "y2": float(detection[keys[3]]),
+                }
+
+        return None
+
+    def normalize_detection(
+        self,
+        detection: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """
+        Normalize a Vision Server detection for cognitive behavior decisions.
+
+        The raw detection is preserved so provider-specific data is never lost.
+        """
+        label = self._normalize_label(
+            detection.get("label")
+            or detection.get("class")
+            or detection.get("name")
+            or detection.get("object")
+            or "unknown"
+        )
+
+        confidence = float(
+            detection.get("confidence")
+            or detection.get("conf")
+            or detection.get("score")
+            or 0.0
+        )
+
+        bbox = self._extract_bbox(detection)
+
+        cx = detection.get("cx", detection.get("center_x"))
+        cy = detection.get("cy", detection.get("center_y"))
+        area = detection.get("area")
+
+        if bbox:
+            width = max(0.0, bbox["x2"] - bbox["x1"])
+            height = max(0.0, bbox["y2"] - bbox["y1"])
+
+            if cx is None:
+                cx = bbox["x1"] + width / 2.0
+
+            if cy is None:
+                cy = bbox["y1"] + height / 2.0
+
+            if area is None:
+                area = width * height
+
+        image_width = (
+            detection.get("image_width")
+            or self.last_payload.get("image_width")
+            or self.last_payload.get("frame_width")
+            or self.last_payload.get("width")
+        )
+
+        image_height = (
+            detection.get("image_height")
+            or self.last_payload.get("image_height")
+            or self.last_payload.get("frame_height")
+            or self.last_payload.get("height")
+        )
+
+        return {
+            "label": label,
+            "confidence": confidence,
+            "cx": float(cx) if cx is not None else None,
+            "cy": float(cy) if cy is not None else None,
+            "area": float(area) if area is not None else None,
+            "bbox": bbox,
+            "image_width": (
+                float(image_width) if image_width is not None else None
+            ),
+            "image_height": (
+                float(image_height) if image_height is not None else None
+            ),
+            "raw_detection": detection,
+        }
+
+    def find_target(self, target_label: str) -> Dict[str, Any]:
+        """
+        Fetch the latest detections and return the best matching target.
+
+        All fetched detections are processed into the World Model before the
+        target result is returned. The World Model therefore remains the
+        platform's single source of truth.
+        """
+        normalized_target = self._normalize_label(target_label)
+        detections = self.fetch_detections()
+        candidates = []
+
+        for detection in detections:
+            self.process_detection(detection)
+            normalized = self.normalize_detection(detection)
+
+            if normalized["label"] == normalized_target:
+                candidates.append(normalized)
+
+        if not candidates:
+            result = {
+                "found": False,
+                "target": normalized_target,
+                "vision_status": self.last_payload.get(
+                    "vision_status",
+                    self.world_model.environment
+                    .get("vision", {})
+                    .get("vision_status", "UNKNOWN"),
+                ),
+            }
+
+            self.world_model.add_event(
+                "vision_target_not_found",
+                result,
+            )
+            self.world_model.save()
+            return result
+
+        best = max(
+            candidates,
+            key=lambda item: (
+                item.get("confidence") or 0.0,
+                item.get("area") or 0.0,
+            ),
+        )
+
+        result = {
+            "found": True,
+            "target": normalized_target,
+            **best,
+        }
+
+        self.world_model.add_event(
+            "vision_target_found",
+            {
+                "target": normalized_target,
+                "label": best["label"],
+                "confidence": best["confidence"],
+                "cx": best["cx"],
+                "cy": best["cy"],
+                "area": best["area"],
+            },
+        )
+        self.world_model.save()
+        return result
+
     def update_vision_health(self, payload: Dict[str, Any]):
         camera_running = payload.get("camera_running")
         timestamp = payload.get("timestamp")
