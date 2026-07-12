@@ -1,9 +1,28 @@
+import time
+
 from robot_bridge.client import RobotBridgeClient
 
 
 class BehaviorManager:
-    def __init__(self, robot_client=None):
+    SEARCH_TURN_SPEED = 0.40
+    SEARCH_TURN_SECONDS = 0.35
+
+    CENTER_TURN_SPEED = 0.60
+    CENTER_TURN_SECONDS = 0.40
+
+    APPROACH_SPEED = 0.08
+    APPROACH_SECONDS = 0.80
+
+    DEFAULT_IMAGE_WIDTH = 640.0
+    CENTER_TOLERANCE_PIXELS = 95.0
+    ARRIVAL_AREA = 75000.0
+
+    MAX_FIND_CYCLES = 30
+    FIND_CYCLE_PAUSE = 1.50
+
+    def __init__(self, robot_client=None, vision_adapter=None):
         self.robot = robot_client or RobotBridgeClient()
+        self.vision = vision_adapter
 
     def simulate(self, mission):
         """
@@ -37,8 +56,8 @@ class BehaviorManager:
                 "Automatic stop is enabled."
             ),
             "FIND_OBJECT": (
-                f"Behavior: Searching for object '{target}'. "
-                "Vision-guided search execution will be added next."
+                f"Behavior: Query vision for '{target}', then execute one "
+                "bounded search, centering, approach, or arrival action."
             ),
             "RETURN_HOME": (
                 "Behavior: Return-home mission prepared. "
@@ -58,10 +77,7 @@ class BehaviorManager:
 
     def execute(self, mission):
         """
-        Execute a mission through the Robot Bridge.
-
-        Motion commands are intentionally short. The Robot Bridge publishes
-        an automatic zero-velocity stop after every motion command.
+        Execute one bounded mission action through the Robot Bridge.
         """
         if mission.status == "REJECTED":
             return {
@@ -106,6 +122,7 @@ class BehaviorManager:
             "ok": bool(robot_result.get("ok")),
             "executed": True,
             "behavior": "STOP",
+            "state": "STOPPED",
             "reason": "Robot stop command sent.",
             "robot_result": robot_result,
         }
@@ -168,12 +185,232 @@ class BehaviorManager:
         }
 
     def _execute_find_object(self, mission):
+        """
+        Execute a bounded autonomous find-object mission.
+
+        The behavior repeatedly performs:
+
+            perception -> decision -> bounded motion -> automatic stop
+
+        until the target is considered arrived or MAX_FIND_CYCLES is reached.
+        """
+        target_name = str(mission.target or "").strip().lower()
+
+        if not target_name:
+            return {
+                "ok": False,
+                "executed": False,
+                "behavior": "FIND_OBJECT",
+                "reason": "FIND_OBJECT requires a target.",
+            }
+
+        if self.vision is None:
+            return {
+                "ok": False,
+                "executed": False,
+                "behavior": "FIND_OBJECT",
+                "target": target_name,
+                "reason": "Vision Adapter is not configured.",
+            }
+
+        cycle_history = []
+
+        for cycle_number in range(1, self.MAX_FIND_CYCLES + 1):
+            cycle_result = self._execute_find_object_cycle(
+                target_name=target_name,
+                cycle_number=cycle_number,
+            )
+
+            cycle_history.append(
+                {
+                    "cycle": cycle_number,
+                    "state": cycle_result.get("state"),
+                    "reason": cycle_result.get("reason"),
+                    "horizontal_error": cycle_result.get(
+                        "horizontal_error"
+                    ),
+                }
+            )
+
+            if not cycle_result.get("ok"):
+                cycle_result["cycles_completed"] = cycle_number
+                cycle_result["cycle_history"] = cycle_history
+                return cycle_result
+
+            if cycle_result.get("state") == "ARRIVED":
+                cycle_result["cycles_completed"] = cycle_number
+                cycle_result["cycle_history"] = cycle_history
+                return cycle_result
+
+            time.sleep(self.FIND_CYCLE_PAUSE)
+
+        stop_result = self.robot.stop()
+
         return {
-            "ok": True,
-            "executed": False,
+            "ok": bool(stop_result.get("ok")),
+            "executed": True,
+            "completed": False,
             "behavior": "FIND_OBJECT",
-            "target": mission.target,
-            "reason": "Vision-guided search behavior is the next milestone.",
+            "target": target_name,
+            "state": "SEARCH_LIMIT_REACHED",
+            "reason": (
+                f"Target was not reached after "
+                f"{self.MAX_FIND_CYCLES} safe cycles."
+            ),
+            "cycles_completed": self.MAX_FIND_CYCLES,
+            "cycle_history": cycle_history,
+            "robot_result": stop_result,
+        }
+
+    def _execute_find_object_cycle(
+        self,
+        target_name,
+        cycle_number,
+    ):
+        try:
+            target = self.vision.find_target(target_name)
+        except Exception as exc:
+            stop_result = self.robot.stop()
+
+            return {
+                "ok": False,
+                "executed": True,
+                "behavior": "FIND_OBJECT",
+                "target": target_name,
+                "state": "VISION_ERROR",
+                "cycle": cycle_number,
+                "reason": f"Vision query failed: {exc}",
+                "robot_result": stop_result,
+            }
+
+        if not target.get("found"):
+            robot_result = self.robot.turn_left(
+                speed=self.SEARCH_TURN_SPEED,
+                seconds=self.SEARCH_TURN_SECONDS,
+            )
+
+            return {
+                "ok": bool(robot_result.get("ok")),
+                "executed": True,
+                "behavior": "FIND_OBJECT",
+                "target": target_name,
+                "state": "SEARCHING",
+                "cycle": cycle_number,
+                "reason": (
+                    f"{target_name} not visible. "
+                    "Executed one short search turn."
+                ),
+                "vision_result": target,
+                "robot_result": robot_result,
+            }
+
+        cx = target.get("cx")
+        area = target.get("area")
+        image_width = (
+            target.get("image_width")
+            or self.DEFAULT_IMAGE_WIDTH
+        )
+
+        if cx is None:
+            stop_result = self.robot.stop()
+
+            return {
+                "ok": False,
+                "executed": True,
+                "behavior": "FIND_OBJECT",
+                "target": target_name,
+                "state": "INVALID_DETECTION",
+                "cycle": cycle_number,
+                "reason": "Target detection has no horizontal center.",
+                "vision_result": target,
+                "robot_result": stop_result,
+            }
+
+        image_center = float(image_width) / 2.0
+        horizontal_error = float(cx) - image_center
+
+        if (
+            area is not None
+            and float(area) >= self.ARRIVAL_AREA
+            and abs(horizontal_error)
+            <= self.CENTER_TOLERANCE_PIXELS
+        ):
+            robot_result = self.robot.stop()
+
+            return {
+                "ok": bool(robot_result.get("ok")),
+                "executed": True,
+                "completed": True,
+                "behavior": "FIND_OBJECT",
+                "target": target_name,
+                "state": "ARRIVED",
+                "cycle": cycle_number,
+                "reason": f"Arrived at {target_name}.",
+                "horizontal_error": horizontal_error,
+                "vision_result": target,
+                "robot_result": robot_result,
+            }
+
+        if horizontal_error < -self.CENTER_TOLERANCE_PIXELS:
+            robot_result = self.robot.turn_left(
+                speed=self.CENTER_TURN_SPEED,
+                seconds=self.CENTER_TURN_SECONDS,
+            )
+
+            return {
+                "ok": bool(robot_result.get("ok")),
+                "executed": True,
+                "behavior": "FIND_OBJECT",
+                "target": target_name,
+                "state": "CENTERING_LEFT",
+                "cycle": cycle_number,
+                "reason": (
+                    f"{target_name} is left in the camera image. "
+                    "Turning robot left to center it."
+                ),
+                "horizontal_error": horizontal_error,
+                "vision_result": target,
+                "robot_result": robot_result,
+            }
+
+        if horizontal_error > self.CENTER_TOLERANCE_PIXELS:
+            robot_result = self.robot.turn_right(
+                speed=self.CENTER_TURN_SPEED,
+                seconds=self.CENTER_TURN_SECONDS,
+            )
+
+            return {
+                "ok": bool(robot_result.get("ok")),
+                "executed": True,
+                "behavior": "FIND_OBJECT",
+                "target": target_name,
+                "state": "CENTERING_RIGHT",
+                "cycle": cycle_number,
+                "reason": (
+                    f"{target_name} is right in the camera image. "
+                    "Turning robot right to center it."
+                ),
+                "horizontal_error": horizontal_error,
+                "vision_result": target,
+                "robot_result": robot_result,
+            }
+
+        robot_result = self.robot.move_forward(
+            speed=self.APPROACH_SPEED,
+            seconds=self.APPROACH_SECONDS,
+        )
+
+        return {
+            "ok": bool(robot_result.get("ok")),
+            "executed": True,
+            "behavior": "FIND_OBJECT",
+            "target": target_name,
+            "state": "APPROACHING",
+            "cycle": cycle_number,
+            "reason": f"{target_name} is centered. Moving closer.",
+            "horizontal_error": horizontal_error,
+            "vision_result": target,
+            "robot_result": robot_result,
         }
 
     def _execute_return_home(self, mission):

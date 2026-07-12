@@ -9,6 +9,8 @@ from config import load_config
 from mission_manager import MissionManager
 from provider_factory import create_provider
 from robot_bridge.client import RobotBridgeClient
+from vision_adapter import VisionAdapter
+from world_model import WorldModel
 
 
 def decode_command(args):
@@ -45,8 +47,12 @@ def run_command(user_text, execute=False):
     print(json.dumps(mission.to_dict(), indent=2))
     print()
 
+    world_model = WorldModel()
+    vision_adapter = VisionAdapter(world_model=world_model)
+
     behavior_manager = BehaviorManager(
-        robot_client=RobotBridgeClient(timeout=3.0)
+        robot_client=RobotBridgeClient(timeout=15.0),
+        vision_adapter=vision_adapter,
     )
 
     if not execute:
@@ -89,7 +95,7 @@ def main():
     group.add_argument("--text", help="Plain-text command.")
     group.add_argument(
         "--base64",
-        help="Base64-encoded UTF-8 command, used by the Windows relay.",
+        help="Base64-encoded UTF-8 command used by the browser relay.",
     )
 
     parser.add_argument(
