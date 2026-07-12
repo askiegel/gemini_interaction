@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import os
+import shutil
 import tempfile
 
 from vision_service import VisionService
@@ -206,15 +207,10 @@ def main():
         print("Vision Service offline test passed.")
 
     finally:
-        for path in (
-            world_model_path,
-            failure_world_model_path,
-        ):
-            if os.path.exists(path):
-                os.remove(path)
-
-        if os.path.isdir(temporary_directory):
-            os.rmdir(temporary_directory)
+        shutil.rmtree(
+            temporary_directory,
+            ignore_errors=True,
+        )
 
 
 if __name__ == "__main__":

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import os
+import shutil
 import tempfile
 
 from mission_manager import MissionManager
@@ -185,11 +186,10 @@ def main():
         print("Cognitive Runtime offline test passed.")
 
     finally:
-        if os.path.exists(world_model_path):
-            os.remove(world_model_path)
-
-        if os.path.isdir(temporary_directory):
-            os.rmdir(temporary_directory)
+        shutil.rmtree(
+            temporary_directory,
+            ignore_errors=True,
+        )
 
 
 if __name__ == "__main__":
