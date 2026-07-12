@@ -386,6 +386,306 @@ class WorldModel:
             ),
         }
 
+    @staticmethod
+    def _normalize_entity_label(value: Any) -> str:
+        """
+        Normalize spoken targets and World Model labels consistently.
+        """
+        label = str(value or "").strip().lower()
+        label = label.replace("_", " ").replace("-", " ")
+        label = " ".join(label.split())
+
+        aliases = {
+            "back pack": "backpack",
+            "rucksack": "backpack",
+            "human": "person",
+        }
+
+        return aliases.get(label, label)
+
+    @staticmethod
+    def _timestamp_age_seconds(timestamp: Optional[str]):
+        """
+        Return the age of an ISO timestamp, or None when it cannot be parsed.
+        """
+        if not timestamp:
+            return None
+
+        try:
+            parsed = datetime.fromisoformat(
+                str(timestamp).replace("Z", "+00:00")
+            )
+
+            current = datetime.now(
+                parsed.tzinfo
+            )
+
+            return max(
+                0.0,
+                (current - parsed).total_seconds(),
+            )
+
+        except (TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def _normalize_bbox_value(value):
+        """
+        Convert common bounding-box formats to x1/y1/x2/y2.
+        """
+        if isinstance(value, dict):
+            x1 = value.get("x1", value.get("left"))
+            y1 = value.get("y1", value.get("top"))
+            x2 = value.get("x2", value.get("right"))
+            y2 = value.get("y2", value.get("bottom"))
+
+            if None not in (x1, y1, x2, y2):
+                return {
+                    "x1": float(x1),
+                    "y1": float(y1),
+                    "x2": float(x2),
+                    "y2": float(y2),
+                }
+
+        if (
+            isinstance(value, (list, tuple))
+            and len(value) >= 4
+        ):
+            return {
+                "x1": float(value[0]),
+                "y1": float(value[1]),
+                "x2": float(value[2]),
+                "y2": float(value[3]),
+            }
+
+        return None
+
+    def find_latest_entity_by_label(
+        self,
+        label: str,
+        max_age_seconds: Optional[float] = None,
+        refresh: bool = True,
+    ) -> Dict[str, Any]:
+        """
+        Return the newest World Model observation matching a target label.
+
+        When refresh=True, the latest shared on-disk World Model is loaded
+        before the query. This allows the cognitive runtime to consume
+        observations written by the independent Vision Service process.
+
+        A stale observation is returned with found=False so robot behavior
+        never moves using outdated perception data.
+        """
+        normalized_label = self._normalize_entity_label(
+            label
+        )
+
+        if not normalized_label:
+            return {
+                "found": False,
+                "target": normalized_label,
+                "reason": "Target label is empty.",
+            }
+
+        if refresh:
+            self.reload()
+
+        candidates = [
+            entity
+            for entity in self.entities.values()
+            if self._normalize_entity_label(
+                entity.label
+            ) == normalized_label
+        ]
+
+        if not candidates:
+            return {
+                "found": False,
+                "target": normalized_label,
+                "stale": False,
+                "reason": (
+                    f"No World Model entity matches "
+                    f"'{normalized_label}'."
+                ),
+            }
+
+        entity = max(
+            candidates,
+            key=lambda item: item.last_seen,
+        )
+
+        age_seconds = self._timestamp_age_seconds(
+            entity.last_seen
+        )
+
+        latest_observation = (
+            entity.history[-1]
+            if entity.history
+            else None
+        )
+
+        location = (
+            copy.deepcopy(
+                latest_observation.location
+            )
+            if (
+                latest_observation is not None
+                and latest_observation.location
+            )
+            else {}
+        )
+
+        attributes = copy.deepcopy(
+            entity.attributes or {}
+        )
+
+        if (
+            latest_observation is not None
+            and latest_observation.attributes
+        ):
+            attributes.update(
+                copy.deepcopy(
+                    latest_observation.attributes
+                )
+            )
+
+        raw_detection = attributes.get(
+            "raw_detection",
+            {},
+        )
+
+        if not isinstance(raw_detection, dict):
+            raw_detection = {}
+
+        bbox = self._normalize_bbox_value(
+            attributes.get("bbox")
+            or raw_detection.get("bbox")
+        )
+
+        cx = (
+            location.get("cx")
+            or location.get("center_x")
+            or attributes.get("cx")
+            or attributes.get("center_x")
+            or raw_detection.get("cx")
+            or raw_detection.get("center_x")
+        )
+
+        cy = (
+            location.get("cy")
+            or location.get("center_y")
+            or attributes.get("cy")
+            or attributes.get("center_y")
+            or raw_detection.get("cy")
+            or raw_detection.get("center_y")
+        )
+
+        area = (
+            location.get("area")
+            or attributes.get("area")
+            or raw_detection.get("area")
+        )
+
+        if bbox is not None:
+            width = max(
+                0.0,
+                bbox["x2"] - bbox["x1"],
+            )
+
+            height = max(
+                0.0,
+                bbox["y2"] - bbox["y1"],
+            )
+
+            if cx is None:
+                cx = bbox["x1"] + width / 2.0
+
+            if cy is None:
+                cy = bbox["y1"] + height / 2.0
+
+            if area is None:
+                area = width * height
+
+        image_width = (
+            attributes.get("image_width")
+            or raw_detection.get("image_width")
+            or raw_detection.get("frame_width")
+            or raw_detection.get("width")
+        )
+
+        image_height = (
+            attributes.get("image_height")
+            or raw_detection.get("image_height")
+            or raw_detection.get("frame_height")
+            or raw_detection.get("height")
+        )
+
+        stale = (
+            max_age_seconds is not None
+            and (
+                age_seconds is None
+                or age_seconds > float(
+                    max_age_seconds
+                )
+            )
+        )
+
+        result = {
+            "found": not stale,
+            "target": normalized_label,
+            "stale": stale,
+            "entity_id": entity.entity_id,
+            "label": entity.label,
+            "entity_type": entity.entity_type,
+            "confidence": float(
+                entity.confidence
+            ),
+            "first_seen": entity.first_seen,
+            "last_seen": entity.last_seen,
+            "age_seconds": age_seconds,
+            "cx": (
+                float(cx)
+                if cx is not None
+                else None
+            ),
+            "cy": (
+                float(cy)
+                if cy is not None
+                else None
+            ),
+            "area": (
+                float(area)
+                if area is not None
+                else None
+            ),
+            "bbox": bbox,
+            "image_width": (
+                float(image_width)
+                if image_width is not None
+                else None
+            ),
+            "image_height": (
+                float(image_height)
+                if image_height is not None
+                else None
+            ),
+            "location": location,
+            "attributes": attributes,
+        }
+
+        if stale:
+            result["reason"] = (
+                f"Latest '{normalized_label}' observation "
+                f"is stale."
+            )
+        else:
+            result["reason"] = (
+                f"Latest '{normalized_label}' observation "
+                f"loaded from the World Model."
+            )
+
+        return result
+
     def save(self):
         """
         Merge this process's changed fields into the shared World Model.
