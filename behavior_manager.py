@@ -197,83 +197,45 @@ class BehaviorManager:
 
     def _execute_find_object(self, mission):
         """
-        Execute a bounded autonomous find-object mission.
+        Execute exactly one bounded FIND_OBJECT cycle.
 
-        The behavior repeatedly performs:
-
-            perception -> decision -> bounded motion -> automatic stop
-
-        until the target is considered arrived or MAX_FIND_CYCLES is reached.
+        The CognitiveRuntime owns repetition. If the returned result contains
+        completed=False, the active mission remains active and this method is
+        called again during a later runtime cycle.
         """
-        target_name = str(mission.target or "").strip().lower()
+        target_name = str(
+            mission.target or ""
+        ).strip().lower()
 
         if not target_name:
             return {
                 "ok": False,
                 "executed": False,
+                "completed": True,
                 "behavior": "FIND_OBJECT",
                 "reason": "FIND_OBJECT requires a target.",
             }
 
-        if self.world_model is None and self.vision is None:
+        if (
+            self.world_model is None
+            and self.vision is None
+        ):
             return {
                 "ok": False,
                 "executed": False,
+                "completed": True,
                 "behavior": "FIND_OBJECT",
                 "target": target_name,
                 "reason": (
-                    "World Model perception source is not configured."
+                    "World Model perception source "
+                    "is not configured."
                 ),
             }
 
-        cycle_history = []
-
-        for cycle_number in range(1, self.MAX_FIND_CYCLES + 1):
-            cycle_result = self._execute_find_object_cycle(
-                target_name=target_name,
-                cycle_number=cycle_number,
-            )
-
-            cycle_history.append(
-                {
-                    "cycle": cycle_number,
-                    "state": cycle_result.get("state"),
-                    "reason": cycle_result.get("reason"),
-                    "horizontal_error": cycle_result.get(
-                        "horizontal_error"
-                    ),
-                }
-            )
-
-            if not cycle_result.get("ok"):
-                cycle_result["cycles_completed"] = cycle_number
-                cycle_result["cycle_history"] = cycle_history
-                return cycle_result
-
-            if cycle_result.get("state") == "ARRIVED":
-                cycle_result["cycles_completed"] = cycle_number
-                cycle_result["cycle_history"] = cycle_history
-                return cycle_result
-
-            time.sleep(self.FIND_CYCLE_PAUSE)
-
-        stop_result = self.robot.stop()
-
-        return {
-            "ok": bool(stop_result.get("ok")),
-            "executed": True,
-            "completed": False,
-            "behavior": "FIND_OBJECT",
-            "target": target_name,
-            "state": "SEARCH_LIMIT_REACHED",
-            "reason": (
-                f"Target was not reached after "
-                f"{self.MAX_FIND_CYCLES} safe cycles."
-            ),
-            "cycles_completed": self.MAX_FIND_CYCLES,
-            "cycle_history": cycle_history,
-            "robot_result": stop_result,
-        }
+        return self._execute_find_object_cycle(
+            target_name=target_name,
+            cycle_number=1,
+        )
 
     def _get_target_observation(self, target_name):
         """
@@ -342,6 +304,7 @@ class BehaviorManager:
                 "behavior": "FIND_OBJECT",
                 "target": target_name,
                 "state": "SEARCHING",
+                "completed": False,
                 "cycle": cycle_number,
                 "reason": (
                     f"{target_name} not visible. "
@@ -391,6 +354,7 @@ class BehaviorManager:
                 "behavior": "FIND_OBJECT",
                 "target": target_name,
                 "state": "ARRIVED",
+                "completed": True,
                 "cycle": cycle_number,
                 "reason": f"Arrived at {target_name}.",
                 "horizontal_error": horizontal_error,
@@ -410,6 +374,7 @@ class BehaviorManager:
                 "behavior": "FIND_OBJECT",
                 "target": target_name,
                 "state": "CENTERING_LEFT",
+                "completed": False,
                 "cycle": cycle_number,
                 "reason": (
                     f"{target_name} is left in the camera image. "
@@ -432,6 +397,7 @@ class BehaviorManager:
                 "behavior": "FIND_OBJECT",
                 "target": target_name,
                 "state": "CENTERING_RIGHT",
+                "completed": False,
                 "cycle": cycle_number,
                 "reason": (
                     f"{target_name} is right in the camera image. "
@@ -453,6 +419,7 @@ class BehaviorManager:
             "behavior": "FIND_OBJECT",
             "target": target_name,
             "state": "APPROACHING",
+            "completed": False,
             "cycle": cycle_number,
             "reason": f"{target_name} is centered. Moving closer.",
             "horizontal_error": horizontal_error,

@@ -8,32 +8,94 @@ class FakeRobotBridgeClient:
     def __init__(self):
         self.calls = []
 
-    def move_forward(self, speed=0.10, seconds=1.0):
-        self.calls.append(("move_forward", speed, seconds))
-        return {"ok": True, "automatic_stop": True}
+    def move_forward(
+        self,
+        speed=0.10,
+        seconds=1.0,
+    ):
+        self.calls.append(
+            (
+                "move_forward",
+                speed,
+                seconds,
+            )
+        )
 
-    def turn_left(self, speed=0.5, seconds=1.0):
-        self.calls.append(("turn_left", speed, seconds))
-        return {"ok": True, "automatic_stop": True}
+        return {
+            "ok": True,
+            "automatic_stop": True,
+        }
 
-    def turn_right(self, speed=0.5, seconds=1.0):
-        self.calls.append(("turn_right", speed, seconds))
-        return {"ok": True, "automatic_stop": True}
+    def turn_left(
+        self,
+        speed=0.5,
+        seconds=1.0,
+    ):
+        self.calls.append(
+            (
+                "turn_left",
+                speed,
+                seconds,
+            )
+        )
+
+        return {
+            "ok": True,
+            "automatic_stop": True,
+        }
+
+    def turn_right(
+        self,
+        speed=0.5,
+        seconds=1.0,
+    ):
+        self.calls.append(
+            (
+                "turn_right",
+                speed,
+                seconds,
+            )
+        )
+
+        return {
+            "ok": True,
+            "automatic_stop": True,
+        }
 
     def stop(self):
-        self.calls.append(("stop",))
-        return {"ok": True, "action": "stop"}
+        self.calls.append(
+            ("stop",)
+        )
+
+        return {
+            "ok": True,
+            "action": "stop",
+        }
 
 
 class SequencedVisionAdapter:
     def __init__(self, results):
         self.results = list(results)
+        self.calls = 0
 
     def find_target(self, target):
         if not self.results:
-            raise AssertionError("Vision sequence exhausted.")
+            raise AssertionError(
+                "Vision sequence exhausted."
+            )
 
-        return dict(self.results.pop(0))
+        self.calls += 1
+
+        result = dict(
+            self.results.pop(0)
+        )
+
+        result.setdefault(
+            "target",
+            target,
+        )
+
+        return result
 
 
 def detection(cx, area):
@@ -59,12 +121,25 @@ def main():
     )
 
     robot = FakeRobotBridgeClient()
+
     vision = SequencedVisionAdapter(
         [
-            detection(cx=180, area=35000),
-            detection(cx=460, area=40000),
-            detection(cx=320, area=50000),
-            detection(cx=320, area=100000),
+            detection(
+                cx=180,
+                area=35000,
+            ),
+            detection(
+                cx=460,
+                area=40000,
+            ),
+            detection(
+                cx=320,
+                area=50000,
+            ),
+            detection(
+                cx=320,
+                area=100000,
+            ),
         ]
     )
 
@@ -73,39 +148,162 @@ def main():
         vision_adapter=vision,
     )
 
-    manager.FIND_CYCLE_PAUSE = 0.0
-    manager.MAX_FIND_CYCLES = 10
+    print(
+        "===== CYCLE 1: IMAGE-LEFT TARGET ====="
+    )
 
-    result = manager.execute(mission)
+    left_result = manager.execute(
+        mission
+    )
 
-    assert result["ok"] is True
-    assert result["completed"] is True
-    assert result["state"] == "ARRIVED"
+    print(left_result)
 
-    assert [call[0] for call in robot.calls] == [
+    assert left_result["ok"] is True
+    assert left_result["executed"] is True
+    assert left_result["completed"] is False
+
+    assert (
+        left_result["state"]
+        == "CENTERING_LEFT"
+    )
+
+    assert robot.calls[-1][0] == (
+        "turn_left"
+    )
+
+    print()
+    print(
+        "===== CYCLE 2: IMAGE-RIGHT TARGET ====="
+    )
+
+    right_result = manager.execute(
+        mission
+    )
+
+    print(right_result)
+
+    assert right_result["ok"] is True
+    assert right_result["executed"] is True
+    assert right_result["completed"] is False
+
+    assert (
+        right_result["state"]
+        == "CENTERING_RIGHT"
+    )
+
+    assert robot.calls[-1][0] == (
+        "turn_right"
+    )
+
+    print()
+    print(
+        "===== CYCLE 3: CENTERED TARGET ====="
+    )
+
+    approach_result = manager.execute(
+        mission
+    )
+
+    print(approach_result)
+
+    assert approach_result["ok"] is True
+    assert approach_result["executed"] is True
+
+    assert (
+        approach_result["completed"]
+        is False
+    )
+
+    assert (
+        approach_result["state"]
+        == "APPROACHING"
+    )
+
+    assert robot.calls[-1][0] == (
+        "move_forward"
+    )
+
+    print()
+    print(
+        "===== CYCLE 4: ARRIVAL TARGET ====="
+    )
+
+    arrived_result = manager.execute(
+        mission
+    )
+
+    print(arrived_result)
+
+    assert arrived_result["ok"] is True
+    assert arrived_result["executed"] is True
+
+    assert (
+        arrived_result["completed"]
+        is True
+    )
+
+    assert (
+        arrived_result["state"]
+        == "ARRIVED"
+    )
+
+    assert robot.calls[-1][0] == (
+        "stop"
+    )
+
+    assert [
+        call[0]
+        for call in robot.calls
+    ] == [
         "turn_left",
         "turn_right",
         "move_forward",
         "stop",
     ]
 
-    assert [
-        item["state"]
-        for item in result["cycle_history"]
-    ] == [
-        "CENTERING_LEFT",
-        "CENTERING_RIGHT",
-        "APPROACHING",
-        "ARRIVED",
-    ]
+    assert vision.calls == 4
+    assert vision.results == []
 
-    print("PASS: image-left target causes left correction")
-    print("PASS: image-right target causes right correction")
-    print("PASS: centered target causes approach")
-    print("PASS: close target causes ARRIVED")
     print()
-    print("All FIND_OBJECT steering tests passed.")
-    print("No commands were sent to the physical robot.")
+    print(
+        "PASS: image-left target causes "
+        "one left correction"
+    )
+
+    print(
+        "PASS: image-right target causes "
+        "one right correction"
+    )
+
+    print(
+        "PASS: centered target causes "
+        "one approach step"
+    )
+
+    print(
+        "PASS: close target causes ARRIVED"
+    )
+
+    print(
+        "PASS: intermediate steps keep "
+        "the mission active"
+    )
+
+    print(
+        "PASS: only ARRIVED completes "
+        "the mission"
+    )
+
+    print()
+    print(
+        "All single-cycle FIND_OBJECT "
+        "steering tests passed."
+    )
+
+    print(
+        "No commands were sent to "
+        "the physical robot."
+    )
 
 
 if __name__ == "__main__":
