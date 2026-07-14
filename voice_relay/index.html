@@ -289,7 +289,47 @@
                 flex-direction: column;
             }
         }
-    </style>
+    
+    .camera-stage {
+        position: relative;
+        width: 100%;
+        max-width: 640px;
+        margin: 0 auto 18px auto;
+        overflow: hidden;
+        border-radius: 12px;
+        border: 1px solid rgba(148, 163, 184, 0.35);
+        background: #020617;
+        aspect-ratio: 4 / 3;
+    }
+
+    .camera-stage img {
+        display: block;
+        width: 100%;
+        height: 100%;
+        object-fit: contain;
+        background: #020617;
+    }
+
+    .camera-placeholder {
+        position: absolute;
+        inset: 0;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        padding: 20px;
+        text-align: center;
+        color: #94a3b8;
+        background: #020617;
+    }
+
+    .camera-caption {
+        margin: -8px 0 16px 0;
+        text-align: center;
+        color: #94a3b8;
+        font-size: 0.85rem;
+    }
+
+</style>
 </head>
 
 <body>
@@ -550,6 +590,27 @@
         <div class="card">
             <h2>Perception</h2>
 
+            <div class="camera-stage">
+                <img
+                    id="cameraImage"
+                    alt="Mini Pupper live camera"
+                >
+
+                <div
+                    id="cameraPlaceholder"
+                    class="camera-placeholder"
+                >
+                    Waiting for the Mini Pupper camera...
+                </div>
+            </div>
+
+            <div
+                id="cameraCaption"
+                class="camera-caption"
+            >
+                Live camera unavailable
+            </div>
+
             <div class="metric">
                 <span class="metric-name">
                     Camera
@@ -633,6 +694,12 @@
             document.getElementById("historyCount"),
         queueList:
             document.getElementById("queueList"),
+        cameraImage:
+            document.getElementById("cameraImage"),
+        cameraPlaceholder:
+            document.getElementById("cameraPlaceholder"),
+        cameraCaption:
+            document.getElementById("cameraCaption"),
         cameraState:
             document.getElementById("cameraState"),
         detectionCount:
@@ -915,6 +982,45 @@
                 vision.camera_running
                     ? "Running"
                     : "Unavailable";
+
+            const cameraUrl = vision.camera_url;
+
+            if (
+                vision.camera_running &&
+                cameraUrl
+            ) {
+                const separator =
+                    cameraUrl.includes("?")
+                        ? "&"
+                        : "?";
+
+                elements.cameraImage.src =
+                    cameraUrl +
+                    separator +
+                    "dashboard_t=" +
+                    Date.now();
+
+                elements.cameraImage.style.display =
+                    "block";
+
+                elements.cameraPlaceholder.style.display =
+                    "none";
+
+                elements.cameraCaption.textContent =
+                    "Live Mini Pupper camera";
+            }
+            else {
+                elements.cameraImage.removeAttribute("src");
+
+                elements.cameraImage.style.display =
+                    "none";
+
+                elements.cameraPlaceholder.style.display =
+                    "flex";
+
+                elements.cameraCaption.textContent =
+                    "Live camera unavailable";
+            }
 
             elements.detectionCount.textContent =
                 String(

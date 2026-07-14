@@ -373,6 +373,11 @@ class VoiceRelayHandler(BaseHTTPRequestHandler):
                 ),
                 "detection_count": len(detections),
                 "detections": detections,
+                "camera_url": (
+                    vision.get("camera_url")
+                    if vision
+                    else None
+                ),
                 "last_error": (
                     vision.get("last_error")
                     if vision

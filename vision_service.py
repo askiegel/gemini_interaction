@@ -26,7 +26,7 @@ class VisionService:
     It continuously imports perception observations into the World Model.
     """
 
-    DEFAULT_POLL_INTERVAL = 1.0
+    DEFAULT_POLL_INTERVAL = 0.35
 
     def __init__(
         self,

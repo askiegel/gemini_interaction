@@ -14,8 +14,14 @@ class BehaviorManager:
     FIND_FORWARD_SECONDS = 0.80
     FIND_ARRIVAL_AREA = 75000.0
 
-    FOLLOW_FORWARD_SPEED = 0.06
-    FOLLOW_FORWARD_SECONDS = 0.60
+    FOLLOW_SEARCH_TURN_SPEED = 0.50
+    FOLLOW_SEARCH_TURN_SECONDS = 0.30
+
+    FOLLOW_CENTER_TURN_SPEED = 0.65
+    FOLLOW_CENTER_TURN_SECONDS = 0.25
+
+    FOLLOW_FORWARD_SPEED = 0.08
+    FOLLOW_FORWARD_SECONDS = 0.30
     FOLLOW_STOP_AREA = 60000.0
 
     DEFAULT_IMAGE_WIDTH = 640.0
@@ -173,6 +179,10 @@ class BehaviorManager:
             target_name=target_name,
             cycle_number=1,
             stop_area=self.FOLLOW_STOP_AREA,
+            search_turn_speed=self.FOLLOW_SEARCH_TURN_SPEED,
+            search_turn_seconds=self.FOLLOW_SEARCH_TURN_SECONDS,
+            center_turn_speed=self.FOLLOW_CENTER_TURN_SPEED,
+            center_turn_seconds=self.FOLLOW_CENTER_TURN_SECONDS,
             forward_speed=self.FOLLOW_FORWARD_SPEED,
             forward_seconds=self.FOLLOW_FORWARD_SECONDS,
             complete_when_close=False,
@@ -307,6 +317,10 @@ class BehaviorManager:
             target_name=target_name,
             cycle_number=cycle_number,
             stop_area=self.FIND_ARRIVAL_AREA,
+            search_turn_speed=self.SEARCH_TURN_SPEED,
+            search_turn_seconds=self.SEARCH_TURN_SECONDS,
+            center_turn_speed=self.CENTER_TURN_SPEED,
+            center_turn_seconds=self.CENTER_TURN_SECONDS,
             forward_speed=self.FIND_FORWARD_SPEED,
             forward_seconds=self.FIND_FORWARD_SECONDS,
             complete_when_close=True,
@@ -320,6 +334,10 @@ class BehaviorManager:
         target_name,
         cycle_number,
         stop_area,
+        search_turn_speed,
+        search_turn_seconds,
+        center_turn_speed,
+        center_turn_seconds,
         forward_speed,
         forward_seconds,
         complete_when_close,
@@ -356,8 +374,8 @@ class BehaviorManager:
 
         if not target.get("found"):
             robot_result = self.robot.turn_left(
-                speed=self.SEARCH_TURN_SPEED,
-                seconds=self.SEARCH_TURN_SECONDS,
+                speed=search_turn_speed,
+                seconds=search_turn_seconds,
             )
 
             return {
@@ -428,8 +446,8 @@ class BehaviorManager:
 
         if horizontal_error < -self.CENTER_TOLERANCE_PIXELS:
             robot_result = self.robot.turn_left(
-                speed=self.CENTER_TURN_SPEED,
-                seconds=self.CENTER_TURN_SECONDS,
+                speed=center_turn_speed,
+                seconds=center_turn_seconds,
             )
 
             return {
@@ -451,8 +469,8 @@ class BehaviorManager:
 
         if horizontal_error > self.CENTER_TOLERANCE_PIXELS:
             robot_result = self.robot.turn_right(
-                speed=self.CENTER_TURN_SPEED,
-                seconds=self.CENTER_TURN_SECONDS,
+                speed=center_turn_speed,
+                seconds=center_turn_seconds,
             )
 
             return {

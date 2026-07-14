@@ -542,7 +542,7 @@ def start_platform():
             str(cognitive_python),
             "vision_service.py",
             "--poll-interval",
-            "1.0",
+            "0.35",
         ],
         cwd=PROJECT_DIR,
         pid_file=(

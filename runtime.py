@@ -35,7 +35,7 @@ class CognitiveRuntime:
     finishes, MissionManager automatically activates the next queued mission.
     """
 
-    LOOP_INTERVAL_SECONDS = 0.25
+    LOOP_INTERVAL_SECONDS = 0.15
 
     def __init__(
         self,
