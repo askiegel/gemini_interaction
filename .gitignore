@@ -9,3 +9,16 @@ world_model_state.json
 
 # Logs
 logs/*.log
+
+# Runtime process files
+.run/
+*.pid
+
+# Runtime and service logs
+logs/
+*.log
+
+# State locks and atomic-write temporary files
+*.lock
+.*_state.json.*.tmp
+.world_model_state.json.*.tmp
