@@ -83,6 +83,7 @@ class CognitiveRuntime:
         self.last_error: Optional[str] = None
         self._state_lock = threading.RLock()
         self._last_runtime_state = None
+        self._control_generation = 0
 
     def submit_text(self, user_text: str):
         """
@@ -107,12 +108,74 @@ class CognitiveRuntime:
     def submit_intent(self, intent: Dict[str, Any]):
         """
         Submit a parsed intent to the persistent MissionManager.
+
+        STOP is handled as an immediate runtime-level preemption. It cancels
+        the active mission, clears queued missions, commands the Robot Bridge
+        to stop, and prevents an in-flight behavior cycle from restoring the
+        previous mission state.
         """
         if not isinstance(intent, dict):
             raise TypeError("Intent must be a dictionary.")
 
+        intent_name = str(
+            intent.get("intent", "UNKNOWN")
+        ).strip().upper()
+
         with self._state_lock:
-            mission = self.mission_manager.handle_intent(intent)
+            if intent_name == "STOP":
+                self._control_generation += 1
+
+                mission = self.mission_manager.handle_intent(
+                    intent
+                )
+
+                try:
+                    robot_result = self.robot_client.stop()
+
+                    stop_ok = bool(
+                        robot_result.get("ok")
+                    )
+
+                    stop_error = None
+
+                except Exception as exc:
+                    robot_result = {
+                        "ok": False,
+                        "error": str(exc),
+                    }
+
+                    stop_ok = False
+                    stop_error = str(exc)
+
+                self.last_result = {
+                    "ok": stop_ok,
+                    "executed": True,
+                    "completed": True,
+                    "behavior": "STOP",
+                    "state": "STOPPED",
+                    "reason": (
+                        "Robot stop command sent and all "
+                        "missions were cancelled."
+                    ),
+                    "robot_result": robot_result,
+                }
+
+                self.last_error = stop_error
+                self._last_runtime_state = "STOPPED"
+
+                self.world_model.update_robot_state(
+                    runtime_state="STOPPED",
+                    mission=None,
+                    mission_queue=[],
+                    last_behavior_result=self.last_result,
+                    last_cancelled_mission=mission.to_dict(),
+                )
+
+                return mission
+
+            mission = self.mission_manager.handle_intent(
+                intent
+            )
 
             self.world_model.update_robot_state(
                 runtime_state="MISSION_ACCEPTED",
@@ -139,12 +202,15 @@ class CognitiveRuntime:
                 return None
 
             mission_id = mission.mission_id
+            control_generation = self._control_generation
 
             self.world_model.update_robot_state(
                 runtime_state="EXECUTING",
                 mission=mission.to_dict(),
                 mission_queue=self.mission_manager.get_queue(),
             )
+
+        execution_error = None
 
         try:
             result = self.behavior_manager.execute(mission)
@@ -154,9 +220,6 @@ class CognitiveRuntime:
                     "BehaviorManager.execute() must return a dictionary."
                 )
 
-            self.last_result = result
-            self.last_error = None
-
         except Exception as exc:
             result = {
                 "ok": False,
@@ -165,8 +228,7 @@ class CognitiveRuntime:
                 "reason": str(exc),
             }
 
-            self.last_result = result
-            self.last_error = str(exc)
+            execution_error = str(exc)
 
             try:
                 self.robot_client.stop()
@@ -174,6 +236,15 @@ class CognitiveRuntime:
                 pass
 
         with self._state_lock:
+            if control_generation != self._control_generation:
+                # STOP arrived while this bounded behavior was executing.
+                # submit_intent(STOP) already cancelled all missions, stopped
+                # the robot, and persisted the authoritative stopped state.
+                return self.last_result
+
+            self.last_result = result
+            self.last_error = execution_error
+
             active = self.mission_manager.get_active_mission()
 
             if active and active.mission_id == mission_id:

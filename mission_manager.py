@@ -29,7 +29,7 @@ class MissionManager:
         target = intent_json.get("target", None)
 
         if intent == "STOP":
-            return self.cancel_active_mission(speech)
+            return self.cancel_all_missions(speech)
 
         if intent == "FOLLOW_PERSON":
             mission = create_mission(
@@ -217,6 +217,53 @@ class MissionManager:
         )
         self.mission_history.append(mission)
         return mission
+
+    def cancel_all_missions(self, speech=""):
+        """
+        Cancel the active mission and every queued mission.
+
+        STOP is a priority control action. No queued mission may resume after
+        an emergency or operator-requested stop.
+        """
+        cancellation_time = now()
+        cancelled_active = None
+
+        if self.active_mission is not None:
+            self.active_mission.status = MISSION_CANCELLED
+            self.active_mission.completed_at = cancellation_time
+            self.active_mission.speech = (
+                speech
+                or self.active_mission.speech
+                or "Mission cancelled by STOP."
+            )
+
+            cancelled_active = self.active_mission
+            self.active_mission = None
+
+        for mission in self.mission_queue:
+            mission.status = MISSION_CANCELLED
+            mission.completed_at = cancellation_time
+            mission.speech = (
+                speech
+                or mission.speech
+                or "Queued mission cancelled by STOP."
+            )
+
+        self.mission_queue = []
+
+        if cancelled_active is not None:
+            return cancelled_active
+
+        stop_mission = create_mission(
+            mission_type="STOP",
+            target=None,
+            speech=speech or "Robot is already stopped.",
+            status=MISSION_CANCELLED,
+            priority=10,
+        )
+
+        self.mission_history.append(stop_mission)
+        return stop_mission
 
     def start_next_mission(self):
         if self.active_mission is not None:
