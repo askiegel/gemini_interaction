@@ -10,12 +10,16 @@ class BehaviorManager:
     CENTER_TURN_SPEED = 0.60
     CENTER_TURN_SECONDS = 0.40
 
-    APPROACH_SPEED = 0.08
-    APPROACH_SECONDS = 0.80
+    FIND_FORWARD_SPEED = 0.08
+    FIND_FORWARD_SECONDS = 0.80
+    FIND_ARRIVAL_AREA = 75000.0
+
+    FOLLOW_FORWARD_SPEED = 0.06
+    FOLLOW_FORWARD_SECONDS = 0.60
+    FOLLOW_STOP_AREA = 60000.0
 
     DEFAULT_IMAGE_WIDTH = 640.0
     CENTER_TOLERANCE_PIXELS = 95.0
-    ARRIVAL_AREA = 75000.0
 
     MAX_FIND_CYCLES = 30
     FIND_CYCLE_PAUSE = 1.50
@@ -139,19 +143,45 @@ class BehaviorManager:
         }
 
     def _execute_follow_person(self, mission):
-        robot_result = self.robot.move_forward(
-            speed=0.08,
-            seconds=0.50,
-        )
+        """
+        Execute one bounded FOLLOW_PERSON cycle.
 
-        return {
-            "ok": bool(robot_result.get("ok")),
-            "executed": True,
-            "behavior": "FOLLOW_PERSON",
-            "target": mission.target,
-            "reason": "Safe forward test motion completed.",
-            "robot_result": robot_result,
-        }
+        The CognitiveRuntime owns repetition. This mission remains active
+        while the person is being searched for, centered, approached, or
+        held at the desired following distance. STOP ends the mission.
+        """
+        target_name = "person"
+
+        if (
+            self.world_model is None
+            and self.vision is None
+        ):
+            return {
+                "ok": False,
+                "executed": False,
+                "completed": True,
+                "behavior": "FOLLOW_PERSON",
+                "target": target_name,
+                "reason": (
+                    "World Model perception source "
+                    "is not configured."
+                ),
+            }
+
+        return self._execute_visual_servo_cycle(
+            behavior="FOLLOW_PERSON",
+            target_name=target_name,
+            cycle_number=1,
+            stop_area=self.FOLLOW_STOP_AREA,
+            forward_speed=self.FOLLOW_FORWARD_SPEED,
+            forward_seconds=self.FOLLOW_FORWARD_SECONDS,
+            complete_when_close=False,
+            close_state="MAINTAINING_DISTANCE",
+            close_reason=(
+                "Person is centered and within the "
+                "desired following distance."
+            ),
+        )
 
     def _execute_move_forward(self, mission):
         robot_result = self.robot.move_forward(
@@ -272,6 +302,37 @@ class BehaviorManager:
         target_name,
         cycle_number,
     ):
+        return self._execute_visual_servo_cycle(
+            behavior="FIND_OBJECT",
+            target_name=target_name,
+            cycle_number=cycle_number,
+            stop_area=self.FIND_ARRIVAL_AREA,
+            forward_speed=self.FIND_FORWARD_SPEED,
+            forward_seconds=self.FIND_FORWARD_SECONDS,
+            complete_when_close=True,
+            close_state="ARRIVED",
+            close_reason=f"Arrived at {target_name}.",
+        )
+
+    def _execute_visual_servo_cycle(
+        self,
+        behavior,
+        target_name,
+        cycle_number,
+        stop_area,
+        forward_speed,
+        forward_seconds,
+        complete_when_close,
+        close_state,
+        close_reason,
+    ):
+        """
+        Perform one bounded camera-guided steering cycle.
+
+        This helper is shared by FIND_OBJECT and FOLLOW_PERSON. It never
+        loops internally. The CognitiveRuntime decides whether another
+        cycle should run.
+        """
         try:
             target = self._get_target_observation(
                 target_name
@@ -282,7 +343,8 @@ class BehaviorManager:
             return {
                 "ok": False,
                 "executed": True,
-                "behavior": "FIND_OBJECT",
+                "completed": True,
+                "behavior": behavior,
                 "target": target_name,
                 "state": "PERCEPTION_ERROR",
                 "cycle": cycle_number,
@@ -301,10 +363,10 @@ class BehaviorManager:
             return {
                 "ok": bool(robot_result.get("ok")),
                 "executed": True,
-                "behavior": "FIND_OBJECT",
+                "completed": False,
+                "behavior": behavior,
                 "target": target_name,
                 "state": "SEARCHING",
-                "completed": False,
                 "cycle": cycle_number,
                 "reason": (
                     f"{target_name} not visible. "
@@ -327,11 +389,14 @@ class BehaviorManager:
             return {
                 "ok": False,
                 "executed": True,
-                "behavior": "FIND_OBJECT",
+                "completed": True,
+                "behavior": behavior,
                 "target": target_name,
                 "state": "INVALID_DETECTION",
                 "cycle": cycle_number,
-                "reason": "Target detection has no horizontal center.",
+                "reason": (
+                    "Target detection has no horizontal center."
+                ),
                 "vision_result": target,
                 "robot_result": stop_result,
             }
@@ -341,7 +406,7 @@ class BehaviorManager:
 
         if (
             area is not None
-            and float(area) >= self.ARRIVAL_AREA
+            and float(area) >= float(stop_area)
             and abs(horizontal_error)
             <= self.CENTER_TOLERANCE_PIXELS
         ):
@@ -350,13 +415,12 @@ class BehaviorManager:
             return {
                 "ok": bool(robot_result.get("ok")),
                 "executed": True,
-                "completed": True,
-                "behavior": "FIND_OBJECT",
+                "completed": bool(complete_when_close),
+                "behavior": behavior,
                 "target": target_name,
-                "state": "ARRIVED",
-                "completed": True,
+                "state": close_state,
                 "cycle": cycle_number,
-                "reason": f"Arrived at {target_name}.",
+                "reason": close_reason,
                 "horizontal_error": horizontal_error,
                 "vision_result": target,
                 "robot_result": robot_result,
@@ -371,10 +435,10 @@ class BehaviorManager:
             return {
                 "ok": bool(robot_result.get("ok")),
                 "executed": True,
-                "behavior": "FIND_OBJECT",
+                "completed": False,
+                "behavior": behavior,
                 "target": target_name,
                 "state": "CENTERING_LEFT",
-                "completed": False,
                 "cycle": cycle_number,
                 "reason": (
                     f"{target_name} is left in the camera image. "
@@ -394,10 +458,10 @@ class BehaviorManager:
             return {
                 "ok": bool(robot_result.get("ok")),
                 "executed": True,
-                "behavior": "FIND_OBJECT",
+                "completed": False,
+                "behavior": behavior,
                 "target": target_name,
                 "state": "CENTERING_RIGHT",
-                "completed": False,
                 "cycle": cycle_number,
                 "reason": (
                     f"{target_name} is right in the camera image. "
@@ -409,19 +473,21 @@ class BehaviorManager:
             }
 
         robot_result = self.robot.move_forward(
-            speed=self.APPROACH_SPEED,
-            seconds=self.APPROACH_SECONDS,
+            speed=forward_speed,
+            seconds=forward_seconds,
         )
 
         return {
             "ok": bool(robot_result.get("ok")),
             "executed": True,
-            "behavior": "FIND_OBJECT",
+            "completed": False,
+            "behavior": behavior,
             "target": target_name,
             "state": "APPROACHING",
-            "completed": False,
             "cycle": cycle_number,
-            "reason": f"{target_name} is centered. Moving closer.",
+            "reason": (
+                f"{target_name} is centered. Moving closer."
+            ),
             "horizontal_error": horizontal_error,
             "vision_result": target,
             "robot_result": robot_result,
