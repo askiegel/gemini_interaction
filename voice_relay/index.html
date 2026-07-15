@@ -310,6 +310,46 @@
         background: #020617;
     }
 
+    .camera-overlay {
+        position: absolute;
+        inset: 0;
+        width: 100%;
+        height: 100%;
+        pointer-events: none;
+        z-index: 2;
+    }
+
+    .tracking-metrics {
+        display: grid;
+        grid-template-columns:
+            repeat(auto-fit, minmax(135px, 1fr));
+        gap: 10px;
+        margin: 0 0 16px 0;
+    }
+
+    .tracking-metric {
+        padding: 10px 12px;
+        border-radius: 10px;
+        background: rgba(15, 23, 42, 0.68);
+        border: 1px solid rgba(148, 163, 184, 0.22);
+    }
+
+    .tracking-metric-name {
+        display: block;
+        color: #94a3b8;
+        font-size: 0.72rem;
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+    }
+
+    .tracking-metric-value {
+        display: block;
+        margin-top: 4px;
+        font-weight: 700;
+        color: #e2e8f0;
+        overflow-wrap: anywhere;
+    }
+
     .camera-placeholder {
         position: absolute;
         inset: 0;
@@ -596,6 +636,13 @@
                     alt="Mini Pupper live camera"
                 >
 
+                <canvas
+                    id="cameraOverlay"
+                    class="camera-overlay"
+                    width="640"
+                    height="480"
+                ></canvas>
+
                 <div
                     id="cameraPlaceholder"
                     class="camera-placeholder"
@@ -609,6 +656,60 @@
                 class="camera-caption"
             >
                 Live camera unavailable
+            </div>
+
+            <div class="tracking-metrics">
+                <div class="tracking-metric">
+                    <span class="tracking-metric-name">
+                        Target
+                    </span>
+
+                    <span
+                        id="trackingTarget"
+                        class="tracking-metric-value"
+                    >
+                        None
+                    </span>
+                </div>
+
+                <div class="tracking-metric">
+                    <span class="tracking-metric-name">
+                        Follow State
+                    </span>
+
+                    <span
+                        id="trackingState"
+                        class="tracking-metric-value"
+                    >
+                        None
+                    </span>
+                </div>
+
+                <div class="tracking-metric">
+                    <span class="tracking-metric-name">
+                        Horizontal Error
+                    </span>
+
+                    <span
+                        id="trackingError"
+                        class="tracking-metric-value"
+                    >
+                        —
+                    </span>
+                </div>
+
+                <div class="tracking-metric">
+                    <span class="tracking-metric-name">
+                        Target Area
+                    </span>
+
+                    <span
+                        id="trackingArea"
+                        class="tracking-metric-value"
+                    >
+                        —
+                    </span>
+                </div>
             </div>
 
             <div class="metric">
@@ -696,10 +797,20 @@
             document.getElementById("queueList"),
         cameraImage:
             document.getElementById("cameraImage"),
+        cameraOverlay:
+            document.getElementById("cameraOverlay"),
         cameraPlaceholder:
             document.getElementById("cameraPlaceholder"),
         cameraCaption:
             document.getElementById("cameraCaption"),
+        trackingTarget:
+            document.getElementById("trackingTarget"),
+        trackingState:
+            document.getElementById("trackingState"),
+        trackingError:
+            document.getElementById("trackingError"),
+        trackingArea:
+            document.getElementById("trackingArea"),
         cameraState:
             document.getElementById("cameraState"),
         detectionCount:
@@ -711,6 +822,211 @@
         detectionList:
             document.getElementById("detectionList")
     };
+
+    function clearTrackingOverlay() {
+        const canvas = elements.cameraOverlay;
+        const context = canvas.getContext("2d");
+
+        context.clearRect(
+            0,
+            0,
+            canvas.width,
+            canvas.height
+        );
+    }
+
+    function detectionCenterX(detection) {
+        if (detection.center_x !== undefined) {
+            return Number(detection.center_x);
+        }
+
+        if (detection.cx !== undefined) {
+            return Number(detection.cx);
+        }
+
+        return (
+            Number(detection.x1 || 0) +
+            Number(detection.x2 || 0)
+        ) / 2;
+    }
+
+    function drawTrackingOverlay(
+        detections,
+        activeTarget
+    ) {
+        const canvas = elements.cameraOverlay;
+        const context = canvas.getContext("2d");
+
+        const imageWidth =
+            detections.length
+                ? Number(
+                    detections[0].image_width || 640
+                )
+                : 640;
+
+        const imageHeight =
+            detections.length
+                ? Number(
+                    detections[0].image_height || 480
+                )
+                : 480;
+
+        canvas.width = imageWidth;
+        canvas.height = imageHeight;
+
+        context.clearRect(
+            0,
+            0,
+            canvas.width,
+            canvas.height
+        );
+
+        const centerX = imageWidth / 2;
+        const tolerance = 95;
+
+        // Center tolerance region.
+        context.fillStyle =
+            "rgba(59, 130, 246, 0.10)";
+
+        context.fillRect(
+            centerX - tolerance,
+            0,
+            tolerance * 2,
+            imageHeight
+        );
+
+        // Tolerance boundaries.
+        context.strokeStyle =
+            "rgba(96, 165, 250, 0.70)";
+
+        context.lineWidth = 1;
+        context.setLineDash([8, 8]);
+
+        for (
+            const x of [
+                centerX - tolerance,
+                centerX + tolerance
+            ]
+        ) {
+            context.beginPath();
+            context.moveTo(x, 0);
+            context.lineTo(x, imageHeight);
+            context.stroke();
+        }
+
+        // Camera center line.
+        context.strokeStyle =
+            "rgba(250, 204, 21, 0.95)";
+
+        context.lineWidth = 2;
+        context.setLineDash([]);
+
+        context.beginPath();
+        context.moveTo(centerX, 0);
+        context.lineTo(centerX, imageHeight);
+        context.stroke();
+
+        detections.forEach((detection) => {
+            const label =
+                String(
+                    detection.label || "unknown"
+                ).toLowerCase();
+
+            const isTarget =
+                activeTarget &&
+                label === activeTarget.toLowerCase();
+
+            const x1 = Number(detection.x1 || 0);
+            const y1 = Number(detection.y1 || 0);
+            const x2 = Number(detection.x2 || 0);
+            const y2 = Number(detection.y2 || 0);
+
+            const width = Math.max(0, x2 - x1);
+            const height = Math.max(0, y2 - y1);
+
+            const confidence =
+                Math.round(
+                    Number(
+                        detection.confidence || 0
+                    ) * 100
+                );
+
+            context.strokeStyle =
+                isTarget
+                    ? "#22c55e"
+                    : "#38bdf8";
+
+            context.lineWidth =
+                isTarget ? 4 : 2;
+
+            context.strokeRect(
+                x1,
+                y1,
+                width,
+                height
+            );
+
+            const text =
+                label +
+                " " +
+                confidence +
+                "%" +
+                (
+                    isTarget
+                        ? "  TARGET"
+                        : ""
+                );
+
+            context.font =
+                "bold 15px sans-serif";
+
+            const textWidth =
+                context.measureText(text).width;
+
+            const textX = x1;
+            const textY = Math.max(20, y1);
+
+            context.fillStyle =
+                isTarget
+                    ? "rgba(22, 101, 52, 0.92)"
+                    : "rgba(3, 105, 161, 0.92)";
+
+            context.fillRect(
+                textX,
+                textY - 20,
+                textWidth + 12,
+                22
+            );
+
+            context.fillStyle = "#ffffff";
+
+            context.fillText(
+                text,
+                textX + 6,
+                textY - 4
+            );
+
+            // Detection center marker.
+            const cx = detectionCenterX(detection);
+            const cy =
+                detection.center_y !== undefined
+                    ? Number(detection.center_y)
+                    : (
+                        detection.cy !== undefined
+                            ? Number(detection.cy)
+                            : (y1 + y2) / 2
+                    );
+
+            context.fillStyle =
+                isTarget
+                    ? "#22c55e"
+                    : "#38bdf8";
+
+            context.beginPath();
+            context.arc(cx, cy, 5, 0, Math.PI * 2);
+            context.fill();
+        });
+    }
 
     function setHealth(dot, detail, ready, text) {
         dot.className =
@@ -1020,6 +1336,8 @@
 
                 elements.cameraCaption.textContent =
                     "Live camera unavailable";
+
+                clearTrackingOverlay();
             }
 
             elements.detectionCount.textContent =
@@ -1032,6 +1350,65 @@
 
             const detections =
                 vision.detections || [];
+
+            const activeTarget =
+                (
+                    active &&
+                    active.target
+                )
+                    ? String(active.target)
+                    : (
+                        active &&
+                        active.mission_type ===
+                            "FOLLOW_PERSON"
+                            ? "person"
+                            : null
+                    );
+
+            drawTrackingOverlay(
+                detections,
+                activeTarget
+            );
+
+            elements.trackingTarget.textContent =
+                activeTarget || "None";
+
+            elements.trackingState.textContent =
+                lastResult.state ||
+                lastResult.behavior ||
+                "None";
+
+            const horizontalError =
+                lastResult.horizontal_error;
+
+            elements.trackingError.textContent =
+                horizontalError === undefined ||
+                horizontalError === null
+                    ? "—"
+                    : (
+                        Math.round(
+                            Number(horizontalError)
+                        ) + " px"
+                    );
+
+            const targetDetection =
+                activeTarget
+                    ? detections.find(
+                        (detection) =>
+                            String(
+                                detection.label || ""
+                            ).toLowerCase() ===
+                            activeTarget.toLowerCase()
+                    )
+                    : null;
+
+            elements.trackingArea.textContent =
+                targetDetection &&
+                targetDetection.area !== undefined
+                    ? Math.round(
+                        Number(targetDetection.area)
+                    ).toLocaleString()
+                    : "—";
 
             elements.detectionList.innerHTML =
                 detections.length

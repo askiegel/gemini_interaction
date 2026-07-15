@@ -378,6 +378,11 @@ class VoiceRelayHandler(BaseHTTPRequestHandler):
                     if vision
                     else None
                 ),
+                "timestamp": (
+                    vision.get("timestamp")
+                    if vision
+                    else None
+                ),
                 "last_error": (
                     vision.get("last_error")
                     if vision
