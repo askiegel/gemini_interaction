@@ -55,15 +55,54 @@ class RobotBridgeClient:
     def stop(self):
         return self._request("POST", "/stop")
 
-    def motion(self, linear_x=0.0, angular_z=0.0, duration=0.25):
+    def motion(
+        self,
+        linear_x=0.0,
+        angular_z=0.0,
+        duration=0.25,
+        streaming=False,
+        watchdog_timeout=0.50,
+    ):
+        payload = {
+            "linear_x": float(linear_x),
+            "angular_z": float(angular_z),
+            "duration": float(duration),
+        }
+
+        if streaming:
+            payload.update(
+                {
+                    "streaming": True,
+                    "watchdog_timeout": float(
+                        watchdog_timeout
+                    ),
+                }
+            )
+
         return self._request(
             "POST",
             "/motion",
-            {
-                "linear_x": float(linear_x),
-                "angular_z": float(angular_z),
-                "duration": float(duration),
-            },
+            payload,
+        )
+
+    def streaming_motion(
+        self,
+        linear_x=0.0,
+        angular_z=0.0,
+        watchdog_timeout=0.50,
+    ):
+        """
+        Refresh a continuous velocity command.
+
+        The Robot Bridge republishes the command until another streaming
+        update arrives, STOP is requested, or the deadman watchdog expires.
+        """
+        return self.motion(
+            linear_x=linear_x,
+            angular_z=angular_z,
+            duration=0.25,
+            streaming=True,
+            watchdog_timeout=watchdog_timeout,
         )
 
     def move_forward(self, speed=0.10, seconds=1.0):

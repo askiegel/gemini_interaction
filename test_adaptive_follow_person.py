@@ -203,7 +203,7 @@ def main():
 
     assert (
         approach_left["commanded_angular_z"]
-        < 0.0
+        > 0.0
     )
 
     print()
@@ -215,7 +215,7 @@ def main():
 
     assert (
         approach_right["commanded_angular_z"]
-        > 0.0
+        < 0.0
     )
 
     print()
@@ -244,7 +244,7 @@ def main():
     assert len(motion_commands) == 7
 
     for _, command in motion_commands:
-        assert command["duration"] <= 0.25
+        assert command["duration"] <= 0.45
 
     print()
     print("PASS: small errors produce gentle corrections")

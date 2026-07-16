@@ -18,25 +18,30 @@ class BehaviorManager:
     FOLLOW_SEARCH_TURN_SECONDS = 0.30
 
     FOLLOW_CENTER_TURN_SPEED = 0.65
-    FOLLOW_CENTER_TURN_SECONDS = 0.22
+    FOLLOW_CENTER_TURN_SECONDS = 0.28
 
     # Adaptive FOLLOW_PERSON steering controller.
     #
     # The horizontal pixel error is converted into an angular velocity.
     # Every command remains short and automatically stops at the Robot
     # Bridge after FOLLOW_CENTER_TURN_SECONDS.
-    FOLLOW_TURN_KP = 0.0022
-    FOLLOW_MIN_TURN_SPEED = 0.22
-    FOLLOW_MAX_TURN_SPEED = 0.70
+    FOLLOW_TURN_KP = 0.0030
+    FOLLOW_MIN_TURN_SPEED = 0.32
+    FOLLOW_MAX_TURN_SPEED = 0.95
 
     # While the target is inside the center tolerance region, the robot may
     # move forward and apply a small simultaneous steering correction.
-    FOLLOW_APPROACH_TURN_KP = 0.0015
-    FOLLOW_MAX_APPROACH_TURN_SPEED = 0.16
+    FOLLOW_APPROACH_TURN_KP = 0.0025
+    FOLLOW_MAX_APPROACH_TURN_SPEED = 0.28
 
-    FOLLOW_FORWARD_SPEED = 0.08
-    FOLLOW_FORWARD_SECONDS = 0.25
+    FOLLOW_FORWARD_SPEED = 0.14
+    FOLLOW_FORWARD_SECONDS = 0.45
     FOLLOW_STOP_AREA = 60000.0
+
+    # FOLLOW_PERSON continuously refreshes the Robot Bridge deadman
+    # watchdog. If updates stop, the bridge automatically publishes zero
+    # velocity.
+    FOLLOW_STREAM_WATCHDOG_SECONDS = 0.50
 
     DEFAULT_IMAGE_WIDTH = 640.0
     CENTER_TOLERANCE_PIXELS = 95.0
@@ -374,8 +379,10 @@ class BehaviorManager:
         """
         Calculate a small steering correction during forward approach.
         """
+        # Camera-left is a negative pixel error, but the Robot Bridge
+        # uses positive angular_z for a physical left turn.
         proportional_speed = (
-            float(horizontal_error)
+            -float(horizontal_error)
             * self.FOLLOW_APPROACH_TURN_KP
         )
 
@@ -384,6 +391,64 @@ class BehaviorManager:
             -self.FOLLOW_MAX_APPROACH_TURN_SPEED,
             self.FOLLOW_MAX_APPROACH_TURN_SPEED,
         )
+
+    def _execute_follow_streaming_motion(
+        self,
+        linear_x,
+        angular_z,
+    ):
+        """
+        Refresh one FOLLOW_PERSON streaming velocity command.
+
+        The preferred client method explicitly requests streaming mode.
+        Compatibility fallbacks keep isolated legacy tests functional.
+        """
+        if hasattr(self.robot, "streaming_motion"):
+            return self.robot.streaming_motion(
+                linear_x=linear_x,
+                angular_z=angular_z,
+                watchdog_timeout=(
+                    self.FOLLOW_STREAM_WATCHDOG_SECONDS
+                ),
+            )
+
+        if hasattr(self.robot, "motion"):
+            try:
+                return self.robot.motion(
+                    linear_x=linear_x,
+                    angular_z=angular_z,
+                    duration=0.25,
+                    streaming=True,
+                    watchdog_timeout=(
+                        self.FOLLOW_STREAM_WATCHDOG_SECONDS
+                    ),
+                )
+            except TypeError:
+                return self.robot.motion(
+                    linear_x=linear_x,
+                    angular_z=angular_z,
+                    duration=0.25,
+                )
+
+        if abs(float(linear_x)) > 0.0:
+            return self.robot.move_forward(
+                speed=abs(float(linear_x)),
+                seconds=0.25,
+            )
+
+        if float(angular_z) > 0.0:
+            return self.robot.turn_left(
+                speed=abs(float(angular_z)),
+                seconds=0.25,
+            )
+
+        if float(angular_z) < 0.0:
+            return self.robot.turn_right(
+                speed=abs(float(angular_z)),
+                seconds=0.25,
+            )
+
+        return self.robot.stop()
 
     def _execute_bounded_motion(
         self,
@@ -469,10 +534,43 @@ class BehaviorManager:
             }
 
         if not target.get("found"):
-            robot_result = self.robot.turn_left(
-                speed=search_turn_speed,
-                seconds=search_turn_seconds,
-            )
+            if behavior == "FOLLOW_PERSON":
+                commanded_linear_x = 0.0
+                commanded_angular_z = float(
+                    search_turn_speed
+                )
+
+                robot_result = (
+                    self._execute_follow_streaming_motion(
+                        linear_x=commanded_linear_x,
+                        angular_z=commanded_angular_z,
+                    )
+                )
+
+                reason = (
+                    f"{target_name} not visible. "
+                    "Continuously rotating left to reacquire it."
+                )
+
+                streaming = True
+
+            else:
+                commanded_linear_x = 0.0
+                commanded_angular_z = float(
+                    search_turn_speed
+                )
+
+                robot_result = self.robot.turn_left(
+                    speed=search_turn_speed,
+                    seconds=search_turn_seconds,
+                )
+
+                reason = (
+                    f"{target_name} not visible. "
+                    "Executed one short search turn."
+                )
+
+                streaming = False
 
             return {
                 "ok": bool(robot_result.get("ok")),
@@ -482,9 +580,14 @@ class BehaviorManager:
                 "target": target_name,
                 "state": "SEARCHING",
                 "cycle": cycle_number,
-                "reason": (
-                    f"{target_name} not visible. "
-                    "Executed one short search turn."
+                "reason": reason,
+                "commanded_linear_x": commanded_linear_x,
+                "commanded_angular_z": commanded_angular_z,
+                "streaming": streaming,
+                "watchdog_timeout": (
+                    self.FOLLOW_STREAM_WATCHDOG_SECONDS
+                    if streaming
+                    else None
                 ),
                 "vision_result": target,
                 "robot_result": robot_result,
@@ -553,10 +656,9 @@ class BehaviorManager:
                 )
 
                 robot_result = (
-                    self._execute_bounded_motion(
+                    self._execute_follow_streaming_motion(
                         linear_x=0.0,
                         angular_z=commanded_angular_z,
-                        seconds=center_turn_seconds,
                     )
                 )
             else:
@@ -588,7 +690,15 @@ class BehaviorManager:
                 "horizontal_error": horizontal_error,
                 "commanded_linear_x": 0.0,
                 "commanded_angular_z": commanded_angular_z,
-                "commanded_duration": center_turn_seconds,
+                "commanded_duration": None,
+                "streaming": (
+                    behavior == "FOLLOW_PERSON"
+                ),
+                "watchdog_timeout": (
+                    self.FOLLOW_STREAM_WATCHDOG_SECONDS
+                    if behavior == "FOLLOW_PERSON"
+                    else None
+                ),
                 "vision_result": target,
                 "robot_result": robot_result,
             }
@@ -606,10 +716,9 @@ class BehaviorManager:
                 )
 
                 robot_result = (
-                    self._execute_bounded_motion(
+                    self._execute_follow_streaming_motion(
                         linear_x=0.0,
                         angular_z=commanded_angular_z,
-                        seconds=center_turn_seconds,
                     )
                 )
             else:
@@ -641,7 +750,15 @@ class BehaviorManager:
                 "horizontal_error": horizontal_error,
                 "commanded_linear_x": 0.0,
                 "commanded_angular_z": commanded_angular_z,
-                "commanded_duration": center_turn_seconds,
+                "commanded_duration": None,
+                "streaming": (
+                    behavior == "FOLLOW_PERSON"
+                ),
+                "watchdog_timeout": (
+                    self.FOLLOW_STREAM_WATCHDOG_SECONDS
+                    if behavior == "FOLLOW_PERSON"
+                    else None
+                ),
                 "vision_result": target,
                 "robot_result": robot_result,
             }
@@ -654,10 +771,9 @@ class BehaviorManager:
             )
 
             robot_result = (
-                self._execute_bounded_motion(
+                self._execute_follow_streaming_motion(
                     linear_x=forward_speed,
                     angular_z=commanded_angular_z,
-                    seconds=forward_seconds,
                 )
             )
         else:
@@ -687,7 +803,19 @@ class BehaviorManager:
             "commanded_angular_z": (
                 commanded_angular_z
             ),
-            "commanded_duration": forward_seconds,
+            "commanded_duration": (
+                None
+                if behavior == "FOLLOW_PERSON"
+                else forward_seconds
+            ),
+            "streaming": (
+                behavior == "FOLLOW_PERSON"
+            ),
+            "watchdog_timeout": (
+                self.FOLLOW_STREAM_WATCHDOG_SECONDS
+                if behavior == "FOLLOW_PERSON"
+                else None
+            ),
             "vision_result": target,
             "robot_result": robot_result,
         }
