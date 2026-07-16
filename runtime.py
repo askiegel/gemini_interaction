@@ -12,6 +12,7 @@ from config import load_config
 from mission_manager import MissionManager
 from provider_factory import create_provider
 from robot_bridge.client import RobotBridgeClient
+from tracking_state import build_tracking_state, empty_tracking_state
 from vision_adapter import VisionAdapter
 from world_model import WorldModel
 
@@ -81,6 +82,7 @@ class CognitiveRuntime:
         self.started_at = None
         self.last_result: Optional[Dict[str, Any]] = None
         self.last_error: Optional[str] = None
+        self.tracking_state: Dict[str, Any] = empty_tracking_state()
         self._state_lock = threading.RLock()
         self._last_runtime_state = None
         self._control_generation = 0
@@ -161,6 +163,9 @@ class CognitiveRuntime:
                 }
 
                 self.last_error = stop_error
+                self.tracking_state = empty_tracking_state(
+                    state="STOPPED",
+                )
                 self._last_runtime_state = "STOPPED"
 
                 self.world_model.update_robot_state(
@@ -244,6 +249,10 @@ class CognitiveRuntime:
 
             self.last_result = result
             self.last_error = execution_error
+            self.tracking_state = build_tracking_state(
+                result,
+                previous=self.tracking_state,
+            )
 
             active = self.mission_manager.get_active_mission()
 
@@ -294,6 +303,7 @@ class CognitiveRuntime:
                 ),
                 "mission_queue": self.mission_manager.get_queue(),
                 "last_behavior_result": result,
+                "tracking": self.tracking_state,
             }
 
             if finished_mission is not None:
@@ -392,6 +402,7 @@ class CognitiveRuntime:
                     self.mission_manager.mission_history
                 ),
                 "last_result": self.last_result,
+                "tracking": dict(self.tracking_state),
                 "last_error": self.last_error,
             }
 
