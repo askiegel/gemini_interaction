@@ -18,10 +18,24 @@ class BehaviorManager:
     FOLLOW_SEARCH_TURN_SECONDS = 0.30
 
     FOLLOW_CENTER_TURN_SPEED = 0.65
-    FOLLOW_CENTER_TURN_SECONDS = 0.25
+    FOLLOW_CENTER_TURN_SECONDS = 0.22
+
+    # Adaptive FOLLOW_PERSON steering controller.
+    #
+    # The horizontal pixel error is converted into an angular velocity.
+    # Every command remains short and automatically stops at the Robot
+    # Bridge after FOLLOW_CENTER_TURN_SECONDS.
+    FOLLOW_TURN_KP = 0.0022
+    FOLLOW_MIN_TURN_SPEED = 0.22
+    FOLLOW_MAX_TURN_SPEED = 0.70
+
+    # While the target is inside the center tolerance region, the robot may
+    # move forward and apply a small simultaneous steering correction.
+    FOLLOW_APPROACH_TURN_KP = 0.0015
+    FOLLOW_MAX_APPROACH_TURN_SPEED = 0.16
 
     FOLLOW_FORWARD_SPEED = 0.08
-    FOLLOW_FORWARD_SECONDS = 0.30
+    FOLLOW_FORWARD_SECONDS = 0.25
     FOLLOW_STOP_AREA = 60000.0
 
     DEFAULT_IMAGE_WIDTH = 640.0
@@ -328,6 +342,88 @@ class BehaviorManager:
             close_reason=f"Arrived at {target_name}.",
         )
 
+    @staticmethod
+    def _clamp(value, minimum, maximum):
+        """
+        Clamp a numeric value to an inclusive range.
+        """
+        return max(
+            float(minimum),
+            min(float(maximum), float(value)),
+        )
+
+    def _follow_turn_speed(self, horizontal_error):
+        """
+        Convert absolute camera error into a safe proportional turn speed.
+        """
+        proportional_speed = (
+            abs(float(horizontal_error))
+            * self.FOLLOW_TURN_KP
+        )
+
+        return self._clamp(
+            proportional_speed,
+            self.FOLLOW_MIN_TURN_SPEED,
+            self.FOLLOW_MAX_TURN_SPEED,
+        )
+
+    def _follow_approach_turn_speed(
+        self,
+        horizontal_error,
+    ):
+        """
+        Calculate a small steering correction during forward approach.
+        """
+        proportional_speed = (
+            float(horizontal_error)
+            * self.FOLLOW_APPROACH_TURN_KP
+        )
+
+        return self._clamp(
+            proportional_speed,
+            -self.FOLLOW_MAX_APPROACH_TURN_SPEED,
+            self.FOLLOW_MAX_APPROACH_TURN_SPEED,
+        )
+
+    def _execute_bounded_motion(
+        self,
+        linear_x,
+        angular_z,
+        seconds,
+    ):
+        """
+        Send one combined bounded motion command when supported.
+
+        The fallback preserves compatibility with older fake clients and
+        isolated tests that expose only move_forward/turn_left/turn_right.
+        """
+        if hasattr(self.robot, "motion"):
+            return self.robot.motion(
+                linear_x=linear_x,
+                angular_z=angular_z,
+                duration=seconds,
+            )
+
+        if abs(float(linear_x)) > 0.0:
+            return self.robot.move_forward(
+                speed=abs(float(linear_x)),
+                seconds=seconds,
+            )
+
+        if float(angular_z) > 0.0:
+            return self.robot.turn_left(
+                speed=abs(float(angular_z)),
+                seconds=seconds,
+            )
+
+        if float(angular_z) < 0.0:
+            return self.robot.turn_right(
+                speed=abs(float(angular_z)),
+                seconds=seconds,
+            )
+
+        return self.robot.stop()
+
     def _execute_visual_servo_cycle(
         self,
         behavior,
@@ -445,10 +541,37 @@ class BehaviorManager:
             }
 
         if horizontal_error < -self.CENTER_TOLERANCE_PIXELS:
-            robot_result = self.robot.turn_left(
-                speed=center_turn_speed,
-                seconds=center_turn_seconds,
-            )
+            if behavior == "FOLLOW_PERSON":
+                commanded_turn_speed = (
+                    self._follow_turn_speed(
+                        horizontal_error
+                    )
+                )
+
+                commanded_angular_z = (
+                    commanded_turn_speed
+                )
+
+                robot_result = (
+                    self._execute_bounded_motion(
+                        linear_x=0.0,
+                        angular_z=commanded_angular_z,
+                        seconds=center_turn_seconds,
+                    )
+                )
+            else:
+                commanded_turn_speed = (
+                    float(center_turn_speed)
+                )
+
+                commanded_angular_z = (
+                    commanded_turn_speed
+                )
+
+                robot_result = self.robot.turn_left(
+                    speed=commanded_turn_speed,
+                    seconds=center_turn_seconds,
+                )
 
             return {
                 "ok": bool(robot_result.get("ok")),
@@ -460,18 +583,48 @@ class BehaviorManager:
                 "cycle": cycle_number,
                 "reason": (
                     f"{target_name} is left in the camera image. "
-                    "Turning robot left to center it."
+                    "Applying one bounded left correction."
                 ),
                 "horizontal_error": horizontal_error,
+                "commanded_linear_x": 0.0,
+                "commanded_angular_z": commanded_angular_z,
+                "commanded_duration": center_turn_seconds,
                 "vision_result": target,
                 "robot_result": robot_result,
             }
 
         if horizontal_error > self.CENTER_TOLERANCE_PIXELS:
-            robot_result = self.robot.turn_right(
-                speed=center_turn_speed,
-                seconds=center_turn_seconds,
-            )
+            if behavior == "FOLLOW_PERSON":
+                commanded_turn_speed = (
+                    self._follow_turn_speed(
+                        horizontal_error
+                    )
+                )
+
+                commanded_angular_z = (
+                    -commanded_turn_speed
+                )
+
+                robot_result = (
+                    self._execute_bounded_motion(
+                        linear_x=0.0,
+                        angular_z=commanded_angular_z,
+                        seconds=center_turn_seconds,
+                    )
+                )
+            else:
+                commanded_turn_speed = (
+                    float(center_turn_speed)
+                )
+
+                commanded_angular_z = (
+                    -commanded_turn_speed
+                )
+
+                robot_result = self.robot.turn_right(
+                    speed=commanded_turn_speed,
+                    seconds=center_turn_seconds,
+                )
 
             return {
                 "ok": bool(robot_result.get("ok")),
@@ -483,17 +636,37 @@ class BehaviorManager:
                 "cycle": cycle_number,
                 "reason": (
                     f"{target_name} is right in the camera image. "
-                    "Turning robot right to center it."
+                    "Applying one bounded right correction."
                 ),
                 "horizontal_error": horizontal_error,
+                "commanded_linear_x": 0.0,
+                "commanded_angular_z": commanded_angular_z,
+                "commanded_duration": center_turn_seconds,
                 "vision_result": target,
                 "robot_result": robot_result,
             }
 
-        robot_result = self.robot.move_forward(
-            speed=forward_speed,
-            seconds=forward_seconds,
-        )
+        if behavior == "FOLLOW_PERSON":
+            commanded_angular_z = (
+                self._follow_approach_turn_speed(
+                    horizontal_error
+                )
+            )
+
+            robot_result = (
+                self._execute_bounded_motion(
+                    linear_x=forward_speed,
+                    angular_z=commanded_angular_z,
+                    seconds=forward_seconds,
+                )
+            )
+        else:
+            commanded_angular_z = 0.0
+
+            robot_result = self.robot.move_forward(
+                speed=forward_speed,
+                seconds=forward_seconds,
+            )
 
         return {
             "ok": bool(robot_result.get("ok")),
@@ -504,9 +677,17 @@ class BehaviorManager:
             "state": "APPROACHING",
             "cycle": cycle_number,
             "reason": (
-                f"{target_name} is centered. Moving closer."
+                f"{target_name} is centered. "
+                "Executing one bounded approach step."
             ),
             "horizontal_error": horizontal_error,
+            "commanded_linear_x": float(
+                forward_speed
+            ),
+            "commanded_angular_z": (
+                commanded_angular_z
+            ),
+            "commanded_duration": forward_seconds,
             "vision_result": target,
             "robot_result": robot_result,
         }
