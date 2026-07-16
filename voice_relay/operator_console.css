@@ -1,0 +1,416 @@
+/*
+ * Mini Pupper 2 Operator Console v2
+ *
+ * Presentation and accessibility layer for the existing dashboard.
+ * Robot behavior and tracking decisions remain runtime-owned.
+ */
+
+:root {
+    --console-gap: 18px;
+    --console-radius: 14px;
+    --console-border: #cbd5e1;
+    --console-muted: #64748b;
+    --console-dark: #0f172a;
+    --console-green: #16a34a;
+    --console-red: #dc2626;
+    --console-blue: #2563eb;
+}
+
+body {
+    font-size: 17px;
+}
+
+header {
+    padding: 22px 30px;
+}
+
+header h1 {
+    font-size: 30px;
+}
+
+header p {
+    font-size: 17px;
+}
+
+main {
+    max-width: 1680px;
+    padding-left: 24px;
+    padding-right: 24px;
+}
+
+.health-title {
+    font-size: 17px;
+}
+
+.health-detail {
+    font-size: 15px;
+}
+
+.health-dot {
+    width: 16px;
+    height: 16px;
+}
+
+.mode-panel {
+    font-size: 17px;
+}
+
+button {
+    min-height: 48px;
+    font-size: 17px;
+}
+
+.stop {
+    min-height: 62px;
+    font-size: 23px;
+}
+
+.operator-console {
+    display: grid;
+    grid-template-columns:
+        minmax(680px, 3fr)
+        minmax(330px, 1fr);
+    gap: var(--console-gap);
+    align-items: start;
+    margin-bottom: var(--console-gap);
+}
+
+.operator-camera-card {
+    min-width: 0;
+}
+
+.operator-camera-card h2 {
+    font-size: 25px;
+}
+
+.operator-camera-card .camera-stage {
+    max-width: 1100px;
+    width: 100%;
+    margin: 0 auto 14px;
+    border: 3px solid #334155;
+    border-radius: var(--console-radius);
+    box-shadow:
+        0 12px 32px rgba(15, 23, 42, 0.22);
+}
+
+.operator-camera-card .camera-caption {
+    font-size: 16px;
+    margin-bottom: 14px;
+}
+
+.operator-camera-card .tracking-metrics {
+    grid-template-columns:
+        repeat(4, minmax(145px, 1fr));
+}
+
+.operator-camera-card .tracking-metric {
+    min-height: 78px;
+    padding: 14px;
+}
+
+.operator-camera-card .tracking-metric-name {
+    font-size: 13px;
+}
+
+.operator-camera-card .tracking-metric-value {
+    font-size: 21px;
+}
+
+.operator-telemetry-card {
+    position: sticky;
+    top: 16px;
+    padding: 22px;
+}
+
+.operator-telemetry-card h2 {
+    font-size: 25px;
+}
+
+.operator-section-title {
+    margin: 22px 0 8px;
+    color: var(--console-muted);
+    font-size: 14px;
+    font-weight: 800;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+}
+
+.operator-section-title:first-of-type {
+    margin-top: 4px;
+}
+
+.operator-value-grid {
+    display: grid;
+    grid-template-columns: 1fr;
+    gap: 8px;
+}
+
+.operator-value {
+    display: grid;
+    grid-template-columns: minmax(120px, 1fr) minmax(120px, 1.25fr);
+    gap: 14px;
+    align-items: center;
+    min-height: 48px;
+    padding: 10px 12px;
+    border: 1px solid #e2e8f0;
+    border-radius: 10px;
+    background: #f8fafc;
+}
+
+.operator-value-name {
+    color: var(--console-muted);
+    font-size: 15px;
+    font-weight: 650;
+}
+
+.operator-value-data {
+    text-align: right;
+    font-size: 19px;
+    font-weight: 800;
+    overflow-wrap: anywhere;
+}
+
+.operator-state-large {
+    display: block;
+    margin-bottom: 14px;
+    padding: 16px;
+    border-radius: 12px;
+    background: #e2e8f0;
+    color: var(--console-dark);
+    text-align: center;
+    font-size: 24px;
+    font-weight: 900;
+    letter-spacing: 0.02em;
+}
+
+.operator-state-large.active {
+    background: #fef3c7;
+    color: #854d0e;
+}
+
+.operator-state-large.centered {
+    background: #dcfce7;
+    color: #166534;
+}
+
+.operator-state-large.stopped {
+    background: #fee2e2;
+    color: #991b1b;
+}
+
+.operator-camera-banner {
+    position: absolute;
+    top: 14px;
+    left: 50%;
+    z-index: 5;
+    min-width: 260px;
+    max-width: calc(100% - 160px);
+    transform: translateX(-50%);
+    padding: 10px 22px;
+    border-radius: 999px;
+    background: rgba(15, 23, 42, 0.88);
+    color: #ffffff;
+    text-align: center;
+    font-size: clamp(17px, 2vw, 27px);
+    font-weight: 900;
+    letter-spacing: 0.04em;
+    text-shadow: 0 2px 4px rgba(0, 0, 0, 0.45);
+    pointer-events: none;
+}
+
+.operator-camera-banner.centered {
+    background: rgba(22, 163, 74, 0.92);
+}
+
+.operator-camera-banner.stopped {
+    background: rgba(220, 38, 38, 0.9);
+}
+
+.operator-steering-arrow {
+    position: absolute;
+    top: 50%;
+    z-index: 5;
+    transform: translateY(-50%);
+    color: #fde047;
+    font-size: clamp(58px, 8vw, 118px);
+    font-weight: 900;
+    line-height: 1;
+    text-shadow:
+        0 4px 8px rgba(0, 0, 0, 0.8),
+        0 0 18px rgba(250, 204, 21, 0.7);
+    pointer-events: none;
+}
+
+.operator-steering-arrow.left {
+    left: 26px;
+}
+
+.operator-steering-arrow.right {
+    right: 26px;
+}
+
+.operator-centered-indicator {
+    position: absolute;
+    left: 50%;
+    bottom: 22px;
+    z-index: 5;
+    display: none;
+    transform: translateX(-50%);
+    padding: 10px 20px;
+    border-radius: 999px;
+    background: rgba(22, 163, 74, 0.92);
+    color: white;
+    font-size: clamp(18px, 2vw, 28px);
+    font-weight: 900;
+    pointer-events: none;
+}
+
+.operator-centered-indicator.visible {
+    display: block;
+}
+
+.operator-camera-actions {
+    display: flex;
+    justify-content: center;
+    gap: 12px;
+    margin: 0 0 18px;
+}
+
+.operator-camera-actions button {
+    min-width: 180px;
+}
+
+.operator-status-good {
+    color: #15803d;
+}
+
+.operator-status-warning {
+    color: #b45309;
+}
+
+.operator-status-bad {
+    color: #b91c1c;
+}
+
+.dashboard-grid.operator-controls-grid {
+    grid-template-columns:
+        repeat(3, minmax(280px, 1fr));
+}
+
+.detection-item {
+    font-size: 16px;
+}
+
+@media (max-width: 1120px) {
+    .operator-console {
+        grid-template-columns: 1fr;
+    }
+
+    .operator-telemetry-card {
+        position: static;
+    }
+
+    .operator-camera-card .tracking-metrics {
+        grid-template-columns:
+            repeat(2, minmax(145px, 1fr));
+    }
+
+    .dashboard-grid.operator-controls-grid {
+        grid-template-columns:
+            repeat(auto-fit, minmax(280px, 1fr));
+    }
+}
+
+@media (max-width: 650px) {
+    body {
+        font-size: 16px;
+    }
+
+    main {
+        padding-left: 10px;
+        padding-right: 10px;
+    }
+
+    .operator-camera-card .tracking-metrics {
+        grid-template-columns: 1fr 1fr;
+    }
+
+    .operator-camera-banner {
+        max-width: calc(100% - 40px);
+        min-width: 0;
+        width: auto;
+    }
+
+    .operator-value {
+        grid-template-columns: 1fr;
+    }
+
+    .operator-value-data {
+        text-align: left;
+    }
+}
+
+/*
+ * Final Operator Console v2 readability adjustments.
+ */
+
+.operator-telemetry-card {
+    min-width: 360px;
+}
+
+.operator-value {
+    min-height: 54px;
+    padding: 12px 14px;
+}
+
+.operator-value-name {
+    font-size: 16px;
+}
+
+.operator-value-data {
+    font-size: 21px;
+}
+
+.operator-section-title {
+    font-size: 15px;
+}
+
+.operator-camera-actions button {
+    min-width: 230px;
+    min-height: 52px;
+    font-size: 17px;
+    font-weight: 800;
+}
+
+.operator-camera-card .camera-caption {
+    font-size: 17px;
+}
+
+.operator-camera-card .tracking-metric-name {
+    font-size: 14px;
+}
+
+.operator-camera-card .tracking-metric-value {
+    font-size: 23px;
+}
+
+.operator-controls-grid h2 {
+    font-size: 21px;
+}
+
+.operator-controls-grid .metric-name,
+.operator-controls-grid .small-text {
+    font-size: 15px;
+}
+
+.operator-controls-grid .metric-value {
+    font-size: 17px;
+}
+
+@media (min-width: 1400px) {
+    .operator-console {
+        grid-template-columns:
+            minmax(850px, 3.4fr)
+            minmax(390px, 1fr);
+    }
+}

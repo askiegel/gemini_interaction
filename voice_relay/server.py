@@ -16,6 +16,14 @@ PORT = 8765
 
 PROJECT_DIR = Path(__file__).resolve().parents[1]
 HTML_FILE = Path(__file__).resolve().parent / "index.html"
+OPERATOR_CSS_FILE = (
+    Path(__file__).resolve().parent
+    / "operator_console.css"
+)
+OPERATOR_JS_FILE = (
+    Path(__file__).resolve().parent
+    / "operator_console.js"
+)
 
 COGNITIVE_RUNTIME_URL = os.getenv(
     "COGNITIVE_RUNTIME_URL",
@@ -426,6 +434,55 @@ class VoiceRelayHandler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         path = urlparse(self.path).path
+
+        static_files = {
+            "/operator_console.css": (
+                OPERATOR_CSS_FILE,
+                "text/css; charset=utf-8",
+            ),
+            "/operator_console.js": (
+                OPERATOR_JS_FILE,
+                "application/javascript; charset=utf-8",
+            ),
+        }
+
+        if path in static_files:
+            static_path, content_type = (
+                static_files[path]
+            )
+
+            if not static_path.exists():
+                self.send_json(
+                    404,
+                    {
+                        "ok": False,
+                        "error": (
+                            f"{static_path.name} "
+                            "was not found."
+                        ),
+                    },
+                )
+                return
+
+            body = static_path.read_bytes()
+
+            self.send_response(200)
+            self.send_cors_headers()
+            self.send_header(
+                "Content-Type",
+                content_type,
+            )
+            self.send_header(
+                "Cache-Control",
+                "no-store",
+            )
+            self.send_header(
+                "Content-Length",
+                str(len(body)),
+            )
+            self.end_headers()
+            self.wfile.write(body)
+            return
 
         if path in ("/", "/index.html"):
             if not HTML_FILE.exists():
