@@ -30,10 +30,24 @@ def main():
         "/stop",
         "SpeechRecognition",
         "setInterval",
+        "const tracking = runtime.tracking || {};",
+        "tracking.target_label",
+        "tracking.state",
+        "tracking.horizontal_error",
+        "tracking.target_area",
     ]
 
     for requirement in html_requirements:
         assert requirement in html, requirement
+
+    forbidden_dashboard_logic = [
+        "lastResult.horizontal_error",
+        "targetDetection.area",
+        "active.mission_type ===",
+    ]
+
+    for forbidden in forbidden_dashboard_logic:
+        assert forbidden not in html, forbidden
 
     server_requirements = [
         'path == "/dashboard/status"',
@@ -43,19 +57,21 @@ def main():
         "ROBOT_BRIDGE_URL",
         "dashboard_status",
         "run_voice_command",
+        'runtime.get("tracking", {})',
     ]
 
     for requirement in server_requirements:
         assert requirement in server, requirement
 
-    print("PASS: dashboard includes live service health")
-    print("PASS: dashboard includes mission visibility")
-    print("PASS: dashboard includes perception status")
-    print("PASS: dashboard preserves voice recognition")
-    print("PASS: dashboard includes quick commands")
-    print("PASS: dashboard includes Stop Robot action")
+    print("PASS: dashboard forwards runtime tracking state")
+    print("PASS: dashboard renders runtime target label")
+    print("PASS: dashboard renders runtime behavior state")
+    print("PASS: dashboard renders runtime horizontal error")
+    print("PASS: dashboard renders runtime target area")
+    print("PASS: dashboard no longer derives tracking metrics")
+    print("PASS: dashboard preserves voice and STOP controls")
     print()
-    print("Operator Dashboard offline test passed.")
+    print("Operator Dashboard runtime integration test passed.")
 
 
 if __name__ == "__main__":

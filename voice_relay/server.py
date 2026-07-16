@@ -346,6 +346,11 @@ class VoiceRelayHandler(BaseHTTPRequestHandler):
                     if runtime
                     else None
                 ),
+                "tracking": (
+                    runtime.get("tracking", {})
+                    if runtime
+                    else {}
+                ),
                 "last_error": (
                     runtime.get("last_error")
                     if runtime

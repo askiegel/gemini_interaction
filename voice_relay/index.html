@@ -1188,6 +1188,7 @@
             const status = await response.json();
 
             const runtime = status.runtime || {};
+            const tracking = runtime.tracking || {};
             const vision = status.vision || {};
             const robot = status.robot || {};
             const missions = status.missions || {};
@@ -1259,6 +1260,7 @@
                 missions.last_result || {};
 
             elements.behaviorState.textContent =
+                tracking.state ||
                 lastResult.state ||
                 lastResult.behavior ||
                 "None";
@@ -1352,18 +1354,7 @@
                 vision.detections || [];
 
             const activeTarget =
-                (
-                    active &&
-                    active.target
-                )
-                    ? String(active.target)
-                    : (
-                        active &&
-                        active.mission_type ===
-                            "FOLLOW_PERSON"
-                            ? "person"
-                            : null
-                    );
+                tracking.target_label || null;
 
             drawTrackingOverlay(
                 detections,
@@ -1374,12 +1365,10 @@
                 activeTarget || "None";
 
             elements.trackingState.textContent =
-                lastResult.state ||
-                lastResult.behavior ||
-                "None";
+                tracking.state || "None";
 
             const horizontalError =
-                lastResult.horizontal_error;
+                tracking.horizontal_error;
 
             elements.trackingError.textContent =
                 horizontalError === undefined ||
@@ -1391,24 +1380,16 @@
                         ) + " px"
                     );
 
-            const targetDetection =
-                activeTarget
-                    ? detections.find(
-                        (detection) =>
-                            String(
-                                detection.label || ""
-                            ).toLowerCase() ===
-                            activeTarget.toLowerCase()
-                    )
-                    : null;
+            const targetArea =
+                tracking.target_area;
 
             elements.trackingArea.textContent =
-                targetDetection &&
-                targetDetection.area !== undefined
-                    ? Math.round(
-                        Number(targetDetection.area)
-                    ).toLocaleString()
-                    : "—";
+                targetArea === undefined ||
+                targetArea === null
+                    ? "—"
+                    : Math.round(
+                        Number(targetArea)
+                    ).toLocaleString();
 
             elements.detectionList.innerHTML =
                 detections.length
