@@ -571,11 +571,23 @@ class BehaviorManager:
             }
 
         if not target.get("found"):
+            commanded_linear_x = 0.0
+
             if behavior == "FOLLOW_PERSON":
-                commanded_linear_x = 0.0
-                commanded_angular_z = float(
-                    search_turn_speed
+                streaming = True
+
+                recovery_direction = target.get(
+                    "recovery_direction"
                 )
+
+                if recovery_direction == "RIGHT":
+                    commanded_angular_z = -float(
+                        search_turn_speed
+                    )
+                else:
+                    commanded_angular_z = float(
+                        search_turn_speed
+                    )
 
                 robot_result = (
                     self._execute_follow_streaming_motion(
@@ -584,30 +596,36 @@ class BehaviorManager:
                     )
                 )
 
-                reason = (
-                    f"{target_name} not visible. "
-                    "Continuously rotating left to reacquire it."
-                )
-
-                streaming = True
+                if recovery_direction:
+                    state = "RECOVERING_TARGET"
+                    reason = (
+                        f"{target_name} temporarily lost. "
+                        "Recovering toward the last-seen "
+                        f"{recovery_direction.lower()} direction."
+                    )
+                else:
+                    state = "SEARCHING"
+                    reason = (
+                        f"{target_name} not visible. "
+                        "Continuously rotating left to reacquire it."
+                    )
 
             else:
-                commanded_linear_x = 0.0
+                streaming = False
                 commanded_angular_z = float(
                     search_turn_speed
                 )
 
                 robot_result = self.robot.turn_left(
-                    speed=search_turn_speed,
-                    seconds=search_turn_seconds,
+                    commanded_angular_z,
+                    search_turn_seconds,
                 )
 
+                state = "SEARCHING"
                 reason = (
                     f"{target_name} not visible. "
-                    "Executed one short search turn."
+                    "Applying one bounded left search turn."
                 )
-
-                streaming = False
 
             return {
                 "ok": bool(robot_result.get("ok")),
@@ -615,7 +633,7 @@ class BehaviorManager:
                 "completed": False,
                 "behavior": behavior,
                 "target": target_name,
-                "state": "SEARCHING",
+                "state": state,
                 "cycle": cycle_number,
                 "reason": reason,
                 "commanded_linear_x": commanded_linear_x,

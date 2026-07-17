@@ -6,43 +6,65 @@ from typing import Any, Dict, Optional
 
 class TargetLock:
     """
-    Own the transient target identity used by a tracking behavior.
+    Preserve the World Model identity selected by an active tracking mission.
 
-    The World Model remains the source of perception data. TargetLock only
-    remembers which World Model entity the active behavior selected.
+    Normal operation:
 
-    Commit 1 responsibilities:
+        1. Acquire an entity by label.
+        2. Remember its entity_id.
+        3. Query only that entity on later control cycles.
 
-        - Acquire the best visible entity by label.
-        - Remember its entity_id.
-        - Query that entity by ID on later control cycles.
-        - Reset when a different mission starts or STOP is requested.
+    Lost-target recovery:
 
-    Lost-target timeout and directional recovery are intentionally deferred
-    to the next feature commit.
+        1. Retain the entity lock during a short visibility interruption.
+        2. Remember whether the target was last seen left, right, or center.
+        3. Supply that direction to BehaviorManager for recovery steering.
+        4. Release the lock only after the recovery timeout expires.
+        5. Permit a fresh label acquisition after the lock is released.
     """
 
     MODE_UNLOCKED = "UNLOCKED"
     MODE_LOCKED = "LOCKED"
+    MODE_RECOVERING = "RECOVERING"
+
+    DIRECTION_LEFT = "LEFT"
+    DIRECTION_RIGHT = "RIGHT"
+    DIRECTION_CENTER = "CENTER"
 
     def __init__(
         self,
         world_model,
         max_age_seconds: float = 3.0,
+        recovery_timeout_seconds: float = 2.0,
     ):
         self.world_model = world_model
         self.max_age_seconds = float(max_age_seconds)
+        self.recovery_timeout_seconds = float(
+            recovery_timeout_seconds
+        )
 
         self.mission_id: Optional[str] = None
         self.target_label: Optional[str] = None
+
         self.locked_entity_id: Optional[str] = None
         self.locked_since: Optional[str] = None
         self.tracking_mode = self.MODE_UNLOCKED
 
+        self.last_valid_observation: Optional[
+            Dict[str, Any]
+        ] = None
+        self.last_visible_at: Optional[str] = None
+        self.lost_since: Optional[str] = None
+        self.last_seen_direction: Optional[str] = None
+
     @staticmethod
-    def _now_iso() -> str:
+    def _now() -> datetime:
+        return datetime.now(timezone.utc)
+
+    @classmethod
+    def _now_iso(cls) -> str:
         return (
-            datetime.now(timezone.utc)
+            cls._now()
             .isoformat()
             .replace("+00:00", "Z")
         )
@@ -87,7 +109,7 @@ class TargetLock:
         return max(
             0.0,
             (
-                datetime.now(timezone.utc) - parsed
+                cls._now() - parsed
             ).total_seconds(),
         )
 
@@ -122,12 +144,55 @@ class TargetLock:
 
         return None
 
+    @classmethod
+    def _direction_from_observation(
+        cls,
+        observation: Dict[str, Any],
+    ) -> Optional[str]:
+        cx = observation.get("cx")
+        image_width = observation.get("image_width")
+
+        if cx is None or image_width is None:
+            return None
+
+        center = float(image_width) / 2.0
+        horizontal_error = float(cx) - center
+
+        center_band = max(
+            40.0,
+            float(image_width) * 0.10,
+        )
+
+        if horizontal_error < -center_band:
+            return cls.DIRECTION_LEFT
+
+        if horizontal_error > center_band:
+            return cls.DIRECTION_RIGHT
+
+        return cls.DIRECTION_CENTER
+
     def reset(self):
         self.mission_id = None
         self.target_label = None
+
         self.locked_entity_id = None
         self.locked_since = None
         self.tracking_mode = self.MODE_UNLOCKED
+
+        self.last_valid_observation = None
+        self.last_visible_at = None
+        self.lost_since = None
+        self.last_seen_direction = None
+
+    def _release_lock(self):
+        self.locked_entity_id = None
+        self.locked_since = None
+        self.tracking_mode = self.MODE_UNLOCKED
+
+        self.last_valid_observation = None
+        self.last_visible_at = None
+        self.lost_since = None
+        self.last_seen_direction = None
 
     def start_mission(
         self,
@@ -150,6 +215,23 @@ class TargetLock:
             self.mission_id = normalized_mission_id
             self.target_label = normalized_label
 
+    def _remember_visible_observation(
+        self,
+        observation: Dict[str, Any],
+    ):
+        self.last_valid_observation = dict(
+            observation
+        )
+        self.last_visible_at = self._now_iso()
+        self.lost_since = None
+
+        direction = self._direction_from_observation(
+            observation
+        )
+
+        if direction is not None:
+            self.last_seen_direction = direction
+
     def _lock_from_observation(
         self,
         observation: Dict[str, Any],
@@ -165,15 +247,18 @@ class TargetLock:
         self.locked_since = self._now_iso()
         self.tracking_mode = self.MODE_LOCKED
 
+        self._remember_visible_observation(
+            observation
+        )
+
     def _query_locked_entity(
         self,
     ) -> Dict[str, Any]:
         """
-        Read the specifically locked World Model entity.
+        Read only the selected entity ID.
 
-        This deliberately does not query by label. Therefore another person
-        cannot replace the selected person merely because their detection is
-        newer or has higher confidence.
+        A newer or higher-confidence person cannot replace the selected
+        person while this lock is active.
         """
         if not self.locked_entity_id:
             return {
@@ -263,7 +348,6 @@ class TargetLock:
             "cx",
             location.get("center_x"),
         )
-
         cy = location.get(
             "cy",
             location.get("center_y"),
@@ -271,25 +355,14 @@ class TargetLock:
 
         area = attributes.get("area")
 
-        if bbox is not None:
-            width = max(
+        if area is None and bbox is not None:
+            area = max(
                 0.0,
                 bbox["x2"] - bbox["x1"],
-            )
-
-            height = max(
+            ) * max(
                 0.0,
                 bbox["y2"] - bbox["y1"],
             )
-
-            if cx is None:
-                cx = bbox["x1"] + width / 2.0
-
-            if cy is None:
-                cy = bbox["y1"] + height / 2.0
-
-            if area is None:
-                area = width * height
 
         result = {
             "found": not stale,
@@ -343,43 +416,147 @@ class TargetLock:
 
         return result
 
+    def _recovery_result(
+        self,
+        query_result: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        if self.lost_since is None:
+            self.lost_since = self._now_iso()
+
+        lost_age_seconds = (
+            self._age_seconds(self.lost_since)
+            or 0.0
+        )
+
+        if (
+            lost_age_seconds
+            > self.recovery_timeout_seconds
+        ):
+            expired_entity_id = (
+                self.locked_entity_id
+            )
+
+            self._release_lock()
+
+            return {
+                "found": False,
+                "stale": bool(
+                    query_result.get("stale")
+                ),
+                "target": self.target_label,
+                "lock_expired": True,
+                "expired_entity_id": (
+                    expired_entity_id
+                ),
+                "recovery_direction": None,
+                "lost_age_seconds": (
+                    lost_age_seconds
+                ),
+                "reason": (
+                    "Target recovery timeout expired. "
+                    "The identity lock was released."
+                ),
+            }
+
+        self.tracking_mode = self.MODE_RECOVERING
+
+        recovery_direction = (
+            self.last_seen_direction
+            or self.DIRECTION_LEFT
+        )
+
+        return {
+            "found": False,
+            "stale": bool(
+                query_result.get("stale")
+            ),
+            "target": self.target_label,
+            "entity_id": self.locked_entity_id,
+            "lock_expired": False,
+            "recovery_direction": (
+                recovery_direction
+            ),
+            "last_seen_direction": (
+                self.last_seen_direction
+            ),
+            "last_visible_at": (
+                self.last_visible_at
+            ),
+            "lost_since": self.lost_since,
+            "lost_age_seconds": (
+                lost_age_seconds
+            ),
+            "recovery_timeout_seconds": (
+                self.recovery_timeout_seconds
+            ),
+            "reason": (
+                "Locked target is temporarily unavailable. "
+                f"Recovering toward {recovery_direction.lower()}."
+            ),
+        }
+
     def resolve(
         self,
         mission_id: Optional[str],
         target_label: str,
     ) -> Dict[str, Any]:
-        """
-        Return the observation for the active target lock.
-
-        The first successful cycle acquires by label. Every later cycle reads
-        only the locked entity ID.
-        """
         self.start_mission(
             mission_id=mission_id,
             target_label=target_label,
         )
 
         if self.locked_entity_id:
-            return self._query_locked_entity()
+            observation = (
+                self._query_locked_entity()
+            )
 
-        observation = (
-            self.world_model.find_latest_entity_by_label(
-                target_label,
-                max_age_seconds=self.max_age_seconds,
+            if observation.get("found"):
+                self.tracking_mode = self.MODE_LOCKED
+                self._remember_visible_observation(
+                    observation
+                )
+                return observation
+
+            recovery = self._recovery_result(
+                observation
+            )
+
+            if not recovery.get("lock_expired"):
+                return recovery
+
+        acquisition = (
+            self.world_model
+            .find_latest_entity_by_label(
+                self.target_label,
+                max_age_seconds=(
+                    self.max_age_seconds
+                ),
                 refresh=True,
             )
         )
 
-        if observation.get("found"):
+        if acquisition.get("found"):
             self._lock_from_observation(
-                observation
+                acquisition
             )
 
-        return observation
+        return acquisition
 
     def snapshot(self) -> Dict[str, Any]:
         return {
             "tracking_mode": self.tracking_mode,
-            "locked_entity_id": self.locked_entity_id,
+            "locked_entity_id": (
+                self.locked_entity_id
+            ),
             "locked_since": self.locked_since,
+            "last_visible_at": (
+                self.last_visible_at
+            ),
+            "lost_since": self.lost_since,
+            "last_seen_direction": (
+                self.last_seen_direction
+            ),
+            "recovery_timeout_seconds": (
+                self.recovery_timeout_seconds
+            ),
         }
