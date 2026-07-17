@@ -580,13 +580,89 @@ class BehaviorManager:
                     "recovery_direction"
                 )
 
-                if recovery_direction == "RIGHT":
-                    commanded_angular_z = -float(
-                        search_turn_speed
+                predicted_cx = target.get(
+                    "predicted_cx"
+                )
+                predicted_image_width = (
+                    target.get("image_width")
+                    or target.get(
+                        "prediction",
+                        {},
+                    ).get("image_width")
+                    or self.DEFAULT_IMAGE_WIDTH
+                )
+
+                if recovery_direction == "CENTER":
+                    commanded_angular_z = 0.0
+                    state = "HOLDING_PREDICTED_TARGET"
+                    reason = (
+                        f"{target_name} temporarily lost "
+                        "near the predicted image center. "
+                        "Holding position while continuing "
+                        "to observe."
                     )
+
+                elif recovery_direction in (
+                    "LEFT",
+                    "RIGHT",
+                ):
+                    if predicted_cx is not None:
+                        predicted_center = (
+                            float(predicted_image_width)
+                            / 2.0
+                        )
+                        predicted_error = (
+                            float(predicted_cx)
+                            - predicted_center
+                        )
+
+                        normalized_error = min(
+                            1.0,
+                            abs(predicted_error)
+                            / max(predicted_center, 1.0),
+                        )
+
+                        recovery_turn_speed = max(
+                            0.12,
+                            float(search_turn_speed)
+                            * normalized_error,
+                        )
+
+                        recovery_turn_speed = min(
+                            float(search_turn_speed),
+                            recovery_turn_speed,
+                        )
+
+                        commanded_angular_z = (
+                            -recovery_turn_speed
+                            if predicted_error > 0.0
+                            else recovery_turn_speed
+                        )
+                    elif recovery_direction == "RIGHT":
+                        commanded_angular_z = -float(
+                            search_turn_speed
+                        )
+                    else:
+                        commanded_angular_z = float(
+                            search_turn_speed
+                        )
+
+                    state = "RECOVERING_TARGET"
+                    reason = (
+                        f"{target_name} temporarily lost. "
+                        "Steering toward the predicted "
+                        f"{recovery_direction.lower()} "
+                        "location."
+                    )
+
                 else:
-                    commanded_angular_z = float(
-                        search_turn_speed
+                    commanded_angular_z = 0.0
+                    state = "HOLDING_NO_PREDICTION"
+                    reason = (
+                        f"{target_name} is not visible and "
+                        "no reliable recovery direction is "
+                        "available. Holding position while "
+                        "continuing to observe."
                     )
 
                 robot_result = (
@@ -595,20 +671,6 @@ class BehaviorManager:
                         angular_z=commanded_angular_z,
                     )
                 )
-
-                if recovery_direction:
-                    state = "RECOVERING_TARGET"
-                    reason = (
-                        f"{target_name} temporarily lost. "
-                        "Recovering toward the last-seen "
-                        f"{recovery_direction.lower()} direction."
-                    )
-                else:
-                    state = "SEARCHING"
-                    reason = (
-                        f"{target_name} not visible. "
-                        "Continuously rotating left to reacquire it."
-                    )
 
             else:
                 streaming = False

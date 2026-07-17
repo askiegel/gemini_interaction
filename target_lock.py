@@ -3,6 +3,8 @@
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
+from prediction_tracker import PredictionTracker
+
 
 class TargetLock:
     """
@@ -41,6 +43,12 @@ class TargetLock:
         self.max_age_seconds = float(max_age_seconds)
         self.recovery_timeout_seconds = float(
             recovery_timeout_seconds
+        )
+
+        self.prediction_tracker = PredictionTracker(
+            maximum_prediction_seconds=(
+                self.recovery_timeout_seconds
+            )
         )
 
         self.mission_id: Optional[str] = None
@@ -184,6 +192,8 @@ class TargetLock:
         self.lost_since = None
         self.last_seen_direction = None
 
+        self.prediction_tracker.reset()
+
     def _release_lock(self):
         self.locked_entity_id = None
         self.locked_since = None
@@ -231,6 +241,18 @@ class TargetLock:
 
         if direction is not None:
             self.last_seen_direction = direction
+
+        self.prediction_tracker.update(
+            cx=observation.get("cx"),
+            area=observation.get("area"),
+            image_width=observation.get(
+                "image_width"
+            ),
+            timestamp=(
+                observation.get("last_seen")
+                or self.last_visible_at
+            ),
+        )
 
     def _lock_from_observation(
         self,
@@ -460,10 +482,49 @@ class TargetLock:
 
         self.tracking_mode = self.MODE_RECOVERING
 
-        recovery_direction = (
-            self.last_seen_direction
-            or self.DIRECTION_LEFT
+        prediction = (
+            self.prediction_tracker.predict()
         )
+
+        recovery_direction = (
+            prediction.get("predicted_direction")
+            if prediction.get("available")
+            else self.last_seen_direction
+        )
+
+        if recovery_direction == self.DIRECTION_CENTER:
+            horizontal_velocity = prediction.get(
+                "horizontal_velocity"
+            )
+
+            velocity_deadband = 15.0
+
+            if (
+                horizontal_velocity is not None
+                and horizontal_velocity > velocity_deadband
+            ):
+                recovery_direction = (
+                    self.DIRECTION_RIGHT
+                )
+            elif (
+                horizontal_velocity is not None
+                and horizontal_velocity < -velocity_deadband
+            ):
+                recovery_direction = (
+                    self.DIRECTION_LEFT
+                )
+            else:
+                recovery_direction = (
+                    self.DIRECTION_CENTER
+                )
+
+        if (
+            recovery_direction is None
+            and self.last_seen_direction is not None
+        ):
+            recovery_direction = (
+                self.last_seen_direction
+            )
 
         return {
             "found": False,
@@ -475,6 +536,24 @@ class TargetLock:
             "lock_expired": False,
             "recovery_direction": (
                 recovery_direction
+            ),
+            "prediction": prediction,
+            "predicted_cx": prediction.get(
+                "predicted_cx"
+            ),
+            "predicted_area": prediction.get(
+                "predicted_area"
+            ),
+            "predicted_direction": prediction.get(
+                "predicted_direction"
+            ),
+            "horizontal_velocity": prediction.get(
+                "horizontal_velocity"
+            ),
+            "prediction_horizon_seconds": (
+                prediction.get(
+                    "prediction_horizon_seconds"
+                )
             ),
             "last_seen_direction": (
                 self.last_seen_direction
@@ -491,7 +570,20 @@ class TargetLock:
             ),
             "reason": (
                 "Locked target is temporarily unavailable. "
-                f"Recovering toward {recovery_direction.lower()}."
+                + (
+                    "Holding position near the predicted "
+                    "target location."
+                    if recovery_direction
+                    == self.DIRECTION_CENTER
+                    else (
+                        "Recovering toward "
+                        f"{recovery_direction.lower()}."
+                        if recovery_direction
+                        else
+                        "No reliable recovery direction "
+                        "is available."
+                    )
+                )
             ),
         }
 
@@ -523,6 +615,19 @@ class TargetLock:
 
             if not recovery.get("lock_expired"):
                 return recovery
+
+            return {
+                **recovery,
+                "identity_lost": True,
+                "reacquisition_blocked": True,
+                "reason": (
+                    "The locked target could not be "
+                    "recovered before the timeout. "
+                    "Automatic acquisition of another "
+                    "person is blocked until a new "
+                    "FOLLOW_PERSON mission begins."
+                ),
+            }
 
         acquisition = (
             self.world_model
@@ -558,5 +663,8 @@ class TargetLock:
             ),
             "recovery_timeout_seconds": (
                 self.recovery_timeout_seconds
+            ),
+            "prediction": (
+                self.prediction_tracker.snapshot()
             ),
         }

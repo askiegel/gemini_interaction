@@ -109,7 +109,7 @@ def main():
     print(result)
 
     assert result["behavior"] == "FOLLOW_PERSON"
-    assert result["state"] == "SEARCHING"
+    assert result["state"] == "HOLDING_NO_PREDICTION"
     assert result["completed"] is False
     assert robot.commands[-1][0] == "turn_left"
 
@@ -173,7 +173,7 @@ def main():
         )
 
     print()
-    print("PASS: missing person causes one search turn")
+    print("PASS: missing person causes a safe observation hold")
     print("PASS: image-left person causes one left correction")
     print("PASS: image-right person causes one right correction")
     print("PASS: centered distant person causes one forward step")
