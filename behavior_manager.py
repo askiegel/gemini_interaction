@@ -1,6 +1,7 @@
 import time
 
 from robot_bridge.client import RobotBridgeClient
+from target_lock import TargetLock
 
 
 class BehaviorManager:
@@ -63,6 +64,17 @@ class BehaviorManager:
             world_model
             or getattr(vision_adapter, "world_model", None)
         )
+
+        self.target_lock = (
+            TargetLock(
+                world_model=self.world_model,
+                max_age_seconds=self.TARGET_MAX_AGE_SECONDS,
+            )
+            if self.world_model is not None
+            else None
+        )
+
+        self._follow_mission_id = None
 
     def simulate(self, mission):
         """
@@ -156,6 +168,10 @@ class BehaviorManager:
         return handler(mission)
 
     def _execute_stop(self):
+        if self.target_lock is not None:
+            self.target_lock.reset()
+
+        self._follow_mission_id = None
         robot_result = self.robot.stop()
 
         return {
@@ -176,6 +192,11 @@ class BehaviorManager:
         held at the desired following distance. STOP ends the mission.
         """
         target_name = "person"
+        self._follow_mission_id = getattr(
+            mission,
+            "mission_id",
+            None,
+        )
 
         if (
             self.world_model is None
@@ -193,7 +214,7 @@ class BehaviorManager:
                 ),
             }
 
-        return self._execute_visual_servo_cycle(
+        result = self._execute_visual_servo_cycle(
             behavior="FOLLOW_PERSON",
             target_name=target_name,
             cycle_number=1,
@@ -211,6 +232,13 @@ class BehaviorManager:
                 "desired following distance."
             ),
         )
+
+        if self.target_lock is not None:
+            result.update(
+                self.target_lock.snapshot()
+            )
+
+        return result
 
     def _execute_move_forward(self, mission):
         robot_result = self.robot.move_forward(
@@ -513,9 +541,18 @@ class BehaviorManager:
         cycle should run.
         """
         try:
-            target = self._get_target_observation(
-                target_name
-            )
+            if (
+                behavior == "FOLLOW_PERSON"
+                and self.target_lock is not None
+            ):
+                target = self.target_lock.resolve(
+                    mission_id=self._follow_mission_id,
+                    target_label=target_name,
+                )
+            else:
+                target = self._get_target_observation(
+                    target_name
+                )
         except Exception as exc:
             stop_result = self.robot.stop()
 
