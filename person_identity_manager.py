@@ -1,0 +1,859 @@
+#!/usr/bin/env python3
+
+"""
+Persistent person identity assignment for the Mini Pupper cognitive platform.
+
+This module intentionally has no OpenCV, NumPy, Torch, or ONNX dependency.
+The first implementation uses geometric and temporal continuity:
+
+    - bounding-box overlap
+    - center-point distance
+    - apparent-size similarity
+    - elapsed time since last observation
+
+Later, appearance embeddings can be added without changing the public
+identity-assignment interface.
+
+Important distinction:
+
+    entity_id
+        A transient World Model or detector tracking identifier.
+
+    identity_id
+        A persistent human identity assigned by this manager.
+"""
+
+from dataclasses import asdict, dataclass
+from datetime import datetime, timezone
+from math import hypot
+from typing import Any, Dict, Iterable, List, Optional
+from uuid import uuid4
+
+
+@dataclass
+class PersonIdentity:
+    identity_id: str
+    created_at: str
+    last_seen_at: str
+    observation_count: int
+
+    cx: Optional[float] = None
+    cy: Optional[float] = None
+    area: Optional[float] = None
+    image_width: Optional[float] = None
+    image_height: Optional[float] = None
+    bbox: Optional[Dict[str, float]] = None
+
+    transient_entity_id: Optional[str] = None
+    confidence: float = 0.0
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+
+class PersonIdentityManager:
+    """
+    Assign persistent identity IDs to person detections.
+
+    Identity matching is conservative. A detection is matched only when the
+    best candidate exceeds the minimum score and clearly beats the second-best
+    candidate. Ambiguous detections receive a new identity instead of silently
+    switching one person's identity to another.
+    """
+
+    DEFAULT_MAX_IDENTITY_AGE_SECONDS = 3.0
+    DEFAULT_MINIMUM_MATCH_SCORE = 0.58
+    DEFAULT_MINIMUM_SCORE_MARGIN = 0.08
+    DEFAULT_MAX_CENTER_DISTANCE_RATIO = 0.38
+    DEFAULT_MINIMUM_IOU = 0.05
+
+    def __init__(
+        self,
+        max_identity_age_seconds: float = (
+            DEFAULT_MAX_IDENTITY_AGE_SECONDS
+        ),
+        minimum_match_score: float = (
+            DEFAULT_MINIMUM_MATCH_SCORE
+        ),
+        minimum_score_margin: float = (
+            DEFAULT_MINIMUM_SCORE_MARGIN
+        ),
+        max_center_distance_ratio: float = (
+            DEFAULT_MAX_CENTER_DISTANCE_RATIO
+        ),
+        minimum_iou: float = DEFAULT_MINIMUM_IOU,
+    ):
+        self.max_identity_age_seconds = float(
+            max_identity_age_seconds
+        )
+        self.minimum_match_score = float(
+            minimum_match_score
+        )
+        self.minimum_score_margin = float(
+            minimum_score_margin
+        )
+        self.max_center_distance_ratio = float(
+            max_center_distance_ratio
+        )
+        self.minimum_iou = float(minimum_iou)
+
+        self.identities: Dict[str, PersonIdentity] = {}
+
+    @staticmethod
+    def _now() -> datetime:
+        return datetime.now(timezone.utc)
+
+    @classmethod
+    def _now_iso(cls) -> str:
+        return (
+            cls._now()
+            .isoformat()
+            .replace("+00:00", "Z")
+        )
+
+    @staticmethod
+    def _parse_timestamp(
+        value: Any,
+    ) -> Optional[datetime]:
+        if value is None:
+            return None
+
+        text = str(value).strip()
+
+        if not text:
+            return None
+
+        if text.endswith("Z"):
+            text = f"{text[:-1]}+00:00"
+
+        try:
+            parsed = datetime.fromisoformat(text)
+        except ValueError:
+            return None
+
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(
+                tzinfo=timezone.utc,
+            )
+
+        return parsed.astimezone(timezone.utc)
+
+    @classmethod
+    def _age_seconds(
+        cls,
+        timestamp: Any,
+    ) -> Optional[float]:
+        parsed = cls._parse_timestamp(timestamp)
+
+        if parsed is None:
+            return None
+
+        return max(
+            0.0,
+            (
+                cls._now() - parsed
+            ).total_seconds(),
+        )
+
+    @staticmethod
+    def _float_or_none(
+        value: Any,
+    ) -> Optional[float]:
+        if value is None:
+            return None
+
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
+
+    @classmethod
+    def _normalize_bbox(
+        cls,
+        value: Any,
+    ) -> Optional[Dict[str, float]]:
+        if isinstance(value, dict):
+            x1 = value.get(
+                "x1",
+                value.get("left"),
+            )
+            y1 = value.get(
+                "y1",
+                value.get("top"),
+            )
+            x2 = value.get(
+                "x2",
+                value.get("right"),
+            )
+            y2 = value.get(
+                "y2",
+                value.get("bottom"),
+            )
+
+            if None not in (x1, y1, x2, y2):
+                return {
+                    "x1": float(x1),
+                    "y1": float(y1),
+                    "x2": float(x2),
+                    "y2": float(y2),
+                }
+
+        if (
+            isinstance(value, (list, tuple))
+            and len(value) >= 4
+        ):
+            return {
+                "x1": float(value[0]),
+                "y1": float(value[1]),
+                "x2": float(value[2]),
+                "y2": float(value[3]),
+            }
+
+        return None
+
+    @classmethod
+    def _normalize_detection(
+        cls,
+        detection: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        bbox = cls._normalize_bbox(
+            detection.get("bbox")
+        )
+
+        cx = cls._float_or_none(
+            detection.get(
+                "cx",
+                detection.get("center_x"),
+            )
+        )
+
+        cy = cls._float_or_none(
+            detection.get(
+                "cy",
+                detection.get("center_y"),
+            )
+        )
+
+        area = cls._float_or_none(
+            detection.get("area")
+        )
+
+        if bbox is not None:
+            width = max(
+                0.0,
+                bbox["x2"] - bbox["x1"],
+            )
+            height = max(
+                0.0,
+                bbox["y2"] - bbox["y1"],
+            )
+
+            if cx is None:
+                cx = bbox["x1"] + width / 2.0
+
+            if cy is None:
+                cy = bbox["y1"] + height / 2.0
+
+            if area is None:
+                area = width * height
+
+        label = str(
+            detection.get("label") or ""
+        ).strip().lower()
+
+        return {
+            "label": label,
+            "cx": cx,
+            "cy": cy,
+            "area": area,
+            "bbox": bbox,
+            "image_width": cls._float_or_none(
+                detection.get("image_width")
+            ),
+            "image_height": cls._float_or_none(
+                detection.get("image_height")
+            ),
+            "confidence": float(
+                detection.get("confidence") or 0.0
+            ),
+            "entity_id": (
+                str(
+                    detection.get("entity_id") or ""
+                ).strip()
+                or None
+            ),
+        }
+
+    @staticmethod
+    def _bbox_iou(
+        first: Optional[Dict[str, float]],
+        second: Optional[Dict[str, float]],
+    ) -> float:
+        if first is None or second is None:
+            return 0.0
+
+        intersection_x1 = max(
+            first["x1"],
+            second["x1"],
+        )
+        intersection_y1 = max(
+            first["y1"],
+            second["y1"],
+        )
+        intersection_x2 = min(
+            first["x2"],
+            second["x2"],
+        )
+        intersection_y2 = min(
+            first["y2"],
+            second["y2"],
+        )
+
+        intersection_width = max(
+            0.0,
+            intersection_x2 - intersection_x1,
+        )
+        intersection_height = max(
+            0.0,
+            intersection_y2 - intersection_y1,
+        )
+        intersection_area = (
+            intersection_width
+            * intersection_height
+        )
+
+        first_area = max(
+            0.0,
+            first["x2"] - first["x1"],
+        ) * max(
+            0.0,
+            first["y2"] - first["y1"],
+        )
+
+        second_area = max(
+            0.0,
+            second["x2"] - second["x1"],
+        ) * max(
+            0.0,
+            second["y2"] - second["y1"],
+        )
+
+        union_area = (
+            first_area
+            + second_area
+            - intersection_area
+        )
+
+        if union_area <= 0.0:
+            return 0.0
+
+        return intersection_area / union_area
+
+    @staticmethod
+    def _area_similarity(
+        first_area: Optional[float],
+        second_area: Optional[float],
+    ) -> float:
+        if (
+            first_area is None
+            or second_area is None
+            or first_area <= 0.0
+            or second_area <= 0.0
+        ):
+            return 0.0
+
+        return min(
+            first_area,
+            second_area,
+        ) / max(
+            first_area,
+            second_area,
+        )
+
+    @staticmethod
+    def _center_distance_ratio(
+        detection: Dict[str, Any],
+        identity: PersonIdentity,
+    ) -> Optional[float]:
+        if None in (
+            detection.get("cx"),
+            detection.get("cy"),
+            identity.cx,
+            identity.cy,
+        ):
+            return None
+
+        image_width = (
+            detection.get("image_width")
+            or identity.image_width
+        )
+        image_height = (
+            detection.get("image_height")
+            or identity.image_height
+        )
+
+        if (
+            image_width is None
+            or image_height is None
+            or image_width <= 0.0
+            or image_height <= 0.0
+        ):
+            return None
+
+        frame_diagonal = hypot(
+            image_width,
+            image_height,
+        )
+
+        if frame_diagonal <= 0.0:
+            return None
+
+        distance = hypot(
+            detection["cx"] - identity.cx,
+            detection["cy"] - identity.cy,
+        )
+
+        return distance / frame_diagonal
+
+    def _match_score(
+        self,
+        detection: Dict[str, Any],
+        identity: PersonIdentity,
+    ) -> float:
+        age = self._age_seconds(
+            identity.last_seen_at
+        )
+
+        if (
+            age is None
+            or age > self.max_identity_age_seconds
+        ):
+            return 0.0
+
+        iou = self._bbox_iou(
+            detection.get("bbox"),
+            identity.bbox,
+        )
+
+        center_distance_ratio = (
+            self._center_distance_ratio(
+                detection,
+                identity,
+            )
+        )
+
+        if center_distance_ratio is None:
+            center_score = 0.0
+        elif (
+            center_distance_ratio
+            > self.max_center_distance_ratio
+        ):
+            center_score = 0.0
+        else:
+            center_score = max(
+                0.0,
+                1.0
+                - (
+                    center_distance_ratio
+                    / self.max_center_distance_ratio
+                ),
+            )
+
+        area_score = self._area_similarity(
+            detection.get("area"),
+            identity.area,
+        )
+
+        temporal_score = max(
+            0.0,
+            1.0
+            - (
+                age
+                / self.max_identity_age_seconds
+            ),
+        )
+
+        transient_entity_bonus = 0.0
+
+        if (
+            detection.get("entity_id")
+            and identity.transient_entity_id
+            and detection["entity_id"]
+            == identity.transient_entity_id
+        ):
+            transient_entity_bonus = 0.15
+
+        score = (
+            0.38 * center_score
+            + 0.27 * iou
+            + 0.20 * area_score
+            + 0.15 * temporal_score
+            + transient_entity_bonus
+        )
+
+        if (
+            iou < self.minimum_iou
+            and center_score < 0.60
+        ):
+            score *= 0.45
+
+        return min(
+            1.0,
+            max(0.0, score),
+        )
+
+    def _new_identity_id(self) -> str:
+        return (
+            f"person-identity-"
+            f"{uuid4().hex[:8]}"
+        )
+
+    def _create_identity(
+        self,
+        detection: Dict[str, Any],
+    ) -> PersonIdentity:
+        timestamp = self._now_iso()
+
+        identity = PersonIdentity(
+            identity_id=self._new_identity_id(),
+            created_at=timestamp,
+            last_seen_at=timestamp,
+            observation_count=1,
+            cx=detection.get("cx"),
+            cy=detection.get("cy"),
+            area=detection.get("area"),
+            image_width=detection.get(
+                "image_width"
+            ),
+            image_height=detection.get(
+                "image_height"
+            ),
+            bbox=detection.get("bbox"),
+            transient_entity_id=detection.get(
+                "entity_id"
+            ),
+            confidence=float(
+                detection.get("confidence") or 0.0
+            ),
+        )
+
+        self.identities[
+            identity.identity_id
+        ] = identity
+
+        return identity
+
+    def _update_identity(
+        self,
+        identity: PersonIdentity,
+        detection: Dict[str, Any],
+    ) -> PersonIdentity:
+        identity.last_seen_at = self._now_iso()
+        identity.observation_count += 1
+
+        for attribute in (
+            "cx",
+            "cy",
+            "area",
+            "image_width",
+            "image_height",
+            "bbox",
+        ):
+            value = detection.get(attribute)
+
+            if value is not None:
+                setattr(
+                    identity,
+                    attribute,
+                    value,
+                )
+
+        if detection.get("entity_id"):
+            identity.transient_entity_id = (
+                detection["entity_id"]
+            )
+
+        identity.confidence = float(
+            detection.get("confidence") or 0.0
+        )
+
+        return identity
+
+    def assign_identity(
+        self,
+        detection: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """
+        Assign a persistent identity to one normalized person detection.
+
+        Returns the original detection with:
+
+            identity_id
+            identity_match_score
+            identity_status
+            identity_ambiguous
+        """
+        normalized = self._normalize_detection(
+            detection
+        )
+
+        result = dict(detection)
+
+        if normalized["label"] != "person":
+            result.update(
+                {
+                    "identity_id": None,
+                    "identity_match_score": 0.0,
+                    "identity_status": (
+                        "NOT_A_PERSON"
+                    ),
+                    "identity_ambiguous": False,
+                }
+            )
+            return result
+
+        scored_candidates = []
+
+        for identity in self.identities.values():
+            score = self._match_score(
+                normalized,
+                identity,
+            )
+
+            if score > 0.0:
+                scored_candidates.append(
+                    (score, identity)
+                )
+
+        scored_candidates.sort(
+            key=lambda item: item[0],
+            reverse=True,
+        )
+
+        best_score = (
+            scored_candidates[0][0]
+            if scored_candidates
+            else 0.0
+        )
+
+        second_score = (
+            scored_candidates[1][0]
+            if len(scored_candidates) > 1
+            else 0.0
+        )
+
+        score_margin = (
+            best_score - second_score
+        )
+
+        ambiguous = (
+            len(scored_candidates) > 1
+            and score_margin
+            < self.minimum_score_margin
+        )
+
+        if (
+            scored_candidates
+            and best_score
+            >= self.minimum_match_score
+            and not ambiguous
+        ):
+            identity = self._update_identity(
+                scored_candidates[0][1],
+                normalized,
+            )
+            status = "MATCHED"
+        else:
+            identity = self._create_identity(
+                normalized
+            )
+            status = (
+                "NEW_AMBIGUOUS"
+                if ambiguous
+                else "NEW"
+            )
+
+        result.update(
+            {
+                "identity_id": (
+                    identity.identity_id
+                ),
+                "identity_match_score": round(
+                    best_score,
+                    4,
+                ),
+                "identity_status": status,
+                "identity_ambiguous": (
+                    ambiguous
+                ),
+            }
+        )
+
+        attributes = dict(
+            result.get("attributes") or {}
+        )
+
+        attributes.update(
+            {
+                "identity_id": (
+                    identity.identity_id
+                ),
+                "identity_match_score": round(
+                    best_score,
+                    4,
+                ),
+                "identity_status": status,
+                "identity_ambiguous": (
+                    ambiguous
+                ),
+            }
+        )
+
+        result["attributes"] = attributes
+
+        return result
+
+    def assign_identities(
+        self,
+        detections: Iterable[
+            Dict[str, Any]
+        ],
+    ) -> List[Dict[str, Any]]:
+        """
+        Assign identities to a frame of detections.
+
+        Each existing identity may be assigned at most once in a frame.
+        This prevents two simultaneous detections from receiving the same
+        identity solely because both are near the previous position.
+        """
+        results = []
+        assigned_identity_ids = set()
+
+        for detection in detections:
+            result = self.assign_identity(
+                detection
+            )
+
+            identity_id = result.get(
+                "identity_id"
+            )
+
+            if (
+                identity_id
+                and identity_id
+                in assigned_identity_ids
+            ):
+                normalized = (
+                    self._normalize_detection(
+                        detection
+                    )
+                )
+                identity = self._create_identity(
+                    normalized
+                )
+
+                result["identity_id"] = (
+                    identity.identity_id
+                )
+                result[
+                    "identity_match_score"
+                ] = 0.0
+                result["identity_status"] = (
+                    "NEW_FRAME_CONFLICT"
+                )
+                result[
+                    "identity_ambiguous"
+                ] = True
+
+                attributes = dict(
+                    result.get("attributes")
+                    or {}
+                )
+                attributes.update(
+                    {
+                        "identity_id": (
+                            identity.identity_id
+                        ),
+                        "identity_match_score": (
+                            0.0
+                        ),
+                        "identity_status": (
+                            "NEW_FRAME_CONFLICT"
+                        ),
+                        "identity_ambiguous": (
+                            True
+                        ),
+                    }
+                )
+                result["attributes"] = (
+                    attributes
+                )
+
+                identity_id = (
+                    identity.identity_id
+                )
+
+            if identity_id:
+                assigned_identity_ids.add(
+                    identity_id
+                )
+
+            results.append(result)
+
+        return results
+
+    def get_identity(
+        self,
+        identity_id: str,
+    ) -> Optional[Dict[str, Any]]:
+        identity = self.identities.get(
+            identity_id
+        )
+
+        if identity is None:
+            return None
+
+        return identity.to_dict()
+
+    def get_identities(
+        self,
+    ) -> List[Dict[str, Any]]:
+        return [
+            identity.to_dict()
+            for identity in self.identities.values()
+        ]
+
+    def prune_expired(
+        self,
+        maximum_age_seconds: Optional[
+            float
+        ] = None,
+    ) -> List[str]:
+        maximum_age = float(
+            maximum_age_seconds
+            if maximum_age_seconds is not None
+            else self.max_identity_age_seconds
+        )
+
+        removed = []
+
+        for identity_id, identity in list(
+            self.identities.items()
+        ):
+            age = self._age_seconds(
+                identity.last_seen_at
+            )
+
+            if (
+                age is not None
+                and age > maximum_age
+            ):
+                removed.append(identity_id)
+                del self.identities[
+                    identity_id
+                ]
+
+        return removed
+
+    def reset(self):
+        self.identities.clear()

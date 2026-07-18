@@ -134,10 +134,12 @@ def main():
     search = manager.execute(mission)
     print(search)
 
-    assert search["state"] == "SEARCHING"
+    assert search["state"] == "HOLDING_NO_PREDICTION"
     assert search["streaming"] is True
     assert search["commanded_linear_x"] == 0.0
-    assert search["commanded_angular_z"] > 0.0
+    assert search["state"] == "HOLDING_NO_PREDICTION"
+    assert search["commanded_linear_x"] == 0.0
+    assert search["commanded_angular_z"] == 0.0
 
     print()
     print("===== STREAMING LEFT CENTERING =====")
@@ -206,7 +208,7 @@ def main():
         )
 
     print()
-    print("PASS: missing person causes continuous search rotation")
+    print("PASS: missing person causes a safe observation hold")
     print("PASS: centering refreshes streaming turn commands")
     print("PASS: approach refreshes combined streaming motion")
     print("PASS: bridge watchdog timeout is always supplied")

@@ -111,7 +111,9 @@ def main():
     assert result["behavior"] == "FOLLOW_PERSON"
     assert result["state"] == "HOLDING_NO_PREDICTION"
     assert result["completed"] is False
-    assert robot.commands[-1][0] == "turn_left"
+    assert result["state"] == "HOLDING_NO_PREDICTION"
+    assert result["commanded_linear_x"] == 0.0
+    assert result["commanded_angular_z"] == 0.0
 
     print()
     print("===== CYCLE 2: CENTER LEFT =====")
@@ -155,7 +157,7 @@ def main():
         command[0]
         for command in robot.commands
     ] == [
-        "turn_left",
+        "stop",
         "turn_left",
         "turn_right",
         "move_forward",
