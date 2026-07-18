@@ -203,6 +203,99 @@ def _distance_state(
     return None
 
 
+def _identity_tracking_fields(
+    source: Dict[str, Any],
+) -> Dict[str, Any]:
+    """
+    Extract identity telemetry from a behavior result.
+
+    Identity information may be present directly on the result, inside the
+    selected vision result, or inside the original normalized detection.
+    This function only normalizes existing data; it does not make identity
+    decisions or alter matching behavior.
+    """
+    search_sources = []
+
+    def add_source(value):
+        if (
+            isinstance(value, dict)
+            and value not in search_sources
+        ):
+            search_sources.append(value)
+
+    add_source(source)
+    add_source(source.get("vision_result"))
+    add_source(source.get("target"))
+
+    for candidate in list(search_sources):
+        add_source(candidate.get("raw_detection"))
+        add_source(candidate.get("attributes"))
+
+    def first_value(*keys):
+        for candidate in search_sources:
+            for key in keys:
+                value = candidate.get(key)
+
+                if value is not None:
+                    return value
+
+        return None
+
+    diagnostics = first_value(
+        "identity_diagnostics",
+    )
+
+    if not isinstance(diagnostics, dict):
+        diagnostics = {}
+
+    candidates = diagnostics.get("candidates")
+
+    if not isinstance(candidates, list):
+        candidates = []
+
+    best_score = _number(
+        diagnostics.get("best_score")
+    )
+
+    second_score = _number(
+        diagnostics.get("second_score")
+    )
+
+    score_margin = _number(
+        diagnostics.get("score_margin")
+    )
+
+    match_score = _number(
+        first_value("identity_match_score")
+    )
+
+    if best_score is None:
+        best_score = match_score
+
+    return {
+        "locked_entity_id": first_value(
+            "locked_entity_id",
+        ),
+        "identity_id": first_value(
+            "identity_id",
+        ),
+        "identity_status": first_value(
+            "identity_status",
+        ),
+        "identity_match_score": match_score,
+        "identity_ambiguous": bool(
+            first_value("identity_ambiguous")
+            or diagnostics.get("ambiguous")
+        ),
+        "identity_best_score": best_score,
+        "identity_runner_up_score": second_score,
+        "identity_score_margin": score_margin,
+        "identity_decision": diagnostics.get(
+            "decision"
+        ),
+    }
+
+
 def empty_tracking_state(
     state: str = "IDLE",
 ) -> Dict[str, Any]:
@@ -224,6 +317,15 @@ def empty_tracking_state(
         "distance_state": None,
         "vision_timestamp": None,
         "detection_age_ms": None,
+        "locked_entity_id": None,
+        "identity_id": None,
+        "identity_status": None,
+        "identity_match_score": None,
+        "identity_ambiguous": False,
+        "identity_best_score": None,
+        "identity_runner_up_score": None,
+        "identity_score_margin": None,
+        "identity_decision": None,
         "bbox": None,
     }
 
@@ -273,6 +375,10 @@ def build_tracking_state(
         }
     else:
         merged = dict(result)
+
+    identity = _identity_tracking_fields(
+        merged
+    )
 
     target_label = _first_value(
         merged,
@@ -455,5 +561,30 @@ def build_tracking_state(
         ),
         "vision_timestamp": vision_timestamp,
         "detection_age_ms": detection_age_ms,
+        "locked_entity_id": identity[
+            "locked_entity_id"
+        ],
+        "identity_id": identity["identity_id"],
+        "identity_status": identity[
+            "identity_status"
+        ],
+        "identity_match_score": identity[
+            "identity_match_score"
+        ],
+        "identity_ambiguous": identity[
+            "identity_ambiguous"
+        ],
+        "identity_best_score": identity[
+            "identity_best_score"
+        ],
+        "identity_runner_up_score": identity[
+            "identity_runner_up_score"
+        ],
+        "identity_score_margin": identity[
+            "identity_score_margin"
+        ],
+        "identity_decision": identity[
+            "identity_decision"
+        ],
         "bbox": bbox,
     }
