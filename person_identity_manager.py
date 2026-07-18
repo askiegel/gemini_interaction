@@ -24,10 +24,17 @@ Important distinction:
 """
 
 from dataclasses import asdict, dataclass
+import json
+import os
 from datetime import datetime, timezone
 from math import hypot
 from typing import Any, Dict, Iterable, List, Optional
 from uuid import uuid4
+
+from identity_diagnostics import (
+    CandidateDiagnostic,
+    MatchDiagnostic,
+)
 
 
 @dataclass
@@ -98,6 +105,10 @@ class PersonIdentityManager:
         self.minimum_iou = float(minimum_iou)
 
         self.identities: Dict[str, PersonIdentity] = {}
+
+        self.last_match_diagnostic: Optional[
+            Dict[str, Any]
+        ] = None
 
     @staticmethod
     def _now() -> datetime:
@@ -415,11 +426,17 @@ class PersonIdentityManager:
 
         return distance / frame_diagonal
 
-    def _match_score(
+    def _match_diagnostic(
         self,
         detection: Dict[str, Any],
         identity: PersonIdentity,
-    ) -> float:
+    ) -> CandidateDiagnostic:
+        """
+        Calculate the existing match score and expose its components.
+
+        The calculations and weights in this method intentionally match the
+        original _match_score() implementation.
+        """
         age = self._age_seconds(
             identity.last_seen_at
         )
@@ -428,7 +445,18 @@ class PersonIdentityManager:
             age is None
             or age > self.max_identity_age_seconds
         ):
-            return 0.0
+            return CandidateDiagnostic(
+                identity_id=identity.identity_id,
+                age_seconds=age,
+                center_distance_ratio=None,
+                center_score=0.0,
+                iou_score=0.0,
+                area_score=0.0,
+                temporal_score=0.0,
+                transient_entity_bonus=0.0,
+                weak_spatial_match_penalty_applied=False,
+                final_score=0.0,
+            )
 
         iou = self._bbox_iou(
             detection.get("bbox"),
@@ -491,16 +519,50 @@ class PersonIdentityManager:
             + transient_entity_bonus
         )
 
-        if (
+        weak_spatial_match_penalty_applied = (
             iou < self.minimum_iou
             and center_score < 0.60
-        ):
+        )
+
+        if weak_spatial_match_penalty_applied:
             score *= 0.45
 
-        return min(
+        final_score = min(
             1.0,
             max(0.0, score),
         )
+
+        return CandidateDiagnostic(
+            identity_id=identity.identity_id,
+            age_seconds=age,
+            center_distance_ratio=(
+                center_distance_ratio
+            ),
+            center_score=center_score,
+            iou_score=iou,
+            area_score=area_score,
+            temporal_score=temporal_score,
+            transient_entity_bonus=(
+                transient_entity_bonus
+            ),
+            weak_spatial_match_penalty_applied=(
+                weak_spatial_match_penalty_applied
+            ),
+            final_score=final_score,
+        )
+
+    def _match_score(
+        self,
+        detection: Dict[str, Any],
+        identity: PersonIdentity,
+    ) -> float:
+        """
+        Preserve the original numeric-score interface.
+        """
+        return self._match_diagnostic(
+            detection,
+            identity,
+        ).final_score
 
     def _new_identity_id(self) -> str:
         return (
@@ -608,36 +670,61 @@ class PersonIdentityManager:
                         "NOT_A_PERSON"
                     ),
                     "identity_ambiguous": False,
+                    "identity_diagnostics": {
+                        "candidates": [],
+                        "winner_identity_id": None,
+                        "runner_up_identity_id": None,
+                        "best_score": 0.0,
+                        "second_score": 0.0,
+                        "score_margin": 0.0,
+                        "minimum_match_score": round(
+                            self.minimum_match_score,
+                            4,
+                        ),
+                        "minimum_score_margin": round(
+                            self.minimum_score_margin,
+                            4,
+                        ),
+                        "ambiguous": False,
+                        "decision": "NOT_A_PERSON",
+                        "reason": (
+                            "Identity assignment applies only "
+                            "to person detections."
+                        ),
+                    },
                 }
+            )
+            self.last_match_diagnostic = (
+                result["identity_diagnostics"]
             )
             return result
 
         scored_candidates = []
 
         for identity in self.identities.values():
-            score = self._match_score(
+            diagnostic = self._match_diagnostic(
                 normalized,
                 identity,
             )
 
-            if score > 0.0:
+            if diagnostic.final_score > 0.0:
                 scored_candidates.append(
-                    (score, identity)
+                    (diagnostic, identity)
                 )
 
         scored_candidates.sort(
-            key=lambda item: item[0],
+            key=lambda item: item[0].final_score,
             reverse=True,
         )
 
         best_score = (
-            scored_candidates[0][0]
+            scored_candidates[0][0].final_score
             if scored_candidates
             else 0.0
         )
 
         second_score = (
-            scored_candidates[1][0]
+            scored_candidates[1][0].final_score
             if len(scored_candidates) > 1
             else 0.0
         )
@@ -652,6 +739,18 @@ class PersonIdentityManager:
             < self.minimum_score_margin
         )
 
+        winner_identity_id = (
+            scored_candidates[0][1].identity_id
+            if scored_candidates
+            else None
+        )
+
+        runner_up_identity_id = (
+            scored_candidates[1][1].identity_id
+            if len(scored_candidates) > 1
+            else None
+        )
+
         if (
             scored_candidates
             and best_score
@@ -663,15 +762,63 @@ class PersonIdentityManager:
                 normalized,
             )
             status = "MATCHED"
+            decision_reason = (
+                "Best candidate met the minimum match score "
+                "and exceeded the required score margin."
+            )
         else:
             identity = self._create_identity(
                 normalized
             )
+
             status = (
                 "NEW_AMBIGUOUS"
                 if ambiguous
                 else "NEW"
             )
+
+            if ambiguous:
+                decision_reason = (
+                    "The best and second-best candidates were "
+                    "separated by less than the required score margin."
+                )
+            elif not scored_candidates:
+                decision_reason = (
+                    "No eligible existing identity candidate "
+                    "produced a positive score."
+                )
+            else:
+                decision_reason = (
+                    "The best candidate score was below the "
+                    "minimum match score."
+                )
+
+        match_diagnostic = MatchDiagnostic(
+            candidates=[
+                candidate
+                for candidate, _identity
+                in scored_candidates
+            ],
+            winner_identity_id=winner_identity_id,
+            runner_up_identity_id=(
+                runner_up_identity_id
+            ),
+            best_score=best_score,
+            second_score=second_score,
+            score_margin=score_margin,
+            minimum_match_score=(
+                self.minimum_match_score
+            ),
+            minimum_score_margin=(
+                self.minimum_score_margin
+            ),
+            ambiguous=ambiguous,
+            decision=status,
+            reason=decision_reason,
+        )
+
+        diagnostic_dict = match_diagnostic.to_dict()
+        self.last_match_diagnostic = diagnostic_dict
 
         result.update(
             {
@@ -686,8 +833,29 @@ class PersonIdentityManager:
                 "identity_ambiguous": (
                     ambiguous
                 ),
+                "identity_diagnostics": (
+                    diagnostic_dict
+                ),
             }
         )
+
+        debug_enabled = str(
+            os.getenv("IDENTITY_DEBUG", "")
+        ).strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
+
+        if debug_enabled:
+            print(
+                "[IDENTITY_DIAGNOSTIC] "
+                + json.dumps(
+                    diagnostic_dict,
+                    sort_keys=True,
+                )
+            )
 
         attributes = dict(
             result.get("attributes") or {}
@@ -764,6 +932,32 @@ class PersonIdentityManager:
                 result[
                     "identity_ambiguous"
                 ] = True
+
+                frame_diagnostic = dict(
+                    result.get(
+                        "identity_diagnostics"
+                    )
+                    or {}
+                )
+                frame_diagnostic.update(
+                    {
+                        "decision": (
+                            "NEW_FRAME_CONFLICT"
+                        ),
+                        "ambiguous": True,
+                        "reason": (
+                            "The selected identity had already "
+                            "been assigned to another detection "
+                            "in the same frame."
+                        ),
+                    }
+                )
+                result["identity_diagnostics"] = (
+                    frame_diagnostic
+                )
+                self.last_match_diagnostic = (
+                    frame_diagnostic
+                )
 
                 attributes = dict(
                     result.get("attributes")
@@ -857,3 +1051,4 @@ class PersonIdentityManager:
 
     def reset(self):
         self.identities.clear()
+        self.last_match_diagnostic = None
