@@ -13,6 +13,11 @@ from conversation_manager import (
     ConversationResult,
 )
 from provider_factory import create_provider
+from world_model import WorldModel
+from world_query_service import (
+    WorldQueryError,
+    WorldQueryService,
+)
 from voice_command import (
     DEFAULT_RUNTIME_URL,
     submit_intent_to_runtime,
@@ -36,6 +41,7 @@ class ConversationServiceResult:
     requires_confirmation: bool
     mission_submitted: bool
     mission_submission: Optional[Dict[str, Any]]
+    world_query: Optional[Dict[str, Any]] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -62,6 +68,7 @@ class ConversationService:
         conversation_manager: ConversationManager,
         runtime_url: str = DEFAULT_RUNTIME_URL,
         mission_submitter: Optional[Callable[..., Dict[str, Any]]] = None,
+        world_query_service: Optional[WorldQueryService] = None,
     ):
         if conversation_manager is None:
             raise ValueError(
@@ -79,6 +86,7 @@ class ConversationService:
             mission_submitter
             or submit_intent_to_runtime
         )
+        self.world_query_service = world_query_service
 
     def process_text(
         self,
@@ -99,11 +107,18 @@ class ConversationService:
             raise ValueError("submit_missions must be a boolean.")
         result = self.conversation_manager.process(user_text)
 
+        if result.decision_type == "WORLD_QUERY":
+            return self._process_world_query(
+                user_text=user_text,
+                conversation_result=result,
+            )
+
         if not result.has_mission:
             return self._build_result(
                 conversation_result=result,
                 mission_submitted=False,
                 mission_submission=None,
+                world_query=None,
             )
 
         if result.requires_confirmation:
@@ -111,6 +126,7 @@ class ConversationService:
                 conversation_result=result,
                 mission_submitted=False,
                 mission_submission=None,
+                world_query=None,
             )
 
         if not submit_missions:
@@ -118,6 +134,7 @@ class ConversationService:
                 conversation_result=result,
                 mission_submitted=False,
                 mission_submission=None,
+                world_query=None,
             )
 
         intent = self._build_runtime_intent(result)
@@ -142,6 +159,58 @@ class ConversationService:
             conversation_result=result,
             mission_submitted=True,
             mission_submission=submission,
+            world_query=None,
+        )
+
+    def _process_world_query(
+        self,
+        user_text: str,
+        conversation_result: ConversationResult,
+    ) -> ConversationServiceResult:
+        if self.world_query_service is None:
+            return self._build_result(
+                conversation_result=conversation_result,
+                mission_submitted=False,
+                mission_submission=None,
+                world_query=None,
+            )
+
+        try:
+            query_result = self.world_query_service.execute_text(
+                user_text
+            )
+        except WorldQueryError as exc:
+            return self._build_result(
+                conversation_result=ConversationResult(
+                    reply=(
+                        "I understand that you are asking about "
+                        "my World Model, but I could not determine "
+                        "which stored information to retrieve."
+                    ),
+                    decision_type="WORLD_QUERY",
+                    mission_type=None,
+                    target=None,
+                    requires_confirmation=False,
+                ),
+                mission_submitted=False,
+                mission_submission=None,
+                world_query={
+                    "ok": False,
+                    "error": str(exc),
+                },
+            )
+
+        return self._build_result(
+            conversation_result=ConversationResult(
+                reply=query_result.reply,
+                decision_type="WORLD_QUERY",
+                mission_type=None,
+                target=None,
+                requires_confirmation=False,
+            ),
+            mission_submitted=False,
+            mission_submission=None,
+            world_query=query_result.to_dict(),
         )
 
     def clear_history(self) -> None:
@@ -170,6 +239,7 @@ class ConversationService:
         conversation_result: ConversationResult,
         mission_submitted: bool,
         mission_submission: Optional[Dict[str, Any]],
+        world_query: Optional[Dict[str, Any]],
     ) -> ConversationServiceResult:
         return ConversationServiceResult(
             reply=conversation_result.reply,
@@ -181,6 +251,7 @@ class ConversationService:
             ),
             mission_submitted=mission_submitted,
             mission_submission=mission_submission,
+            world_query=world_query,
         )
 
 
@@ -199,9 +270,14 @@ def create_conversation_service(
         max_history_turns=max_history_turns,
     )
 
+    world_model = WorldModel()
+
     return ConversationService(
         conversation_manager=manager,
         runtime_url=runtime_url,
+        world_query_service=WorldQueryService(
+            world_model=world_model,
+        ),
     )
 
 
