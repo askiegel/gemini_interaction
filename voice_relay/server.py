@@ -8,13 +8,23 @@ import urllib.error
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from threading import Lock
 from urllib.parse import urlparse
+
+
+PROJECT_DIR = Path(__file__).resolve().parents[1]
+
+if str(PROJECT_DIR) not in sys.path:
+    sys.path.insert(0, str(PROJECT_DIR))
+
+
+from conversation_manager import ConversationError
+from conversation_service import create_conversation_service
 
 
 HOST = "0.0.0.0"
 PORT = 8765
 
-PROJECT_DIR = Path(__file__).resolve().parents[1]
 HTML_FILE = Path(__file__).resolve().parent / "index.html"
 OPERATOR_CSS_FILE = (
     Path(__file__).resolve().parent
@@ -39,6 +49,44 @@ ROBOT_BRIDGE_URL = os.getenv(
     "ROBOT_BRIDGE_URL",
     "http://192.168.68.127:8090",
 ).rstrip("/")
+
+
+_CONVERSATION_SERVICE = None
+_CONVERSATION_SERVICE_LOCK = Lock()
+
+
+def get_conversation_service():
+    """
+    Return the persistent browser ConversationService.
+
+    The service is created only when the first conversational request arrives.
+    Keeping one instance alive preserves ConversationManager history across
+    browser requests while the Voice Relay process is running.
+    """
+    global _CONVERSATION_SERVICE
+
+    if _CONVERSATION_SERVICE is not None:
+        return _CONVERSATION_SERVICE
+
+    with _CONVERSATION_SERVICE_LOCK:
+        if _CONVERSATION_SERVICE is None:
+            _CONVERSATION_SERVICE = create_conversation_service(
+                runtime_url=COGNITIVE_RUNTIME_URL,
+            )
+
+    return _CONVERSATION_SERVICE
+
+
+def set_conversation_service_for_testing(service):
+    """
+    Replace the persistent service for an offline test.
+
+    Production code does not call this function.
+    """
+    global _CONVERSATION_SERVICE
+
+    with _CONVERSATION_SERVICE_LOCK:
+        _CONVERSATION_SERVICE = service
 
 
 def request_json(
@@ -560,6 +608,146 @@ class VoiceRelayHandler(BaseHTTPRequestHandler):
         path = urlparse(self.path).path
 
         try:
+            if path == "/conversation":
+                payload = self.read_json_body()
+
+                if not isinstance(payload, dict):
+                    self.send_json(
+                        400,
+                        {
+                            "ok": False,
+                            "error": (
+                                "The request body must be a JSON object."
+                            ),
+                        },
+                    )
+                    return
+
+                user_text = payload.get(
+                    "text",
+                    payload.get("command"),
+                )
+
+                if not isinstance(user_text, str):
+                    self.send_json(
+                        400,
+                        {
+                            "ok": False,
+                            "error": (
+                                "Conversation requests require a "
+                                "string field named 'text' or 'command'."
+                            ),
+                        },
+                    )
+                    return
+
+                user_text = user_text.strip()
+
+                if not user_text:
+                    self.send_json(
+                        400,
+                        {
+                            "ok": False,
+                            "error": (
+                                "Conversation text cannot be empty."
+                            ),
+                        },
+                    )
+                    return
+
+                execute = payload.get("execute", False)
+
+                if not isinstance(execute, bool):
+                    self.send_json(
+                        400,
+                        {
+                            "ok": False,
+                            "error": (
+                                "The execute field must be a boolean."
+                            ),
+                        },
+                    )
+                    return
+
+                try:
+                    service = get_conversation_service()
+                    result = service.process_text(
+                        user_text,
+                        submit_missions=execute,
+                    )
+
+                except ConversationError as exc:
+                    self.send_json(
+                        400,
+                        {
+                            "ok": False,
+                            "error_type": "conversation_error",
+                            "error": str(exc),
+                        },
+                    )
+                    return
+
+                except RuntimeError as exc:
+                    self.send_json(
+                        503,
+                        {
+                            "ok": False,
+                            "error_type": "runtime_error",
+                            "error": str(exc),
+                        },
+                    )
+                    return
+
+                except Exception as exc:
+                    self.send_json(
+                        500,
+                        {
+                            "ok": False,
+                            "error_type": "internal_error",
+                            "error": str(exc),
+                        },
+                    )
+                    return
+
+                response = {
+                    "ok": True,
+                    "mode": (
+                        "live"
+                        if execute
+                        else "dry-run"
+                    ),
+                    "executed": execute,
+                    **result.to_dict(),
+                }
+
+                self.send_json(200, response)
+                return
+
+            if path == "/conversation/history":
+                service = get_conversation_service()
+
+                self.send_json(
+                    200,
+                    {
+                        "ok": True,
+                        "history": service.get_history(),
+                    },
+                )
+                return
+
+            if path == "/conversation/clear":
+                service = get_conversation_service()
+                service.clear_history()
+
+                self.send_json(
+                    200,
+                    {
+                        "ok": True,
+                        "history_cleared": True,
+                    },
+                )
+                return
+
             if path == "/command":
                 request_data = self.read_json_body()
 

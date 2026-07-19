@@ -80,14 +80,23 @@ class ConversationService:
             or submit_intent_to_runtime
         )
 
-    def process_text(self, user_text: str) -> ConversationServiceResult:
+    def process_text(
+        self,
+        user_text: str,
+        submit_missions: bool = True,
+    ) -> ConversationServiceResult:
         """
         Process one user message.
 
         Conversational and world-query responses do not create missions.
         Mission decisions requiring confirmation are not submitted until a
         future confirmation layer explicitly approves them.
+
+        When submit_missions is False, mission decisions are returned without
+        contacting the Cognitive Runtime. This supports browser dry-run mode.
         """
+        if not isinstance(submit_missions, bool):
+            raise ValueError("submit_missions must be a boolean.")
         result = self.conversation_manager.process(user_text)
 
         if not result.has_mission:
@@ -98,6 +107,13 @@ class ConversationService:
             )
 
         if result.requires_confirmation:
+            return self._build_result(
+                conversation_result=result,
+                mission_submitted=False,
+                mission_submission=None,
+            )
+
+        if not submit_missions:
             return self._build_result(
                 conversation_result=result,
                 mission_submitted=False,

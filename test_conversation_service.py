@@ -275,6 +275,49 @@ def main():
     )
 
     print()
+    print("===== DRY-RUN MISSION SAFETY =====")
+
+    manager = FakeConversationManager(
+        [
+            ConversationResult(
+                reply="I would follow you.",
+                decision_type="MISSION",
+                mission_type="FOLLOW_PERSON",
+                target="person",
+                requires_confirmation=False,
+            )
+        ]
+    )
+
+    submitter = FakeMissionSubmitter()
+
+    service = ConversationService(
+        conversation_manager=manager,
+        runtime_url="http://127.0.0.1:8770",
+        mission_submitter=submitter,
+    )
+
+    result = service.process_text(
+        "Follow me",
+        submit_missions=False,
+    )
+
+    assert_equal(
+        result.mission_type,
+        "FOLLOW_PERSON",
+        "dry-run preserves the interpreted mission",
+    )
+    assert_true(
+        not result.mission_submitted,
+        "dry-run does not submit the mission",
+    )
+    assert_equal(
+        len(submitter.calls),
+        0,
+        "dry-run never contacts the runtime submitter",
+    )
+
+    print()
     print("===== CONFIRMATION SAFETY =====")
 
     confirmation_manager = FakeConversationManager(
