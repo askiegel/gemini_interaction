@@ -385,6 +385,7 @@ def main():
             "reply": "Stopping now.",
             "decision_type": "MISSION",
             "mission_type": "STOP",
+            "query_type": None,
             "target": None,
             "requires_confirmation": False,
         },

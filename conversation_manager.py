@@ -23,6 +23,14 @@ ALLOWED_DECISION_TYPES = {
 }
 
 
+ALLOWED_WORLD_QUERY_TYPES = {
+    "LATEST_ENTITY",
+    "LIST_ENTITIES",
+    "CURRENT_MISSION",
+    "VISION_STATUS",
+}
+
+
 class ConversationError(RuntimeError):
     """Raised when a conversational provider returns an invalid decision."""
 
@@ -41,6 +49,7 @@ class ConversationResult:
     reply: str
     decision_type: str = "CONVERSATION"
     mission_type: Optional[str] = None
+    query_type: Optional[str] = None
     target: Optional[str] = None
     requires_confirmation: bool = False
 
@@ -227,6 +236,19 @@ class ConversationManager:
                     f"Unsupported mission_type: {mission_type}"
                 )
 
+        query_type = self._normalize_optional_text(
+            raw_decision.get("query_type"),
+            "query_type",
+        )
+
+        if query_type is not None:
+            query_type = query_type.upper()
+
+            if query_type not in ALLOWED_WORLD_QUERY_TYPES:
+                raise ConversationError(
+                    f"Unsupported query_type: {query_type}"
+                )
+
         target = self._normalize_optional_text(
             raw_decision.get("target"),
             "target",
@@ -252,9 +274,36 @@ class ConversationManager:
                 "Only MISSION decisions may contain mission_type."
             )
 
-        if decision_type != "MISSION" and target is not None:
+        if decision_type == "WORLD_QUERY" and query_type is None:
             raise ConversationError(
-                "Only MISSION decisions may contain a target."
+                "WORLD_QUERY decisions require query_type."
+            )
+
+        if decision_type != "WORLD_QUERY" and query_type is not None:
+            raise ConversationError(
+                "Only WORLD_QUERY decisions may contain query_type."
+            )
+
+        if (
+            decision_type not in {"MISSION", "WORLD_QUERY"}
+            and target is not None
+        ):
+            raise ConversationError(
+                "Only MISSION or WORLD_QUERY decisions may contain a target."
+            )
+
+        if (
+            decision_type == "WORLD_QUERY"
+            and query_type != "LATEST_ENTITY"
+            and target is not None
+        ):
+            raise ConversationError(
+                "Only LATEST_ENTITY world queries may contain a target."
+            )
+
+        if query_type == "LATEST_ENTITY" and target is None:
+            raise ConversationError(
+                "LATEST_ENTITY requires a target."
             )
 
         if mission_type == "FIND_OBJECT" and target is None:
@@ -269,6 +318,7 @@ class ConversationManager:
             reply=reply,
             decision_type=decision_type,
             mission_type=mission_type,
+            query_type=query_type,
             target=target,
             requires_confirmation=requires_confirmation,
         )

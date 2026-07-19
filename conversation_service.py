@@ -37,6 +37,7 @@ class ConversationServiceResult:
     reply: str
     decision_type: str
     mission_type: Optional[str]
+    query_type: Optional[str]
     target: Optional[str]
     requires_confirmation: bool
     mission_submitted: bool
@@ -109,7 +110,6 @@ class ConversationService:
 
         if result.decision_type == "WORLD_QUERY":
             return self._process_world_query(
-                user_text=user_text,
                 conversation_result=result,
             )
 
@@ -164,7 +164,6 @@ class ConversationService:
 
     def _process_world_query(
         self,
-        user_text: str,
         conversation_result: ConversationResult,
     ) -> ConversationServiceResult:
         if self.world_query_service is None:
@@ -176,8 +175,9 @@ class ConversationService:
             )
 
         try:
-            query_result = self.world_query_service.execute_text(
-                user_text
+            query_result = self.world_query_service.execute(
+                query_type=conversation_result.query_type,
+                target=conversation_result.target,
             )
         except WorldQueryError as exc:
             return self._build_result(
@@ -189,7 +189,8 @@ class ConversationService:
                     ),
                     decision_type="WORLD_QUERY",
                     mission_type=None,
-                    target=None,
+                    query_type=conversation_result.query_type,
+                    target=conversation_result.target,
                     requires_confirmation=False,
                 ),
                 mission_submitted=False,
@@ -205,7 +206,8 @@ class ConversationService:
                 reply=query_result.reply,
                 decision_type="WORLD_QUERY",
                 mission_type=None,
-                target=None,
+                query_type=query_result.query_type,
+                target=query_result.target,
                 requires_confirmation=False,
             ),
             mission_submitted=False,
@@ -245,6 +247,7 @@ class ConversationService:
             reply=conversation_result.reply,
             decision_type=conversation_result.decision_type,
             mission_type=conversation_result.mission_type,
+            query_type=conversation_result.query_type,
             target=conversation_result.target,
             requires_confirmation=(
                 conversation_result.requires_confirmation

@@ -24,6 +24,14 @@ def assert_equal(actual, expected, message):
 
 
 class FakeConversationManager:
+    """
+    Simulate already-validated structured Gemini decisions.
+
+    Natural-language interpretation belongs upstream of
+    ConversationService. This integration test verifies that the service
+    dispatches query_type and target directly to WorldQueryService.
+    """
+
     def __init__(self):
         self.history = []
 
@@ -35,11 +43,34 @@ class FakeConversationManager:
             }
         )
 
+        normalized = " ".join(
+            user_text.strip().lower().split()
+        )
+
+        if "backpack" in normalized:
+            query_type = "LATEST_ENTITY"
+            target = "backpack"
+        elif "objects" in normalized:
+            query_type = "LIST_ENTITIES"
+            target = None
+        elif "vision" in normalized:
+            query_type = "VISION_STATUS"
+            target = None
+        elif "mission" in normalized:
+            query_type = "CURRENT_MISSION"
+            target = None
+        else:
+            # Simulate a valid structured query whose deterministic
+            # execution finds no matching entity.
+            query_type = "LATEST_ENTITY"
+            target = "room color"
+
         return ConversationResult(
             reply="Let me check my World Model.",
             decision_type="WORLD_QUERY",
             mission_type=None,
-            target=None,
+            query_type=query_type,
+            target=target,
             requires_confirmation=False,
         )
 
@@ -124,6 +155,16 @@ assert_equal(
     "WORLD_QUERY decision is preserved",
 )
 assert_equal(
+    result.query_type,
+    "LATEST_ENTITY",
+    "service result exposes structured query type",
+)
+assert_equal(
+    result.target,
+    "backpack",
+    "service result exposes structured query target",
+)
+assert_equal(
     result.mission_submitted,
     False,
     "WORLD_QUERY does not submit a mission",
@@ -140,12 +181,12 @@ assert_true(
 assert_equal(
     result.world_query["query_type"],
     "LATEST_ENTITY",
-    "entity question routes to LATEST_ENTITY",
+    "entity question dispatches LATEST_ENTITY",
 )
 assert_equal(
     result.world_query["target"],
     "backpack",
-    "spoken possessive target is normalized",
+    "structured entity target is preserved",
 )
 assert_true(
     "backpack" in result.reply.lower(),
@@ -165,9 +206,14 @@ result = service.process_text(
 )
 
 assert_equal(
+    result.query_type,
+    "LIST_ENTITIES",
+    "manager supplies LIST_ENTITIES query type",
+)
+assert_equal(
     result.world_query["query_type"],
     "LIST_ENTITIES",
-    "object-list question routes to LIST_ENTITIES",
+    "service dispatches LIST_ENTITIES",
 )
 assert_true(
     "backpack" in result.reply.lower(),
@@ -183,9 +229,14 @@ result = service.process_text(
 )
 
 assert_equal(
+    result.query_type,
+    "VISION_STATUS",
+    "manager supplies VISION_STATUS query type",
+)
+assert_equal(
     result.world_query["query_type"],
     "VISION_STATUS",
-    "vision question routes to VISION_STATUS",
+    "service dispatches VISION_STATUS",
 )
 assert_true(
     "running" in result.reply.lower(),
@@ -201,9 +252,14 @@ result = service.process_text(
 )
 
 assert_equal(
+    result.query_type,
+    "CURRENT_MISSION",
+    "manager supplies CURRENT_MISSION query type",
+)
+assert_equal(
     result.world_query["query_type"],
     "CURRENT_MISSION",
-    "mission question routes to CURRENT_MISSION",
+    "service dispatches CURRENT_MISSION",
 )
 assert_true(
     "do not currently have an active mission" in (
@@ -213,7 +269,7 @@ assert_true(
 )
 
 print()
-print("===== UNSUPPORTED WORLD QUERY =====")
+print("===== UNKNOWN ENTITY QUERY =====")
 
 result = service.process_text(
     "What color is the room?",
@@ -221,23 +277,35 @@ result = service.process_text(
 )
 
 assert_equal(
-    result.world_query["ok"],
+    result.world_query["query_type"],
+    "LATEST_ENTITY",
+    "valid structured unknown-entity query is executed",
+)
+assert_equal(
+    result.world_query["target"],
+    "room color",
+    "unknown entity target is preserved",
+)
+assert_equal(
+    result.world_query["data"]["found"],
     False,
-    "unsupported World Query returns safe failure",
+    "unknown entity returns found=false",
+)
+assert_true(
+    "do not have a recorded observation" in (
+        result.reply.lower()
+    ),
+    "unknown entity gets deterministic safe response",
 )
 assert_equal(
     runtime_calls,
     [],
-    "unsupported World Query still does not contact runtime",
-)
-assert_true(
-    "could not determine" in result.reply.lower(),
-    "unsupported World Query gets safe spoken response",
+    "unknown entity query still does not contact runtime",
 )
 
 assert_true(
-    world_model.load_calls >= 4,
-    "shared World Model is refreshed for supported queries",
+    world_model.load_calls >= 5,
+    "shared World Model is refreshed for every query",
 )
 
 print()
