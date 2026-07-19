@@ -47,6 +47,20 @@ class BehaviorManager:
     DEFAULT_IMAGE_WIDTH = 640.0
     CENTER_TOLERANCE_PIXELS = 95.0
 
+    # FOLLOW_PERSON servo smoothing.
+    #
+    # The object detector naturally moves the reported bounding box slightly
+    # between frames. Filtering prevents that perception noise from becoming
+    # physical steering jitter.
+    FOLLOW_ERROR_FILTER_ALPHA = 0.25
+
+    # Steering begins outside CENTER_TOLERANCE_PIXELS, but an active turn is
+    # not released until the target enters this tighter center region.
+    FOLLOW_CENTER_EXIT_TOLERANCE_PIXELS = 55.0
+
+    # Maximum permitted angular_z change during one cognitive runtime cycle.
+    FOLLOW_MAX_ANGULAR_STEP = 0.09
+
     MAX_FIND_CYCLES = 30
     FIND_CYCLE_PAUSE = 1.50
 
@@ -384,6 +398,202 @@ class BehaviorManager:
             float(minimum),
             min(float(maximum), float(value)),
         )
+
+    def _reset_follow_servo_state(self):
+        """
+        Reset transient FOLLOW_PERSON steering-controller state.
+
+        Target identity and predictive tracking remain owned by TargetLock.
+        These fields control only smoothing of robot motion commands.
+        """
+        self._follow_filtered_horizontal_error = None
+        self._follow_steering_latch = "CENTER"
+        self._follow_previous_angular_command = 0.0
+        self._follow_servo_mission_id = None
+
+    def _ensure_follow_servo_state(self):
+        """
+        Lazily initialize controller state.
+
+        Lazy initialization preserves compatibility with isolated tests that
+        construct BehaviorManager through __new__ without calling __init__.
+        """
+        if not hasattr(
+            self,
+            "_follow_filtered_horizontal_error",
+        ):
+            self._follow_filtered_horizontal_error = None
+
+        if not hasattr(
+            self,
+            "_follow_steering_latch",
+        ):
+            self._follow_steering_latch = "CENTER"
+
+        if not hasattr(
+            self,
+            "_follow_previous_angular_command",
+        ):
+            self._follow_previous_angular_command = 0.0
+
+        if not hasattr(
+            self,
+            "_follow_servo_mission_id",
+        ):
+            self._follow_servo_mission_id = None
+
+    def _prepare_follow_servo_mission(
+        self,
+        mission_id,
+    ):
+        """
+        Reset smoothing history when a different follow mission starts.
+        """
+        self._ensure_follow_servo_state()
+
+        if self._follow_servo_mission_id == mission_id:
+            return False
+
+        self._follow_filtered_horizontal_error = None
+        self._follow_steering_latch = "CENTER"
+        self._follow_previous_angular_command = 0.0
+        self._follow_servo_mission_id = mission_id
+
+        return True
+
+    def _filter_follow_horizontal_error(
+        self,
+        horizontal_error,
+    ):
+        """
+        Apply a low-pass filter to horizontal camera error.
+
+        This method records steering hysteresis state but does not itself send
+        robot commands. Integration into live steering occurs in Commit 2.
+        """
+        self._ensure_follow_servo_state()
+
+        raw_error = float(horizontal_error)
+        previous_error = (
+            self._follow_filtered_horizontal_error
+        )
+
+        if previous_error is None:
+            filtered_error = raw_error
+        else:
+            alpha = self._clamp(
+                self.FOLLOW_ERROR_FILTER_ALPHA,
+                0.0,
+                1.0,
+            )
+
+            filtered_error = (
+                (1.0 - alpha) * float(previous_error)
+                + alpha * raw_error
+            )
+
+        self._follow_filtered_horizontal_error = (
+            filtered_error
+        )
+
+        enter_tolerance = float(
+            self.CENTER_TOLERANCE_PIXELS
+        )
+        exit_tolerance = min(
+            enter_tolerance,
+            float(
+                self.FOLLOW_CENTER_EXIT_TOLERANCE_PIXELS
+            ),
+        )
+
+        if self._follow_steering_latch == "LEFT":
+            if filtered_error >= -exit_tolerance:
+                self._follow_steering_latch = "CENTER"
+
+        elif self._follow_steering_latch == "RIGHT":
+            if filtered_error <= exit_tolerance:
+                self._follow_steering_latch = "CENTER"
+
+        elif filtered_error < -enter_tolerance:
+            self._follow_steering_latch = "LEFT"
+
+        elif filtered_error > enter_tolerance:
+            self._follow_steering_latch = "RIGHT"
+
+        else:
+            self._follow_steering_latch = "CENTER"
+
+        return filtered_error
+
+    def _follow_effective_horizontal_error(
+        self,
+        horizontal_error,
+    ):
+        """
+        Return an error value compatible with existing steering branches.
+
+        While a direction is latched, this keeps the existing LEFT or RIGHT
+        branch active until the tighter exit tolerance has been reached.
+        """
+        filtered_error = (
+            self._filter_follow_horizontal_error(
+                horizontal_error
+            )
+        )
+
+        enter_tolerance = float(
+            self.CENTER_TOLERANCE_PIXELS
+        )
+
+        if self._follow_steering_latch == "LEFT":
+            return min(
+                filtered_error,
+                -(enter_tolerance + 0.001),
+            )
+
+        if self._follow_steering_latch == "RIGHT":
+            return max(
+                filtered_error,
+                enter_tolerance + 0.001,
+            )
+
+        return filtered_error
+
+    def _limit_follow_angular_command(
+        self,
+        angular_z,
+    ):
+        """
+        Limit angular velocity changes between control cycles.
+
+        A requested direction reversal must therefore pass progressively
+        through zero instead of changing direction in one camera frame.
+        """
+        self._ensure_follow_servo_state()
+
+        requested = float(angular_z)
+        previous = float(
+            self._follow_previous_angular_command
+        )
+        maximum_step = abs(
+            float(self.FOLLOW_MAX_ANGULAR_STEP)
+        )
+
+        limited = self._clamp(
+            requested,
+            previous - maximum_step,
+            previous + maximum_step,
+        )
+
+        if (
+            abs(requested) < 1e-9
+            and abs(limited) <= maximum_step
+        ):
+            limited = 0.0
+
+        self._follow_previous_angular_command = limited
+
+        return limited
 
     def _follow_turn_speed(self, horizontal_error):
         """
