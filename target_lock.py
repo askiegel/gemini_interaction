@@ -428,6 +428,24 @@ class TargetLock:
                 if age_seconds is not None
                 else None
             ),
+            "identity_id": attributes.get(
+                "identity_id"
+            ),
+            "identity_match_score": attributes.get(
+                "identity_match_score"
+            ),
+            "identity_status": attributes.get(
+                "identity_status"
+            ),
+            "identity_ambiguous": bool(
+                attributes.get(
+                    "identity_ambiguous",
+                    False,
+                )
+            ),
+            "identity_diagnostics": attributes.get(
+                "identity_diagnostics"
+            ),
         }
 
         if stale:

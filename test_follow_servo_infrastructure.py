@@ -256,6 +256,32 @@ def test_zero_command_settles():
     print("PASS: zero command removes residual turn")
 
 
+def test_large_sign_change_resets_filter():
+    manager = make_manager()
+
+    left = manager._filter_follow_horizontal_error(
+        -180.0
+    )
+
+    right = manager._filter_follow_horizontal_error(
+        105.0
+    )
+
+    assert_close(left, -180.0)
+    assert_close(right, 105.0)
+
+    assert (
+        manager._follow_filtered_horizontal_error
+        == 105.0
+    )
+
+    print(
+        "PASS: large center crossing resets "
+        "the horizontal filter"
+    )
+
+
+
 def main():
     print("==========================================")
     print("FOLLOW_PERSON SERVO INFRASTRUCTURE TEST")
@@ -268,6 +294,7 @@ def main():
     test_right_hysteresis()
     test_rate_limiter()
     test_zero_command_settles()
+    test_large_sign_change_resets_filter()
 
     print()
     print(

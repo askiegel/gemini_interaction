@@ -466,78 +466,83 @@ class BehaviorManager:
         horizontal_error,
     ):
         """
-        Apply a low-pass filter to horizontal camera error.
+        Smooth FOLLOW_PERSON horizontal error while preserving
+        fast response when the target crosses the image center.
 
-        This method records steering hysteresis state but does not itself send
-        robot commands. Integration into live steering occurs in Commit 2.
+        Small frame-to-frame changes use low-pass filtering.
+        A large sign change resets the filter immediately so the
+        controller does not continue steering in the old direction.
         """
-        self._ensure_follow_servo_state()
+        horizontal_error = float(horizontal_error)
 
-        raw_error = float(horizontal_error)
-        previous_error = (
+        previous = (
             self._follow_filtered_horizontal_error
         )
 
-        if previous_error is None:
-            filtered_error = raw_error
+        if previous is None or previous == 0.0:
+            # A reset servo starts with no measurement history.
+            # Use the first real observation directly rather than
+            # blending it with the reset value of zero.
+            filtered = horizontal_error
         else:
-            alpha = self._clamp(
-                self.FOLLOW_ERROR_FILTER_ALPHA,
-                0.0,
-                1.0,
+            sign_changed = (
+                previous != 0.0
+                and horizontal_error != 0.0
+                and (
+                    previous < 0.0
+                    < horizontal_error
+                    or horizontal_error < 0.0
+                    < previous
+                )
             )
 
-            filtered_error = (
-                (1.0 - alpha) * float(previous_error)
-                + alpha * raw_error
+            large_crossing = (
+                abs(horizontal_error)
+                >= self.CENTER_TOLERANCE_PIXELS
             )
+
+            if sign_changed and large_crossing:
+                # This is likely real target motion rather than
+                # center-line detection noise. Respond immediately.
+                filtered = horizontal_error
+            else:
+                alpha = float(
+                    self.FOLLOW_ERROR_FILTER_ALPHA
+                )
+
+                filtered = (
+                    alpha * horizontal_error
+                    + (1.0 - alpha) * previous
+                )
 
         self._follow_filtered_horizontal_error = (
-            filtered_error
+            filtered
         )
 
-        enter_tolerance = float(
-            self.CENTER_TOLERANCE_PIXELS
-        )
-        exit_tolerance = min(
-            enter_tolerance,
-            float(
-                self.FOLLOW_CENTER_EXIT_TOLERANCE_PIXELS
-            ),
-        )
-
-        if self._follow_steering_latch == "LEFT":
-            if filtered_error >= -exit_tolerance:
-                self._follow_steering_latch = "CENTER"
-
-        elif self._follow_steering_latch == "RIGHT":
-            if filtered_error <= exit_tolerance:
-                self._follow_steering_latch = "CENTER"
-
-        elif filtered_error < -enter_tolerance:
-            self._follow_steering_latch = "LEFT"
-
-        elif filtered_error > enter_tolerance:
-            self._follow_steering_latch = "RIGHT"
-
-        else:
-            self._follow_steering_latch = "CENTER"
-
-        return filtered_error
+        return filtered
 
     def _follow_effective_horizontal_error(
         self,
         horizontal_error,
     ):
         """
-        Return an error value compatible with existing steering branches.
+        Filter FOLLOW_PERSON horizontal error and apply steering
+        hysteresis.
 
-        While a direction is latched, this keeps the existing LEFT or RIGHT
-        branch active until the tighter exit tolerance has been reached.
+        Steering begins outside CENTER_TOLERANCE_PIXELS. Once a
+        direction is active, the raw camera measurement must return
+        inside FOLLOW_CENTER_EXIT_TOLERANCE_PIXELS before steering is
+        released.
+
+        The raw measurement is used for latch transitions so old
+        filtered history cannot keep the robot turning after the
+        target has returned near image center.
         """
+        raw_error = float(horizontal_error)
+
         filtered_error = (
             self._filter_follow_horizontal_error(
-                horizontal_error
+                raw_error
             )
         )
 
@@ -545,17 +550,73 @@ class BehaviorManager:
             self.CENTER_TOLERANCE_PIXELS
         )
 
-        if self._follow_steering_latch == "LEFT":
+        exit_tolerance = float(
+            self.FOLLOW_CENTER_EXIT_TOLERANCE_PIXELS
+        )
+
+        latch = self._follow_steering_latch
+
+        # Once the raw camera measurement is genuinely centered,
+        # discard stale filtered steering history. Without this reset,
+        # a previous large LEFT or RIGHT error can re-enter a centering
+        # state on the next frame even though the target remains near
+        # the image center.
+        if abs(raw_error) <= exit_tolerance:
+            self._follow_steering_latch = "CENTER"
+            self._follow_filtered_horizontal_error = raw_error
+            return raw_error
+
+        if latch == "LEFT":
+            if raw_error > enter_tolerance:
+                self._follow_steering_latch = "RIGHT"
+                return max(
+                    filtered_error,
+                    enter_tolerance + 0.001,
+                )
+
+            if raw_error >= -exit_tolerance:
+                self._follow_steering_latch = "CENTER"
+                return raw_error
+
             return min(
                 filtered_error,
                 -(enter_tolerance + 0.001),
             )
 
-        if self._follow_steering_latch == "RIGHT":
+        if latch == "RIGHT":
+            if raw_error < -enter_tolerance:
+                self._follow_steering_latch = "LEFT"
+                return min(
+                    filtered_error,
+                    -(enter_tolerance + 0.001),
+                )
+
+            if raw_error <= exit_tolerance:
+                self._follow_steering_latch = "CENTER"
+                return raw_error
+
             return max(
                 filtered_error,
                 enter_tolerance + 0.001,
             )
+
+        if filtered_error < -enter_tolerance:
+            self._follow_steering_latch = "LEFT"
+
+            return min(
+                filtered_error,
+                -(enter_tolerance + 0.001),
+            )
+
+        if filtered_error > enter_tolerance:
+            self._follow_steering_latch = "RIGHT"
+
+            return max(
+                filtered_error,
+                enter_tolerance + 0.001,
+            )
+
+        self._follow_steering_latch = "CENTER"
 
         return filtered_error
 
@@ -641,6 +702,10 @@ class BehaviorManager:
         The preferred client method explicitly requests streaming mode.
         Compatibility fallbacks keep isolated legacy tests functional.
         """
+        angular_z = self._limit_follow_angular_command(
+            angular_z
+        )
+
         if hasattr(self.robot, "streaming_motion"):
             return self.robot.streaming_motion(
                 linear_x=linear_x,
@@ -946,7 +1011,20 @@ class BehaviorManager:
             }
 
         image_center = float(image_width) / 2.0
-        horizontal_error = float(cx) - image_center
+        raw_horizontal_error = float(cx) - image_center
+
+        if behavior == "FOLLOW_PERSON":
+            self._prepare_follow_servo_mission(
+                self._follow_mission_id
+            )
+
+            horizontal_error = (
+                self._follow_effective_horizontal_error(
+                    raw_horizontal_error
+                )
+            )
+        else:
+            horizontal_error = raw_horizontal_error
 
         if (
             area is not None

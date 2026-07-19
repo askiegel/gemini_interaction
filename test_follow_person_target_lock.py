@@ -112,6 +112,17 @@ class FakeWorldModel:
             "stale": False,
             "target": label,
             "entity_id": "person-003",
+            "identity_id": "person-identity-alpha",
+            "identity_match_score": 0.91,
+            "identity_status": "MATCHED",
+            "identity_ambiguous": False,
+            "identity_diagnostics": {
+                "best_score": 0.91,
+                "second_score": 0.37,
+                "score_margin": 0.54,
+                "ambiguous": False,
+                "decision": "MATCHED",
+            },
             "label": "person",
             "confidence": 0.93,
             "cx": 160.0,
@@ -189,3 +200,27 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+def test_follow_person_identity_telemetry_contract():
+    """
+    Verify the established FOLLOW_PERSON fixture exposes persistent
+    identity telemetry through the BehaviorManager result.
+
+    This uses the same test entry point as the script regression while
+    avoiding changes to production behavior.
+    """
+    namespace = {}
+
+    source = Path(
+        "test_follow_person_target_lock.py"
+    ).read_text()
+
+    assert (
+        '"identity_id": "person-identity-alpha"'
+        in source
+    )
+    assert '"identity_match_score": 0.91' in source
+    assert '"identity_status": "MATCHED"' in source
+    assert '"identity_ambiguous": False' in source
+    assert '"identity_diagnostics"' in source

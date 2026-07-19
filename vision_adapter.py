@@ -5,6 +5,7 @@ from typing import Dict, Any, List, Optional
 
 from world_model import WorldModel
 from entity_registry import EntityRegistry
+from person_identity_manager import PersonIdentityManager
 
 
 DEFAULT_VISION_SERVER_URL = os.getenv(
@@ -38,6 +39,7 @@ class VisionAdapter:
     ):
         self.world_model = world_model
         self.registry = EntityRegistry(world_model)
+        self.identity_manager = PersonIdentityManager()
         self.vision_url = vision_url
         self.image_path = image_path
         self.poll_interval = poll_interval
@@ -71,6 +73,75 @@ class VisionAdapter:
 
         return data
 
+    def _assign_person_identities(
+        self,
+        detections: List[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        """
+        Enrich person detections with persistent identity information.
+
+        Non-person detections pass through unchanged. Frame dimensions from
+        the Vision Server payload are copied into person detections when the
+        detector did not include them directly.
+        """
+        enriched = []
+        person_positions = []
+        person_detections = []
+
+        frame_width = (
+            self.last_payload.get("image_width")
+            or self.last_payload.get("frame_width")
+            or self.last_payload.get("width")
+        )
+
+        frame_height = (
+            self.last_payload.get("image_height")
+            or self.last_payload.get("frame_height")
+            or self.last_payload.get("height")
+        )
+
+        for detection in detections:
+            if not isinstance(detection, dict):
+                enriched.append(detection)
+                continue
+
+            copied = dict(detection)
+            enriched.append(copied)
+
+            label = self._normalize_label(
+                copied.get("label")
+                or copied.get("class")
+                or copied.get("name")
+                or copied.get("object")
+            )
+
+            if label != "person":
+                continue
+
+            if copied.get("image_width") is None and frame_width is not None:
+                copied["image_width"] = frame_width
+
+            if copied.get("image_height") is None and frame_height is not None:
+                copied["image_height"] = frame_height
+
+            person_positions.append(len(enriched) - 1)
+            person_detections.append(copied)
+
+        if not person_detections:
+            return enriched
+
+        assigned = self.identity_manager.assign_identities(
+            person_detections
+        )
+
+        for position, detection in zip(
+            person_positions,
+            assigned,
+        ):
+            enriched[position] = detection
+
+        return enriched
+
     def fetch_detections(self) -> List[Dict[str, Any]]:
         payload = self.fetch_vision_payload()
         self.last_payload = payload
@@ -79,7 +150,7 @@ class VisionAdapter:
         detections = payload.get("detections", [])
 
         if isinstance(detections, list):
-            return detections
+            return self._assign_person_identities(detections)
 
         objects = payload.get("objects", [])
 
@@ -220,6 +291,23 @@ class VisionAdapter:
             ),
             "image_height": (
                 float(image_height) if image_height is not None else None
+            ),
+            "entity_id": detection.get("entity_id"),
+            "identity_id": detection.get("identity_id"),
+            "identity_match_score": detection.get(
+                "identity_match_score",
+                0.0,
+            ),
+            "identity_status": detection.get("identity_status"),
+            "identity_ambiguous": detection.get(
+                "identity_ambiguous",
+                False,
+            ),
+            "identity_diagnostics": detection.get(
+                "identity_diagnostics"
+            ),
+            "attributes": dict(
+                detection.get("attributes") or {}
             ),
             "raw_detection": detection,
         }
@@ -381,8 +469,34 @@ class VisionAdapter:
 
         attributes = {
             "raw_detection": detection,
-            "targetable": label in ["person", "backpack", "chair", "bottle", "cup"]
+            "targetable": label in [
+                "person",
+                "backpack",
+                "chair",
+                "bottle",
+                "cup",
+            ],
         }
+
+        detection_attributes = dict(
+            detection.get("attributes") or {}
+        )
+
+        attributes.update(detection_attributes)
+
+        identity_fields = (
+            "identity_id",
+            "identity_match_score",
+            "identity_status",
+            "identity_ambiguous",
+            "identity_diagnostics",
+        )
+
+        for identity_field in identity_fields:
+            if identity_field in detection:
+                attributes[identity_field] = detection[
+                    identity_field
+                ]
 
         if "reid" in detection:
             attributes["reid"] = detection["reid"]
