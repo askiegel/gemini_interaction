@@ -3,13 +3,15 @@
 import argparse
 import json
 import os
+import signal
+import socket
 import subprocess
 import sys
 import time
 import urllib.error
 import urllib.request
 from pathlib import Path
-from typing import Optional
+from typing import Iterable, Optional
 
 
 PROJECT_DIR = Path(__file__).resolve().parents[1]
@@ -146,6 +148,393 @@ def process_is_running(pid_file: Path):
         return True
     except OSError:
         return False
+
+
+def read_pid_file(pid_file: Path) -> Optional[int]:
+    """Return a valid integer PID from a PID file."""
+
+    if not pid_file.exists():
+        return None
+
+    try:
+        value = pid_file.read_text(
+            encoding="utf-8"
+        ).strip()
+
+        return int(value)
+
+    except (OSError, ValueError):
+        return None
+
+
+def remove_pid_file(pid_file: Path):
+    """Remove a stale or no-longer-needed PID file."""
+
+    try:
+        pid_file.unlink()
+    except FileNotFoundError:
+        pass
+    except OSError as exc:
+        print(
+            f"WARN: Could not remove PID file "
+            f"{pid_file}: {exc}"
+        )
+
+
+def wait_for_process_exit(
+    pid: int,
+    timeout_seconds: float = 8.0,
+) -> bool:
+    """Wait until a process no longer exists."""
+
+    deadline = time.time() + timeout_seconds
+
+    while time.time() < deadline:
+        try:
+            os.kill(pid, 0)
+        except OSError:
+            return True
+
+        time.sleep(0.2)
+
+    return False
+
+
+def stop_pid(
+    name: str,
+    pid: int,
+):
+    """Stop one process, escalating to SIGKILL if required."""
+
+    if pid <= 1 or pid == os.getpid():
+        return
+
+    try:
+        os.kill(pid, 0)
+    except OSError:
+        return
+
+    print(
+        f"STOP:  {name} PID={pid}"
+    )
+
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return
+    except PermissionError as exc:
+        raise RuntimeError(
+            f"Unable to stop {name} PID {pid}: {exc}"
+        ) from exc
+
+    if wait_for_process_exit(
+        pid,
+        timeout_seconds=8.0,
+    ):
+        print(
+            f"PASS:  {name} PID={pid} stopped"
+        )
+        return
+
+    print(
+        f"WARN:  {name} PID={pid} did not stop; "
+        "sending SIGKILL"
+    )
+
+    try:
+        os.kill(pid, signal.SIGKILL)
+    except ProcessLookupError:
+        return
+    except PermissionError as exc:
+        raise RuntimeError(
+            f"Unable to kill {name} PID {pid}: {exc}"
+        ) from exc
+
+    if not wait_for_process_exit(
+        pid,
+        timeout_seconds=4.0,
+    ):
+        raise RuntimeError(
+            f"{name} PID {pid} is still running."
+        )
+
+    print(
+        f"PASS:  {name} PID={pid} killed"
+    )
+
+
+def process_matches(
+    pid: int,
+    cwd: Path,
+    command_markers: Iterable[str],
+) -> bool:
+    """
+    Return True when a Linux process has the expected working directory
+    and all command-line markers.
+
+    This catches services that were started manually without a PID file.
+    """
+
+    proc_dir = Path("/proc") / str(pid)
+
+    try:
+        process_cwd = Path(
+            os.readlink(proc_dir / "cwd")
+        ).resolve()
+
+        command_line = (
+            proc_dir
+            .joinpath("cmdline")
+            .read_bytes()
+            .replace(b"\0", b" ")
+            .decode(
+                "utf-8",
+                errors="replace",
+            )
+        )
+
+    except (
+        FileNotFoundError,
+        PermissionError,
+        OSError,
+    ):
+        return False
+
+    try:
+        expected_cwd = cwd.resolve()
+    except OSError:
+        expected_cwd = cwd
+
+    if process_cwd != expected_cwd:
+        return False
+
+    return all(
+        marker in command_line
+        for marker in command_markers
+    )
+
+
+def find_matching_processes(
+    cwd: Path,
+    command_markers: Iterable[str],
+):
+    """Find service processes matching a working directory and command."""
+
+    markers = tuple(command_markers)
+    matches = []
+
+    proc_root = Path("/proc")
+
+    if not proc_root.exists():
+        return matches
+
+    for entry in proc_root.iterdir():
+        if not entry.name.isdigit():
+            continue
+
+        pid = int(entry.name)
+
+        if pid == os.getpid():
+            continue
+
+        if process_matches(
+            pid,
+            cwd,
+            markers,
+        ):
+            matches.append(pid)
+
+    return sorted(set(matches))
+
+
+def stop_local_process(
+    name: str,
+    cwd: Path,
+    pid_file: Path,
+    command_markers: Iterable[str],
+):
+    """
+    Stop a managed local service.
+
+    The PID file is checked first, followed by a /proc scan so manually
+    started or orphaned service instances are also removed.
+    """
+
+    stopped_pids = set()
+
+    pid = read_pid_file(pid_file)
+
+    if pid is not None:
+        stop_pid(
+            name,
+            pid,
+        )
+        stopped_pids.add(pid)
+
+    for matching_pid in find_matching_processes(
+        cwd,
+        command_markers,
+    ):
+        if matching_pid in stopped_pids:
+            continue
+
+        stop_pid(
+            name,
+            matching_pid,
+        )
+        stopped_pids.add(matching_pid)
+
+    remove_pid_file(pid_file)
+
+    if not stopped_pids:
+        print(
+            f"PASS:  {name} was not running"
+        )
+
+
+def port_is_open(
+    host: str,
+    port: int,
+    timeout: float = 0.5,
+) -> bool:
+    """Check whether a TCP port accepts connections."""
+
+    try:
+        with socket.create_connection(
+            (host, int(port)),
+            timeout=timeout,
+        ):
+            return True
+    except OSError:
+        return False
+
+
+def wait_for_port_free(
+    name: str,
+    host: str,
+    port: int,
+    timeout_seconds: float = 10.0,
+):
+    """Wait until a local service port is no longer listening."""
+
+    deadline = time.time() + timeout_seconds
+
+    while time.time() < deadline:
+        if not port_is_open(
+            host,
+            port,
+        ):
+            print(
+                f"PASS:  {name} port {port} is free"
+            )
+            return True
+
+        time.sleep(0.25)
+
+    print(
+        f"FAIL:  {name} port {port} is still in use"
+    )
+    return False
+
+
+def restart_local_services():
+    """
+    Stop local platform services so current source code is loaded.
+
+    Remote Mini Pupper services are not forcibly restarted. The normal
+    startup process reconnects to the robot and starts any missing remote
+    service before completing full health verification.
+    """
+
+    heading("STOPPING LOCAL PLATFORM SERVICES")
+
+    stop_local_process(
+        name="Browser Voice Relay",
+        cwd=PROJECT_DIR,
+        pid_file=(
+            PLATFORM_RUN_DIR
+            / "voice_relay.pid"
+        ),
+        command_markers=(
+            "voice_relay/server.py",
+        ),
+    )
+
+    stop_local_process(
+        name="Cognitive Runtime",
+        cwd=PROJECT_DIR,
+        pid_file=(
+            PLATFORM_RUN_DIR
+            / "runtime_api.pid"
+        ),
+        command_markers=(
+            "runtime_api.py",
+        ),
+    )
+
+    stop_local_process(
+        name="Vision Service",
+        cwd=PROJECT_DIR,
+        pid_file=(
+            PLATFORM_RUN_DIR
+            / "vision_service.pid"
+        ),
+        command_markers=(
+            "vision_service.py",
+        ),
+    )
+
+    stop_local_process(
+        name="YOLO Vision Server",
+        cwd=VISION_SERVER_DIR,
+        pid_file=(
+            PLATFORM_RUN_DIR
+            / "vision_server.pid"
+        ),
+        command_markers=(
+            "uvicorn",
+            "server:app",
+        ),
+    )
+
+    heading("VERIFYING LOCAL PORTS")
+
+    checks = [
+        (
+            "YOLO Vision Server",
+            "127.0.0.1",
+            8000,
+        ),
+        (
+            "Browser Voice Relay",
+            "127.0.0.1",
+            8765,
+        ),
+        (
+            "Cognitive Runtime",
+            "127.0.0.1",
+            8770,
+        ),
+    ]
+
+    failures = []
+
+    for name, host, port in checks:
+        if not wait_for_port_free(
+            name,
+            host,
+            port,
+        ):
+            failures.append(
+                f"{name} port {port}"
+            )
+
+    if failures:
+        raise RuntimeError(
+            "Unable to restart because these resources "
+            "remain in use: "
+            + ", ".join(failures)
+        )
 
 
 def start_local_process(
@@ -430,6 +819,14 @@ def print_plan():
     print("6. Ubuntu PC Cognitive Runtime")
     print("7. Ubuntu PC Browser Voice Relay")
     print("8. Full health verification")
+    print()
+    print(
+        "--start starts services that are missing."
+    )
+    print(
+        "--restart reloads all local service code, "
+        "then verifies the complete stack."
+    )
 
 
 def start_platform():
@@ -667,6 +1064,15 @@ def main():
         help="Start missing services and verify the complete stack.",
     )
 
+    group.add_argument(
+        "--restart",
+        action="store_true",
+        help=(
+            "Restart local services with current source code "
+            "and verify the complete stack."
+        ),
+    )
+
     args = parser.parse_args()
 
     try:
@@ -686,6 +1092,24 @@ def main():
         if args.start:
             print_plan()
             start_platform()
+            return
+
+        if args.restart:
+            print_plan()
+
+            PLATFORM_LOG_DIR.mkdir(
+                parents=True,
+                exist_ok=True,
+            )
+
+            PLATFORM_RUN_DIR.mkdir(
+                parents=True,
+                exist_ok=True,
+            )
+
+            restart_local_services()
+            start_platform()
+            return
 
     except KeyboardInterrupt:
         print()

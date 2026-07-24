@@ -45,9 +45,41 @@ def main():
     for item in expected_items:
         assert item in result.stdout
 
+    assert "--restart" in result.stdout
+
     print("PASS: startup plan executes offline")
     print("PASS: dependency order is preserved")
     print("PASS: all platform services are included")
+    print("PASS: restart behavior is documented")
+
+    print()
+    print("===== STARTUP MANAGER HELP TEST =====")
+
+    help_result = subprocess.run(
+        [
+            sys.executable,
+            str(SCRIPT),
+            "--help",
+        ],
+        cwd=PROJECT_DIR,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    print(help_result.stdout)
+
+    if help_result.stderr:
+        print(help_result.stderr)
+
+    assert help_result.returncode == 0
+    assert "--plan" in help_result.stdout
+    assert "--check" in help_result.stdout
+    assert "--start" in help_result.stdout
+    assert "--restart" in help_result.stdout
+
+    print("PASS: existing CLI modes remain available")
+    print("PASS: --restart is available")
     print()
     print("Startup Manager offline test passed.")
 
