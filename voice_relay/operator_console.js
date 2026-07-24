@@ -1049,3 +1049,240 @@
     }
     if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", initialize, {once: true}); else initialize();
 })();
+
+
+/* Operator Console v5 World Model Explorer */
+(function () {
+    var WORLD_MODEL_URL = "/dashboard/world-model";
+    var entities = [];
+    var recentEvents = [];
+    var robotState = {};
+    var selectedEntityId = null;
+    var timer = null;
+
+    function byId(id) { return document.getElementById(id); }
+    function text(value) { return value == null || value === "" ? "—" : String(value); }
+    function escapeHtml(value) { return text(value).replace(/[&<>"']/g, function (character) { return {"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#039;"}[character]; }); }
+    function formatTimestamp(value) { if (!value) return "—"; var date = new Date(value); return isNaN(date.getTime()) ? value : date.toLocaleString(); }
+    function ageSeconds(value) { if (!value) return Infinity; var date = new Date(value); return isNaN(date.getTime()) ? Infinity : Math.max(0, (Date.now() - date.getTime()) / 1000); }
+    function formatAge(value) { var seconds = ageSeconds(value); if (!isFinite(seconds)) return "unknown"; if (seconds < 1) return "now"; if (seconds < 60) return Math.floor(seconds) + "s ago"; if (seconds < 3600) return Math.floor(seconds / 60) + "m ago"; if (seconds < 86400) return Math.floor(seconds / 3600) + "h ago"; return Math.floor(seconds / 86400) + "d ago"; }
+    function confidence(value) { var number = Number(value); return isFinite(number) ? (number * 100).toFixed(1) + "%" : "—"; }
+    function jsonBlock(value) { return '<pre class="world-model-json">' + escapeHtml(JSON.stringify(value || {}, null, 2)) + '</pre>'; }
+    function field(label, value) { return '<div class="world-model-detail-field"><span>' + escapeHtml(label) + '</span><strong>' + escapeHtml(value) + '</strong></div>'; }
+
+    function updateTypeFilter() {
+        var select = byId("worldModelTypeFilter");
+        var current = select.value;
+        var types = {};
+        entities.forEach(function (entity) { types[entity.entity_type || "unknown"] = true; });
+        select.innerHTML = '<option value="ALL">All types</option>' + Object.keys(types).sort().map(function (type) { return '<option value="' + escapeHtml(type) + '">' + escapeHtml(type) + '</option>'; }).join("");
+        select.value = types[current] ? current : "ALL";
+    }
+
+    function filteredEntities() {
+        var search = (byId("worldModelSearch").value || "").toLowerCase().trim();
+        var type = byId("worldModelTypeFilter").value;
+        var age = byId("worldModelAgeFilter").value;
+        return entities.filter(function (entity) {
+            if (type !== "ALL" && (entity.entity_type || "unknown") !== type) return false;
+            if (age !== "ALL" && ageSeconds(entity.last_seen) > Number(age)) return false;
+            if (!search) return true;
+            var observations = Array.isArray(entity.history) ? entity.history : [];
+            var sources = observations.map(function (observation) { return observation.source; }).join(" ");
+            return [entity.entity_id, entity.label, entity.entity_type, sources, JSON.stringify(entity.attributes || {})].join(" ").toLowerCase().indexOf(search) !== -1;
+        });
+    }
+
+    function renderSummary() {
+        var types = {};
+        var fresh = 0;
+        entities.forEach(function (entity) { types[entity.entity_type || "unknown"] = (types[entity.entity_type || "unknown"] || 0) + 1; if (ageSeconds(entity.last_seen) <= 5) fresh += 1; });
+        var mission = robotState.mission || "None";
+        byId("worldModelSummary").innerHTML = [
+            ["Entities", entities.length], ["Fresh (5s)", fresh], ["Entity types", Object.keys(types).length], ["Robot mission", mission]
+        ].map(function (item) { return '<article class="card world-model-summary-card"><span>' + escapeHtml(item[0]) + '</span><strong>' + escapeHtml(item[1]) + '</strong></article>'; }).join("");
+    }
+
+    function renderDetail(entity) {
+        var detail = byId("worldModelDetail");
+        if (!entity) { detail.className = "world-model-empty"; detail.textContent = "Select an entity to inspect its memory and observation history."; return; }
+        var history = Array.isArray(entity.history) ? entity.history.slice().reverse() : [];
+        detail.className = "world-model-detail";
+        detail.innerHTML = '<div class="world-model-detail-title"><div><h3>' + escapeHtml(entity.label) + '</h3><p>' + escapeHtml(entity.entity_id) + '</p></div><span class="world-model-confidence">' + escapeHtml(confidence(entity.confidence)) + '</span></div>' +
+            '<div class="world-model-detail-grid">' + field("Type", entity.entity_type) + field("Last seen", formatTimestamp(entity.last_seen)) + field("Age", formatAge(entity.last_seen)) + field("First seen", formatTimestamp(entity.first_seen)) + field("Observations", history.length) + field("Confidence", confidence(entity.confidence)) + '</div>' +
+            '<section class="world-model-section"><h3>Attributes</h3>' + jsonBlock(entity.attributes) + '</section>' +
+            '<section class="world-model-section"><h3>Observation History</h3><div class="world-model-observations">' + (history.length ? history.map(function (observation) { return '<article><div><strong>' + escapeHtml(observation.source || "unknown") + '</strong><span>' + escapeHtml(formatTimestamp(observation.timestamp)) + '</span></div><div class="world-model-observation-meta">Confidence ' + escapeHtml(confidence(observation.confidence)) + '</div>' + jsonBlock({location: observation.location, attributes: observation.attributes}) + '</article>'; }).join("") : '<div class="world-model-empty">No observation history.</div>') + '</div></section>';
+    }
+
+    function renderEvents() {
+        var container = byId("worldModelEvents");
+        var events = recentEvents.slice().reverse().slice(0, 20);
+        container.innerHTML = events.length ? events.map(function (event) { return '<article class="world-model-event"><div><strong>' + escapeHtml(event.type) + '</strong><span>' + escapeHtml(formatTimestamp(event.timestamp)) + '</span></div>' + jsonBlock(event.data) + '</article>'; }).join("") : '<div class="world-model-empty">No recent events recorded.</div>';
+    }
+
+    function render() {
+        var visible = filteredEntities();
+        byId("worldModelCount").textContent = visible.length + " shown of " + entities.length + " persistent entities.";
+        if (!selectedEntityId || !visible.some(function (entity) { return entity.entity_id === selectedEntityId; })) selectedEntityId = visible.length ? visible[0].entity_id : null;
+        var list = byId("worldModelList");
+        list.innerHTML = visible.length ? visible.map(function (entity) {
+            var selected = entity.entity_id === selectedEntityId ? " selected" : "";
+            var fresh = ageSeconds(entity.last_seen) <= 5 ? " fresh" : "";
+            return '<button type="button" class="world-model-item' + selected + fresh + '" data-entity-id="' + escapeHtml(entity.entity_id) + '"><div class="world-model-item-top"><span><strong>' + escapeHtml(entity.label) + '</strong><small>' + escapeHtml(entity.entity_type || "unknown") + '</small></span><b>' + escapeHtml(confidence(entity.confidence)) + '</b></div><div class="world-model-item-meta"><span>' + escapeHtml(entity.entity_id) + '</span><span>' + escapeHtml(formatAge(entity.last_seen)) + '</span></div></button>';
+        }).join("") : '<div class="world-model-empty">No entities match the current filters.</div>';
+        Array.prototype.forEach.call(list.querySelectorAll("[data-entity-id]"), function (button) { button.addEventListener("click", function () { selectedEntityId = button.getAttribute("data-entity-id"); render(); }); });
+        renderDetail(visible.filter(function (entity) { return entity.entity_id === selectedEntityId; })[0]);
+        renderSummary();
+        renderEvents();
+    }
+
+    async function refresh() {
+        var pill = byId("worldModelStatusPill");
+        var message = byId("worldModelMessage");
+        try {
+            var response = await fetch(WORLD_MODEL_URL, {cache: "no-store"});
+            var payload = await response.json();
+            if (!response.ok || payload.ok === false) throw new Error(payload.error || "World Model request failed.");
+            entities = Array.isArray(payload.entities) ? payload.entities : [];
+            recentEvents = Array.isArray(payload.recent_events) ? payload.recent_events : [];
+            robotState = payload.robot_state || {};
+            updateTypeFilter();
+            pill.textContent = entities.length + " entities remembered";
+            pill.className = "console-status-pill ready";
+            message.hidden = true;
+            render();
+        } catch (error) {
+            pill.textContent = "World Model offline";
+            pill.className = "console-status-pill error";
+            message.textContent = error.message;
+            message.hidden = false;
+        }
+    }
+
+    function initialize() {
+        if (!byId("worldModelPage")) return;
+        byId("refreshWorldModelButton").addEventListener("click", refresh);
+        byId("worldModelSearch").addEventListener("input", render);
+        byId("worldModelTypeFilter").addEventListener("change", render);
+        byId("worldModelAgeFilter").addEventListener("change", render);
+        refresh();
+        timer = window.setInterval(refresh, 3000);
+        window.addEventListener("beforeunload", function () { window.clearInterval(timer); }, {once: true});
+    }
+    if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", initialize, {once: true}); else initialize();
+})();
+
+/* Operator Console v6 Read-only Network Manager */
+(function () {
+    var NETWORK_URL = "/dashboard/network-status";
+    var refreshTimer = null;
+
+    function byId(id) { return document.getElementById(id); }
+    function text(value, fallback) {
+        if (value === null || typeof value === "undefined" || value === "") return fallback || "—";
+        return String(value);
+    }
+    function escapeNetworkHtml(value) {
+        return text(value, "").replace(/[&<>"']/g, function (character) {
+            return {"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[character];
+        });
+    }
+    function setMessage(message) {
+        var element = byId("networkMessage");
+        if (!element) return;
+        element.hidden = !message;
+        element.textContent = message || "";
+    }
+    function signalMarkup(signal) {
+        var number = Number(signal);
+        if (!Number.isFinite(number)) return "—";
+        var bounded = Math.max(0, Math.min(100, number));
+        return '<span class="network-signal"><span class="network-signal-meter"><i style="width:' + bounded + '%"></i></span><strong>' + bounded + '%</strong></span>';
+    }
+    function renderWifi(networks) {
+        var target = byId("wifiNetworksTable");
+        if (!target) return;
+        if (!networks.length) {
+            target.innerHTML = '<div class="mission-history-empty">No Wi-Fi networks were reported.</div>';
+            return;
+        }
+        target.innerHTML = '<table class="network-table"><thead><tr><th>SSID</th><th>Status</th><th>Signal</th><th>Security</th><th>Channel</th><th>Rate</th></tr></thead><tbody>' + networks.map(function (network) {
+            return '<tr class="' + (network.in_use ? 'network-active-row' : '') + '"><td><strong>' + escapeNetworkHtml(network.ssid) + '</strong></td><td>' + (network.in_use ? 'Connected' : 'Available') + '</td><td>' + signalMarkup(network.signal) + '</td><td>' + escapeNetworkHtml(network.security || 'Open') + '</td><td>' + escapeNetworkHtml(text(network.channel)) + '</td><td>' + escapeNetworkHtml(text(network.rate)) + '</td></tr>';
+        }).join("") + '</tbody></table>';
+    }
+    function renderDevices(devices) {
+        var target = byId("networkDevicesTable");
+        if (!target) return;
+        if (!devices.length) {
+            target.innerHTML = '<div class="mission-history-empty">No network devices were reported.</div>';
+            return;
+        }
+        target.innerHTML = '<table class="network-table"><thead><tr><th>Device</th><th>Type</th><th>State</th><th>Connection</th></tr></thead><tbody>' + devices.map(function (device) {
+            return '<tr><td><strong>' + escapeNetworkHtml(device.device) + '</strong></td><td>' + escapeNetworkHtml(device.type) + '</td><td>' + escapeNetworkHtml(device.state) + '</td><td>' + escapeNetworkHtml(text(device.connection)) + '</td></tr>';
+        }).join("") + '</tbody></table>';
+    }
+    function renderSaved(connections) {
+        var target = byId("savedConnectionsTable");
+        if (!target) return;
+        if (!connections.length) {
+            target.innerHTML = '<div class="mission-history-empty">No saved connections were reported.</div>';
+            return;
+        }
+        target.innerHTML = '<table class="network-table"><thead><tr><th>Name</th><th>Type</th><th>Device</th><th>Status</th></tr></thead><tbody>' + connections.map(function (connection) {
+            return '<tr class="' + (connection.active ? 'network-active-row' : '') + '"><td><strong>' + escapeNetworkHtml(connection.name) + '</strong></td><td>' + escapeNetworkHtml(connection.type) + '</td><td>' + escapeNetworkHtml(text(connection.device)) + '</td><td>' + (connection.active ? 'Active' : 'Saved') + '</td></tr>';
+        }).join("") + '</tbody></table>';
+    }
+    function render(payload) {
+        var summary = payload.summary || {};
+        byId("networkConnectionSummary").textContent = summary.connected ? text(summary.active_connection, "Connected") : "Disconnected";
+        byId("networkWifiSummary").textContent = text(summary.active_wifi_ssid, "Not connected");
+        byId("networkSignalSummary").textContent = Number.isFinite(Number(summary.wifi_signal)) ? summary.wifi_signal + "%" : "—";
+        byId("networkHostnameSummary").textContent = text(payload.hostname);
+        byId("networkManagedSummary").textContent = text(summary.managed_device_count, "0") + " of " + text(summary.device_count, "0");
+        var collectedAt = payload.collected_at ? new Date(payload.collected_at) : null;
+        byId("networkUpdatedSummary").textContent = collectedAt && !isNaN(collectedAt.getTime()) ? collectedAt.toLocaleTimeString() : "—";
+        renderWifi(payload.wifi_networks || []);
+        renderDevices(payload.devices || []);
+        renderSaved(payload.saved_connections || []);
+        var pill = byId("networkStatusPill");
+        if (pill) {
+            pill.textContent = summary.connected ? "Network online" : "Network disconnected";
+            pill.className = "console-status-pill " + (summary.connected ? "success" : "error");
+        }
+        if (!summary.networkmanager_managing_interfaces) {
+            setMessage("NetworkManager is installed, but it is not managing any reported interface. Wi-Fi scans and saved profiles may be unavailable until Netplan or the host network renderer is configured to use NetworkManager.");
+        } else if (!summary.wifi_device_count) {
+            setMessage("No Wi-Fi adapter was reported by NetworkManager. Ethernet information remains available.");
+        } else {
+            setMessage("");
+        }
+    }
+    function refresh(rescan) {
+        var scanButton = byId("scanWifiButton");
+        if (scanButton && rescan) { scanButton.disabled = true; scanButton.textContent = "Scanning..."; }
+        fetch(NETWORK_URL + (rescan ? "?rescan=true" : ""), {cache: "no-store"})
+            .then(function (response) { return response.json().then(function (payload) { return {response: response, payload: payload}; }); })
+            .then(function (result) {
+                if (!result.response.ok || result.payload.ok === false) throw new Error(result.payload.error || "Network request failed.");
+                render(result.payload);
+            })
+            .catch(function (error) {
+                setMessage(error.message || String(error));
+                var pill = byId("networkStatusPill");
+                if (pill) { pill.textContent = "Network unavailable"; pill.className = "console-status-pill error"; }
+            })
+            .finally(function () {
+                if (scanButton) { scanButton.disabled = false; scanButton.textContent = "Scan Again"; }
+            });
+    }
+    function initialize() {
+        if (!byId("networkPage")) return;
+        var scanButton = byId("scanWifiButton");
+        if (scanButton) scanButton.addEventListener("click", function () { refresh(true); });
+        refresh(false);
+        if (refreshTimer) clearInterval(refreshTimer);
+        refreshTimer = setInterval(function () { refresh(false); }, 10000);
+    }
+    if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", initialize);
+    else initialize();
+})();

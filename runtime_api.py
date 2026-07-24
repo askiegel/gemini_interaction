@@ -5,9 +5,10 @@ import json
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Dict
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
 from diagnostics import DiagnosticsManager
+from network import NetworkManager, NetworkManagerError
 from config.config_manager import (
     ConfigurationError,
     ConfigurationManager,
@@ -30,6 +31,8 @@ class RuntimeAPIHandler(BaseHTTPRequestHandler):
         GET  /missions
         GET  /config
         GET  /diagnostics
+        GET  /world-model
+        GET  /network-status
         PUT  /config
         POST /missions
 
@@ -104,7 +107,8 @@ class RuntimeAPIHandler(BaseHTTPRequestHandler):
         self.end_headers()
 
     def do_GET(self):
-        path = urlparse(self.path).path
+        parsed_url = urlparse(self.path)
+        path = parsed_url.path
 
         if path == "/health":
             self.send_json(
@@ -139,6 +143,49 @@ class RuntimeAPIHandler(BaseHTTPRequestHandler):
                 self.send_json(200, self.server.diagnostics_manager.collect())
             except Exception as exc:
                 self.send_json(500, {"ok": False, "error": str(exc)})
+            return
+
+        if path == "/network-status":
+            try:
+                query = parse_qs(parsed_url.query)
+                rescan = str(query.get("rescan", ["false"])[0]).lower() in {
+                    "1", "true", "yes", "on"
+                }
+                self.send_json(200, self.server.network_manager.collect(rescan=rescan))
+            except NetworkManagerError as exc:
+                self.send_json(503, {"ok": False, "read_only": True, "error": str(exc)})
+            except Exception as exc:
+                self.send_json(500, {"ok": False, "read_only": True, "error": str(exc)})
+            return
+
+        if path == "/world-model":
+            try:
+                world_model = self.server.runtime.world_model
+                entities = world_model.get_entities()
+                entities = sorted(
+                    entities,
+                    key=lambda item: item.get("last_seen", ""),
+                    reverse=True,
+                )
+                self.send_json(
+                    200,
+                    {
+                        "ok": True,
+                        "count": len(entities),
+                        "robot_state": dict(world_model.robot_state),
+                        "environment": dict(world_model.environment),
+                        "recent_events": world_model.get_recent_events(),
+                        "entities": entities,
+                    },
+                )
+            except Exception as exc:
+                self.send_json(
+                    500,
+                    {
+                        "ok": False,
+                        "error": str(exc),
+                    },
+                )
             return
 
         if path == "/mission-history":
@@ -387,6 +434,7 @@ class CognitiveRuntimeHTTPServer(ThreadingHTTPServer):
             runtime=self.runtime,
             config_manager=self.config_manager,
         )
+        self.network_manager = NetworkManager()
 
 
 def create_server(

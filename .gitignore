@@ -22,3 +22,10 @@ logs/
 *.lock
 .*_state.json.*.tmp
 .world_model_state.json.*.tmp
+
+# Local credentials and generated release artifacts
+.env
+*.zip
+*_backup_*/
+*backup*
+*:Zone.Identifier

@@ -612,6 +612,41 @@ class VoiceRelayHandler(BaseHTTPRequestHandler):
             )
             return
 
+        if path == "/dashboard/world-model":
+            response = request_json(
+                "GET",
+                f"{COGNITIVE_RUNTIME_URL}/world-model",
+                timeout=8.0,
+            )
+            self.send_json(
+                response["status_code"] or 503,
+                response["data"] or {
+                    "ok": False,
+                    "error": response["error"] or "World Model service unavailable.",
+                },
+            )
+            return
+
+        if path == "/dashboard/network-status":
+            query = urlparse(self.path).query
+            target_url = f"{COGNITIVE_RUNTIME_URL}/network-status"
+            if query:
+                target_url = f"{target_url}?{query}"
+            response = request_json(
+                "GET",
+                target_url,
+                timeout=12.0,
+            )
+            self.send_json(
+                response["status_code"] or 503,
+                response["data"] or {
+                    "ok": False,
+                    "read_only": True,
+                    "error": response["error"] or "Network visibility service unavailable.",
+                },
+            )
+            return
+
         if path == "/dashboard/mission-history":
             response = request_json(
                 "GET",

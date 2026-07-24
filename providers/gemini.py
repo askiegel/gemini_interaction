@@ -1,7 +1,5 @@
 import json
 
-from google import genai
-
 from intent_parser import extract_json, validate_intent
 from prompts import CONVERSATION_SYSTEM_PROMPT, SYSTEM_PROMPT
 from providers.base import CognitiveProvider
@@ -10,6 +8,14 @@ from robot_context import format_robot_context, get_robot_context
 
 class GeminiProvider(CognitiveProvider):
     def __init__(self, api_key, model):
+        try:
+            from google import genai
+        except ImportError as exc:
+            raise RuntimeError(
+                "The google-genai package is required for Gemini operation. "
+                "Install dependencies with: pip install -r requirements.txt"
+            ) from exc
+
         self.client = genai.Client(api_key=api_key)
         self.model = model
 

@@ -388,9 +388,11 @@
     <div class="console-navigation-inner">
         <button type="button" class="console-nav-button active" data-console-page="missionPage" aria-controls="missionPage" aria-selected="true">Mission Control</button>
         <button type="button" class="console-nav-button" data-console-page="perceptionPage" aria-controls="perceptionPage" aria-selected="false">Perception</button>
+        <button type="button" class="console-nav-button" data-console-page="worldModelPage" aria-controls="worldModelPage" aria-selected="false">World Model</button>
         <button type="button" class="console-nav-button" data-console-page="conversationPage" aria-controls="conversationPage" aria-selected="false">Conversation</button>
         <button type="button" class="console-nav-button" data-console-page="historyPage" aria-controls="historyPage" aria-selected="false">Mission History</button>
         <button type="button" class="console-nav-button" data-console-page="diagnosticsPage" aria-controls="diagnosticsPage" aria-selected="false">Diagnostics</button>
+        <button type="button" class="console-nav-button" data-console-page="networkPage" aria-controls="networkPage" aria-selected="false">Network</button>
         <button type="button" class="console-nav-button" data-console-page="administrationPage" aria-controls="administrationPage" aria-selected="false">Administration</button>
     </div>
 </nav>
@@ -809,6 +811,36 @@
     </section>
 </main>
 
+
+<main id="worldModelPage" class="console-page world-model-page" hidden>
+    <section class="console-page-heading">
+        <div><div class="console-eyebrow">Operator Console v5</div><h2>World Model Explorer</h2><p>Inspect the robot's persistent memory, tracked entities, observations, and recent world events.</p></div>
+        <span id="worldModelStatusPill" class="console-status-pill planned">Loading world model</span>
+    </section>
+    <div id="worldModelMessage" class="configuration-message error" role="status" hidden></div>
+    <section class="card world-model-toolbar">
+        <label>Search<input id="worldModelSearch" type="search" placeholder="Entity, label, type, source, or ID"></label>
+        <label>Entity type<select id="worldModelTypeFilter"><option value="ALL">All types</option></select></label>
+        <label>Seen within<select id="worldModelAgeFilter"><option value="ALL">Any time</option><option value="5">5 seconds</option><option value="30">30 seconds</option><option value="300">5 minutes</option><option value="3600">1 hour</option></select></label>
+        <button id="refreshWorldModelButton" type="button" class="secondary-action">Refresh Now</button>
+    </section>
+    <section id="worldModelSummary" class="world-model-summary"></section>
+    <section class="world-model-layout">
+        <article class="card world-model-list-card">
+            <div class="world-model-card-heading"><div><h2>Entities</h2><p id="worldModelCount">No entities loaded.</p></div></div>
+            <div id="worldModelList" class="world-model-list"></div>
+        </article>
+        <article class="card world-model-detail-card">
+            <h2>Entity Details</h2>
+            <div id="worldModelDetail" class="world-model-empty">Select an entity to inspect its memory and observation history.</div>
+        </article>
+    </section>
+    <section class="card world-model-events-card">
+        <div class="world-model-card-heading"><div><h2>Recent World Events</h2><p>Latest persistent updates recorded by the World Model.</p></div></div>
+        <div id="worldModelEvents" class="world-model-events"></div>
+    </section>
+</main>
+
 <main id="diagnosticsPage" class="console-page diagnostics-page" hidden>
     <section class="console-page-heading">
         <div><div class="console-eyebrow">Operator Console v3</div><h2>Diagnostics</h2><p>Live health, service reachability, host resources, and runtime state.</p></div>
@@ -820,6 +852,53 @@
         <article class="card diagnostics-card"><h2>Brain PC</h2><div id="systemDiagnostics" class="diagnostics-metrics"></div></article>
         <article class="card diagnostics-card"><h2>Cognitive Runtime</h2><div id="runtimeDiagnostics" class="diagnostics-metrics"></div></article>
         <article class="card diagnostics-card diagnostics-wide"><div class="diagnostics-card-heading"><div><h2>Service Details</h2><p>Current endpoint status and response latency.</p></div><button id="refreshDiagnosticsButton" type="button" class="secondary-action">Refresh Now</button></div><div id="serviceDiagnostics" class="diagnostics-table-wrap"></div></article>
+    </section>
+</main>
+
+<main id="networkPage" class="console-page network-page" hidden>
+    <section class="console-page-heading">
+        <div>
+            <div class="console-eyebrow">Operator Console v6</div>
+            <h2>Network Manager</h2>
+            <p>Read-only visibility into the Brain PC connection, interfaces, saved profiles, and nearby Wi-Fi networks.</p>
+        </div>
+        <span id="networkStatusPill" class="console-status-pill planned">Loading network</span>
+    </section>
+
+    <div id="networkMessage" class="configuration-message error" role="status" hidden></div>
+
+    <section class="network-summary-grid" aria-label="Network summary">
+        <article class="card network-summary-card"><span>Connection</span><strong id="networkConnectionSummary">Checking...</strong></article>
+        <article class="card network-summary-card"><span>Active Wi-Fi</span><strong id="networkWifiSummary">Checking...</strong></article>
+        <article class="card network-summary-card"><span>Signal</span><strong id="networkSignalSummary">—</strong></article>
+        <article class="card network-summary-card"><span>Hostname</span><strong id="networkHostnameSummary">—</strong></article>
+        <article class="card network-summary-card"><span>Managed interfaces</span><strong id="networkManagedSummary">—</strong></article>
+        <article class="card network-summary-card"><span>Last update</span><strong id="networkUpdatedSummary">—</strong></article>
+    </section>
+
+    <section class="network-layout">
+        <article class="card network-card network-wide">
+            <div class="network-card-heading">
+                <div><h2>Nearby Wi-Fi</h2><p>Visible networks reported by NetworkManager. Credentials are never displayed.</p></div>
+                <button id="scanWifiButton" type="button" class="secondary-action">Scan Again</button>
+            </div>
+            <div id="wifiNetworksTable" class="network-table-wrap"></div>
+        </article>
+
+        <article class="card network-card">
+            <div class="network-card-heading"><div><h2>Network Devices</h2><p>Current state of local interfaces.</p></div></div>
+            <div id="networkDevicesTable" class="network-table-wrap"></div>
+        </article>
+
+        <article class="card network-card">
+            <div class="network-card-heading"><div><h2>Saved Connections</h2><p>Profiles already stored on the Brain PC.</p></div></div>
+            <div id="savedConnectionsTable" class="network-table-wrap"></div>
+        </article>
+    </section>
+
+    <section class="card network-security-note">
+        <div><strong>Read-only mode</strong><p>Connecting, forgetting, or changing Wi-Fi is intentionally disabled until dashboard authorization is added.</p></div>
+        <span>SAFE</span>
     </section>
 </main>
 

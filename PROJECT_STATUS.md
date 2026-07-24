@@ -2,60 +2,47 @@
 
 ## Current Version
 
-v1.7-alpha
+**v1.0.0 — Stable**
 
-## Current Milestone
+## Release Status
 
-Robot Bridge Server
+The cognitive platform and Operator Console are feature-complete for the Version 1.0 baseline.
 
-## Last Verified Hardware Configuration
+Completed subsystems:
 
-Mini Pupper Workspace:
-~/ros2_ws
+- Conversation Manager and Gemini provider
+- Runtime API and persistent Cognitive Runtime
+- Mission Manager and deterministic Behavior Manager
+- Robot Bridge client integration
+- Vision Service, target tracking, and persistent World Model
+- Streaming FOLLOW_PERSON control with target lock and recovery
+- Operator Console: Mission Control, Perception, World Model, Conversation, Mission History, Diagnostics, Network, and Administration
+- Central configuration and read-only network diagnostics
+- Automated regression tests and startup verification
 
-Bringup:
+## Stable Architecture
 
-ros2 launch mini_pupper_bringup bringup.launch.py
+Human → Browser Voice Relay → Conversation Manager → Gemini Provider → Runtime API → Mission Manager → Behavior Manager → Robot Bridge → ROS 2 → Mini Pupper 2
 
-Verified Motion Topic:
+The World Model remains the single source of truth for persistent perceived entities.
 
-/cmd_vel
+## Repository Locations
 
-Verified Controller:
+- Brain PC: `~/robot_services/cognitive`
+- Mini Pupper: `~/robot_bridge`
+- Branch: `main`
+- Release tag: `v1.0.0`
 
-/quadruped_controller_node
+## Version 1.0 Boundaries
+
+Wi-Fi visibility is read-only. Connecting, disconnecting, forgetting profiles, and changing credentials remain disabled until dashboard authentication is implemented.
+
+LiDAR navigation, SLAM, semantic mapping, and multi-robot fleet support are post-v1.0 roadmap items.
 
 ## Development Rules
 
 - One feature per commit.
 - Build → Test → Commit → Push.
-- ROS2 remains isolated.
-- World Model remains the single source of truth.
-- Provider-agnostic AI architecture.
-- No architectural redesign without discussion.
-
-## Before Every Session
-
-Read:
-
-PROJECT_STATUS.md
-
-Then complete:
-
-docs/checklists/SESSION_START.md
-
-## Next Goal
-
-Implement the Robot Bridge Server on the Mini Pupper.
-
-The Robot Bridge Server will expose:
-
-- GET /status
-- POST /motion
-- POST /stop
-
-and publish motion commands locally to /cmd_vel.
-
-## End-to-End Demonstration Goal
-
-Find my backpack.
+- Keep ROS 2 isolated on the robot.
+- Keep the World Model as the single source of truth.
+- Never commit `.env`, credentials, runtime state, lock files, or generated logs.
