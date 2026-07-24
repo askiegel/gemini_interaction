@@ -7,7 +7,7 @@ ROOT = Path(__file__).resolve().parent
 checks = {
     "runtime_api.py": ["/network-status", "NetworkManager", "read_only"],
     "voice_relay/server.py": ["/dashboard/network-status", "Network visibility service unavailable"],
-    "voice_relay/index.html": ["networkPage", "Network Manager", "scanWifiButton", "Read-only mode"],
+    "voice_relay/index.html": ["networkPage", "Network Manager", "scanWifiButton", "Phase 7A status mode"],
     "voice_relay/operator_console.js": ["NETWORK_URL", "wifiNetworksTable", "savedConnectionsTable"],
     "voice_relay/operator_console.css": ["network-summary-grid", "network-security-note"],
 }

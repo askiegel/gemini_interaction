@@ -1249,10 +1249,12 @@
             pill.textContent = summary.connected ? "Network online" : "Network disconnected";
             pill.className = "console-status-pill " + (summary.connected ? "success" : "error");
         }
-        if (!summary.networkmanager_managing_interfaces) {
+        if (payload.backend === "windows_wsl") {
+            setMessage("Windows Wi-Fi is being managed through the WSL cross-platform backend.");
+        } else if (!summary.networkmanager_managing_interfaces) {
             setMessage("NetworkManager is installed, but it is not managing any reported interface. Wi-Fi scans and saved profiles may be unavailable until Netplan or the host network renderer is configured to use NetworkManager.");
         } else if (!summary.wifi_device_count) {
-            setMessage("No Wi-Fi adapter was reported by NetworkManager. Ethernet information remains available.");
+            setMessage("No Wi-Fi adapter was reported by the active network backend. Ethernet information remains available.");
         } else {
             setMessage("");
         }

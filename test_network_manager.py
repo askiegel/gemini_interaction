@@ -26,7 +26,9 @@ class NetworkManagerTests(unittest.TestCase):
             Completed("*:Home WiFi:78:WPA2:5180:36:405 Mbit/s:▂▄▆_\n:Guest:42:--:2412:1:130 Mbit/s:▂▄__\n"),
         ]
 
-        payload = NetworkManager().collect(rescan=True)
+        manager = NetworkManager()
+        manager.platform_backend = "linux_nmcli"
+        payload = manager.collect(rescan=True)
 
         self.assertTrue(payload["ok"])
         self.assertTrue(payload["read_only"])

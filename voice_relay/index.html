@@ -860,7 +860,7 @@
         <div>
             <div class="console-eyebrow">Operator Console v6</div>
             <h2>Network Manager</h2>
-            <p>Read-only visibility into the Brain PC connection, interfaces, saved profiles, and nearby Wi-Fi networks.</p>
+            <p>Cross-platform visibility into the Brain PC connection, interfaces, saved profiles, and nearby Wi-Fi networks.</p>
         </div>
         <span id="networkStatusPill" class="console-status-pill planned">Loading network</span>
     </section>
@@ -879,7 +879,7 @@
     <section class="network-layout">
         <article class="card network-card network-wide">
             <div class="network-card-heading">
-                <div><h2>Nearby Wi-Fi</h2><p>Visible networks reported by NetworkManager. Credentials are never displayed.</p></div>
+                <div><h2>Nearby Wi-Fi</h2><p>Visible networks reported by Windows Wi-Fi or Linux NetworkManager. Credentials are never displayed.</p></div>
                 <button id="scanWifiButton" type="button" class="secondary-action">Scan Again</button>
             </div>
             <div id="wifiNetworksTable" class="network-table-wrap"></div>
@@ -897,7 +897,7 @@
     </section>
 
     <section class="card network-security-note">
-        <div><strong>Read-only mode</strong><p>Connecting, forgetting, or changing Wi-Fi is intentionally disabled until dashboard authorization is added.</p></div>
+        <div><strong>Phase 7A status mode</strong><p>The dashboard automatically uses Windows Wi-Fi under WSL2 and NetworkManager on native Linux. Connection controls will be enabled in the next step.</p></div>
         <span>SAFE</span>
     </section>
 </main>
