@@ -414,3 +414,396 @@ button {
             minmax(390px, 1fr);
     }
 }
+
+/* =========================================================
+ * Operator Console v3 navigation and administration pages
+ * ========================================================= */
+
+.console-navigation {
+    position: sticky;
+    top: 0;
+    z-index: 50;
+    border-top: 1px solid rgba(255, 255, 255, 0.08);
+    border-bottom: 1px solid rgba(255, 255, 255, 0.12);
+    background: rgba(15, 23, 42, 0.97);
+    backdrop-filter: blur(8px);
+}
+
+.console-navigation-inner {
+    display: flex;
+    gap: 8px;
+    max-width: 1680px;
+    margin: 0 auto;
+    padding: 10px 24px;
+    overflow-x: auto;
+}
+
+.console-nav-button {
+    flex: 0 0 auto;
+    min-width: 145px;
+    min-height: 44px;
+    padding: 10px 15px;
+    border: 1px solid transparent;
+    background: transparent;
+    color: #cbd5e1;
+    font-size: 16px;
+    font-weight: 800;
+}
+
+.console-nav-button:hover {
+    background: rgba(255, 255, 255, 0.08);
+    color: #ffffff;
+}
+
+.console-nav-button.active {
+    border-color: rgba(147, 197, 253, 0.45);
+    background: #1666c5;
+    color: #ffffff;
+    box-shadow: 0 3px 12px rgba(22, 102, 197, 0.35);
+}
+
+.console-page[hidden] {
+    display: none !important;
+}
+
+.console-page-heading {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 24px;
+    margin-bottom: 18px;
+    padding: 22px;
+    border-radius: 14px;
+    background: #17202a;
+    color: #ffffff;
+    box-shadow: 0 3px 14px rgba(0, 0, 0, 0.10);
+}
+
+.console-page-heading h2 {
+    margin: 3px 0 7px;
+    font-size: 28px;
+}
+
+.console-page-heading p {
+    max-width: 780px;
+    margin: 0;
+    color: #cbd5e1;
+    line-height: 1.5;
+}
+
+.console-eyebrow {
+    color: #77b7ff;
+    font-size: 12px;
+    font-weight: 900;
+    letter-spacing: 0.11em;
+    text-transform: uppercase;
+}
+
+.console-status-pill {
+    flex: 0 0 auto;
+    padding: 8px 12px;
+    border-radius: 999px;
+    font-size: 14px;
+    font-weight: 800;
+}
+
+.console-status-pill.ready {
+    border: 1px solid rgba(74, 222, 128, 0.45);
+    background: rgba(22, 163, 74, 0.16);
+    color: #bbf7d0;
+}
+
+.console-status-pill.planned {
+    border: 1px solid rgba(147, 197, 253, 0.4);
+    background: rgba(37, 99, 235, 0.16);
+    color: #bfdbfe;
+}
+
+.administration-page,
+.console-placeholder-page {
+    max-width: 1680px;
+    margin: 22px auto;
+    padding: 0 24px 36px;
+}
+
+.administration-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(340px, 1fr));
+    gap: 18px;
+}
+
+.administration-card {
+    display: flex;
+    min-height: 340px;
+    flex-direction: column;
+}
+
+.administration-card-header {
+    display: flex;
+    align-items: flex-start;
+    gap: 14px;
+    margin-bottom: 16px;
+}
+
+.administration-card-header h2 {
+    margin: 0 0 6px;
+    font-size: 22px;
+}
+
+.administration-card-header p {
+    margin: 0;
+    color: #64748b;
+    line-height: 1.5;
+}
+
+.administration-icon {
+    display: flex;
+    width: 54px;
+    height: 54px;
+    flex: 0 0 54px;
+    align-items: center;
+    justify-content: center;
+    border-radius: 13px;
+    background: #e7f1fc;
+    color: #145ea8;
+    font-size: 13px;
+    font-weight: 900;
+}
+
+.administration-field {
+    display: flex;
+    justify-content: space-between;
+    gap: 18px;
+    padding: 13px 0;
+    border-bottom: 1px solid #e2e8f0;
+}
+
+.administration-field span {
+    color: #64748b;
+}
+
+.administration-field strong {
+    text-align: right;
+    overflow-wrap: anywhere;
+}
+
+.administration-warning {
+    margin: 8px 0 20px;
+    padding: 14px;
+    border: 1px solid #f1cf82;
+    border-radius: 10px;
+    background: #fff8e6;
+    color: #775000;
+    line-height: 1.5;
+}
+
+.administration-action {
+    width: 100%;
+    margin-top: auto;
+}
+
+@media (max-width: 700px) {
+    .console-navigation-inner {
+        padding-right: 10px;
+        padding-left: 10px;
+    }
+
+    .console-nav-button {
+        min-width: 132px;
+    }
+
+    .console-page-heading {
+        align-items: flex-start;
+        flex-direction: column;
+    }
+
+    .administration-page,
+    .console-placeholder-page {
+        padding-right: 10px;
+        padding-left: 10px;
+    }
+}
+
+/* =========================================================
+ * Operator Console v3 live configuration form
+ * ========================================================= */
+
+.console-status-pill.error {
+    border: 1px solid rgba(248, 113, 113, 0.5);
+    background: rgba(220, 38, 38, 0.18);
+    color: #fecaca;
+}
+
+.configuration-form {
+    display: grid;
+    gap: 18px;
+}
+
+.configuration-card {
+    min-height: 0;
+}
+
+.configuration-field {
+    display: grid;
+    gap: 7px;
+    margin-bottom: 14px;
+    color: #475569;
+    font-size: 15px;
+    font-weight: 750;
+}
+
+.configuration-field input,
+.configuration-field select {
+    width: 100%;
+    min-height: 48px;
+    box-sizing: border-box;
+    padding: 10px 12px;
+    border: 1px solid #cbd5e1;
+    border-radius: 9px;
+    background: #ffffff;
+    color: #0f172a;
+    font: inherit;
+    font-weight: 600;
+}
+
+.configuration-field input:focus,
+.configuration-field select:focus {
+    border-color: #2563eb;
+    outline: 3px solid rgba(37, 99, 235, 0.16);
+}
+
+.configuration-message {
+    padding: 14px 16px;
+    border-radius: 10px;
+    line-height: 1.5;
+    font-weight: 700;
+}
+
+.configuration-message.success {
+    border: 1px solid #86efac;
+    background: #dcfce7;
+    color: #166534;
+}
+
+.configuration-message.error {
+    border: 1px solid #fca5a5;
+    background: #fee2e2;
+    color: #991b1b;
+}
+
+.configuration-message.info {
+    border: 1px solid #93c5fd;
+    background: #dbeafe;
+    color: #1e3a8a;
+}
+
+.configuration-actions-card {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 24px;
+    padding: 22px;
+}
+
+.configuration-actions-card h2 {
+    margin: 0 0 6px;
+}
+
+.configuration-actions-card p {
+    max-width: 850px;
+    margin: 0;
+    color: #64748b;
+    line-height: 1.5;
+}
+
+.configuration-actions {
+    display: flex;
+    flex: 0 0 auto;
+    gap: 10px;
+}
+
+.secondary-action {
+    border: 1px solid #94a3b8;
+    background: #ffffff;
+    color: #334155;
+}
+
+@media (max-width: 800px) {
+    .configuration-actions-card {
+        align-items: stretch;
+        flex-direction: column;
+    }
+
+    .configuration-actions {
+        display: grid;
+        grid-template-columns: 1fr;
+    }
+}
+
+
+/* Operator Console v3 live diagnostics */
+.diagnostics-page { display: grid; gap: 18px; }
+.diagnostics-service-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 14px; }
+.diagnostics-service-card { padding: 18px; border-left: 6px solid #94a3b8; }
+.diagnostics-service-card.healthy { border-left-color: #22c55e; }
+.diagnostics-service-card.warning { border-left-color: #f59e0b; }
+.diagnostics-service-card.offline { border-left-color: #ef4444; }
+.diagnostics-service-card h3 { margin: 0 0 6px; font-size: 18px; }
+.diagnostics-service-card p { margin: 0; color: #64748b; }
+.diagnostics-indicator { display: inline-block; width: 11px; height: 11px; margin-right: 8px; border-radius: 50%; background: #94a3b8; }
+.healthy .diagnostics-indicator { background: #22c55e; }
+.warning .diagnostics-indicator { background: #f59e0b; }
+.offline .diagnostics-indicator { background: #ef4444; }
+.diagnostics-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 18px; }
+.diagnostics-card { min-height: 0; }
+.diagnostics-wide { grid-column: 1 / -1; }
+.diagnostics-card-heading { display: flex; align-items: center; justify-content: space-between; gap: 18px; }
+.diagnostics-card-heading h2, .diagnostics-card h2 { margin-top: 0; }
+.diagnostics-card-heading p { margin: 0; color: #64748b; }
+.diagnostics-metrics { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+.diagnostics-metric { padding: 13px; border: 1px solid #e2e8f0; border-radius: 9px; background: #f8fafc; }
+.diagnostics-metric span { display: block; color: #64748b; font-size: 13px; font-weight: 700; }
+.diagnostics-metric strong { display: block; margin-top: 4px; color: #0f172a; font-size: 18px; overflow-wrap: anywhere; }
+.diagnostics-table { width: 100%; border-collapse: collapse; margin-top: 15px; }
+.diagnostics-table th, .diagnostics-table td { padding: 12px 10px; border-bottom: 1px solid #e2e8f0; text-align: left; }
+.diagnostics-table th { color: #475569; font-size: 13px; text-transform: uppercase; letter-spacing: .04em; }
+.diagnostics-table-wrap { overflow-x: auto; }
+@media (max-width: 900px) { .diagnostics-service-grid, .diagnostics-grid { grid-template-columns: 1fr 1fr; } }
+@media (max-width: 650px) { .diagnostics-service-grid, .diagnostics-grid, .diagnostics-metrics { grid-template-columns: 1fr; } .diagnostics-wide { grid-column: auto; } }
+
+
+/* Operator Console v4 mission history */
+.mission-history-toolbar {
+    display: grid;
+    grid-template-columns: minmax(260px, 1fr) minmax(180px, 240px) auto;
+    gap: 16px;
+    align-items: end;
+    margin-bottom: 18px;
+    padding: 18px;
+}
+.mission-history-toolbar label { display: grid; gap: 7px; font-size: 0.82rem; font-weight: 700; color: #51627a; }
+.mission-history-toolbar input, .mission-history-toolbar select { width: 100%; min-height: 42px; border: 1px solid #cbd5e1; border-radius: 8px; padding: 9px 11px; background: #fff; color: #111827; }
+.mission-history-layout { display: grid; grid-template-columns: minmax(0, 1.35fr) minmax(330px, .65fr); gap: 18px; }
+.mission-history-list-card, .mission-history-detail-card { padding: 18px; min-height: 520px; }
+.mission-history-card-heading { display: flex; align-items: start; justify-content: space-between; margin-bottom: 12px; }
+.mission-history-card-heading h2, .mission-history-detail-card h2 { margin: 0 0 5px; }
+.mission-history-card-heading p { margin: 0; color: #64748b; }
+.mission-history-list { display: grid; gap: 10px; max-height: 650px; overflow: auto; padding-right: 4px; }
+.mission-history-item { width: 100%; text-align: left; border: 1px solid #dbe3ee; border-left: 4px solid #94a3b8; border-radius: 10px; background: #fff; padding: 13px 14px; cursor: pointer; color: inherit; }
+.mission-history-item:hover, .mission-history-item.selected { border-color: #2484df; box-shadow: 0 0 0 2px rgba(36,132,223,.10); }
+.mission-history-item.status-completed { border-left-color: #19b86a; }
+.mission-history-item.status-active { border-left-color: #2484df; }
+.mission-history-item.status-queued, .mission-history-item.status-info_only { border-left-color: #d89b16; }
+.mission-history-item.status-cancelled, .mission-history-item.status-rejected { border-left-color: #dc4c4c; }
+.mission-history-item-top { display: flex; justify-content: space-between; gap: 12px; align-items: center; }
+.mission-history-item-title { font-weight: 800; }
+.mission-history-item-meta { margin-top: 5px; color: #64748b; font-size: .82rem; }
+.mission-history-badge { display: inline-flex; border-radius: 999px; padding: 4px 8px; font-size: .7rem; font-weight: 800; background: #edf2f7; }
+.mission-history-detail { display: grid; gap: 12px; }
+.mission-history-detail-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.mission-history-detail-field { border: 1px solid #dbe3ee; border-radius: 9px; padding: 11px; background: #f8fafc; }
+.mission-history-detail-field span { display: block; color: #64748b; font-size: .72rem; font-weight: 700; margin-bottom: 4px; }
+.mission-history-detail-field strong { overflow-wrap: anywhere; }
+.mission-history-speech { border-left: 4px solid #2484df; background: #f4f8fd; padding: 12px 14px; border-radius: 8px; line-height: 1.45; }
+.mission-history-empty { color: #64748b; padding: 36px 4px; text-align: center; }
+@media (max-width: 900px) { .mission-history-layout { grid-template-columns: 1fr; } .mission-history-toolbar { grid-template-columns: 1fr; } }

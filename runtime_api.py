@@ -7,6 +7,11 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Dict
 from urllib.parse import urlparse
 
+from diagnostics import DiagnosticsManager
+from config.config_manager import (
+    ConfigurationError,
+    ConfigurationManager,
+)
 from runtime import CognitiveRuntime
 
 
@@ -23,6 +28,9 @@ class RuntimeAPIHandler(BaseHTTPRequestHandler):
         GET  /health
         GET  /status
         GET  /missions
+        GET  /config
+        GET  /diagnostics
+        PUT  /config
         POST /missions
 
     POST /missions accepts either:
@@ -43,13 +51,13 @@ class RuntimeAPIHandler(BaseHTTPRequestHandler):
     invoking the AI provider twice for the same spoken command.
     """
 
-    server_version = "MiniPupperRuntimeAPI/1.1"
+    server_version = "MiniPupperRuntimeAPI/1.2"
 
     def send_cors_headers(self):
         self.send_header("Access-Control-Allow-Origin", "*")
         self.send_header(
             "Access-Control-Allow-Methods",
-            "GET, POST, OPTIONS",
+            "GET, POST, PUT, OPTIONS",
         )
         self.send_header(
             "Access-Control-Allow-Headers",
@@ -116,6 +124,45 @@ class RuntimeAPIHandler(BaseHTTPRequestHandler):
             )
             return
 
+        if path == "/config":
+            self.send_json(
+                200,
+                {
+                    "ok": True,
+                    "config": self.server.config_manager.get_config(),
+                },
+            )
+            return
+
+        if path == "/diagnostics":
+            try:
+                self.send_json(200, self.server.diagnostics_manager.collect())
+            except Exception as exc:
+                self.send_json(500, {"ok": False, "error": str(exc)})
+            return
+
+        if path == "/mission-history":
+            try:
+                history = self.server.runtime.mission_manager.get_history()
+                history = list(reversed(history))
+                self.send_json(
+                    200,
+                    {
+                        "ok": True,
+                        "count": len(history),
+                        "missions": history,
+                    },
+                )
+            except Exception as exc:
+                self.send_json(
+                    500,
+                    {
+                        "ok": False,
+                        "error": str(exc),
+                    },
+                )
+            return
+
         if path == "/missions":
             runtime_status = self.server.runtime.get_status()
 
@@ -148,6 +195,57 @@ class RuntimeAPIHandler(BaseHTTPRequestHandler):
                 "error": "Not found.",
             },
         )
+
+    def do_PUT(self):
+        path = urlparse(self.path).path
+
+        if path != "/config":
+            self.send_json(
+                404,
+                {"ok": False, "error": "Not found."},
+            )
+            return
+
+        try:
+            request_data = self.read_json_body()
+            if not isinstance(request_data, dict):
+                raise ConfigurationError(
+                    "The request body must be a JSON object."
+                )
+
+            config_payload = request_data.get(
+                "config",
+                request_data,
+            )
+            updated = self.server.config_manager.update_config(
+                config_payload
+            )
+            self.send_json(
+                200,
+                {
+                    "ok": True,
+                    "saved": True,
+                    "config": updated,
+                },
+            )
+        except (ConfigurationError, TypeError, ValueError) as exc:
+            self.send_json(
+                400,
+                {
+                    "ok": False,
+                    "saved": False,
+                    "error": str(exc),
+                },
+            )
+        except Exception as exc:
+            self.send_json(
+                500,
+                {
+                    "ok": False,
+                    "saved": False,
+                    "error": str(exc),
+                },
+            )
 
     def do_POST(self):
         path = urlparse(self.path).path
@@ -274,6 +372,7 @@ class CognitiveRuntimeHTTPServer(ThreadingHTTPServer):
         self,
         server_address,
         runtime,
+        config_manager=None,
     ):
         super().__init__(
             server_address,
@@ -281,12 +380,20 @@ class CognitiveRuntimeHTTPServer(ThreadingHTTPServer):
         )
 
         self.runtime = runtime
+        self.config_manager = (
+            config_manager or ConfigurationManager()
+        )
+        self.diagnostics_manager = DiagnosticsManager(
+            runtime=self.runtime,
+            config_manager=self.config_manager,
+        )
 
 
 def create_server(
     runtime,
     host=DEFAULT_HOST,
     port=DEFAULT_PORT,
+    config_manager=None,
 ):
     """
     Create the runtime API server.
@@ -297,6 +404,7 @@ def create_server(
     return CognitiveRuntimeHTTPServer(
         (host, int(port)),
         runtime,
+        config_manager=config_manager,
     )
 
 
@@ -348,6 +456,9 @@ def main():
     print("Health:   GET  /health")
     print("Status:   GET  /status")
     print("Missions: GET  /missions")
+    print("Config:   GET  /config")
+    print("Diag:     GET  /diagnostics")
+    print("Update:   PUT  /config")
     print("Submit:   POST /missions")
     print()
     print("Leave this terminal running.")

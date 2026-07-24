@@ -2,15 +2,25 @@ import json
 import urllib.request
 import urllib.error
 
-from config.robot_bridge import ROBOT_BRIDGE_URL
+from config.config_manager import ConfigurationManager
 
 
-DEFAULT_BASE_URL = ROBOT_BRIDGE_URL
 
 
 class RobotBridgeClient:
-    def __init__(self, base_url=DEFAULT_BASE_URL, timeout=3.0):
-        self.base_url = base_url.rstrip("/")
+    def __init__(
+        self,
+        base_url=None,
+        timeout=3.0,
+        config_manager=None,
+    ):
+        self.config_manager = (
+            config_manager or ConfigurationManager()
+        )
+        resolved_url = (
+            base_url or self.config_manager.robot_bridge_url
+        )
+        self.base_url = resolved_url.rstrip("/")
         self.timeout = timeout
 
     def _request(self, method, path, payload=None):

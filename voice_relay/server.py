@@ -178,7 +178,7 @@ class VoiceRelayHandler(BaseHTTPRequestHandler):
 
         self.send_header(
             "Access-Control-Allow-Methods",
-            "GET, POST, OPTIONS",
+            "GET, POST, PUT, OPTIONS",
         )
 
         self.send_header(
@@ -596,6 +596,52 @@ class VoiceRelayHandler(BaseHTTPRequestHandler):
             )
             return
 
+        if path == "/dashboard/config":
+            response = request_json(
+                "GET",
+                f"{COGNITIVE_RUNTIME_URL}/config",
+                timeout=5.0,
+            )
+
+            self.send_json(
+                response["status_code"] or 503,
+                response["data"] or {
+                    "ok": False,
+                    "error": response["error"] or "Runtime configuration service unavailable.",
+                },
+            )
+            return
+
+        if path == "/dashboard/mission-history":
+            response = request_json(
+                "GET",
+                f"{COGNITIVE_RUNTIME_URL}/mission-history",
+                timeout=5.0,
+            )
+            self.send_json(
+                response["status_code"] or 503,
+                response["data"] or {
+                    "ok": False,
+                    "error": response["error"] or "Mission history service unavailable.",
+                },
+            )
+            return
+
+        if path == "/dashboard/diagnostics":
+            response = request_json(
+                "GET",
+                f"{COGNITIVE_RUNTIME_URL}/diagnostics",
+                timeout=8.0,
+            )
+            self.send_json(
+                response["status_code"] or 503,
+                response["data"] or {
+                    "ok": False,
+                    "error": response["error"] or "Runtime diagnostics service unavailable.",
+                },
+            )
+            return
+
         self.send_json(
             404,
             {
@@ -603,6 +649,56 @@ class VoiceRelayHandler(BaseHTTPRequestHandler):
                 "error": "Not found",
             },
         )
+
+    def do_PUT(self):
+        path = urlparse(self.path).path
+
+        if path != "/dashboard/config":
+            self.send_json(
+                404,
+                {
+                    "ok": False,
+                    "error": "Not found",
+                },
+            )
+            return
+
+        try:
+            payload = self.read_json_body()
+
+            if not isinstance(payload, dict):
+                self.send_json(
+                    400,
+                    {
+                        "ok": False,
+                        "error": "The request body must be a JSON object.",
+                    },
+                )
+                return
+
+            response = request_json(
+                "PUT",
+                f"{COGNITIVE_RUNTIME_URL}/config",
+                payload=payload,
+                timeout=5.0,
+            )
+
+            self.send_json(
+                response["status_code"] or 503,
+                response["data"] or {
+                    "ok": False,
+                    "error": response["error"] or "Runtime configuration service unavailable.",
+                },
+            )
+
+        except ValueError as exc:
+            self.send_json(
+                400,
+                {
+                    "ok": False,
+                    "error": str(exc),
+                },
+            )
 
     def do_POST(self):
         path = urlparse(self.path).path

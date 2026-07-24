@@ -1,0 +1,24 @@
+{
+  "config_version": 1,
+  "robot": {
+    "name": "Tony-01",
+    "model": "Mini Pupper 2",
+    "hostname": "minipupper"
+  },
+  "network": {
+    "robot_ip": "192.168.68.127",
+    "robot_bridge_port": 8090,
+    "brain_ip": "127.0.0.1",
+    "ros_domain": 42
+  },
+  "vision": {
+    "server_url": "http://127.0.0.1:8000/detections/latest"
+  },
+  "speech": {
+    "provider": "browser"
+  },
+  "ui": {
+    "theme": "dark",
+    "camera_layout": "large"
+  }
+}

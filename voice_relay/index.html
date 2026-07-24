@@ -8,7 +8,7 @@
         content="width=device-width, initial-scale=1.0"
     >
 
-    <title>Mini Pupper 2 Operator Dashboard</title>
+    <title>Mini Pupper 2 Operator Console</title>
 
     <style>
         :root {
@@ -384,7 +384,18 @@
     </p>
 </header>
 
-<main>
+<nav class="console-navigation" aria-label="Operator Console navigation">
+    <div class="console-navigation-inner">
+        <button type="button" class="console-nav-button active" data-console-page="missionPage" aria-controls="missionPage" aria-selected="true">Mission Control</button>
+        <button type="button" class="console-nav-button" data-console-page="perceptionPage" aria-controls="perceptionPage" aria-selected="false">Perception</button>
+        <button type="button" class="console-nav-button" data-console-page="conversationPage" aria-controls="conversationPage" aria-selected="false">Conversation</button>
+        <button type="button" class="console-nav-button" data-console-page="historyPage" aria-controls="historyPage" aria-selected="false">Mission History</button>
+        <button type="button" class="console-nav-button" data-console-page="diagnosticsPage" aria-controls="diagnosticsPage" aria-selected="false">Diagnostics</button>
+        <button type="button" class="console-nav-button" data-console-page="administrationPage" aria-controls="administrationPage" aria-selected="false">Administration</button>
+    </div>
+</nav>
+
+<main id="missionPage" class="console-page active">
     <section class="health-grid">
         <div class="card health-card">
             <div
@@ -755,6 +766,128 @@
             <pre id="output">Dashboard ready.</pre>
         </div>
     </section>
+</main>
+
+
+
+<main id="perceptionPage" class="console-page console-placeholder-page" hidden>
+    <section class="console-page-heading">
+        <div><div class="console-eyebrow">Operator Console</div><h2>Perception</h2><p>Dedicated perception tools will be added here while the live camera remains available in Mission Control.</p></div>
+        <span class="console-status-pill planned">Planned</span>
+    </section>
+    <section class="administration-grid"><article class="card administration-card"><div class="administration-card-header"><div class="administration-icon">VIS</div><div><h2>Vision Workspace</h2><p>Future controls for detections, overlays, snapshots, and perception tuning.</p></div></div><div class="administration-field"><span>Live detections</span><strong>Mission Control</strong></div><div class="administration-field"><span>Model controls</span><strong>Coming soon</strong></div></article></section>
+</main>
+
+<main id="conversationPage" class="console-page console-placeholder-page" hidden>
+    <section class="console-page-heading">
+        <div><div class="console-eyebrow">Operator Console</div><h2>Conversation</h2><p>Conversation history, speech controls, and communication channels will be organized here.</p></div>
+        <span class="console-status-pill planned">Planned</span>
+    </section>
+    <section class="administration-grid"><article class="card administration-card"><div class="administration-card-header"><div class="administration-icon">AI</div><div><h2>Conversation Workspace</h2><p>The existing voice-command controls remain active in Mission Control.</p></div></div><div class="administration-field"><span>Voice relay</span><strong>Available</strong></div><div class="administration-field"><span>Conversation history</span><strong>Coming soon</strong></div></article></section>
+</main>
+
+<main id="historyPage" class="console-page mission-history-page" hidden>
+    <section class="console-page-heading">
+        <div><div class="console-eyebrow">Operator Console v4</div><h2>Mission History</h2><p>Review what the robot was asked to do, when it ran, and how it finished.</p></div>
+        <span id="missionHistoryStatusPill" class="console-status-pill planned">Loading history</span>
+    </section>
+    <div id="missionHistoryMessage" class="configuration-message error" role="status" hidden></div>
+    <section class="card mission-history-toolbar">
+        <label>Search<input id="missionHistorySearch" type="search" placeholder="Mission, target, speech, or status"></label>
+        <label>Status<select id="missionHistoryFilter"><option value="ALL">All statuses</option><option value="ACTIVE">Active</option><option value="QUEUED">Queued</option><option value="COMPLETED">Completed</option><option value="CANCELLED">Cancelled</option><option value="REJECTED">Rejected</option><option value="INFO_ONLY">Info only</option></select></label>
+        <button id="refreshMissionHistoryButton" type="button" class="secondary-action">Refresh Now</button>
+    </section>
+    <section class="mission-history-layout">
+        <article class="card mission-history-list-card">
+            <div class="mission-history-card-heading"><div><h2>Timeline</h2><p id="missionHistorySummary">No missions loaded.</p></div></div>
+            <div id="missionHistoryList" class="mission-history-list"></div>
+        </article>
+        <article class="card mission-history-detail-card">
+            <h2>Mission Details</h2>
+            <div id="missionHistoryDetail" class="mission-history-empty">Select a mission to inspect its details.</div>
+        </article>
+    </section>
+</main>
+
+<main id="diagnosticsPage" class="console-page diagnostics-page" hidden>
+    <section class="console-page-heading">
+        <div><div class="console-eyebrow">Operator Console v3</div><h2>Diagnostics</h2><p>Live health, service reachability, host resources, and runtime state.</p></div>
+        <span id="diagnosticsStatusPill" class="console-status-pill planned">Loading diagnostics</span>
+    </section>
+    <div id="diagnosticsMessage" class="configuration-message error" role="status" hidden></div>
+    <section id="serviceHealthGrid" class="diagnostics-service-grid" aria-label="Service health"></section>
+    <section class="diagnostics-grid">
+        <article class="card diagnostics-card"><h2>Brain PC</h2><div id="systemDiagnostics" class="diagnostics-metrics"></div></article>
+        <article class="card diagnostics-card"><h2>Cognitive Runtime</h2><div id="runtimeDiagnostics" class="diagnostics-metrics"></div></article>
+        <article class="card diagnostics-card diagnostics-wide"><div class="diagnostics-card-heading"><div><h2>Service Details</h2><p>Current endpoint status and response latency.</p></div><button id="refreshDiagnosticsButton" type="button" class="secondary-action">Refresh Now</button></div><div id="serviceDiagnostics" class="diagnostics-table-wrap"></div></article>
+    </section>
+</main>
+
+<main id="administrationPage" class="console-page administration-page" hidden>
+    <section class="console-page-heading">
+        <div>
+            <div class="console-eyebrow">Operator Console v3</div>
+            <h2>Administration</h2>
+            <p>Manage the authoritative configuration used by the cognitive platform.</p>
+        </div>
+        <span id="configurationStatusPill" class="console-status-pill planned">Loading configuration</span>
+    </section>
+
+    <form id="configurationForm" class="configuration-form" novalidate>
+        <div id="configurationMessage" class="configuration-message" role="status" aria-live="polite" hidden></div>
+
+        <section class="administration-grid">
+            <article class="card administration-card configuration-card">
+                <div class="administration-card-header">
+                    <div class="administration-icon">ID</div>
+                    <div><h2>Robot Identity</h2><p>How this robot is identified throughout the platform.</p></div>
+                </div>
+                <label class="configuration-field">Robot name<input id="configRobotName" name="robot.name" type="text" required maxlength="64" autocomplete="off"></label>
+                <label class="configuration-field">Model<input id="configRobotModel" name="robot.model" type="text" required maxlength="64" autocomplete="off"></label>
+                <label class="configuration-field">Hostname<input id="configRobotHostname" name="robot.hostname" type="text" required maxlength="253" autocomplete="off"></label>
+            </article>
+
+            <article class="card administration-card configuration-card">
+                <div class="administration-card-header">
+                    <div class="administration-icon">NET</div>
+                    <div><h2>Network</h2><p>Addresses and ports used by the brain and robot body.</p></div>
+                </div>
+                <label class="configuration-field">Robot IP<input id="configRobotIp" name="network.robot_ip" type="text" required inputmode="decimal" autocomplete="off"></label>
+                <label class="configuration-field">Robot Bridge port<input id="configRobotBridgePort" name="network.robot_bridge_port" type="number" required min="1" max="65535" step="1"></label>
+                <label class="configuration-field">Brain IP<input id="configBrainIp" name="network.brain_ip" type="text" required inputmode="decimal" autocomplete="off"></label>
+                <label class="configuration-field">ROS domain<input id="configRosDomain" name="network.ros_domain" type="number" required min="0" max="232" step="1"></label>
+            </article>
+
+            <article class="card administration-card configuration-card">
+                <div class="administration-card-header">
+                    <div class="administration-icon">VIS</div>
+                    <div><h2>Vision</h2><p>Detection service used by the World Model and behaviors.</p></div>
+                </div>
+                <label class="configuration-field">Vision server URL<input id="configVisionServerUrl" name="vision.server_url" type="url" required autocomplete="off"></label>
+            </article>
+
+            <article class="card administration-card configuration-card">
+                <div class="administration-card-header">
+                    <div class="administration-icon">UI</div>
+                    <div><h2>Speech &amp; Interface</h2><p>Operator-facing speech and display preferences.</p></div>
+                </div>
+                <label class="configuration-field">Speech provider<select id="configSpeechProvider" name="speech.provider" required><option value="browser">Browser</option><option value="microphone">Microphone</option></select></label>
+                <label class="configuration-field">Theme<select id="configUiTheme" name="ui.theme" required><option value="dark">Dark</option><option value="light">Light</option></select></label>
+                <label class="configuration-field">Camera layout<select id="configCameraLayout" name="ui.camera_layout" required><option value="large">Large</option><option value="standard">Standard</option></select></label>
+            </article>
+        </section>
+
+        <section class="card configuration-actions-card">
+            <div>
+                <h2>Save Configuration</h2>
+                <p>Changes are validated and written atomically to <code>config/system_config.json</code>. Some service changes require a restart before they take effect.</p>
+            </div>
+            <div class="configuration-actions">
+                <button id="reloadConfigurationButton" type="button" class="secondary-action">Reload</button>
+                <button id="saveConfigurationButton" type="submit">Save Configuration</button>
+            </div>
+        </section>
+    </form>
 </main>
 
 <script>

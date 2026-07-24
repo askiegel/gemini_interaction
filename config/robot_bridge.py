@@ -1,7 +1,10 @@
-"""
-Robot Bridge configuration.
+"""Compatibility helpers for Robot Bridge configuration."""
 
-Update ROBOT_BRIDGE_URL if the Mini Pupper IP address changes.
-"""
+from config.config_manager import ConfigurationManager
 
-ROBOT_BRIDGE_URL = "http://192.168.68.127:8090"
+
+def get_robot_bridge_url():
+    return ConfigurationManager().robot_bridge_url
+
+
+ROBOT_BRIDGE_URL = get_robot_bridge_url()
