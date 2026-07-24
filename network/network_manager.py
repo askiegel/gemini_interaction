@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 
+import base64
 import os
 import platform
 import re
@@ -8,6 +9,7 @@ import socket
 import subprocess
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
+from xml.sax.saxutils import escape as xml_escape
 
 
 class NetworkManagerError(RuntimeError):
@@ -89,12 +91,18 @@ class NetworkManager:
 
         return "unsupported"
 
-    def _run_command(self, command: List[str], timeout: Optional[float] = None) -> str:
+    def _run_command(
+        self,
+        command: List[str],
+        timeout: Optional[float] = None,
+        input_text: Optional[str] = None,
+    ) -> str:
         try:
             result = subprocess.run(
                 command,
                 capture_output=True,
                 text=True,
+                input=input_text,
                 timeout=timeout or self.command_timeout,
                 check=False,
             )
@@ -145,6 +153,32 @@ class NetworkManager:
                 "-Command",
                 command,
             ]
+        )
+
+    def _run_powershell_script(self, script: str) -> str:
+        """Run a PowerShell script through standard input.
+
+        Supplying scripts through standard input prevents Wi-Fi credentials
+        from appearing in the PowerShell process command line.
+        """
+        powershell = shutil.which("powershell.exe")
+
+        if not powershell:
+            raise NetworkManagerError(
+                "powershell.exe is unavailable from WSL."
+            )
+
+        return self._run_command(
+            [
+                powershell,
+                "-NoProfile",
+                "-NonInteractive",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-Command",
+                "-",
+            ],
+            input_text=script,
         )
 
     # ------------------------------------------------------------------
@@ -646,6 +680,375 @@ class NetworkManager:
             "wifi_networks": wifi_networks,
             "interface_details": interface,
         }
+
+    # ------------------------------------------------------------------
+    # Phase 7B network operations
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _validate_ssid(ssid: str) -> str:
+        value = str(ssid or "").strip()
+
+        if not value:
+            raise NetworkManagerError(
+                "A Wi-Fi network name is required."
+            )
+
+        if len(value.encode("utf-8")) > 32:
+            raise NetworkManagerError(
+                "A Wi-Fi network name cannot exceed 32 UTF-8 bytes."
+            )
+
+        if any(ord(character) < 32 for character in value):
+            raise NetworkManagerError(
+                "The Wi-Fi network name contains invalid control characters."
+            )
+
+        return value
+
+    @staticmethod
+    def _validate_password(
+        password: Optional[str],
+    ) -> Optional[str]:
+        if password is None:
+            return None
+
+        value = str(password)
+
+        if not value:
+            return ""
+
+        if len(value) < 8 or len(value) > 63:
+            raise NetworkManagerError(
+                "A WPA/WPA2 Wi-Fi password must contain 8 to 63 characters."
+            )
+
+        if any(ord(character) < 32 for character in value):
+            raise NetworkManagerError(
+                "The Wi-Fi password contains invalid control characters."
+            )
+
+        return value
+
+    @staticmethod
+    def _powershell_single_quote(value: str) -> str:
+        return "'" + str(value).replace("'", "''") + "'"
+
+    def _linux_wifi_devices(self) -> List[Dict[str, Any]]:
+        return [
+            device
+            for device in self._linux_device_status()
+            if device.get("type") == "wifi"
+        ]
+
+    def _linux_connect(
+        self,
+        ssid: str,
+        password: Optional[str],
+    ) -> Dict[str, Any]:
+        if password is None:
+            self._run_nmcli(
+                "connection",
+                "up",
+                "id",
+                ssid,
+            )
+            message = (
+                f"Requested connection using saved profile '{ssid}'."
+            )
+        else:
+            arguments = [
+                "device",
+                "wifi",
+                "connect",
+                ssid,
+            ]
+
+            if password:
+                arguments.extend(["password", password])
+
+            self._run_nmcli(*arguments)
+
+            message = (
+                f"Requested connection to Wi-Fi network '{ssid}'."
+            )
+
+        return {
+            "ok": True,
+            "action": "connect",
+            "backend": "linux_nmcli",
+            "ssid": ssid,
+            "message": message,
+        }
+
+    def _linux_disconnect(self) -> Dict[str, Any]:
+        wifi_devices = self._linux_wifi_devices()
+
+        connected_devices = [
+            device
+            for device in wifi_devices
+            if str(device.get("state") or "").lower()
+            in {"connected", "connecting"}
+        ]
+
+        if not connected_devices:
+            return {
+                "ok": True,
+                "action": "disconnect",
+                "backend": "linux_nmcli",
+                "changed": False,
+                "message": "No connected Linux Wi-Fi interface was found.",
+            }
+
+        disconnected = []
+
+        for device in connected_devices:
+            device_name = device.get("device")
+
+            if not device_name:
+                continue
+
+            self._run_nmcli(
+                "device",
+                "disconnect",
+                device_name,
+            )
+            disconnected.append(device_name)
+
+        return {
+            "ok": True,
+            "action": "disconnect",
+            "backend": "linux_nmcli",
+            "changed": bool(disconnected),
+            "devices": disconnected,
+            "message": (
+                "Disconnected Linux Wi-Fi interface(s): "
+                + ", ".join(disconnected)
+            ),
+        }
+
+    def _linux_forget(self, profile: str) -> Dict[str, Any]:
+        self._run_nmcli(
+            "connection",
+            "delete",
+            "id",
+            profile,
+        )
+
+        return {
+            "ok": True,
+            "action": "forget",
+            "backend": "linux_nmcli",
+            "profile": profile,
+            "message": f"Deleted saved connection '{profile}'.",
+        }
+
+    def _windows_profile_xml(
+        self,
+        ssid: str,
+        password: str,
+    ) -> str:
+        escaped_ssid = xml_escape(ssid)
+        ssid_hex = ssid.encode("utf-8").hex().upper()
+
+        if password:
+            escaped_password = xml_escape(password)
+
+            security = f"""\
+<security>
+    <authEncryption>
+        <authentication>WPA2PSK</authentication>
+        <encryption>AES</encryption>
+        <useOneX>false</useOneX>
+    </authEncryption>
+    <sharedKey>
+        <keyType>passPhrase</keyType>
+        <protected>false</protected>
+        <keyMaterial>{escaped_password}</keyMaterial>
+    </sharedKey>
+</security>"""
+        else:
+            security = """\
+<security>
+    <authEncryption>
+        <authentication>open</authentication>
+        <encryption>none</encryption>
+        <useOneX>false</useOneX>
+    </authEncryption>
+</security>"""
+
+        return f"""\
+<?xml version="1.0"?>
+<WLANProfile xmlns="http://www.microsoft.com/networking/WLAN/profile/v1">
+    <name>{escaped_ssid}</name>
+    <SSIDConfig>
+        <SSID>
+            <hex>{ssid_hex}</hex>
+            <name>{escaped_ssid}</name>
+        </SSID>
+    </SSIDConfig>
+    <connectionType>ESS</connectionType>
+    <connectionMode>auto</connectionMode>
+    <MSM>
+        {security}
+    </MSM>
+</WLANProfile>
+"""
+
+    def _windows_connect(
+        self,
+        ssid: str,
+        password: Optional[str],
+    ) -> Dict[str, Any]:
+        quoted_ssid = self._powershell_single_quote(ssid)
+
+        if password is None:
+            script = f"""
+$ssid = {quoted_ssid}
+& netsh wlan connect name="$ssid" ssid="$ssid"
+if ($LASTEXITCODE -ne 0) {{
+    throw "Windows could not connect using the saved Wi-Fi profile."
+}}
+"""
+            self._run_powershell_script(script)
+
+            message = (
+                f"Requested connection using saved Windows profile '{ssid}'."
+            )
+        else:
+            profile_xml = self._windows_profile_xml(
+                ssid,
+                password,
+            )
+
+            encoded_xml = base64.b64encode(
+                profile_xml.encode("utf-8")
+            ).decode("ascii")
+
+            script = f"""
+$ssid = {quoted_ssid}
+$profileBytes = [Convert]::FromBase64String('{encoded_xml}')
+$tempPath = Join-Path $env:TEMP (
+    'mini-pupper-wifi-' +
+    [Guid]::NewGuid().ToString() +
+    '.xml'
+)
+
+try {{
+    [IO.File]::WriteAllBytes($tempPath, $profileBytes)
+
+    & netsh wlan add profile filename="$tempPath" user=current
+
+    if ($LASTEXITCODE -ne 0) {{
+        throw "Windows could not install the Wi-Fi profile."
+    }}
+
+    & netsh wlan connect name="$ssid" ssid="$ssid"
+
+    if ($LASTEXITCODE -ne 0) {{
+        throw "Windows could not connect to the Wi-Fi network."
+    }}
+}}
+finally {{
+    Remove-Item -LiteralPath $tempPath -Force -ErrorAction SilentlyContinue
+}}
+"""
+            self._run_powershell_script(script)
+
+            message = (
+                f"Installed and requested connection to Windows "
+                f"Wi-Fi network '{ssid}'."
+            )
+
+        return {
+            "ok": True,
+            "action": "connect",
+            "backend": "windows_wsl",
+            "ssid": ssid,
+            "message": message,
+        }
+
+    def _windows_disconnect(self) -> Dict[str, Any]:
+        self._run_powershell(
+            "netsh wlan disconnect"
+        )
+
+        return {
+            "ok": True,
+            "action": "disconnect",
+            "backend": "windows_wsl",
+            "changed": True,
+            "message": "Requested Windows Wi-Fi disconnection.",
+        }
+
+    def _windows_forget(self, profile: str) -> Dict[str, Any]:
+        quoted_profile = self._powershell_single_quote(profile)
+
+        script = f"""
+$profile = {quoted_profile}
+& netsh wlan delete profile name="$profile"
+
+if ($LASTEXITCODE -ne 0) {{
+    throw "Windows could not delete the saved Wi-Fi profile."
+}}
+"""
+        self._run_powershell_script(script)
+
+        return {
+            "ok": True,
+            "action": "forget",
+            "backend": "windows_wsl",
+            "profile": profile,
+            "message": f"Deleted saved Windows profile '{profile}'.",
+        }
+
+    def connect(
+        self,
+        ssid: str,
+        password: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        validated_ssid = self._validate_ssid(ssid)
+        validated_password = self._validate_password(password)
+
+        if self.platform_backend == "windows_wsl":
+            return self._windows_connect(
+                validated_ssid,
+                validated_password,
+            )
+
+        if self.platform_backend == "linux_nmcli":
+            return self._linux_connect(
+                validated_ssid,
+                validated_password,
+            )
+
+        raise NetworkManagerError(
+            "No supported network backend was detected."
+        )
+
+    def disconnect(self) -> Dict[str, Any]:
+        if self.platform_backend == "windows_wsl":
+            return self._windows_disconnect()
+
+        if self.platform_backend == "linux_nmcli":
+            return self._linux_disconnect()
+
+        raise NetworkManagerError(
+            "No supported network backend was detected."
+        )
+
+    def forget(self, profile: str) -> Dict[str, Any]:
+        validated_profile = self._validate_ssid(profile)
+
+        if self.platform_backend == "windows_wsl":
+            return self._windows_forget(validated_profile)
+
+        if self.platform_backend == "linux_nmcli":
+            return self._linux_forget(validated_profile)
+
+        raise NetworkManagerError(
+            "No supported network backend was detected."
+        )
 
     def collect(self, rescan: bool = False) -> Dict[str, Any]:
         if self.platform_backend == "windows_wsl":
