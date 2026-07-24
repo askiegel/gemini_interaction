@@ -85,21 +85,65 @@ class RuntimeAPIHandler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def read_json_body(self):
-        content_length = int(
-            self.headers.get("Content-Length", "0")
-        )
+        content_length_value = self.headers.get(
+            "Content-Length",
+            "",
+        ).strip()
+
+        if not content_length_value:
+            raise ValueError(
+                "The request body must contain valid JSON."
+            )
+
+        try:
+            content_length = int(content_length_value)
+        except ValueError as exc:
+            raise ValueError(
+                "Content-Length must be a valid integer."
+            ) from exc
 
         if content_length <= 0:
-            return {}
+            raise ValueError(
+                "The request body must contain valid JSON."
+            )
 
         raw_body = self.rfile.read(content_length)
 
         try:
             return json.loads(raw_body.decode("utf-8"))
+        except UnicodeDecodeError as exc:
+            raise ValueError(
+                "The request body must use UTF-8 encoding."
+            ) from exc
         except json.JSONDecodeError as exc:
             raise ValueError(
                 "The request body must contain valid JSON."
             ) from exc
+
+    def require_json_request(self):
+        content_type = self.headers.get(
+            "Content-Type",
+            "",
+        )
+
+        media_type = content_type.split(
+            ";",
+            1,
+        )[0].strip().lower()
+
+        if media_type != "application/json":
+            raise ValueError(
+                "Content-Type must be application/json."
+            )
+
+        request_data = self.read_json_body()
+
+        if not isinstance(request_data, dict):
+            raise ValueError(
+                "The request body must be a JSON object."
+            )
+
+        return request_data
 
     def do_OPTIONS(self):
         self.send_response(204)
@@ -297,7 +341,14 @@ class RuntimeAPIHandler(BaseHTTPRequestHandler):
     def do_POST(self):
         path = urlparse(self.path).path
 
-        if path != "/missions":
+        supported_paths = {
+            "/missions",
+            "/network/connect",
+            "/network/disconnect",
+            "/network/forget",
+        }
+
+        if path not in supported_paths:
             self.send_json(
                 404,
                 {
@@ -308,12 +359,73 @@ class RuntimeAPIHandler(BaseHTTPRequestHandler):
             return
 
         try:
-            request_data = self.read_json_body()
+            request_data = self.require_json_request()
 
-            if not isinstance(request_data, dict):
-                raise ValueError(
-                    "The request body must be a JSON object."
+            if path == "/network/connect":
+                ssid = request_data.get("ssid")
+                password = request_data.get("password")
+
+                if not isinstance(ssid, str) or not ssid.strip():
+                    raise ValueError(
+                        "A non-empty ssid is required."
+                    )
+
+                if password is not None and not isinstance(
+                    password,
+                    str,
+                ):
+                    raise ValueError(
+                        "password must be a string when provided."
+                    )
+
+                result = self.server.network_manager.connect(
+                    ssid=ssid.strip(),
+                    password=password,
                 )
+
+                self.send_json(
+                    200,
+                    result,
+                )
+                return
+
+            if path == "/network/disconnect":
+                if request_data:
+                    raise ValueError(
+                        "The disconnect request body must be an "
+                        "empty JSON object."
+                    )
+
+                result = (
+                    self.server.network_manager.disconnect()
+                )
+
+                self.send_json(
+                    200,
+                    result,
+                )
+                return
+
+            if path == "/network/forget":
+                profile = request_data.get("profile")
+
+                if (
+                    not isinstance(profile, str)
+                    or not profile.strip()
+                ):
+                    raise ValueError(
+                        "A non-empty profile is required."
+                    )
+
+                result = self.server.network_manager.forget(
+                    profile=profile.strip(),
+                )
+
+                self.send_json(
+                    200,
+                    result,
+                )
+                return
 
             command_value = request_data.get("command")
             intent_value = request_data.get("intent")
@@ -352,6 +464,7 @@ class RuntimeAPIHandler(BaseHTTPRequestHandler):
                 )
 
                 submission_mode = "parsed_intent"
+
                 command = str(
                     request_data.get("source_text", "")
                 ).strip()
@@ -394,12 +507,20 @@ class RuntimeAPIHandler(BaseHTTPRequestHandler):
                 },
             )
 
+        except NetworkManagerError as exc:
+            self.send_json(
+                503,
+                {
+                    "ok": False,
+                    "error": str(exc),
+                },
+            )
+
         except Exception as exc:
             self.send_json(
                 500,
                 {
                     "ok": False,
-                    "accepted": False,
                     "error": str(exc),
                 },
             )
