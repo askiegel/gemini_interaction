@@ -310,6 +310,137 @@ class TargetLock:
             ),
         }
 
+    def _resolve_waiting_identity(
+        self,
+    ) -> Dict[str, Any]:
+        """
+        Query only the selected persistent identity while waiting.
+
+        Label-based acquisition is never used in this state. Tracking returns
+        to LOCKED only when the World Model reports the same persistent
+        identity with a fresh transient entity ID.
+        """
+        waiting = self._waiting_result()
+
+        if not self.locked_identity_id:
+            return {
+                **waiting,
+                "identity_reacquisition_pending": False,
+                "reason": (
+                    "Identity waiting cannot continue because "
+                    "no persistent identity is selected."
+                ),
+            }
+
+        if not hasattr(
+            self.world_model,
+            "find_latest_entity_by_identity",
+        ):
+            return {
+                **waiting,
+                "identity_lookup_available": False,
+                "reason": (
+                    "Waiting for the selected identity, but "
+                    "the World Model does not provide identity lookup."
+                ),
+            }
+
+        result = (
+            self.world_model
+            .find_latest_entity_by_identity(
+                self.locked_identity_id,
+                max_age_seconds=(
+                    self.max_age_seconds
+                ),
+                refresh=True,
+            )
+        )
+
+        resolved_identity_id = str(
+            result.get("identity_id") or ""
+        ).strip() or None
+
+        if (
+            resolved_identity_id
+            and resolved_identity_id
+            != self.locked_identity_id
+        ):
+            return {
+                **waiting,
+                "identity_lookup_attempted": True,
+                "identity_mismatch": True,
+                "resolved_identity_id": (
+                    resolved_identity_id
+                ),
+                "reason": (
+                    "Identity reacquisition was blocked because "
+                    "the World Model returned a different identity."
+                ),
+            }
+
+        new_entity_id = str(
+            result.get("entity_id") or ""
+        ).strip() or None
+
+        if (
+            not result.get("found")
+            or not new_entity_id
+        ):
+            return {
+                **waiting,
+                "stale": bool(
+                    result.get("stale")
+                ),
+                "identity_lookup_attempted": True,
+                "identity_lookup_result": result,
+                "reason": (
+                    result.get("reason")
+                    or waiting["reason"]
+                ),
+            }
+
+        waiting_since = self.waiting_since
+        waiting_age_seconds = (
+            self._age_seconds(waiting_since)
+            if waiting_since
+            else 0.0
+        )
+
+        self.locked_entity_id = new_entity_id
+        self.tracking_mode = self.MODE_LOCKED
+        self.waiting_since = None
+        self.lost_since = None
+
+        self._remember_visible_observation(
+            result
+        )
+
+        return {
+            **result,
+            "identity_id": self.locked_identity_id,
+            "locked_identity_id": (
+                self.locked_identity_id
+            ),
+            "identity_lost": False,
+            "identity_retained": True,
+            "lock_expired": False,
+            "reacquisition_blocked": False,
+            "label_reacquisition_blocked": True,
+            "identity_reacquisition_pending": False,
+            "identity_lookup_attempted": True,
+            "identity_reacquired": True,
+            "reacquired_entity_id": new_entity_id,
+            "tracking_mode": self.MODE_LOCKED,
+            "previous_waiting_since": waiting_since,
+            "waiting_duration_seconds": (
+                waiting_age_seconds or 0.0
+            ),
+            "reason": (
+                "The selected persistent identity became "
+                "visible again and tracking resumed."
+            ),
+        }
+
     def start_mission(
         self,
         mission_id: Optional[str],
@@ -830,9 +961,8 @@ class TargetLock:
         if (
             self.tracking_mode
             == self.MODE_WAITING_FOR_IDENTITY
-            and self.locked_identity_id
         ):
-            return self._waiting_result()
+            return self._resolve_waiting_identity()
 
         if self.locked_entity_id:
             observation = (

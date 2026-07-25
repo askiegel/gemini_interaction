@@ -213,14 +213,14 @@ def main():
     )
     assert (
         world_model.identity_queries
-        == identity_queries_before
+        == identity_queries_before + 1
     )
 
     print(
         "PASS: repeated waiting did not acquire by label"
     )
     print(
-        "PASS: Phase 3A does not yet attempt identity "
+        "PASS: Phase 3B attempted identity-only "
         "reacquisition"
     )
 
