@@ -68,11 +68,17 @@ class PersonIdentityManager:
     switching one person's identity to another.
     """
 
-    DEFAULT_MAX_IDENTITY_AGE_SECONDS = 3.0
+    DEFAULT_MAX_IDENTITY_AGE_SECONDS = 30.0
     DEFAULT_MINIMUM_MATCH_SCORE = 0.58
     DEFAULT_MINIMUM_SCORE_MARGIN = 0.08
     DEFAULT_MAX_CENTER_DISTANCE_RATIO = 0.38
     DEFAULT_MINIMUM_IOU = 0.05
+
+    # A recently established identity may survive a brief score drop or
+    # small ambiguity margin without creating another identity.
+    DEFAULT_HYSTERESIS_MAX_AGE_SECONDS = 10.0
+    DEFAULT_HYSTERESIS_MINIMUM_MATCH_SCORE = 0.52
+    DEFAULT_HYSTERESIS_MINIMUM_OBSERVATIONS = 2
 
     def __init__(
         self,
@@ -89,6 +95,15 @@ class PersonIdentityManager:
             DEFAULT_MAX_CENTER_DISTANCE_RATIO
         ),
         minimum_iou: float = DEFAULT_MINIMUM_IOU,
+        hysteresis_max_age_seconds: float = (
+            DEFAULT_HYSTERESIS_MAX_AGE_SECONDS
+        ),
+        hysteresis_minimum_match_score: float = (
+            DEFAULT_HYSTERESIS_MINIMUM_MATCH_SCORE
+        ),
+        hysteresis_minimum_observations: int = (
+            DEFAULT_HYSTERESIS_MINIMUM_OBSERVATIONS
+        ),
     ):
         self.max_identity_age_seconds = float(
             max_identity_age_seconds
@@ -104,7 +119,18 @@ class PersonIdentityManager:
         )
         self.minimum_iou = float(minimum_iou)
 
+        self.hysteresis_max_age_seconds = float(
+            hysteresis_max_age_seconds
+        )
+        self.hysteresis_minimum_match_score = float(
+            hysteresis_minimum_match_score
+        )
+        self.hysteresis_minimum_observations = int(
+            hysteresis_minimum_observations
+        )
+
         self.identities: Dict[str, PersonIdentity] = {}
+        self.entity_bindings: Dict[str, str] = {}
 
         self.last_match_diagnostic: Optional[
             Dict[str, Any]
@@ -603,6 +629,13 @@ class PersonIdentityManager:
             identity.identity_id
         ] = identity
 
+        entity_id = detection.get("entity_id")
+
+        if entity_id:
+            self.entity_bindings[
+                entity_id
+            ] = identity.identity_id
+
         return identity
 
     def _update_identity(
@@ -631,8 +664,14 @@ class PersonIdentityManager:
                 )
 
         if detection.get("entity_id"):
+            entity_id = detection["entity_id"]
+
+            self.entity_bindings[
+                entity_id
+            ] = identity.identity_id
+
             identity.transient_entity_id = (
-                detection["entity_id"]
+                entity_id
             )
 
         identity.confidence = float(
@@ -699,18 +738,58 @@ class PersonIdentityManager:
             )
             return result
 
+        current_entity_id = normalized.get(
+            "entity_id"
+        )
+
+        bound_identity_id = (
+            self.entity_bindings.get(
+                current_entity_id
+            )
+            if current_entity_id
+            else None
+        )
+
+        bound_identity = (
+            self.identities.get(
+                bound_identity_id
+            )
+            if bound_identity_id
+            else None
+        )
+
+        previous_identity_ids = (
+            [bound_identity_id]
+            if bound_identity_id
+            else []
+        )
+
         scored_candidates = []
 
-        for identity in self.identities.values():
+        if bound_identity is not None:
+            # Exact registry-entity continuity is deterministic ownership
+            # evidence. Score only the bound identity so unrelated historical
+            # candidates cannot create an ambiguity-driven identity switch.
             diagnostic = self._match_diagnostic(
                 normalized,
-                identity,
+                bound_identity,
             )
 
-            if diagnostic.final_score > 0.0:
-                scored_candidates.append(
-                    (diagnostic, identity)
+            scored_candidates.append(
+                (diagnostic, bound_identity)
+            )
+
+        else:
+            for identity in self.identities.values():
+                diagnostic = self._match_diagnostic(
+                    normalized,
+                    identity,
                 )
+
+                if diagnostic.final_score > 0.0:
+                    scored_candidates.append(
+                        (diagnostic, identity)
+                    )
 
         scored_candidates.sort(
             key=lambda item: item[0].final_score,
@@ -751,20 +830,63 @@ class PersonIdentityManager:
             else None
         )
 
-        if (
+        best_diagnostic = (
+            scored_candidates[0][0]
+            if scored_candidates
+            else None
+        )
+        best_identity = (
+            scored_candidates[0][1]
+            if scored_candidates
+            else None
+        )
+
+        hysteresis_match = (
+            best_diagnostic is not None
+            and best_identity is not None
+            and best_score
+            >= self.hysteresis_minimum_match_score
+            and best_diagnostic.age_seconds is not None
+            and best_diagnostic.age_seconds
+            <= self.hysteresis_max_age_seconds
+            and best_identity.observation_count
+            >= self.hysteresis_minimum_observations
+        )
+
+        if bound_identity is not None:
+            identity = self._update_identity(
+                bound_identity,
+                normalized,
+            )
+            status = "MATCHED"
+            decision_reason = (
+                "The World Model entity ID is already bound "
+                "to this persistent identity."
+            )
+        elif (
             scored_candidates
             and best_score
             >= self.minimum_match_score
             and not ambiguous
         ):
             identity = self._update_identity(
-                scored_candidates[0][1],
+                best_identity,
                 normalized,
             )
             status = "MATCHED"
             decision_reason = (
                 "Best candidate met the minimum match score "
                 "and exceeded the required score margin."
+            )
+        elif hysteresis_match:
+            identity = self._update_identity(
+                best_identity,
+                normalized,
+            )
+            status = "MATCHED_HYSTERESIS"
+            decision_reason = (
+                "A recently established identity was retained "
+                "through a brief score drop or ambiguous margin."
             )
         else:
             identity = self._create_identity(
@@ -789,8 +911,8 @@ class PersonIdentityManager:
                 )
             else:
                 decision_reason = (
-                    "The best candidate score was below the "
-                    "minimum match score."
+                    "The best candidate score was below both the "
+                    "normal and hysteresis match thresholds."
                 )
 
         match_diagnostic = MatchDiagnostic(
@@ -849,10 +971,46 @@ class PersonIdentityManager:
         }
 
         if debug_enabled:
+            decision_telemetry = {
+                **diagnostic_dict,
+                "entity_id": current_entity_id,
+                "previous_identity_ids": (
+                    previous_identity_ids
+                ),
+                "assigned_identity_id": (
+                    identity.identity_id
+                ),
+                "best_candidate_identity_id": (
+                    winner_identity_id
+                ),
+                "match_score": round(
+                    best_score,
+                    4,
+                ),
+                "threshold": round(
+                    self.minimum_match_score,
+                    4,
+                ),
+                "hysteresis_threshold": round(
+                    self.hysteresis_minimum_match_score,
+                    4,
+                ),
+                "runner_up_score": round(
+                    second_score,
+                    4,
+                ),
+                "entity_binding_match": (
+                    bound_identity is not None
+                ),
+                "bound_identity_id": (
+                    bound_identity_id
+                ),
+            }
+
             print(
                 "[IDENTITY_DIAGNOSTIC] "
                 + json.dumps(
-                    diagnostic_dict,
+                    decision_telemetry,
                     sort_keys=True,
                 )
             )
@@ -1047,8 +1205,19 @@ class PersonIdentityManager:
                     identity_id
                 ]
 
+        if removed:
+            removed_set = set(removed)
+
+            self.entity_bindings = {
+                entity_id: identity_id
+                for entity_id, identity_id
+                in self.entity_bindings.items()
+                if identity_id not in removed_set
+            }
+
         return removed
 
     def reset(self):
         self.identities.clear()
+        self.entity_bindings.clear()
         self.last_match_diagnostic = None

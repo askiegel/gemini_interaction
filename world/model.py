@@ -210,6 +210,41 @@ class WorldModel:
 
             self.save()
 
+    def enrich_latest_entity_observation(
+        self,
+        entity_id: str,
+        attributes: Dict[str, Any],
+    ) -> bool:
+        """
+        Enrich an entity and its latest observation without adding another
+        observation to history.
+
+        This is used when deterministic processing later in the same perception
+        frame adds information, such as persistent person identity, to an
+        observation already registered by the Entity Registry.
+        """
+        updates = dict(attributes or {})
+
+        if not updates:
+            return False
+
+        with self._thread_lock:
+            entity = self.entities.get(entity_id)
+
+            if entity is None:
+                return False
+
+            entity.attributes.update(updates)
+
+            if entity.history:
+                entity.history[-1].attributes.update(
+                    updates
+                )
+
+            self.save()
+
+        return True
+
     def get_entity(
         self,
         entity_id: str,
@@ -671,6 +706,24 @@ class WorldModel:
             ),
             "location": location,
             "attributes": attributes,
+            "identity_id": attributes.get(
+                "identity_id"
+            ),
+            "identity_status": attributes.get(
+                "identity_status"
+            ),
+            "identity_match_score": attributes.get(
+                "identity_match_score"
+            ),
+            "identity_ambiguous": bool(
+                attributes.get(
+                    "identity_ambiguous",
+                    False,
+                )
+            ),
+            "identity_diagnostics": attributes.get(
+                "identity_diagnostics"
+            ),
         }
 
         if stale:

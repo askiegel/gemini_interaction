@@ -97,7 +97,9 @@ def main():
 
         print("===== FIRST DETECTION FRAME =====")
 
-        first_frame = adapter.fetch_detections()
+        first_frame = adapter.process_detection_frame(
+            adapter.fetch_detections()
+        )
         first_person = first_frame[0]
         first_backpack = first_frame[1]
 
@@ -119,15 +121,23 @@ def main():
         print()
         print("===== SECOND DETECTION FRAME =====")
 
-        second_frame = adapter.fetch_detections()
+        second_frame = adapter.process_detection_frame(
+            adapter.fetch_detections()
+        )
         second_person = second_frame[0]
         second_backpack = second_frame[1]
 
         print(second_person)
         print(second_backpack)
 
-        assert second_person["entity_id"] == "person-027"
-        assert second_person["entity_id"] != first_person["entity_id"]
+        # Detector-provided IDs are not authoritative. EntityRegistry owns
+        # World Model entity IDs and recognizes the nearby observation as the
+        # same person entity.
+        assert second_person["entity_id"] == "person-001"
+        assert (
+            second_person["entity_id"]
+            == first_person["entity_id"]
+        )
 
         assert second_person["identity_id"] == first_identity_id
         assert second_person["identity_status"] == "MATCHED"
@@ -144,7 +154,7 @@ def main():
         print(normalized)
 
         assert normalized["label"] == "person"
-        assert normalized["entity_id"] == "person-027"
+        assert normalized["entity_id"] == "person-001"
         assert normalized["identity_id"] == first_identity_id
         assert normalized["identity_status"] == "MATCHED"
         assert normalized["identity_match_score"] > 0.0
@@ -161,8 +171,12 @@ def main():
             "to person detections"
         )
         print(
-            "PASS: persistent identity survives transient "
-            "detector-ID changes"
+            "PASS: EntityRegistry preserves the World Model "
+            "entity across nearby observations"
+        )
+        print(
+            "PASS: persistent identity remains attached to "
+            "the registry-owned entity"
         )
         print(
             "PASS: non-person detections remain unchanged"

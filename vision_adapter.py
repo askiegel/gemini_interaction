@@ -150,7 +150,12 @@ class VisionAdapter:
         detections = payload.get("detections", [])
 
         if isinstance(detections, list):
-            return self._assign_person_identities(detections)
+            return [
+                dict(detection)
+                if isinstance(detection, dict)
+                else detection
+                for detection in detections
+            ]
 
         objects = payload.get("objects", [])
 
@@ -321,11 +326,12 @@ class VisionAdapter:
         platform's single source of truth.
         """
         normalized_target = self._normalize_label(target_label)
-        detections = self.fetch_detections()
+        detections = self.process_detection_frame(
+            self.fetch_detections()
+        )
         candidates = []
 
         for detection in detections:
-            self.process_detection(detection)
             normalized = self.normalize_detection(detection)
 
             if normalized["label"] == normalized_target:
@@ -448,6 +454,170 @@ class VisionAdapter:
 
         return []
 
+    def process_detection_frame(
+        self,
+        detections: List[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        """
+        Register one perception frame before assigning persistent identities.
+
+        EntityRegistry remains responsible for deterministic World Model entity
+        ownership. PersonIdentityManager then receives those resolved entity IDs.
+        Identity enrichment updates the already registered observation rather
+        than appending a duplicate history entry.
+        """
+        registered = []
+
+        for detection in detections:
+            if not isinstance(detection, dict):
+                continue
+
+            copied = dict(detection)
+            entity_id = self.process_detection(
+                copied
+            )
+
+            if entity_id:
+                copied["entity_id"] = entity_id
+
+            registered.append(copied)
+
+        # Multiple YOLO person boxes may resolve to the same World Model
+        # entity in one frame. Collapse those duplicate boxes before identity
+        # assignment so assign_identities() does not interpret them as separate
+        # people and create NEW_FRAME_CONFLICT identities.
+        deduplicated = []
+        person_entity_positions = {}
+
+        for detection in registered:
+            label = self._normalize_label(
+                detection.get("label")
+                or detection.get("class")
+                or detection.get("name")
+                or detection.get("object")
+            )
+
+            entity_id = detection.get(
+                "entity_id"
+            )
+
+            if label != "person" or not entity_id:
+                deduplicated.append(detection)
+                continue
+
+            existing_position = (
+                person_entity_positions.get(
+                    entity_id
+                )
+            )
+
+            if existing_position is None:
+                person_entity_positions[
+                    entity_id
+                ] = len(deduplicated)
+                deduplicated.append(detection)
+                continue
+
+            existing = deduplicated[
+                existing_position
+            ]
+
+            existing_rank = (
+                float(
+                    existing.get("confidence")
+                    or existing.get("conf")
+                    or existing.get("score")
+                    or 0.0
+                ),
+                float(
+                    existing.get("area")
+                    or 0.0
+                ),
+            )
+
+            candidate_rank = (
+                float(
+                    detection.get("confidence")
+                    or detection.get("conf")
+                    or detection.get("score")
+                    or 0.0
+                ),
+                float(
+                    detection.get("area")
+                    or 0.0
+                ),
+            )
+
+            if candidate_rank > existing_rank:
+                deduplicated[
+                    existing_position
+                ] = detection
+
+        assigned = self._assign_person_identities(
+            deduplicated
+        )
+
+        identity_fields = (
+            "identity_id",
+            "identity_match_score",
+            "identity_status",
+            "identity_ambiguous",
+            "identity_diagnostics",
+        )
+
+        for detection in assigned:
+            if not isinstance(detection, dict):
+                continue
+
+            if (
+                self._normalize_label(
+                    detection.get("label")
+                    or detection.get("class")
+                    or detection.get("name")
+                    or detection.get("object")
+                )
+                != "person"
+            ):
+                continue
+
+            entity_id = detection.get(
+                "entity_id"
+            )
+
+            if not entity_id:
+                continue
+
+            updates = dict(
+                detection.get("attributes")
+                or {}
+            )
+
+            for identity_field in identity_fields:
+                if identity_field in detection:
+                    updates[identity_field] = (
+                        detection[identity_field]
+                    )
+
+            updates["raw_detection"] = dict(
+                detection
+            )
+
+            enriched = (
+                self.world_model
+                .enrich_latest_entity_observation(
+                    entity_id=entity_id,
+                    attributes=updates,
+                )
+            )
+
+            if not enriched:
+                raise RuntimeError(
+                    "Identity enrichment failed for "
+                    f"World Model entity '{entity_id}'."
+                )
+
+        return assigned
+
     def process_detection(self, detection: Dict[str, Any]) -> Optional[str]:
         label = (
             detection.get("label")
@@ -526,16 +696,18 @@ class VisionAdapter:
         return entity_id
 
     def process_once(self) -> List[str]:
-        entity_ids = []
-        detections = self.fetch_detections()
+        detections = self.process_detection_frame(
+            self.fetch_detections()
+        )
 
-        for detection in detections:
-            entity_id = self.process_detection(detection)
-
-            if entity_id:
-                entity_ids.append(entity_id)
-
-        return entity_ids
+        return [
+            detection["entity_id"]
+            for detection in detections
+            if (
+                isinstance(detection, dict)
+                and detection.get("entity_id")
+            )
+        ]
 
     def run_forever(self):
         self.running = True
@@ -614,19 +786,32 @@ class VisionAdapter:
         if "area" in detection:
             location["area"] = detection["area"]
 
-        if "bbox" in detection:
-            location["bbox"] = detection["bbox"]
+        bbox = self._extract_bbox(detection)
 
-        if all(k in detection for k in ["x1", "y1", "x2", "y2"]):
-            location["bbox"] = [
-                detection["x1"],
-                detection["y1"],
-                detection["x2"],
-                detection["y2"]
-            ]
+        if bbox is not None:
+            location["bbox"] = bbox
 
-            location["cx"] = (detection["x1"] + detection["x2"]) / 2
-            location["cy"] = (detection["y1"] + detection["y2"]) / 2
+            if "cx" not in location:
+                location["cx"] = (
+                    bbox["x1"] + bbox["x2"]
+                ) / 2.0
+
+            if "cy" not in location:
+                location["cy"] = (
+                    bbox["y1"] + bbox["y2"]
+                ) / 2.0
+
+            if "area" not in location:
+                location["area"] = (
+                    max(
+                        0.0,
+                        bbox["x2"] - bbox["x1"],
+                    )
+                    * max(
+                        0.0,
+                        bbox["y2"] - bbox["y1"],
+                    )
+                )
 
         if "image_width" in detection:
             location["image_width"] = detection["image_width"]

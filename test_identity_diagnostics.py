@@ -248,6 +248,15 @@ printed = debug_output.getvalue()
 
 assert "[IDENTITY_DIAGNOSTIC]" in printed
 assert '"decision": "MATCHED"' in printed
+assert '"entity_id": "person-001"' in printed
+assert '"assigned_identity_id":' in printed
+assert '"best_candidate_identity_id":' in printed
+assert '"previous_identity_ids":' in printed
+assert '"match_score":' in printed
+assert '"threshold":' in printed
+assert '"hysteresis_threshold":' in printed
+assert '"runner_up_score":' in printed
+assert first["identity_id"] in printed
 
 print(printed.strip())
 print("PASS: IDENTITY_DEBUG emits JSON diagnostics")
