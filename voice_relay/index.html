@@ -880,7 +880,10 @@
         <article class="card network-card network-wide">
             <div class="network-card-heading">
                 <div><h2>Nearby Wi-Fi</h2><p>Visible networks reported by Windows Wi-Fi or Linux NetworkManager. Credentials are never displayed.</p></div>
-                <button id="scanWifiButton" type="button" class="secondary-action">Scan Again</button>
+                <div class="configuration-actions">
+                    <button id="disconnectNetworkButton" type="button" class="secondary-action">Disconnect</button>
+                    <button id="scanWifiButton" type="button" class="secondary-action">Scan Again</button>
+                </div>
             </div>
             <div id="wifiNetworksTable" class="network-table-wrap"></div>
         </article>
@@ -897,8 +900,8 @@
     </section>
 
     <section class="card network-security-note">
-        <div><strong>Phase 7A status mode</strong><p>The dashboard automatically uses Windows Wi-Fi under WSL2 and NetworkManager on native Linux. Connection controls will be enabled in the next step.</p></div>
-        <span>SAFE</span>
+        <div><strong>Network controls enabled</strong><p>The dashboard uses Windows Wi-Fi under WSL2 and NetworkManager on native Linux. Passwords are sent only to the local Runtime API and are never displayed or stored by the dashboard.</p></div>
+        <span>ACTIVE</span>
     </section>
 </main>
 

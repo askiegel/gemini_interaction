@@ -273,11 +273,53 @@ def _identity_tracking_fields(
         best_score = match_score
 
     return {
+        "tracking_mode": first_value(
+            "tracking_mode",
+        ),
         "locked_entity_id": first_value(
             "locked_entity_id",
         ),
+        "locked_identity_id": first_value(
+            "locked_identity_id",
+            "identity_id",
+        ),
         "identity_id": first_value(
             "identity_id",
+            "locked_identity_id",
+        ),
+        "waiting_since": first_value(
+            "waiting_since",
+        ),
+        "waiting_age_seconds": _number(
+            first_value(
+                "waiting_age_seconds",
+            )
+        ),
+        "identity_reacquisition_pending": bool(
+            first_value(
+                "identity_reacquisition_pending",
+            )
+        ),
+        "identity_lookup_attempted": bool(
+            first_value(
+                "identity_lookup_attempted",
+            )
+        ),
+        "identity_reacquired": bool(
+            first_value(
+                "identity_reacquired",
+            )
+        ),
+        "identity_mismatch": bool(
+            first_value(
+                "identity_mismatch",
+            )
+        ),
+        "reacquired_entity_id": first_value(
+            "reacquired_entity_id",
+        ),
+        "last_entity_migration": first_value(
+            "last_entity_migration",
         ),
         "identity_status": first_value(
             "identity_status",
@@ -317,8 +359,18 @@ def empty_tracking_state(
         "distance_state": None,
         "vision_timestamp": None,
         "detection_age_ms": None,
+        "tracking_mode": "UNLOCKED",
         "locked_entity_id": None,
+        "locked_identity_id": None,
         "identity_id": None,
+        "waiting_since": None,
+        "waiting_age_seconds": None,
+        "identity_reacquisition_pending": False,
+        "identity_lookup_attempted": False,
+        "identity_reacquired": False,
+        "identity_mismatch": False,
+        "reacquired_entity_id": None,
+        "last_entity_migration": None,
         "identity_status": None,
         "identity_match_score": None,
         "identity_ambiguous": False,
@@ -561,10 +613,42 @@ def build_tracking_state(
         ),
         "vision_timestamp": vision_timestamp,
         "detection_age_ms": detection_age_ms,
+        "tracking_mode": (
+            str(identity["tracking_mode"]).strip().upper()
+            if identity["tracking_mode"] is not None
+            else "UNLOCKED"
+        ),
         "locked_entity_id": identity[
             "locked_entity_id"
         ],
+        "locked_identity_id": identity[
+            "locked_identity_id"
+        ],
         "identity_id": identity["identity_id"],
+        "waiting_since": identity[
+            "waiting_since"
+        ],
+        "waiting_age_seconds": identity[
+            "waiting_age_seconds"
+        ],
+        "identity_reacquisition_pending": identity[
+            "identity_reacquisition_pending"
+        ],
+        "identity_lookup_attempted": identity[
+            "identity_lookup_attempted"
+        ],
+        "identity_reacquired": identity[
+            "identity_reacquired"
+        ],
+        "identity_mismatch": identity[
+            "identity_mismatch"
+        ],
+        "reacquired_entity_id": identity[
+            "reacquired_entity_id"
+        ],
+        "last_entity_migration": identity[
+            "last_entity_migration"
+        ],
         "identity_status": identity[
             "identity_status"
         ],

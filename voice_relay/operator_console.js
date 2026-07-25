@@ -78,6 +78,10 @@
             ["Target area", "operatorArea"],
             ["Detection age", "operatorAge"],
             ["Vision FPS", "operatorFps"],
+            ["Tracking mode", "operatorTrackingMode"],
+            ["Locked identity", "operatorLockedIdentity"],
+            ["Locked entity", "operatorLockedEntity"],
+            ["Waiting time", "operatorWaitingTime"],
         ].forEach(([name, id]) => {
             trackingGrid.appendChild(
                 createMetric(name, id)
@@ -492,6 +496,49 @@
             estimatedFps === null
                 ? "Calculating…"
                 : estimatedFps.toFixed(1)
+        );
+
+        const trackingMode = String(
+            tracking.tracking_mode || "UNLOCKED"
+        ).trim().toUpperCase();
+
+        setText(
+            "operatorTrackingMode",
+            trackingMode.replaceAll("_", " ")
+        );
+
+        setText(
+            "operatorLockedIdentity",
+            tracking.locked_identity_id ||
+                tracking.identity_id ||
+                "None"
+        );
+
+        setText(
+            "operatorLockedEntity",
+            tracking.locked_entity_id ||
+                tracking.entity_id ||
+                "None"
+        );
+
+        const waitingAgeSeconds =
+            tracking.waiting_age_seconds;
+
+        setText(
+            "operatorWaitingTime",
+            waitingAgeSeconds === null ||
+            waitingAgeSeconds === undefined
+                ? (
+                    trackingMode ===
+                    "WAITING_FOR_IDENTITY"
+                        ? "Starting…"
+                        : "—"
+                )
+                : (
+                    Number(
+                        waitingAgeSeconds
+                    ).toFixed(1) + " s"
+                )
         );
 
         setText(
@@ -1172,119 +1219,928 @@
     if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", initialize, {once: true}); else initialize();
 })();
 
-/* Operator Console v6 Read-only Network Manager */
+/* Operator Console v6 Network Manager */
 (function () {
     var NETWORK_URL = "/dashboard/network-status";
-    var refreshTimer = null;
+    var CONNECT_URL = "/network/connect";
+    var DISCONNECT_URL = "/network/disconnect";
+    var FORGET_URL = "/network/forget";
 
-    function byId(id) { return document.getElementById(id); }
+    var refreshTimer = null;
+    var operationInProgress = false;
+    var lastPayload = null;
+
+    function byId(id) {
+        return document.getElementById(id);
+    }
+
     function text(value, fallback) {
-        if (value === null || typeof value === "undefined" || value === "") return fallback || "—";
+        if (
+            value === null ||
+            typeof value === "undefined" ||
+            value === ""
+        ) {
+            return fallback || "—";
+        }
+
         return String(value);
     }
+
     function escapeNetworkHtml(value) {
-        return text(value, "").replace(/[&<>"']/g, function (character) {
-            return {"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[character];
-        });
+        return text(value, "").replace(
+            /[&<>"']/g,
+            function (character) {
+                return {
+                    "&": "&amp;",
+                    "<": "&lt;",
+                    ">": "&gt;",
+                    "\"": "&quot;",
+                    "'": "&#39;"
+                }[character];
+            }
+        );
     }
-    function setMessage(message) {
+
+    function setMessage(message, kind) {
         var element = byId("networkMessage");
-        if (!element) return;
+
+        if (!element) {
+            return;
+        }
+
         element.hidden = !message;
         element.textContent = message || "";
+
+        element.className =
+            "configuration-message " +
+            (kind === "success" ? "success" : "error");
     }
+
+    function setNetworkPill(label, state) {
+        var pill = byId("networkStatusPill");
+
+        if (!pill) {
+            return;
+        }
+
+        pill.textContent = label;
+        pill.className =
+            "console-status-pill " + state;
+    }
+
+    function setBusy(busy, label) {
+        operationInProgress = Boolean(busy);
+
+        var scanButton = byId("scanWifiButton");
+        var disconnectButton =
+            byId("disconnectNetworkButton");
+
+        if (scanButton) {
+            scanButton.disabled = operationInProgress;
+        }
+
+        if (disconnectButton) {
+            disconnectButton.disabled =
+                operationInProgress ||
+                !(
+                    lastPayload &&
+                    lastPayload.summary &&
+                    lastPayload.summary.connected
+                );
+        }
+
+        var actionButtons = document.querySelectorAll(
+            "#networkPage [data-network-action]"
+        );
+
+        actionButtons.forEach(function (button) {
+            button.disabled = operationInProgress;
+        });
+
+        if (operationInProgress) {
+            setNetworkPill(
+                label || "Network operation...",
+                "planned"
+            );
+        }
+    }
+
     function signalMarkup(signal) {
         var number = Number(signal);
-        if (!Number.isFinite(number)) return "—";
-        var bounded = Math.max(0, Math.min(100, number));
-        return '<span class="network-signal"><span class="network-signal-meter"><i style="width:' + bounded + '%"></i></span><strong>' + bounded + '%</strong></span>';
+
+        if (!Number.isFinite(number)) {
+            return "—";
+        }
+
+        var bounded = Math.max(
+            0,
+            Math.min(100, number)
+        );
+
+        return (
+            '<span class="network-signal">' +
+                '<span class="network-signal-meter">' +
+                    '<i style="width:' +
+                        bounded +
+                        '%"></i>' +
+                '</span>' +
+                '<strong>' +
+                    bounded +
+                    '%</strong>' +
+            '</span>'
+        );
     }
+
+    function networkIsOpen(network) {
+        var security = text(
+            network.security,
+            ""
+        ).toLowerCase();
+
+        return (
+            !security ||
+            security === "open" ||
+            security === "none" ||
+            security === "--"
+        );
+    }
+
     function renderWifi(networks) {
         var target = byId("wifiNetworksTable");
-        if (!target) return;
-        if (!networks.length) {
-            target.innerHTML = '<div class="mission-history-empty">No Wi-Fi networks were reported.</div>';
+
+        if (!target) {
             return;
         }
-        target.innerHTML = '<table class="network-table"><thead><tr><th>SSID</th><th>Status</th><th>Signal</th><th>Security</th><th>Channel</th><th>Rate</th></tr></thead><tbody>' + networks.map(function (network) {
-            return '<tr class="' + (network.in_use ? 'network-active-row' : '') + '"><td><strong>' + escapeNetworkHtml(network.ssid) + '</strong></td><td>' + (network.in_use ? 'Connected' : 'Available') + '</td><td>' + signalMarkup(network.signal) + '</td><td>' + escapeNetworkHtml(network.security || 'Open') + '</td><td>' + escapeNetworkHtml(text(network.channel)) + '</td><td>' + escapeNetworkHtml(text(network.rate)) + '</td></tr>';
-        }).join("") + '</tbody></table>';
+
+        if (!networks.length) {
+            target.innerHTML =
+                '<div class="mission-history-empty">' +
+                'No Wi-Fi networks were reported.' +
+                '</div>';
+            return;
+        }
+
+        target.innerHTML =
+            '<table class="network-table">' +
+                '<thead>' +
+                    '<tr>' +
+                        '<th>SSID</th>' +
+                        '<th>Status</th>' +
+                        '<th>Signal</th>' +
+                        '<th>Security</th>' +
+                        '<th>Channel</th>' +
+                        '<th>Rate</th>' +
+                        '<th>Action</th>' +
+                    '</tr>' +
+                '</thead>' +
+                '<tbody>' +
+                    networks.map(function (network) {
+                        var ssid = text(
+                            network.ssid,
+                            ""
+                        );
+
+                        var action = network.in_use
+                            ? (
+                                '<button ' +
+                                    'type="button" ' +
+                                    'class="secondary-action" ' +
+                                    'data-network-action="disconnect">' +
+                                    'Disconnect' +
+                                '</button>'
+                            )
+                            : (
+                                '<button ' +
+                                    'type="button" ' +
+                                    'class="secondary-action" ' +
+                                    'data-network-action="connect" ' +
+                                    'data-network-ssid="' +
+                                    escapeNetworkHtml(ssid) +
+                                    '" ' +
+                                    'data-network-open="' +
+                                    (
+                                        networkIsOpen(network)
+                                            ? "true"
+                                            : "false"
+                                    ) +
+                                    '">' +
+                                    'Connect' +
+                                '</button>'
+                            );
+
+                        return (
+                            '<tr class="' +
+                                (
+                                    network.in_use
+                                        ? "network-active-row"
+                                        : ""
+                                ) +
+                                '">' +
+                                '<td><strong>' +
+                                    escapeNetworkHtml(ssid) +
+                                '</strong></td>' +
+                                '<td>' +
+                                    (
+                                        network.in_use
+                                            ? "Connected"
+                                            : "Available"
+                                    ) +
+                                '</td>' +
+                                '<td>' +
+                                    signalMarkup(network.signal) +
+                                '</td>' +
+                                '<td>' +
+                                    escapeNetworkHtml(
+                                        network.security || "Open"
+                                    ) +
+                                '</td>' +
+                                '<td>' +
+                                    escapeNetworkHtml(
+                                        text(network.channel)
+                                    ) +
+                                '</td>' +
+                                '<td>' +
+                                    escapeNetworkHtml(
+                                        text(network.rate)
+                                    ) +
+                                '</td>' +
+                                '<td>' +
+                                    action +
+                                '</td>' +
+                            '</tr>'
+                        );
+                    }).join("") +
+                '</tbody>' +
+            '</table>';
     }
+
     function renderDevices(devices) {
         var target = byId("networkDevicesTable");
-        if (!target) return;
-        if (!devices.length) {
-            target.innerHTML = '<div class="mission-history-empty">No network devices were reported.</div>';
+
+        if (!target) {
             return;
         }
-        target.innerHTML = '<table class="network-table"><thead><tr><th>Device</th><th>Type</th><th>State</th><th>Connection</th></tr></thead><tbody>' + devices.map(function (device) {
-            return '<tr><td><strong>' + escapeNetworkHtml(device.device) + '</strong></td><td>' + escapeNetworkHtml(device.type) + '</td><td>' + escapeNetworkHtml(device.state) + '</td><td>' + escapeNetworkHtml(text(device.connection)) + '</td></tr>';
-        }).join("") + '</tbody></table>';
+
+        if (!devices.length) {
+            target.innerHTML =
+                '<div class="mission-history-empty">' +
+                'No network devices were reported.' +
+                '</div>';
+            return;
+        }
+
+        target.innerHTML =
+            '<table class="network-table">' +
+                '<thead>' +
+                    '<tr>' +
+                        '<th>Device</th>' +
+                        '<th>Type</th>' +
+                        '<th>State</th>' +
+                        '<th>Connection</th>' +
+                    '</tr>' +
+                '</thead>' +
+                '<tbody>' +
+                    devices.map(function (device) {
+                        return (
+                            '<tr>' +
+                                '<td><strong>' +
+                                    escapeNetworkHtml(device.device) +
+                                '</strong></td>' +
+                                '<td>' +
+                                    escapeNetworkHtml(device.type) +
+                                '</td>' +
+                                '<td>' +
+                                    escapeNetworkHtml(device.state) +
+                                '</td>' +
+                                '<td>' +
+                                    escapeNetworkHtml(
+                                        text(device.connection)
+                                    ) +
+                                '</td>' +
+                            '</tr>'
+                        );
+                    }).join("") +
+                '</tbody>' +
+            '</table>';
     }
+
     function renderSaved(connections) {
         var target = byId("savedConnectionsTable");
-        if (!target) return;
-        if (!connections.length) {
-            target.innerHTML = '<div class="mission-history-empty">No saved connections were reported.</div>';
+
+        if (!target) {
             return;
         }
-        target.innerHTML = '<table class="network-table"><thead><tr><th>Name</th><th>Type</th><th>Device</th><th>Status</th></tr></thead><tbody>' + connections.map(function (connection) {
-            return '<tr class="' + (connection.active ? 'network-active-row' : '') + '"><td><strong>' + escapeNetworkHtml(connection.name) + '</strong></td><td>' + escapeNetworkHtml(connection.type) + '</td><td>' + escapeNetworkHtml(text(connection.device)) + '</td><td>' + (connection.active ? 'Active' : 'Saved') + '</td></tr>';
-        }).join("") + '</tbody></table>';
+
+        if (!connections.length) {
+            target.innerHTML =
+                '<div class="mission-history-empty">' +
+                'No saved connections were reported.' +
+                '</div>';
+            return;
+        }
+
+        target.innerHTML =
+            '<table class="network-table">' +
+                '<thead>' +
+                    '<tr>' +
+                        '<th>Name</th>' +
+                        '<th>Type</th>' +
+                        '<th>Device</th>' +
+                        '<th>Status</th>' +
+                        '<th>Actions</th>' +
+                    '</tr>' +
+                '</thead>' +
+                '<tbody>' +
+                    connections.map(function (connection) {
+                        var name = text(
+                            connection.name,
+                            ""
+                        );
+
+                        var connectAction =
+                            connection.active
+                                ? (
+                                    '<button ' +
+                                        'type="button" ' +
+                                        'class="secondary-action" ' +
+                                        'data-network-action=' +
+                                        '"disconnect">' +
+                                        'Disconnect' +
+                                    '</button>'
+                                )
+                                : (
+                                    '<button ' +
+                                        'type="button" ' +
+                                        'class="secondary-action" ' +
+                                        'data-network-action="connect-saved" ' +
+                                        'data-network-ssid="' +
+                                        escapeNetworkHtml(name) +
+                                        '">' +
+                                        'Connect' +
+                                    '</button>'
+                                );
+
+                        var forgetAction =
+                            '<button ' +
+                                'type="button" ' +
+                                'class="secondary-action" ' +
+                                'data-network-action="forget" ' +
+                                'data-network-profile="' +
+                                escapeNetworkHtml(name) +
+                                '">' +
+                                'Forget' +
+                            '</button>';
+
+                        return (
+                            '<tr class="' +
+                                (
+                                    connection.active
+                                        ? "network-active-row"
+                                        : ""
+                                ) +
+                                '">' +
+                                '<td><strong>' +
+                                    escapeNetworkHtml(name) +
+                                '</strong></td>' +
+                                '<td>' +
+                                    escapeNetworkHtml(
+                                        connection.type
+                                    ) +
+                                '</td>' +
+                                '<td>' +
+                                    escapeNetworkHtml(
+                                        text(connection.device)
+                                    ) +
+                                '</td>' +
+                                '<td>' +
+                                    (
+                                        connection.active
+                                            ? "Active"
+                                            : "Saved"
+                                    ) +
+                                '</td>' +
+                                '<td>' +
+                                    connectAction +
+                                    " " +
+                                    forgetAction +
+                                '</td>' +
+                            '</tr>'
+                        );
+                    }).join("") +
+                '</tbody>' +
+            '</table>';
     }
+
     function render(payload) {
+        lastPayload = payload;
+
         var summary = payload.summary || {};
-        byId("networkConnectionSummary").textContent = summary.connected ? text(summary.active_connection, "Connected") : "Disconnected";
-        byId("networkWifiSummary").textContent = text(summary.active_wifi_ssid, "Not connected");
-        byId("networkSignalSummary").textContent = Number.isFinite(Number(summary.wifi_signal)) ? summary.wifi_signal + "%" : "—";
-        byId("networkHostnameSummary").textContent = text(payload.hostname);
-        byId("networkManagedSummary").textContent = text(summary.managed_device_count, "0") + " of " + text(summary.device_count, "0");
-        var collectedAt = payload.collected_at ? new Date(payload.collected_at) : null;
-        byId("networkUpdatedSummary").textContent = collectedAt && !isNaN(collectedAt.getTime()) ? collectedAt.toLocaleTimeString() : "—";
+
+        byId(
+            "networkConnectionSummary"
+        ).textContent = summary.connected
+            ? text(
+                summary.active_connection,
+                "Connected"
+            )
+            : "Disconnected";
+
+        byId(
+            "networkWifiSummary"
+        ).textContent = text(
+            summary.active_wifi_ssid,
+            "Not connected"
+        );
+
+        byId(
+            "networkSignalSummary"
+        ).textContent =
+            Number.isFinite(
+                Number(summary.wifi_signal)
+            )
+                ? summary.wifi_signal + "%"
+                : "—";
+
+        byId(
+            "networkHostnameSummary"
+        ).textContent = text(payload.hostname);
+
+        byId(
+            "networkManagedSummary"
+        ).textContent =
+            text(
+                summary.managed_device_count,
+                "0"
+            ) +
+            " of " +
+            text(
+                summary.device_count,
+                "0"
+            );
+
+        var collectedAt = payload.collected_at
+            ? new Date(payload.collected_at)
+            : null;
+
+        byId(
+            "networkUpdatedSummary"
+        ).textContent =
+            collectedAt &&
+            !isNaN(collectedAt.getTime())
+                ? collectedAt.toLocaleTimeString()
+                : "—";
+
         renderWifi(payload.wifi_networks || []);
         renderDevices(payload.devices || []);
         renderSaved(payload.saved_connections || []);
-        var pill = byId("networkStatusPill");
-        if (pill) {
-            pill.textContent = summary.connected ? "Network online" : "Network disconnected";
-            pill.className = "console-status-pill " + (summary.connected ? "success" : "error");
+
+        setNetworkPill(
+            summary.connected
+                ? "Network online"
+                : "Network disconnected",
+            summary.connected
+                ? "success"
+                : "error"
+        );
+
+        var disconnectButton =
+            byId("disconnectNetworkButton");
+
+        if (disconnectButton) {
+            disconnectButton.disabled =
+                operationInProgress ||
+                !summary.connected;
         }
+
         if (payload.backend === "windows_wsl") {
-            setMessage("Windows Wi-Fi is being managed through the WSL cross-platform backend.");
-        } else if (!summary.networkmanager_managing_interfaces) {
-            setMessage("NetworkManager is installed, but it is not managing any reported interface. Wi-Fi scans and saved profiles may be unavailable until Netplan or the host network renderer is configured to use NetworkManager.");
-        } else if (!summary.wifi_device_count) {
-            setMessage("No Wi-Fi adapter was reported by the active network backend. Ethernet information remains available.");
-        } else {
+            setMessage(
+                "Windows Wi-Fi is being managed through " +
+                "the WSL cross-platform backend.",
+                "success"
+            );
+        }
+        else if (
+            !summary.networkmanager_managing_interfaces
+        ) {
+            setMessage(
+                "NetworkManager is installed, but it is " +
+                "not managing any reported interface. " +
+                "Wi-Fi scans and saved profiles may be " +
+                "unavailable until the host network " +
+                "renderer uses NetworkManager.",
+                "error"
+            );
+        }
+        else if (!summary.wifi_device_count) {
+            setMessage(
+                "No Wi-Fi adapter was reported by the " +
+                "active network backend. Ethernet " +
+                "information remains available.",
+                "error"
+            );
+        }
+        else {
             setMessage("");
         }
     }
-    function refresh(rescan) {
-        var scanButton = byId("scanWifiButton");
-        if (scanButton && rescan) { scanButton.disabled = true; scanButton.textContent = "Scanning..."; }
-        fetch(NETWORK_URL + (rescan ? "?rescan=true" : ""), {cache: "no-store"})
-            .then(function (response) { return response.json().then(function (payload) { return {response: response, payload: payload}; }); })
-            .then(function (result) {
-                if (!result.response.ok || result.payload.ok === false) throw new Error(result.payload.error || "Network request failed.");
-                render(result.payload);
+
+    function parseJsonResponse(response) {
+        return response.json()
+            .catch(function () {
+                return {
+                    ok: false,
+                    error:
+                        "The server returned an invalid " +
+                        "JSON response."
+                };
             })
-            .catch(function (error) {
-                setMessage(error.message || String(error));
-                var pill = byId("networkStatusPill");
-                if (pill) { pill.textContent = "Network unavailable"; pill.className = "console-status-pill error"; }
-            })
-            .finally(function () {
-                if (scanButton) { scanButton.disabled = false; scanButton.textContent = "Scan Again"; }
+            .then(function (payload) {
+                return {
+                    response: response,
+                    payload: payload
+                };
             });
     }
-    function initialize() {
-        if (!byId("networkPage")) return;
-        var scanButton = byId("scanWifiButton");
-        if (scanButton) scanButton.addEventListener("click", function () { refresh(true); });
-        refresh(false);
-        if (refreshTimer) clearInterval(refreshTimer);
-        refreshTimer = setInterval(function () { refresh(false); }, 10000);
+
+    function postJson(url, payload) {
+        return fetch(
+            url,
+            {
+                method: "POST",
+                headers: {
+                    "Content-Type":
+                        "application/json"
+                },
+                body: JSON.stringify(payload)
+            }
+        )
+            .then(parseJsonResponse)
+            .then(function (result) {
+                if (
+                    !result.response.ok ||
+                    result.payload.ok === false
+                ) {
+                    throw new Error(
+                        result.payload.error ||
+                        "Network operation failed."
+                    );
+                }
+
+                return result.payload;
+            });
     }
-    if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", initialize);
-    else initialize();
+
+    function refresh(rescan) {
+        var scanButton = byId("scanWifiButton");
+
+        if (scanButton && rescan) {
+            scanButton.disabled = true;
+            scanButton.textContent = "Scanning...";
+        }
+
+        return fetch(
+            NETWORK_URL +
+                (rescan ? "?rescan=true" : ""),
+            {
+                cache: "no-store"
+            }
+        )
+            .then(parseJsonResponse)
+            .then(function (result) {
+                if (
+                    !result.response.ok ||
+                    result.payload.ok === false
+                ) {
+                    throw new Error(
+                        result.payload.error ||
+                        "Network request failed."
+                    );
+                }
+
+                render(result.payload);
+
+                return result.payload;
+            })
+            .catch(function (error) {
+                setMessage(
+                    error.message || String(error),
+                    "error"
+                );
+
+                setNetworkPill(
+                    "Network unavailable",
+                    "error"
+                );
+
+                throw error;
+            })
+            .finally(function () {
+                if (scanButton) {
+                    scanButton.disabled =
+                        operationInProgress;
+
+                    scanButton.textContent =
+                        "Scan Again";
+                }
+            });
+    }
+
+    function connectNetwork(ssid, requestPassword) {
+        if (!ssid) {
+            setMessage(
+                "The selected Wi-Fi network has no SSID.",
+                "error"
+            );
+            return;
+        }
+
+        var password;
+
+        if (requestPassword) {
+            password = window.prompt(
+                "Enter the Wi-Fi password for:\n\n" +
+                ssid +
+                "\n\nThe password will not be displayed " +
+                "or stored by the dashboard."
+            );
+
+            if (password === null) {
+                return;
+            }
+
+            if (!password) {
+                setMessage(
+                    "A password is required for " +
+                    ssid +
+                    ".",
+                    "error"
+                );
+                return;
+            }
+        }
+
+        var payload = {
+            ssid: ssid
+        };
+
+        if (typeof password === "string") {
+            payload.password = password;
+        }
+
+        setBusy(
+            true,
+            "Connecting..."
+        );
+
+        setMessage(
+            "Connecting to " + ssid + "...",
+            "success"
+        );
+
+        postJson(
+            CONNECT_URL,
+            payload
+        )
+            .then(function () {
+                return refresh(true);
+            })
+            .then(function () {
+                setMessage(
+                    "Connected to " + ssid + ".",
+                    "success"
+                );
+            })
+            .catch(function (error) {
+                setMessage(
+                    error.message || String(error),
+                    "error"
+                );
+            })
+            .finally(function () {
+                setBusy(false);
+            });
+    }
+
+    function disconnectNetwork() {
+        var confirmed = window.confirm(
+            "Disconnect the Brain PC from its " +
+            "current network connection?\n\n" +
+            "The Operator Console may become " +
+            "temporarily unavailable."
+        );
+
+        if (!confirmed) {
+            return;
+        }
+
+        setBusy(
+            true,
+            "Disconnecting..."
+        );
+
+        setMessage(
+            "Disconnecting the active network...",
+            "success"
+        );
+
+        postJson(
+            DISCONNECT_URL,
+            {}
+        )
+            .then(function () {
+                return refresh(false);
+            })
+            .then(function () {
+                setMessage(
+                    "The active network was disconnected.",
+                    "success"
+                );
+            })
+            .catch(function (error) {
+                setMessage(
+                    error.message || String(error),
+                    "error"
+                );
+            })
+            .finally(function () {
+                setBusy(false);
+            });
+    }
+
+    function forgetNetwork(profile) {
+        if (!profile) {
+            setMessage(
+                "The selected saved connection has no " +
+                "profile name.",
+                "error"
+            );
+            return;
+        }
+
+        var confirmed = window.confirm(
+            "Forget the saved network profile:\n\n" +
+            profile +
+            "\n\nThe stored Wi-Fi credentials will be " +
+            "removed from the Brain PC."
+        );
+
+        if (!confirmed) {
+            return;
+        }
+
+        setBusy(
+            true,
+            "Forgetting profile..."
+        );
+
+        setMessage(
+            "Removing saved profile " +
+            profile +
+            "...",
+            "success"
+        );
+
+        postJson(
+            FORGET_URL,
+            {
+                profile: profile
+            }
+        )
+            .then(function () {
+                return refresh(true);
+            })
+            .then(function () {
+                setMessage(
+                    "Forgot saved profile " +
+                    profile +
+                    ".",
+                    "success"
+                );
+            })
+            .catch(function (error) {
+                setMessage(
+                    error.message || String(error),
+                    "error"
+                );
+            })
+            .finally(function () {
+                setBusy(false);
+            });
+    }
+
+    function handleNetworkAction(event) {
+        var button = event.target.closest(
+            "[data-network-action]"
+        );
+
+        if (
+            !button ||
+            operationInProgress
+        ) {
+            return;
+        }
+
+        var action = button.getAttribute(
+            "data-network-action"
+        );
+
+        if (action === "connect") {
+            connectNetwork(
+                button.getAttribute(
+                    "data-network-ssid"
+                ),
+                button.getAttribute(
+                    "data-network-open"
+                ) !== "true"
+            );
+        }
+        else if (action === "connect-saved") {
+            connectNetwork(
+                button.getAttribute(
+                    "data-network-ssid"
+                ),
+                false
+            );
+        }
+        else if (action === "disconnect") {
+            disconnectNetwork();
+        }
+        else if (action === "forget") {
+            forgetNetwork(
+                button.getAttribute(
+                    "data-network-profile"
+                )
+            );
+        }
+    }
+
+    function initialize() {
+        var page = byId("networkPage");
+
+        if (!page) {
+            return;
+        }
+
+        var scanButton = byId("scanWifiButton");
+        var disconnectButton =
+            byId("disconnectNetworkButton");
+
+        if (scanButton) {
+            scanButton.addEventListener(
+                "click",
+                function () {
+                    if (!operationInProgress) {
+                        refresh(true).catch(
+                            function () {}
+                        );
+                    }
+                }
+            );
+        }
+
+        if (disconnectButton) {
+            disconnectButton.addEventListener(
+                "click",
+                function () {
+                    if (!operationInProgress) {
+                        disconnectNetwork();
+                    }
+                }
+            );
+        }
+
+        page.addEventListener(
+            "click",
+            handleNetworkAction
+        );
+
+        refresh(false).catch(
+            function () {}
+        );
+
+        if (refreshTimer) {
+            clearInterval(refreshTimer);
+        }
+
+        refreshTimer = setInterval(
+            function () {
+                if (!operationInProgress) {
+                    refresh(false).catch(
+                        function () {}
+                    );
+                }
+            },
+            10000
+        );
+    }
+
+    if (document.readyState === "loading") {
+        document.addEventListener(
+            "DOMContentLoaded",
+            initialize
+        );
+    }
+    else {
+        initialize();
+    }
 })();

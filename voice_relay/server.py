@@ -475,6 +475,45 @@ class VoiceRelayHandler(BaseHTTPRequestHandler):
             },
         }
 
+    def relay_runtime_json(
+        self,
+        method,
+        runtime_path,
+        payload=None,
+        timeout=15.0,
+    ):
+        """
+        Forward a JSON request to the Cognitive Runtime API.
+
+        The browser communicates only with the Voice Relay. The relay
+        preserves the Runtime API status code and response body so the
+        Operator Console receives the authoritative backend result.
+        """
+        response = request_json(
+            method,
+            f"{COGNITIVE_RUNTIME_URL}{runtime_path}",
+            payload=payload,
+            timeout=timeout,
+        )
+
+        status_code = response["status_code"] or 503
+
+        response_payload = response["data"]
+
+        if not isinstance(response_payload, dict):
+            response_payload = {
+                "ok": False,
+                "error": (
+                    response["error"]
+                    or "Cognitive Runtime API is unavailable."
+                ),
+            }
+
+        self.send_json(
+            status_code,
+            response_payload,
+        )
+
     def do_OPTIONS(self):
         self.send_response(204)
         self.send_cors_headers()
@@ -627,7 +666,10 @@ class VoiceRelayHandler(BaseHTTPRequestHandler):
             )
             return
 
-        if path == "/dashboard/network-status":
+        if path in (
+            "/dashboard/network-status",
+            "/dashboard/network",
+        ):
             query = urlparse(self.path).query
             target_url = f"{COGNITIVE_RUNTIME_URL}/network-status"
             if query:
@@ -737,6 +779,62 @@ class VoiceRelayHandler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         path = urlparse(self.path).path
+
+        if path in (
+            "/network/connect",
+            "/network/disconnect",
+            "/network/forget",
+        ):
+            try:
+                content_type = self.headers.get(
+                    "Content-Type",
+                    "",
+                )
+
+                media_type = content_type.split(
+                    ";",
+                    1,
+                )[0].strip().lower()
+
+                if media_type != "application/json":
+                    raise ValueError(
+                        "Content-Type must be application/json."
+                    )
+
+                request_data = self.read_json_body()
+
+                if not isinstance(request_data, dict):
+                    raise ValueError(
+                        "The request body must be a JSON object."
+                    )
+
+                self.relay_runtime_json(
+                    "POST",
+                    path,
+                    payload=request_data,
+                    timeout=20.0,
+                )
+
+            except ValueError as exc:
+                self.send_json(
+                    400,
+                    {
+                        "ok": False,
+                        "error": str(exc),
+                    },
+                )
+
+            except Exception as exc:
+                self.send_json(
+                    500,
+                    {
+                        "ok": False,
+                        "error": str(exc),
+                    },
+                )
+
+            return
+
 
         try:
             if path == "/conversation":
