@@ -67,6 +67,7 @@ class TargetLock:
         self.last_visible_at: Optional[str] = None
         self.lost_since: Optional[str] = None
         self.waiting_since: Optional[str] = None
+        self.waiting_entity_id: Optional[str] = None
         self.last_seen_direction: Optional[str] = None
 
     @staticmethod
@@ -197,6 +198,7 @@ class TargetLock:
         self.last_visible_at = None
         self.lost_since = None
         self.waiting_since = None
+        self.waiting_entity_id = None
         self.last_seen_direction = None
 
         self.prediction_tracker.reset()
@@ -212,6 +214,7 @@ class TargetLock:
         self.last_visible_at = None
         self.lost_since = None
         self.waiting_since = None
+        self.waiting_entity_id = None
         self.last_seen_direction = None
 
         self.prediction_tracker.reset()
@@ -231,6 +234,10 @@ class TargetLock:
         if self.waiting_since is None:
             self.waiting_since = self._now_iso()
 
+        # Release the active transient lock so WAITING_FOR_IDENTITY remains
+        # stationary and reports locked_entity_id=None. Preserve the expired
+        # entity separately for exact-entity continuity checks only.
+        self.waiting_entity_id = expired_entity_id
         self.locked_entity_id = None
         self.tracking_mode = self.MODE_WAITING_FOR_IDENTITY
 
@@ -260,6 +267,7 @@ class TargetLock:
                 self.MODE_WAITING_FOR_IDENTITY
             ),
             "waiting_since": self.waiting_since,
+            "waiting_entity_id": self.waiting_entity_id,
             "recovery_direction": None,
             "reason": (
                 "Predictive recovery expired. The transient "
@@ -321,6 +329,100 @@ class TargetLock:
         identity with a fresh transient entity ID.
         """
         waiting = self._waiting_result()
+
+        # Before searching by persistent identity, check continuity through
+        # the exact transient entity that was selected before recovery
+        # expired. This never performs label-based reacquisition.
+        #
+        # If that exact entity is fresh again, its current identity assignment
+        # is authoritative for continuity. This handles identity refinement
+        # such as old temporary identity -> stable identity while preventing a
+        # different person from stealing the lock.
+        if (
+            self.waiting_entity_id
+            and hasattr(self.world_model, "get_entity")
+        ):
+            waiting_entity_id = self.waiting_entity_id
+            self.locked_entity_id = waiting_entity_id
+
+            try:
+                continuity_result = self._query_locked_entity()
+            finally:
+                self.locked_entity_id = None
+
+            if continuity_result.get("found"):
+                observed_identity_id = str(
+                    continuity_result.get("identity_id") or ""
+                ).strip() or None
+
+                previous_identity_id = self.locked_identity_id
+                identity_refreshed = bool(
+                    observed_identity_id
+                    and observed_identity_id
+                    != previous_identity_id
+                )
+
+                if identity_refreshed:
+                    self.locked_identity_id = observed_identity_id
+
+                waiting_since = self.waiting_since
+                waiting_age_seconds = (
+                    self._age_seconds(waiting_since)
+                    if waiting_since
+                    else 0.0
+                )
+
+                self.locked_entity_id = waiting_entity_id
+                self.waiting_entity_id = None
+                self.tracking_mode = self.MODE_LOCKED
+                self.waiting_since = None
+                self.lost_since = None
+
+                self._remember_visible_observation(
+                    continuity_result
+                )
+
+                return {
+                    **continuity_result,
+                    "identity_id": (
+                        observed_identity_id
+                        or self.locked_identity_id
+                    ),
+                    "locked_identity_id": (
+                        self.locked_identity_id
+                    ),
+                    "identity_lost": False,
+                    "identity_retained": True,
+                    "identity_refreshed": identity_refreshed,
+                    "previous_identity_id": (
+                        previous_identity_id
+                        if identity_refreshed
+                        else None
+                    ),
+                    "new_identity_id": (
+                        self.locked_identity_id
+                        if identity_refreshed
+                        else None
+                    ),
+                    "lock_expired": False,
+                    "reacquisition_blocked": False,
+                    "label_reacquisition_blocked": True,
+                    "identity_reacquisition_pending": False,
+                    "identity_lookup_attempted": False,
+                    "identity_reacquired": True,
+                    "reacquired_entity_id": (
+                        self.locked_entity_id
+                    ),
+                    "tracking_mode": self.MODE_LOCKED,
+                    "previous_waiting_since": waiting_since,
+                    "waiting_duration_seconds": (
+                        waiting_age_seconds or 0.0
+                    ),
+                    "reason": (
+                        "The exact previously selected entity became "
+                        "visible again and tracking resumed."
+                    ),
+                }
 
         if not self.locked_identity_id:
             return {
@@ -407,6 +509,7 @@ class TargetLock:
         )
 
         self.locked_entity_id = new_entity_id
+        self.waiting_entity_id = None
         self.tracking_mode = self.MODE_LOCKED
         self.waiting_since = None
         self.lost_since = None
@@ -530,6 +633,59 @@ class TargetLock:
         Older World Model test doubles that do not yet expose identity lookup
         continue using the legacy locked entity query.
         """
+        # First preserve continuity through the currently locked transient
+        # entity. The identity manager may refine or replace identity_id while
+        # the same detector entity remains continuously visible.
+        #
+        # This is safe because label-based reacquisition is not involved:
+        # the World Model must still return the exact locked entity_id and the
+        # observation must be fresh.
+        continuity_result = None
+
+        if hasattr(self.world_model, "get_entity"):
+            continuity_result = self._query_locked_entity()
+
+        if (
+            continuity_result is not None
+            and continuity_result.get("found")
+        ):
+            observed_identity_id = str(
+                continuity_result.get("identity_id") or ""
+            ).strip() or None
+
+            previous_identity_id = self.locked_identity_id
+            identity_refreshed = bool(
+                observed_identity_id
+                and observed_identity_id
+                != previous_identity_id
+            )
+
+            if identity_refreshed:
+                self.locked_identity_id = observed_identity_id
+
+            return {
+                **continuity_result,
+                "identity_id": (
+                    observed_identity_id
+                    or self.locked_identity_id
+                ),
+                "locked_identity_id": self.locked_identity_id,
+                "identity_refreshed": identity_refreshed,
+                "previous_identity_id": (
+                    previous_identity_id
+                    if identity_refreshed
+                    else None
+                ),
+                "new_identity_id": (
+                    self.locked_identity_id
+                    if identity_refreshed
+                    else None
+                ),
+                "entity_migrated": False,
+                "previous_entity_id": None,
+                "new_entity_id": None,
+            }
+
         if (
             self.locked_identity_id
             and hasattr(
