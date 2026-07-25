@@ -56,6 +56,7 @@ class TargetLock:
 
         self.locked_entity_id: Optional[str] = None
         self.locked_identity_id: Optional[str] = None
+        self.last_entity_migration: Optional[Dict[str, Any]] = None
         self.locked_since: Optional[str] = None
         self.tracking_mode = self.MODE_UNLOCKED
 
@@ -186,6 +187,7 @@ class TargetLock:
 
         self.locked_entity_id = None
         self.locked_identity_id = None
+        self.last_entity_migration = None
         self.locked_since = None
         self.tracking_mode = self.MODE_UNLOCKED
 
@@ -199,6 +201,7 @@ class TargetLock:
     def _release_lock(self):
         self.locked_entity_id = None
         self.locked_identity_id = None
+        self.last_entity_migration = None
         self.locked_since = None
         self.tracking_mode = self.MODE_UNLOCKED
 
@@ -280,6 +283,120 @@ class TargetLock:
         self._remember_visible_observation(
             observation
         )
+
+    def _query_locked_target(
+        self,
+    ) -> Dict[str, Any]:
+        """
+        Resolve the active target through persistent identity when possible.
+
+        A detector or tracker may assign a new transient entity_id to the
+        same person. When the World Model supports identity lookup, the
+        newest entity carrying locked_identity_id becomes the active entity.
+
+        Label-based reacquisition is never performed while a lock exists.
+        Older World Model test doubles that do not yet expose identity lookup
+        continue using the legacy locked entity query.
+        """
+        if (
+            self.locked_identity_id
+            and hasattr(
+                self.world_model,
+                "find_latest_entity_by_identity",
+            )
+        ):
+            previous_entity_id = self.locked_entity_id
+
+            result = (
+                self.world_model
+                .find_latest_entity_by_identity(
+                    self.locked_identity_id,
+                    max_age_seconds=(
+                        self.max_age_seconds
+                    ),
+                    refresh=True,
+                )
+            )
+
+            resolved_identity_id = str(
+                result.get("identity_id") or ""
+            ).strip()
+
+            if (
+                resolved_identity_id
+                and resolved_identity_id
+                != self.locked_identity_id
+            ):
+                return {
+                    "found": False,
+                    "stale": False,
+                    "target": self.target_label,
+                    "entity_id": previous_entity_id,
+                    "identity_id": (
+                        self.locked_identity_id
+                    ),
+                    "identity_mismatch": True,
+                    "reacquisition_blocked": True,
+                    "reason": (
+                        "World Model identity lookup returned "
+                        "an entity belonging to a different "
+                        "identity. Migration was blocked."
+                    ),
+                }
+
+            new_entity_id = str(
+                result.get("entity_id") or ""
+            ).strip() or None
+
+            entity_migrated = bool(
+                new_entity_id
+                and previous_entity_id
+                and new_entity_id
+                != previous_entity_id
+            )
+
+            if new_entity_id:
+                self.locked_entity_id = new_entity_id
+
+            if entity_migrated:
+                self.last_entity_migration = {
+                    "timestamp": self._now_iso(),
+                    "identity_id": (
+                        self.locked_identity_id
+                    ),
+                    "previous_entity_id": (
+                        previous_entity_id
+                    ),
+                    "new_entity_id": new_entity_id,
+                }
+
+            return {
+                **result,
+                "identity_id": (
+                    result.get("identity_id")
+                    or self.locked_identity_id
+                ),
+                "entity_migrated": entity_migrated,
+                "previous_entity_id": (
+                    previous_entity_id
+                    if entity_migrated
+                    else None
+                ),
+                "new_entity_id": (
+                    new_entity_id
+                    if entity_migrated
+                    else None
+                ),
+            }
+
+        result = self._query_locked_entity()
+
+        return {
+            **result,
+            "entity_migrated": False,
+            "previous_entity_id": None,
+            "new_entity_id": None,
+        }
 
     def _query_locked_entity(
         self,
@@ -625,7 +742,7 @@ class TargetLock:
 
         if self.locked_entity_id:
             observation = (
-                self._query_locked_entity()
+                self._query_locked_target()
             )
 
             if observation.get("found"):
@@ -633,6 +750,10 @@ class TargetLock:
                 self._remember_visible_observation(
                     observation
                 )
+                return observation
+
+            if observation.get("identity_mismatch"):
+                self.tracking_mode = self.MODE_LOCKED
                 return observation
 
             recovery = self._recovery_result(
@@ -681,6 +802,11 @@ class TargetLock:
             ),
             "locked_identity_id": (
                 self.locked_identity_id
+            ),
+            "last_entity_migration": (
+                dict(self.last_entity_migration)
+                if self.last_entity_migration
+                else None
             ),
             "locked_since": self.locked_since,
             "last_visible_at": (
