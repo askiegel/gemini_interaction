@@ -835,6 +835,226 @@ class WorldModel:
                         fcntl.LOCK_UN,
                     )
 
+    def find_latest_entity_by_identity(
+        self,
+        identity_id: str,
+        max_age_seconds: Optional[float] = None,
+        refresh: bool = True,
+    ) -> Dict[str, Any]:
+        """
+        Return the newest World Model entity assigned to an identity.
+
+        identity_id is persistent across transient detector or World Model
+        entity IDs. When multiple entities contain the same identity_id, the
+        entity with the newest last_seen timestamp is selected.
+
+        When refresh=True, the latest shared on-disk World Model is loaded
+        before the query.
+
+        A stale observation is returned with found=False so robot behavior
+        never moves using outdated perception data.
+        """
+        normalized_identity_id = str(
+            identity_id or ""
+        ).strip()
+
+        if not normalized_identity_id:
+            return {
+                "found": False,
+                "target": None,
+                "identity_id": None,
+                "reason": "Identity ID is empty.",
+            }
+
+        if refresh:
+            self.reload()
+
+        candidates = []
+
+        for entity in self.entities.values():
+            latest_observation = (
+                entity.history[-1]
+                if entity.history
+                else None
+            )
+
+            entity_attributes = dict(
+                entity.attributes or {}
+            )
+
+            observation_attributes = dict(
+                getattr(
+                    latest_observation,
+                    "attributes",
+                    None,
+                )
+                or {}
+            )
+
+            candidate_identity_id = str(
+                observation_attributes.get(
+                    "identity_id",
+                    entity_attributes.get("identity_id"),
+                )
+                or ""
+            ).strip()
+
+            if candidate_identity_id == normalized_identity_id:
+                candidates.append(entity)
+
+        if not candidates:
+            return {
+                "found": False,
+                "target": None,
+                "identity_id": normalized_identity_id,
+                "stale": False,
+                "reason": (
+                    "No World Model entity matches identity "
+                    f"'{normalized_identity_id}'."
+                ),
+            }
+
+        entity = max(
+            candidates,
+            key=lambda item: item.last_seen,
+        )
+
+        latest_observation = (
+            entity.history[-1]
+            if entity.history
+            else None
+        )
+
+        location = dict(
+            getattr(
+                latest_observation,
+                "location",
+                None,
+            )
+            or {}
+        )
+
+        entity_attributes = dict(
+            entity.attributes or {}
+        )
+
+        observation_attributes = dict(
+            getattr(
+                latest_observation,
+                "attributes",
+                None,
+            )
+            or {}
+        )
+
+        attributes = {
+            **entity_attributes,
+            **observation_attributes,
+        }
+
+        age_seconds = self._timestamp_age_seconds(
+            entity.last_seen
+        )
+
+        stale = (
+            max_age_seconds is not None
+            and age_seconds is not None
+            and age_seconds > float(max_age_seconds)
+        )
+
+        bbox = self._normalize_bbox_value(
+            attributes.get("bbox")
+        )
+
+        cx = location.get(
+            "cx",
+            location.get("center_x"),
+        )
+
+        cy = location.get(
+            "cy",
+            location.get("center_y"),
+        )
+
+        area = attributes.get("area")
+
+        if area is None and bbox is not None:
+            area = max(
+                0.0,
+                bbox["x2"] - bbox["x1"],
+            ) * max(
+                0.0,
+                bbox["y2"] - bbox["y1"],
+            )
+
+        result = {
+            "found": not stale,
+            "stale": stale,
+            "target": self._normalize_entity_label(
+                entity.label
+            ),
+            "entity_id": entity.entity_id,
+            "identity_id": attributes.get(
+                "identity_id",
+                normalized_identity_id,
+            ),
+            "label": entity.label,
+            "confidence": float(
+                entity.confidence or 0.0
+            ),
+            "cx": (
+                float(cx)
+                if cx is not None
+                else None
+            ),
+            "cy": (
+                float(cy)
+                if cy is not None
+                else None
+            ),
+            "area": (
+                float(area)
+                if area is not None
+                else None
+            ),
+            "bbox": bbox,
+            "image_width": attributes.get(
+                "image_width"
+            ),
+            "image_height": attributes.get(
+                "image_height"
+            ),
+            "last_seen": entity.last_seen,
+            "detection_age_ms": (
+                int(round(age_seconds * 1000.0))
+                if age_seconds is not None
+                else None
+            ),
+            "identity_match_score": attributes.get(
+                "identity_match_score"
+            ),
+            "identity_status": attributes.get(
+                "identity_status"
+            ),
+            "identity_ambiguous": bool(
+                attributes.get(
+                    "identity_ambiguous",
+                    False,
+                )
+            ),
+            "identity_diagnostics": attributes.get(
+                "identity_diagnostics"
+            ),
+        }
+
+        if stale:
+            result["reason"] = (
+                "The newest World Model entity for identity "
+                f"'{normalized_identity_id}' is stale."
+            )
+
+        return result
+
     def reload(self):
         """
         Refresh this instance from the shared persistent World Model.
