@@ -55,6 +55,7 @@ class TargetLock:
         self.target_label: Optional[str] = None
 
         self.locked_entity_id: Optional[str] = None
+        self.locked_identity_id: Optional[str] = None
         self.locked_since: Optional[str] = None
         self.tracking_mode = self.MODE_UNLOCKED
 
@@ -184,6 +185,7 @@ class TargetLock:
         self.target_label = None
 
         self.locked_entity_id = None
+        self.locked_identity_id = None
         self.locked_since = None
         self.tracking_mode = self.MODE_UNLOCKED
 
@@ -196,6 +198,7 @@ class TargetLock:
 
     def _release_lock(self):
         self.locked_entity_id = None
+        self.locked_identity_id = None
         self.locked_since = None
         self.tracking_mode = self.MODE_UNLOCKED
 
@@ -265,7 +268,12 @@ class TargetLock:
         if not entity_id:
             return
 
+        identity_id = str(
+            observation.get("identity_id") or ""
+        ).strip() or None
+
         self.locked_entity_id = entity_id
+        self.locked_identity_id = identity_id
         self.locked_since = self._now_iso()
         self.tracking_mode = self.MODE_LOCKED
 
@@ -670,6 +678,9 @@ class TargetLock:
             "tracking_mode": self.tracking_mode,
             "locked_entity_id": (
                 self.locked_entity_id
+            ),
+            "locked_identity_id": (
+                self.locked_identity_id
             ),
             "locked_since": self.locked_since,
             "last_visible_at": (

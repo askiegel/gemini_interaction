@@ -106,6 +106,7 @@ class FakeWorldModel:
             "stale": False,
             "target": label,
             "entity_id": "person-003",
+            "identity_id": "person-identity-alpha",
             "label": "person",
             "confidence": 0.94,
             "cx": 180.0,
@@ -149,7 +150,24 @@ def main():
 
     assert first["entity_id"] == "person-003"
     assert lock.locked_entity_id == "person-003"
+    assert (
+        lock.locked_identity_id
+        == "person-identity-alpha"
+    )
+    assert (
+        lock.snapshot()["locked_identity_id"]
+        == "person-identity-alpha"
+    )
     assert lock.tracking_mode == "LOCKED"
+    assert (
+        lock.locked_identity_id
+        == "person-identity-alpha"
+    )
+    assert (
+        lock.snapshot()["locked_identity_id"]
+        == "person-identity-alpha"
+    )
+
     assert world_model.label_queries == 1
     assert world_model.entity_queries == []
 
@@ -197,6 +215,8 @@ def main():
     print(lock.snapshot())
 
     assert lock.locked_entity_id is None
+    assert lock.locked_identity_id is None
+    assert lock.snapshot()["locked_identity_id"] is None
     assert lock.tracking_mode == "UNLOCKED"
     assert lock.locked_since is None
 
