@@ -17,9 +17,16 @@ SUPPORTED_CONFIG_VERSION = 1
 DEFAULT_CONFIG: Dict[str, Any] = {
     "config_version": SUPPORTED_CONFIG_VERSION,
     "robot": {
-        "name": "Tony-01",
+        "id": "mayday",
+        "name": "Mayday",
+        "voice_aliases": [
+            "mayday",
+            "may day",
+        ],
         "model": "Mini Pupper 2",
+        "role": "primary",
         "hostname": "minipupper",
+        "platform_version": "1.1.0",
     },
     "network": {
         "robot_ip": "192.168.68.127",
@@ -62,6 +69,66 @@ def _require_string(
     if not allow_empty and not cleaned:
         raise ConfigurationError(f"{field_name} must not be empty.")
     return cleaned
+
+
+def _require_string_list(
+    value: Any,
+    field_name: str,
+) -> list[str]:
+    if not isinstance(value, list):
+        raise ConfigurationError(
+            f"{field_name} must be a JSON array."
+        )
+
+    normalized = []
+    seen = set()
+
+    for index, item in enumerate(value):
+        alias = _require_string(
+            item,
+            f"{field_name}[{index}]",
+        )
+
+        alias = " ".join(
+            alias.lower().split()
+        )
+
+        if alias in seen:
+            continue
+
+        seen.add(alias)
+        normalized.append(alias)
+
+    if not normalized:
+        raise ConfigurationError(
+            f"{field_name} must contain at least one alias."
+        )
+
+    return normalized
+
+
+def _require_robot_id(
+    value: Any,
+    field_name: str,
+) -> str:
+    robot_id = _require_string(
+        value,
+        field_name,
+    ).lower()
+
+    allowed = set(
+        "abcdefghijklmnopqrstuvwxyz"
+        "0123456789"
+        "-_"
+    )
+
+    if any(character not in allowed for character in robot_id):
+        raise ConfigurationError(
+            f"{field_name} may contain only lowercase letters, "
+            "numbers, hyphens, and underscores."
+        )
+
+    return robot_id
 
 
 def _require_int(
@@ -114,11 +181,33 @@ def validate_config(payload: Any) -> Dict[str, Any]:
     normalized = {
         "config_version": version,
         "robot": {
-            "name": _require_string(robot.get("name"), "robot.name"),
-            "model": _require_string(robot.get("model"), "robot.model"),
+            "id": _require_robot_id(
+                robot.get("id"),
+                "robot.id",
+            ),
+            "name": _require_string(
+                robot.get("name"),
+                "robot.name",
+            ),
+            "voice_aliases": _require_string_list(
+                robot.get("voice_aliases"),
+                "robot.voice_aliases",
+            ),
+            "model": _require_string(
+                robot.get("model"),
+                "robot.model",
+            ),
+            "role": _require_string(
+                robot.get("role"),
+                "robot.role",
+            ).lower(),
             "hostname": _require_string(
                 robot.get("hostname"),
                 "robot.hostname",
+            ),
+            "platform_version": _require_string(
+                robot.get("platform_version"),
+                "robot.platform_version",
             ),
         },
         "network": {

@@ -1,9 +1,16 @@
 {
   "config_version": 1,
   "robot": {
-    "name": "Tony-01",
+    "id": "mayday",
+    "name": "Mayday",
+    "voice_aliases": [
+      "mayday",
+      "may day"
+    ],
     "model": "Mini Pupper 2",
-    "hostname": "minipupper"
+    "role": "primary",
+    "hostname": "minipupper",
+    "platform_version": "1.1.0"
   },
   "network": {
     "robot_ip": "192.168.68.127",

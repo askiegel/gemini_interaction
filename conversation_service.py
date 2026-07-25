@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 
 import argparse
+import inspect
 import json
 import os
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from typing import Any, Callable, Dict, Optional
 
 from config import load_config
@@ -13,6 +14,9 @@ from conversation_manager import (
     ConversationResult,
 )
 from provider_factory import create_provider
+from robot_addressing import AddressedCommand, RobotAddressParser
+from robot_fleet import load_robot_fleet
+from robot_identity import RobotIdentity, get_robot_identity
 from world_model import WorldModel
 from world_query_service import (
     WorldQueryError,
@@ -43,6 +47,10 @@ class ConversationServiceResult:
     mission_submitted: bool
     mission_submission: Optional[Dict[str, Any]]
     world_query: Optional[Dict[str, Any]] = None
+    robot_id: Optional[str] = None
+    addressing: Optional[Dict[str, Any]] = None
+    accepted: bool = True
+    ignored: bool = False
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -70,6 +78,8 @@ class ConversationService:
         runtime_url: str = DEFAULT_RUNTIME_URL,
         mission_submitter: Optional[Callable[..., Dict[str, Any]]] = None,
         world_query_service: Optional[WorldQueryService] = None,
+        local_identity: Optional[RobotIdentity] = None,
+        address_parser: Optional[RobotAddressParser] = None,
     ):
         if conversation_manager is None:
             raise ValueError(
@@ -89,24 +99,100 @@ class ConversationService:
         )
         self.world_query_service = world_query_service
 
+        self.local_identity = (
+            local_identity
+            or get_robot_identity()
+        )
+
+        if not isinstance(self.local_identity, RobotIdentity):
+            raise TypeError(
+                "local_identity must be a RobotIdentity."
+            )
+
+        if address_parser is None:
+            fleet = load_robot_fleet(
+                local_identity=self.local_identity,
+            )
+
+            address_parser = RobotAddressParser(
+                local_identity=self.local_identity,
+                known_identities=fleet.remote_identities,
+            )
+
+        if not isinstance(address_parser, RobotAddressParser):
+            raise TypeError(
+                "address_parser must be a RobotAddressParser."
+            )
+
+        self.address_parser = address_parser
+
     def process_text(
         self,
         user_text: str,
         submit_missions: bool = True,
     ) -> ConversationServiceResult:
         """
-        Process one user message.
+        Process one user message through deterministic robot addressing before
+        conversational interpretation.
 
-        Conversational and world-query responses do not create missions.
-        Mission decisions requiring confirmation are not submitted until a
-        future confirmation layer explicitly approves them.
-
-        When submit_missions is False, mission decisions are returned without
-        contacting the Cognitive Runtime. This supports browser dry-run mode.
+        Commands addressed to another robot are ignored before the provider,
+        conversation history, Runtime API, ROS, or Robot Bridge are contacted.
         """
         if not isinstance(submit_missions, bool):
             raise ValueError("submit_missions must be a boolean.")
-        result = self.conversation_manager.process(user_text)
+
+        addressed = self.address_parser.parse(user_text)
+
+        if not addressed.is_for(self.local_identity.id):
+            return ConversationServiceResult(
+                reply=(
+                    f"That command is addressed to "
+                    f"{addressed.addressed_robot_name or 'another robot'}."
+                ),
+                decision_type="CONVERSATION",
+                mission_type=None,
+                query_type=None,
+                target=None,
+                requires_confirmation=False,
+                mission_submitted=False,
+                mission_submission=None,
+                world_query=None,
+                robot_id=self.local_identity.id,
+                addressing=addressed.to_dict(),
+                accepted=False,
+                ignored=True,
+            )
+
+        if not addressed.command_text:
+            raise ConversationError(
+                "A robot name was recognized, but no command followed it."
+            )
+
+        result = self._process_local_text(
+            command_text=addressed.command_text,
+            original_text=addressed.original_text,
+            addressed=addressed,
+            submit_missions=submit_missions,
+        )
+
+        return replace(
+            result,
+            robot_id=self.local_identity.id,
+            addressing=addressed.to_dict(),
+            accepted=True,
+            ignored=False,
+        )
+
+    def _process_local_text(
+        self,
+        command_text: str,
+        original_text: str,
+        addressed: AddressedCommand,
+        submit_missions: bool,
+    ) -> ConversationServiceResult:
+        result = self.conversation_manager.process(
+            command_text
+        )
 
         if result.decision_type == "WORLD_QUERY":
             return self._process_world_query(
@@ -139,10 +225,10 @@ class ConversationService:
 
         intent = self._build_runtime_intent(result)
 
-        submission = self.mission_submitter(
-            user_text=user_text.strip(),
+        submission = self._submit_runtime_mission(
+            original_text=original_text,
             intent=intent,
-            runtime_url=self.runtime_url,
+            addressed=addressed,
         )
 
         if not isinstance(submission, dict):
@@ -161,6 +247,55 @@ class ConversationService:
             mission_submission=submission,
             world_query=None,
         )
+
+    def _submit_runtime_mission(
+        self,
+        original_text: str,
+        intent: Dict[str, Any],
+        addressed: AddressedCommand,
+    ) -> Dict[str, Any]:
+        """
+        Submit mission ownership metadata when supported.
+
+        Legacy test doubles and older submitters that accept only user_text,
+        intent, and runtime_url continue to work unchanged.
+        """
+        kwargs = {
+            "user_text": original_text.strip(),
+            "intent": intent,
+            "runtime_url": self.runtime_url,
+        }
+
+        supports_identity = False
+
+        try:
+            signature = inspect.signature(
+                self.mission_submitter
+            )
+
+            parameters = signature.parameters
+
+            supports_identity = (
+                "robot_id" in parameters
+                or "addressing" in parameters
+                or any(
+                    parameter.kind
+                    == inspect.Parameter.VAR_KEYWORD
+                    for parameter in parameters.values()
+                )
+            )
+        except (TypeError, ValueError):
+            supports_identity = True
+
+        if supports_identity:
+            kwargs.update(
+                {
+                    "robot_id": self.local_identity.id,
+                    "addressing": addressed.to_dict(),
+                }
+            )
+
+        return self.mission_submitter(**kwargs)
 
     def _process_world_query(
         self,

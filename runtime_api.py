@@ -429,6 +429,50 @@ class RuntimeAPIHandler(BaseHTTPRequestHandler):
 
             command_value = request_data.get("command")
             intent_value = request_data.get("intent")
+            robot_id_value = request_data.get("robot_id")
+            addressing_value = request_data.get("addressing")
+
+            local_robot = (
+                self.server.config_manager
+                .get_config()
+                .get("robot", {})
+            )
+
+            local_robot_id = str(
+                local_robot.get("id", "")
+            ).strip().lower()
+
+            if robot_id_value is not None:
+                if not isinstance(robot_id_value, str):
+                    raise ValueError(
+                        "robot_id must be a string when provided."
+                    )
+
+                requested_robot_id = (
+                    robot_id_value.strip().lower()
+                )
+
+                if not requested_robot_id:
+                    raise ValueError(
+                        "robot_id must not be empty."
+                    )
+
+                if requested_robot_id != local_robot_id:
+                    raise ValueError(
+                        "Mission robot_id does not match this runtime. "
+                        f"Requested: {requested_robot_id}; "
+                        f"local: {local_robot_id}."
+                    )
+            else:
+                requested_robot_id = local_robot_id or None
+
+            if (
+                addressing_value is not None
+                and not isinstance(addressing_value, dict)
+            ):
+                raise ValueError(
+                    "addressing must be a JSON object when provided."
+                )
 
             has_command = (
                 isinstance(command_value, str)
@@ -470,9 +514,15 @@ class RuntimeAPIHandler(BaseHTTPRequestHandler):
                 ).strip()
 
                 submission = {
+                    "robot_id": requested_robot_id,
                     "command": command or None,
                     "intent": parsed_intent,
                     "mission": mission.to_dict(),
+                    "addressing": (
+                        dict(addressing_value)
+                        if addressing_value is not None
+                        else None
+                    ),
                 }
 
             else:
@@ -480,6 +530,13 @@ class RuntimeAPIHandler(BaseHTTPRequestHandler):
 
                 submission = self.server.runtime.submit_text(
                     command
+                )
+
+                submission["robot_id"] = requested_robot_id
+                submission["addressing"] = (
+                    dict(addressing_value)
+                    if addressing_value is not None
+                    else None
                 )
 
                 submission_mode = "command"
@@ -490,9 +547,11 @@ class RuntimeAPIHandler(BaseHTTPRequestHandler):
                     "ok": True,
                     "accepted": True,
                     "submission_mode": submission_mode,
+                    "robot_id": submission.get("robot_id"),
                     "command": submission.get("command"),
                     "intent": submission["intent"],
                     "mission": submission["mission"],
+                    "addressing": submission.get("addressing"),
                     "runtime": self.server.runtime.get_status(),
                 },
             )

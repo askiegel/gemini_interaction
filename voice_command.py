@@ -12,7 +12,10 @@ from behavior_manager import BehaviorManager
 from config import load_config
 from mission_manager import MissionManager
 from provider_factory import create_provider
+from robot_addressing import RobotAddressParser
 from robot_bridge.client import RobotBridgeClient
+from robot_fleet import load_robot_fleet
+from robot_identity import get_robot_identity
 from vision_adapter import VisionAdapter
 from world_model import WorldModel
 
@@ -47,6 +50,8 @@ def submit_intent_to_runtime(
     intent,
     runtime_url=DEFAULT_RUNTIME_URL,
     timeout=10.0,
+    robot_id=None,
+    addressing=None,
 ):
     """
     Submit an already parsed intent to the persistent cognitive runtime.
@@ -61,6 +66,24 @@ def submit_intent_to_runtime(
         "source_text": user_text,
         "intent": intent,
     }
+
+    if robot_id is not None:
+        normalized_robot_id = str(robot_id).strip().lower()
+
+        if not normalized_robot_id:
+            raise ValueError(
+                "robot_id must not be empty when provided."
+            )
+
+        payload["robot_id"] = normalized_robot_id
+
+    if addressing is not None:
+        if not isinstance(addressing, dict):
+            raise ValueError(
+                "addressing must be a dictionary when provided."
+            )
+
+        payload["addressing"] = dict(addressing)
 
     request = urllib.request.Request(
         url,
@@ -123,11 +146,56 @@ def run_command(
     config = load_config()
     provider = create_provider(config)
 
+    local_identity = get_robot_identity()
+    fleet = load_robot_fleet(
+        local_identity=local_identity,
+    )
+
+    address_parser = RobotAddressParser(
+        local_identity=local_identity,
+        known_identities=fleet.remote_identities,
+    )
+
+    addressed = address_parser.parse(user_text)
+
     print("===== SPOKEN COMMAND =====")
     print(user_text)
     print()
 
-    intent = provider.get_intent(user_text)
+    print("===== ROBOT ADDRESSING =====")
+    print(json.dumps(addressed.to_dict(), indent=2))
+    print()
+
+    if not addressed.is_for(local_identity.id):
+        result = {
+            "ok": True,
+            "accepted": False,
+            "ignored": True,
+            "reason": (
+                "Command was addressed to another robot."
+            ),
+            "local_robot": local_identity.to_dict(),
+            "addressing": addressed.to_dict(),
+        }
+
+        print("===== COMMAND IGNORED =====")
+        print(json.dumps(result, indent=2))
+        print()
+        print(
+            f"{local_identity.name} ignored a command addressed "
+            "to another robot."
+        )
+
+        return result
+
+    if not addressed.command_text:
+        raise ValueError(
+            "A robot name was recognized, but no command followed it."
+        )
+
+    intent = provider.get_intent(
+        addressed.command_text
+    )
 
     print("===== INTENT =====")
     print(json.dumps(intent, indent=2))
@@ -138,6 +206,8 @@ def run_command(
             user_text=user_text,
             intent=intent,
             runtime_url=runtime_url,
+            robot_id=local_identity.id,
+            addressing=addressed.to_dict(),
         )
 
         print("===== RUNTIME SUBMISSION =====")

@@ -1,0 +1,30 @@
+{
+  "fleet_version": 1,
+  "robots": [
+    {
+      "id": "mayday",
+      "name": "Mayday",
+      "voice_aliases": [
+        "mayday",
+        "may day"
+      ],
+      "model": "Mini Pupper 2",
+      "role": "primary",
+      "hostname": "minipupper",
+      "platform_version": "1.1.0"
+    },
+    {
+      "id": "pypper",
+      "name": "Pypper",
+      "voice_aliases": [
+        "pypper",
+        "pyper",
+        "piper"
+      ],
+      "model": "Mini Pupper 2",
+      "role": "secondary",
+      "hostname": "minipupper2",
+      "platform_version": "1.1.0"
+    }
+  ]
+}
