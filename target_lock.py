@@ -28,6 +28,7 @@ class TargetLock:
     MODE_UNLOCKED = "UNLOCKED"
     MODE_LOCKED = "LOCKED"
     MODE_RECOVERING = "RECOVERING"
+    MODE_WAITING_FOR_IDENTITY = "WAITING_FOR_IDENTITY"
 
     DIRECTION_LEFT = "LEFT"
     DIRECTION_RIGHT = "RIGHT"
@@ -65,6 +66,7 @@ class TargetLock:
         ] = None
         self.last_visible_at: Optional[str] = None
         self.lost_since: Optional[str] = None
+        self.waiting_since: Optional[str] = None
         self.last_seen_direction: Optional[str] = None
 
     @staticmethod
@@ -194,6 +196,7 @@ class TargetLock:
         self.last_valid_observation = None
         self.last_visible_at = None
         self.lost_since = None
+        self.waiting_since = None
         self.last_seen_direction = None
 
         self.prediction_tracker.reset()
@@ -208,7 +211,104 @@ class TargetLock:
         self.last_valid_observation = None
         self.last_visible_at = None
         self.lost_since = None
+        self.waiting_since = None
         self.last_seen_direction = None
+
+        self.prediction_tracker.reset()
+
+    def _enter_identity_wait(
+        self,
+    ) -> Dict[str, Any]:
+        """
+        Release the transient entity lock while preserving persistent identity.
+
+        Detector entity IDs may disappear after an occlusion or tracker reset.
+        The selected identity remains authoritative until the FOLLOW_PERSON
+        mission is stopped, cancelled, or replaced.
+        """
+        expired_entity_id = self.locked_entity_id
+
+        if self.waiting_since is None:
+            self.waiting_since = self._now_iso()
+
+        self.locked_entity_id = None
+        self.tracking_mode = self.MODE_WAITING_FOR_IDENTITY
+
+        self.last_valid_observation = None
+        self.lost_since = None
+        self.last_seen_direction = None
+
+        self.prediction_tracker.reset()
+
+        return {
+            "found": False,
+            "stale": False,
+            "target": self.target_label,
+            "entity_id": None,
+            "expired_entity_id": expired_entity_id,
+            "identity_id": self.locked_identity_id,
+            "locked_identity_id": self.locked_identity_id,
+            "identity_lost": True,
+            "identity_retained": bool(
+                self.locked_identity_id
+            ),
+            "lock_expired": True,
+            "reacquisition_blocked": True,
+            "label_reacquisition_blocked": True,
+            "identity_reacquisition_pending": True,
+            "tracking_mode": (
+                self.MODE_WAITING_FOR_IDENTITY
+            ),
+            "waiting_since": self.waiting_since,
+            "recovery_direction": None,
+            "reason": (
+                "Predictive recovery expired. The transient "
+                "entity lock was released, but the persistent "
+                "identity remains selected. Waiting for that "
+                "same identity to become visible again."
+            ),
+        }
+
+    def _waiting_result(
+        self,
+    ) -> Dict[str, Any]:
+        """
+        Report a stationary identity wait without acquiring by label.
+        """
+        waiting_age_seconds = (
+            self._age_seconds(self.waiting_since)
+            if self.waiting_since
+            else 0.0
+        )
+
+        return {
+            "found": False,
+            "stale": False,
+            "target": self.target_label,
+            "entity_id": None,
+            "identity_id": self.locked_identity_id,
+            "locked_identity_id": self.locked_identity_id,
+            "identity_lost": True,
+            "identity_retained": bool(
+                self.locked_identity_id
+            ),
+            "lock_expired": True,
+            "reacquisition_blocked": True,
+            "label_reacquisition_blocked": True,
+            "identity_reacquisition_pending": True,
+            "tracking_mode": (
+                self.MODE_WAITING_FOR_IDENTITY
+            ),
+            "waiting_since": self.waiting_since,
+            "waiting_age_seconds": (
+                waiting_age_seconds or 0.0
+            ),
+            "recovery_direction": None,
+            "reason": (
+                "Waiting for the selected persistent identity. "
+                "Label-based acquisition of another person is blocked."
+            ),
+        }
 
     def start_mission(
         self,
@@ -240,6 +340,7 @@ class TargetLock:
         )
         self.last_visible_at = self._now_iso()
         self.lost_since = None
+        self.waiting_since = None
 
         direction = self._direction_from_observation(
             observation
@@ -597,29 +698,15 @@ class TargetLock:
             lost_age_seconds
             > self.recovery_timeout_seconds
         ):
-            expired_entity_id = (
-                self.locked_entity_id
-            )
-
-            self._release_lock()
+            waiting = self._enter_identity_wait()
 
             return {
-                "found": False,
+                **waiting,
                 "stale": bool(
                     query_result.get("stale")
                 ),
-                "target": self.target_label,
-                "lock_expired": True,
-                "expired_entity_id": (
-                    expired_entity_id
-                ),
-                "recovery_direction": None,
                 "lost_age_seconds": (
                     lost_age_seconds
-                ),
-                "reason": (
-                    "Target recovery timeout expired. "
-                    "The identity lock was released."
                 ),
             }
 
@@ -740,6 +827,13 @@ class TargetLock:
             target_label=target_label,
         )
 
+        if (
+            self.tracking_mode
+            == self.MODE_WAITING_FOR_IDENTITY
+            and self.locked_identity_id
+        ):
+            return self._waiting_result()
+
         if self.locked_entity_id:
             observation = (
                 self._query_locked_target()
@@ -760,21 +854,7 @@ class TargetLock:
                 observation
             )
 
-            if not recovery.get("lock_expired"):
-                return recovery
-
-            return {
-                **recovery,
-                "identity_lost": True,
-                "reacquisition_blocked": True,
-                "reason": (
-                    "The locked target could not be "
-                    "recovered before the timeout. "
-                    "Automatic acquisition of another "
-                    "person is blocked until a new "
-                    "FOLLOW_PERSON mission begins."
-                ),
-            }
+            return recovery
 
         acquisition = (
             self.world_model
@@ -813,6 +893,12 @@ class TargetLock:
                 self.last_visible_at
             ),
             "lost_since": self.lost_since,
+            "waiting_since": self.waiting_since,
+            "waiting_age_seconds": (
+                self._age_seconds(self.waiting_since)
+                if self.waiting_since
+                else None
+            ),
             "last_seen_direction": (
                 self.last_seen_direction
             ),

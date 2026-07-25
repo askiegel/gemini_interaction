@@ -48,6 +48,7 @@ class FakeWorldModel:
             "stale": False,
             "target": label,
             "entity_id": "person-003",
+            "identity_id": "person-identity-alpha",
             "label": "person",
             "confidence": 0.95,
             "cx": 320.0,
@@ -141,15 +142,26 @@ print(second)
 assert second["found"] is False
 assert second["lock_expired"] is True
 assert second["identity_lost"] is True
+assert second["identity_retained"] is True
 assert second["reacquisition_blocked"] is True
+assert second["label_reacquisition_blocked"] is True
+assert second["identity_reacquisition_pending"] is True
+assert (
+    second["tracking_mode"]
+    == TargetLock.MODE_WAITING_FOR_IDENTITY
+)
 assert second.get("entity_id") != "person-999"
 assert lock.locked_entity_id is None
+assert (
+    lock.locked_identity_id
+    == "person-identity-alpha"
+)
 assert world_model.latest_queries == 1
 
 print()
 print("PASS: original person was acquired")
-print("PASS: recovery timeout released the old lock")
+print("PASS: recovery timeout released only the ""transient entity lock")
 print("PASS: another visible person was not acquired")
-print("PASS: automatic identity switching was blocked")
+print("PASS: persistent identity remained selected ""while switching was blocked")
 print()
 print("Target identity-switch prevention test passed.")
