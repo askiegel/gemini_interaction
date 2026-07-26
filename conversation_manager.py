@@ -4,6 +4,7 @@ from dataclasses import asdict, dataclass
 from typing import Any, Dict, List, Optional
 
 from arithmetic_service import answer_arithmetic_question
+from symbolic_math_service import answer_symbolic_math_question
 
 
 ALLOWED_MISSION_TYPES = {
@@ -117,6 +118,21 @@ class ConversationManager:
                 "The provider does not implement "
                 "get_conversation_decision(user_text, history)."
             )
+
+        symbolic_reply = answer_symbolic_math_question(
+            normalized_text
+        )
+
+        if symbolic_reply is not None:
+            result = ConversationResult(
+                reply=symbolic_reply,
+                decision_type="CONVERSATION",
+            )
+
+            self._append_turn("user", normalized_text)
+            self._append_turn("assistant", result.reply)
+
+            return result
 
         arithmetic_reply = answer_arithmetic_question(
             normalized_text

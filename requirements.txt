@@ -2,3 +2,4 @@ google-genai
 python-dotenv
 requests
 SpeechRecognition
+sympy>=1.12,<2.0
