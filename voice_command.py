@@ -201,7 +201,11 @@ def run_command(
     print(json.dumps(intent, indent=2))
     print()
 
-    if submit_runtime:
+    # Both --runtime and the backward-compatible --execute option submit
+    # through the persistent Cognitive Runtime. Execution ownership must remain
+    # with the single runtime instance so commands cannot construct another
+    # VisionAdapter or identity-processing pipeline.
+    if submit_runtime or execute:
         result = submit_intent_to_runtime(
             user_text=user_text,
             intent=intent,
@@ -308,8 +312,8 @@ def main():
         "--execute",
         action="store_true",
         help=(
-            "Execute the resulting behavior immediately through "
-            "the Robot Bridge using the legacy one-shot mode."
+            "Submit the resulting behavior to the persistent "
+            "cognitive runtime. Retained for CLI compatibility."
         ),
     )
 
