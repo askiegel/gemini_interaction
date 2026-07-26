@@ -53,6 +53,7 @@ ROBOT_BRIDGE_URL = os.getenv(
 
 _CONVERSATION_SERVICE = None
 _CONVERSATION_SERVICE_LOCK = Lock()
+_ROBOT_SPEECH_SUBMITTER = None
 
 
 def get_conversation_service():
@@ -87,6 +88,107 @@ def set_conversation_service_for_testing(service):
 
     with _CONVERSATION_SERVICE_LOCK:
         _CONVERSATION_SERVICE = service
+
+
+def set_robot_speech_submitter_for_testing(
+    submitter,
+):
+    """
+    Replace Pupper speech delivery for an offline test.
+
+    Production code does not call this function.
+    """
+    global _ROBOT_SPEECH_SUBMITTER
+    _ROBOT_SPEECH_SUBMITTER = submitter
+
+
+def submit_robot_speech(reply):
+    normalized_reply = (
+        str(reply or "").strip()
+    )
+
+    if not normalized_reply:
+        return {
+            "ok": False,
+            "destination": "mini_pupper",
+            "fallback_required": False,
+            "skipped": True,
+            "error": "The conversational reply was empty.",
+        }
+
+    try:
+        if _ROBOT_SPEECH_SUBMITTER is not None:
+            raw_result = _ROBOT_SPEECH_SUBMITTER(
+                normalized_reply
+            )
+        else:
+            raw_result = request_json(
+                "POST",
+                f"{ROBOT_BRIDGE_URL}/speak",
+                payload={
+                    "text": normalized_reply,
+                },
+                timeout=35.0,
+            )
+    except Exception as exc:
+        return {
+            "ok": False,
+            "destination": "mini_pupper",
+            "fallback_required": True,
+            "skipped": False,
+            "error": str(exc),
+        }
+
+    if not isinstance(raw_result, dict):
+        return {
+            "ok": False,
+            "destination": "mini_pupper",
+            "fallback_required": True,
+            "skipped": False,
+            "error": (
+                "Robot speech submitter returned "
+                "an invalid response."
+            ),
+        }
+
+    if "status_code" in raw_result:
+        bridge_response = raw_result.get("data")
+        request_ok = bool(raw_result.get("ok"))
+        request_error = raw_result.get("error")
+    else:
+        bridge_response = raw_result
+        request_ok = bool(raw_result.get("ok"))
+        request_error = raw_result.get("error")
+
+    bridge_ok = bool(
+        isinstance(bridge_response, dict)
+        and bridge_response.get("ok")
+    )
+    delivered = request_ok and bridge_ok
+
+    return {
+        "ok": delivered,
+        "destination": "mini_pupper",
+        "fallback_required": not delivered,
+        "skipped": False,
+        "error": (
+            None
+            if delivered
+            else (
+                request_error
+                or (
+                    bridge_response.get("error")
+                    if isinstance(
+                        bridge_response,
+                        dict,
+                    )
+                    else None
+                )
+                or "Mini Pupper speech delivery failed."
+            )
+        ),
+        "bridge_response": bridge_response,
+    }
 
 
 def request_json(
@@ -938,6 +1040,30 @@ class VoiceRelayHandler(BaseHTTPRequestHandler):
                     )
                     return
 
+                result_data = result.to_dict()
+
+                if (
+                    result_data.get("accepted", True)
+                    and not result_data.get(
+                        "ignored",
+                        False,
+                    )
+                ):
+                    speech_output = submit_robot_speech(
+                        result.reply
+                    )
+                else:
+                    speech_output = {
+                        "ok": False,
+                        "destination": "mini_pupper",
+                        "fallback_required": False,
+                        "skipped": True,
+                        "error": (
+                            "Reply was not addressed "
+                            "to this robot."
+                        ),
+                    }
+
                 response = {
                     "ok": True,
                     "mode": (
@@ -946,7 +1072,8 @@ class VoiceRelayHandler(BaseHTTPRequestHandler):
                         else "dry-run"
                     ),
                     "executed": execute,
-                    **result.to_dict(),
+                    **result_data,
+                    "speech_output": speech_output,
                 }
 
                 self.send_json(200, response)

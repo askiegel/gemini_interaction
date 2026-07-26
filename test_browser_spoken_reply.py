@@ -25,7 +25,7 @@ def main():
     )
     require(
         html,
-        'function speakReply(reply)',
+        'function speakReply(reply, speechOutput)',
         "spoken reply function is defined",
     )
     require(
@@ -41,11 +41,21 @@ def main():
     require(
         html,
         'window.speechSynthesis.speak(utterance);',
-        "browser speaks the conversational reply",
+        "browser speech fallback remains available",
     )
     require(
         html,
-        'speakReply(result.reply);',
+        'const pupperSpoke =',
+        "browser detects successful Pupper speech",
+    )
+    require(
+        html,
+        'speechOutput.fallback_required === false',
+        "browser suppresses duplicate speech after Pupper success",
+    )
+    require(
+        html,
+        'result.speech_output',
         "successful conversation reply reaches speech output",
     )
     require(
@@ -58,7 +68,7 @@ def main():
         'if (!response.ok || result.ok === false)'
     )
     speech_call = html.index(
-        'speakReply(result.reply);'
+        'result.speech_output'
     )
 
     if response_check >= speech_call:

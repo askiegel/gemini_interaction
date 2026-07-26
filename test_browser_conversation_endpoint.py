@@ -10,6 +10,7 @@ from http.server import ThreadingHTTPServer
 from voice_relay.server import (
     VoiceRelayHandler,
     set_conversation_service_for_testing,
+    set_robot_speech_submitter_for_testing,
 )
 
 
@@ -141,6 +142,23 @@ def main():
     fake_service = FakeConversationService()
     set_conversation_service_for_testing(fake_service)
 
+    spoken_replies = []
+
+    def fake_speech_submitter(reply):
+        spoken_replies.append(reply)
+
+        return {
+            "ok": True,
+            "action": "speak",
+            "speech_result": {
+                "text": reply,
+            },
+        }
+
+    set_robot_speech_submitter_for_testing(
+        fake_speech_submitter
+    )
+
     server = ThreadingHTTPServer(
         ("127.0.0.1", 0),
         VoiceRelayHandler,
@@ -190,6 +208,19 @@ def main():
         assert_true(
             not first["mission_submitted"],
             "ordinary conversation submits no mission",
+        )
+        assert_true(
+            first["speech_output"]["ok"],
+            "validated reply is delivered to Pupper speech",
+        )
+        assert_true(
+            not first["speech_output"]["fallback_required"],
+            "successful Pupper speech disables browser fallback",
+        )
+        assert_equal(
+            spoken_replies,
+            ["I remember 1 browser message(s)."],
+            "Pupper receives the validated reply exactly once",
         )
         assert_equal(
             first["mode"],

@@ -1324,7 +1324,7 @@
         }
     );
 
-    function speakReply(reply) {
+    function speakReply(reply, speechOutput) {
         const normalizedReply =
             typeof reply === "string"
                 ? reply.trim()
@@ -1336,6 +1336,19 @@
 
         elements.robotReply.textContent =
             normalizedReply;
+
+        const pupperSpoke =
+            speechOutput &&
+            speechOutput.ok === true &&
+            speechOutput.fallback_required === false;
+
+        if (pupperSpoke) {
+            if ("speechSynthesis" in window) {
+                window.speechSynthesis.cancel();
+            }
+
+            return;
+        }
 
         if (
             !("speechSynthesis" in window) ||
@@ -1402,7 +1415,10 @@
                 );
             }
 
-            speakReply(result.reply);
+            speakReply(
+                result.reply,
+                result.speech_output
+            );
 
             await refreshStatus();
         }
