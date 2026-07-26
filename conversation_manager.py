@@ -4,6 +4,7 @@ from dataclasses import asdict, dataclass
 from typing import Any, Dict, List, Optional
 
 from arithmetic_service import answer_arithmetic_question
+from rock_paper_scissors_service import RockPaperScissorsGame
 from symbolic_math_service import answer_symbolic_math_question
 
 
@@ -93,6 +94,7 @@ class ConversationManager:
         self,
         provider,
         max_history_turns: int = 12,
+        rock_paper_scissors_game=None,
     ):
         if provider is None:
             raise ValueError("ConversationManager requires a provider.")
@@ -102,6 +104,10 @@ class ConversationManager:
 
         self.provider = provider
         self.max_history_turns = int(max_history_turns)
+        self.rock_paper_scissors_game = (
+            rock_paper_scissors_game
+            or RockPaperScissorsGame()
+        )
         self._history: List[ConversationTurn] = []
 
     def process(self, user_text: str) -> ConversationResult:
@@ -118,6 +124,21 @@ class ConversationManager:
                 "The provider does not implement "
                 "get_conversation_decision(user_text, history)."
             )
+
+        game_reply = self.rock_paper_scissors_game.process(
+            normalized_text
+        )
+
+        if game_reply is not None:
+            result = ConversationResult(
+                reply=game_reply,
+                decision_type="CONVERSATION",
+            )
+
+            self._append_turn("user", normalized_text)
+            self._append_turn("assistant", result.reply)
+
+            return result
 
         symbolic_reply = answer_symbolic_math_question(
             normalized_text
@@ -175,6 +196,7 @@ class ConversationManager:
 
     def clear_history(self) -> None:
         self._history.clear()
+        self.rock_paper_scissors_game.reset()
 
     def _append_turn(self, role: str, text: str) -> None:
         if self.max_history_turns == 0:
