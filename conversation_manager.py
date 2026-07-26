@@ -3,6 +3,8 @@
 from dataclasses import asdict, dataclass
 from typing import Any, Dict, List, Optional
 
+from arithmetic_service import answer_arithmetic_question
+
 
 ALLOWED_MISSION_TYPES = {
     "FOLLOW_PERSON",
@@ -115,6 +117,21 @@ class ConversationManager:
                 "The provider does not implement "
                 "get_conversation_decision(user_text, history)."
             )
+
+        arithmetic_reply = answer_arithmetic_question(
+            normalized_text
+        )
+
+        if arithmetic_reply is not None:
+            result = ConversationResult(
+                reply=arithmetic_reply,
+                decision_type="CONVERSATION",
+            )
+
+            self._append_turn("user", normalized_text)
+            self._append_turn("assistant", result.reply)
+
+            return result
 
         history_snapshot = self.get_history()
 

@@ -27,8 +27,17 @@ GLOBAL_STOP_COMMANDS = {
 def normalize_speech_text(value: str) -> str:
     text = str(value or "").strip().lower()
 
+    # Preserve arithmetic operators and parentheses because addressing runs
+    # before conversational interpretation. Decimal points are preserved only
+    # when they occur between digits; sentence punctuation is still removed.
     text = re.sub(
-        r"[^\w\s'-]",
+        r"(?<!\d)\.|\.(?!\d)",
+        " ",
+        text,
+    )
+
+    text = re.sub(
+        r"[^\w\s'()+*/.\-]",
         " ",
         text,
     )

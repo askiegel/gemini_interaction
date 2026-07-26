@@ -215,6 +215,19 @@
             margin-bottom: 12px;
         }
 
+        .robot-reply {
+            min-height: 64px;
+            padding: 12px;
+            border: 1px solid #b9ddc7;
+            border-radius: 8px;
+            background: #eefaf2;
+            color: #174f2c;
+            font-size: 18px;
+            font-weight: 700;
+            line-height: 1.4;
+            margin-bottom: 12px;
+        }
+
         .metric {
             display: flex;
             justify-content: space-between;
@@ -519,6 +532,15 @@
                 class="heard"
             >
                 Ready for a command.
+            </div>
+
+            <div
+                id="robotReply"
+                class="robot-reply"
+                role="status"
+                aria-live="polite"
+            >
+                Robot ready to answer.
             </div>
 
             <input
@@ -976,6 +998,8 @@
     const elements = {
         output: document.getElementById("output"),
         heard: document.getElementById("heard"),
+        robotReply:
+            document.getElementById("robotReply"),
         listenButton:
             document.getElementById("listenButton"),
         sendButton:
@@ -1300,6 +1324,41 @@
         }
     );
 
+    function speakReply(reply) {
+        const normalizedReply =
+            typeof reply === "string"
+                ? reply.trim()
+                : "";
+
+        if (!normalizedReply) {
+            return;
+        }
+
+        elements.robotReply.textContent =
+            normalizedReply;
+
+        if (
+            !("speechSynthesis" in window) ||
+            typeof SpeechSynthesisUtterance ===
+                "undefined"
+        ) {
+            return;
+        }
+
+        window.speechSynthesis.cancel();
+
+        const utterance =
+            new SpeechSynthesisUtterance(
+                normalizedReply
+            );
+
+        utterance.lang = "en-US";
+        utterance.rate = 1.0;
+        utterance.pitch = 1.0;
+
+        window.speechSynthesis.speak(utterance);
+    }
+
     async function sendCommand(command) {
         if (!command) {
             return;
@@ -1336,9 +1395,21 @@
             elements.output.textContent =
                 JSON.stringify(result, null, 2);
 
+            if (!response.ok || result.ok === false) {
+                throw new Error(
+                    result.error ||
+                    "Conversation request failed."
+                );
+            }
+
+            speakReply(result.reply);
+
             await refreshStatus();
         }
         catch (error) {
+            elements.robotReply.textContent =
+                "I could not answer that request.";
+
             elements.output.textContent =
                 "Command error:\n" +
                 error.toString();
