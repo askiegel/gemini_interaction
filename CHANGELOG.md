@@ -1,5 +1,20 @@
 # Changelog
 
+## Unreleased - 2026-07-25
+
+### Persistent person identity
+
+- Stabilized identity across transient World Model entity changes.
+- Ordered Entity Registry resolution before identity assignment.
+- Deduplicated person detections after registry resolution.
+- Preserved TargetLock identity through occlusion and reacquisition.
+- Verified repeated waiting-to-locked recovery with zero identity changes.
+
+### Execution ownership
+
+- Routed backward-compatible `--execute` through the persistent Runtime API.
+- Prevented command execution from creating a second live VisionAdapter.
+
 ## v1.0.0 — 2026-07-23
 
 First stable release of the Mini Pupper 2 Cognitive Robotics Platform.

@@ -82,6 +82,28 @@ The single source of truth for perceived entities.
 Translates cognitive commands into ROS2 motion and provides watchdog
 protection.
 
+## Persistent Identity and Target Ownership
+
+The live perception path is:
+
+```text
+Camera Relay -> YOLO Vision Server -> Vision Service -> VisionAdapter
+-> Entity Registry -> PersonIdentityManager -> World Model
+-> TargetLock -> FOLLOW_PERSON Controller
+```
+
+The Vision Service is the only live perception writer. Entity Registry
+resolution occurs before identity assignment. A persistent identity can retain
+bindings to multiple transient entity IDs.
+
+`TargetLock` retains the selected identity through `LOCKED`, `RECOVERING`, and
+`WAITING_FOR_IDENTITY`. Generic label reacquisition is blocked while waiting.
+
+The Cognitive Runtime is the only execution owner. Dashboard, `--runtime`, and
+backward-compatible `--execute` commands all submit through the Runtime API.
+
+See `docs/PERSISTENT_IDENTITY.md`.
+
 ## Startup Order
 
 1.  ROS2 Bringup
@@ -106,6 +128,9 @@ protection.
 -   Streaming FOLLOW_PERSON
 -   Target Lock
 -   Prediction Tracker
+-   Persistent Person Identity
+-   Identity-Only Target Reacquisition
+-   Single-Runtime Execution Ownership
 
 ## Future
 

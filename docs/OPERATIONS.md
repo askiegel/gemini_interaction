@@ -224,14 +224,16 @@ Verify:
 
 ### FOLLOW_PERSON
 
-When implemented, verify:
+Verify:
 
-- Person acquisition.
-- Horizontal centering.
-- Distance maintenance.
-- Repeated bounded corrections.
-- Loss-of-target recovery.
-- STOP preemption.
+- Persistent person identity acquisition.
+- `LOCKED`, `RECOVERING`, and `WAITING_FOR_IDENTITY` transitions.
+- Stationary waiting after predictive recovery expires.
+- Reappearance restores the same identity to `LOCKED`.
+- Another person cannot steal the target lock.
+- STOP resets tracking to `UNLOCKED`.
+
+See `docs/PERSISTENT_IDENTITY.md` for the hardware acceptance test.
 
 ## 11. Service Health Checks
 
@@ -445,6 +447,8 @@ If a regression test fails:
 The World Model must remain the single source of truth for perception.
 
 Behaviors should not query the Vision Server directly when the World Model already provides the required observation.
+
+Vision Service is the only live perception writer. Command execution must route through the persistent Runtime API so a second `VisionAdapter` cannot create an independent identity pipeline.
 
 Verify:
 

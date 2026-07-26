@@ -567,24 +567,28 @@ Use `Ctrl+C` in each service terminal.
 
 Power off the Mini Pupper only after motion has stopped.
 
-## Future Automation
+## Automated Startup
 
-The manual steps in this document will be automated by:
+The implemented startup script is the preferred startup method:
 
-    scripts/start_platform.py
+```bash
+cd ~/robot_services/cognitive
+source .venv/bin/activate
+python3 scripts/start_platform.py --start
+```
 
-The target command is:
+Use `--start` to start missing services, `--restart` after local service code
+changes, and `--check` to verify service readiness without starting services.
 
-    python3 scripts/start_platform.py
+A successful startup prints `SYSTEM READY`.
 
-The startup script should:
+## FOLLOW_PERSON Identity Verification
 
-1. Verify Mini Pupper connectivity.
-2. Verify Robot Bridge.
-3. Verify Camera Relay.
-4. Start the Vision Server if needed.
-5. Start the Vision Service.
-6. Start the Runtime API.
-7. Start the Browser Voice Relay.
-8. Run health checks.
-9. Print `SYSTEM READY`.
+Follow `docs/PERSISTENT_IDENTITY.md`. The required transition is:
+
+```text
+LOCKED -> RECOVERING -> WAITING_FOR_IDENTITY -> LOCKED
+```
+
+The persistent `locked_identity_id` must remain unchanged. STOP must return
+tracking to `UNLOCKED`.

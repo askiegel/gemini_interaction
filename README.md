@@ -28,7 +28,8 @@ The Vision Service continuously updates the World Model, which is the authoritat
 - Persistent runtime and mission queue
 - Immediate STOP preemption
 - Motion, FIND_OBJECT, FOLLOW_PERSON, scene description, and return-home mission support
-- Streaming follow controller with target lock, prediction, recovery, and identity telemetry
+- Streaming follow controller with persistent identity, target lock, prediction, occlusion recovery, and identity telemetry
+- Single-runtime execution ownership for dashboard, `--runtime`, and backward-compatible `--execute` commands
 - YOLO-based perception and persistent World Model
 - Robot Bridge and camera relay integration
 - Central configuration management
@@ -99,6 +100,7 @@ Hardware-dependent and explicitly live tests are not run automatically. Follow `
 ## Documentation
 
 - `docs/ARCHITECTURE.md`
+- `docs/PERSISTENT_IDENTITY.md`
 - `docs/STARTUP.md`
 - `docs/OPERATIONS.md`
 - `docs/SESSION_CHECKLIST.md`

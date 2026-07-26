@@ -15,7 +15,8 @@ Completed subsystems:
 - Mission Manager and deterministic Behavior Manager
 - Robot Bridge client integration
 - Vision Service, target tracking, and persistent World Model
-- Streaming FOLLOW_PERSON control with target lock and recovery
+- Streaming FOLLOW_PERSON control with persistent identity, target lock, predictive recovery, and identity-only reacquisition
+- Single-runtime command execution for dashboard, `--runtime`, and backward-compatible `--execute` paths
 - Operator Console: Mission Control, Perception, World Model, Conversation, Mission History, Diagnostics, Network, and Administration
 - Central configuration and read-only network diagnostics
 - Automated regression tests and startup verification

@@ -34,18 +34,18 @@ Completed:
 
 Goal: Start and verify the platform with one command.
 
-- [ ] Complete `scripts/start_platform.py`
-- [ ] Verify Mini Pupper connectivity
-- [ ] Verify Robot Bridge
-- [ ] Verify Camera Relay
-- [ ] Start Vision Server when needed
-- [ ] Start Vision Service
-- [ ] Start Runtime API
-- [ ] Start Browser Voice Relay
-- [ ] Run service health checks
-- [ ] Print `SYSTEM READY`
+- [x] Complete `scripts/start_platform.py`
+- [x] Verify Mini Pupper connectivity
+- [x] Verify Robot Bridge
+- [x] Verify Camera Relay
+- [x] Start Vision Server when needed
+- [x] Start Vision Service
+- [x] Start Runtime API
+- [x] Start Browser Voice Relay
+- [x] Run service health checks
+- [x] Print `SYSTEM READY`
 - [ ] Add clean shutdown support
-- [ ] Add structured service logs
+- [x] Add structured service logs
 
 Target command:
 
@@ -77,24 +77,24 @@ Mission lifecycle:
 
 Tasks:
 
-- [ ] Read the latest person observation from the World Model
-- [ ] Turn toward a person positioned left or right
-- [ ] Move forward when the person is centered and too far away
-- [ ] Stop or hold position at the target distance
-- [ ] Reacquire a temporarily lost person
-- [ ] Preserve one bounded action per runtime cycle
-- [ ] Add STOP-preemption tests
-- [ ] Add persistent mission regression tests
+- [x] Read the latest person observation from the World Model
+- [x] Turn toward a person positioned left or right
+- [x] Move forward when the person is centered and too far away
+- [x] Stop or hold position at the target distance
+- [x] Reacquire a temporarily lost person
+- [x] Preserve one bounded action per runtime cycle
+- [x] Add STOP-preemption tests
+- [x] Add persistent mission regression tests
 
 ## Phase 3 — Operator Experience
 
-- [ ] Dashboard STOP button
-- [ ] Platform health indicators
-- [ ] Active mission display
-- [ ] Mission queue display
-- [ ] Mission history
-- [ ] World Model visualization
-- [ ] Camera and detection preview
+- [x] Dashboard STOP button
+- [x] Platform health indicators
+- [x] Active mission display
+- [x] Mission queue display
+- [x] Mission history
+- [x] World Model visualization
+- [x] Camera and detection preview
 - [ ] Battery monitoring
 
 ## Phase 4 — LiDAR Navigation
@@ -138,9 +138,9 @@ Tasks:
 - [ ] Improve scene descriptions
 - [ ] Add conversational memory
 - [ ] Investigate pose estimation
-- [ ] Investigate person re-identification
+- [x] Implement persistent person identity
 - [ ] Add gesture understanding
-- [ ] Improve lost-person recovery
+- [x] Implement identity-only lost-person recovery
 
 ## Phase 9 — Robot-to-Robot Communication
 
@@ -200,8 +200,11 @@ Before marking a release stable:
 
 ## Immediate Next Tasks
 
-1. Finish `scripts/start_platform.py`.
-2. Test one-command startup.
-3. Add shutdown and process cleanup.
-4. Implement persistent FOLLOW_PERSON.
-5. Add the Dashboard STOP button.
+1. Add LiDAR observations to the World Model.
+2. Add deterministic collision-prevention checks.
+3. Add LiDAR health to startup diagnostics.
+4. Define safe local-navigation boundaries.
+5. Preserve the verified identity and TargetLock contracts.
+
+Persistent identity, occlusion recovery, one-command startup, streaming
+FOLLOW_PERSON, and the Operator Console STOP path are hardware-verified.

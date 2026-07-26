@@ -80,6 +80,17 @@ Verify that:
 - The mission queue is cleared.
 - The runtime returns to STOPPED.
 
+## FOLLOW_PERSON Identity Check
+
+- [ ] Issue `Follow me` through the Operator Console
+- [ ] Confirm tracking reaches `LOCKED`
+- [ ] Record `locked_identity_id`
+- [ ] Leave view until `WAITING_FOR_IDENTITY`
+- [ ] Reappear and confirm the same identity returns to `LOCKED`
+- [ ] Issue STOP and confirm `UNLOCKED`
+
+See `docs/PERSISTENT_IDENTITY.md` for the complete procedure.
+
 ## Before Coding
 
 - [ ] Activate the Python virtual environment
