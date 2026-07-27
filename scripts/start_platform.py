@@ -22,7 +22,7 @@ VISION_SERVER_DIR = Path.home() / "vision_server"
 
 ROBOT_HOST = os.getenv(
     "MINI_PUPPER_HOST",
-    "192.168.68.127",
+    "192.168.68.124",
 )
 
 ROBOT_USER = os.getenv(

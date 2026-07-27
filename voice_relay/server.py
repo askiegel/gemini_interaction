@@ -47,7 +47,7 @@ VISION_SERVER_URL = os.getenv(
 
 ROBOT_BRIDGE_URL = os.getenv(
     "ROBOT_BRIDGE_URL",
-    "http://192.168.68.127:8090",
+    "http://192.168.68.124:8090",
 ).rstrip("/")
 
 

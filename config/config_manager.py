@@ -29,7 +29,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "platform_version": "1.1.0",
     },
     "network": {
-        "robot_ip": "192.168.68.127",
+        "robot_ip": "192.168.68.124",
         "robot_bridge_port": 8090,
         "brain_ip": "127.0.0.1",
         "ros_domain": 42,
