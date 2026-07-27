@@ -132,6 +132,9 @@ class PersonIdentityManager:
         self.identities: Dict[str, PersonIdentity] = {}
         self.entity_bindings: Dict[str, str] = {}
 
+        # Valid only across consecutive single-person frames.
+        self.last_single_person_identity_id: Optional[str] = None
+
         self.last_match_diagnostic: Optional[
             Dict[str, Any]
         ] = None
@@ -1052,10 +1055,49 @@ class PersonIdentityManager:
         This prevents two simultaneous detections from receiving the same
         identity solely because both are near the previous position.
         """
+        frame_detections = list(detections)
+        previous_single_identity_id = (
+            self.last_single_person_identity_id
+        )
+
+        # Empty and multi-person frames invalidate the preference.
+        self.last_single_person_identity_id = None
+
+        if (
+            len(frame_detections) == 1
+            and previous_single_identity_id
+        ):
+            normalized = self._normalize_detection(
+                frame_detections[0]
+            )
+            current_entity_id = normalized.get("entity_id")
+            previous_identity = self.identities.get(
+                previous_single_identity_id
+            )
+
+            if (
+                normalized.get("label") == "person"
+                and current_entity_id
+                and current_entity_id not in self.entity_bindings
+                and previous_identity is not None
+            ):
+                diagnostic = self._match_diagnostic(
+                    normalized,
+                    previous_identity,
+                )
+
+                if (
+                    diagnostic.final_score
+                    >= self.hysteresis_minimum_match_score
+                ):
+                    self.entity_bindings[
+                        current_entity_id
+                    ] = previous_single_identity_id
+
         results = []
         assigned_identity_ids = set()
 
-        for detection in detections:
+        for detection in frame_detections:
             result = self.assign_identity(
                 detection
             )
@@ -1152,6 +1194,17 @@ class PersonIdentityManager:
 
             results.append(result)
 
+        if (
+            len(results) == 1
+            and results[0].get("identity_id")
+            and self._normalize_detection(
+                frame_detections[0]
+            ).get("label") == "person"
+        ):
+            self.last_single_person_identity_id = (
+                results[0]["identity_id"]
+            )
+
         return results
 
     def get_identity(
@@ -1208,6 +1261,12 @@ class PersonIdentityManager:
         if removed:
             removed_set = set(removed)
 
+            if (
+                self.last_single_person_identity_id
+                in removed_set
+            ):
+                self.last_single_person_identity_id = None
+
             self.entity_bindings = {
                 entity_id: identity_id
                 for entity_id, identity_id
@@ -1220,4 +1279,5 @@ class PersonIdentityManager:
     def reset(self):
         self.identities.clear()
         self.entity_bindings.clear()
+        self.last_single_person_identity_id = None
         self.last_match_diagnostic = None
