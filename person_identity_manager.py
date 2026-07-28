@@ -80,6 +80,13 @@ class PersonIdentityManager:
     DEFAULT_HYSTERESIS_MINIMUM_MATCH_SCORE = 0.52
     DEFAULT_HYSTERESIS_MINIMUM_OBSERVATIONS = 2
 
+    # A single person in two uninterrupted consecutive frames may move far
+    # enough to lose center overlap. Retain identity only for a short interval
+    # when apparent body area remains strongly consistent.
+    DEFAULT_SINGLE_PERSON_CONTINUITY_MAX_AGE_SECONDS = 2.0
+    DEFAULT_SINGLE_PERSON_CONTINUITY_MINIMUM_SCORE = 0.14
+    DEFAULT_SINGLE_PERSON_CONTINUITY_MINIMUM_AREA_SCORE = 0.75
+
     def __init__(
         self,
         max_identity_age_seconds: float = (
@@ -104,6 +111,15 @@ class PersonIdentityManager:
         hysteresis_minimum_observations: int = (
             DEFAULT_HYSTERESIS_MINIMUM_OBSERVATIONS
         ),
+        single_person_continuity_max_age_seconds: float = (
+            DEFAULT_SINGLE_PERSON_CONTINUITY_MAX_AGE_SECONDS
+        ),
+        single_person_continuity_minimum_score: float = (
+            DEFAULT_SINGLE_PERSON_CONTINUITY_MINIMUM_SCORE
+        ),
+        single_person_continuity_minimum_area_score: float = (
+            DEFAULT_SINGLE_PERSON_CONTINUITY_MINIMUM_AREA_SCORE
+        ),
     ):
         self.max_identity_age_seconds = float(
             max_identity_age_seconds
@@ -127,6 +143,16 @@ class PersonIdentityManager:
         )
         self.hysteresis_minimum_observations = int(
             hysteresis_minimum_observations
+        )
+
+        self.single_person_continuity_max_age_seconds = float(
+            single_person_continuity_max_age_seconds
+        )
+        self.single_person_continuity_minimum_score = float(
+            single_person_continuity_minimum_score
+        )
+        self.single_person_continuity_minimum_area_score = float(
+            single_person_continuity_minimum_area_score
         )
 
         self.identities: Dict[str, PersonIdentity] = {}
@@ -1086,9 +1112,24 @@ class PersonIdentityManager:
                     previous_identity,
                 )
 
-                if (
+                strong_hysteresis_match = (
                     diagnostic.final_score
                     >= self.hysteresis_minimum_match_score
+                )
+
+                bounded_rapid_motion_match = (
+                    diagnostic.final_score
+                    >= self.single_person_continuity_minimum_score
+                    and diagnostic.age_seconds is not None
+                    and diagnostic.age_seconds
+                    <= self.single_person_continuity_max_age_seconds
+                    and diagnostic.area_score
+                    >= self.single_person_continuity_minimum_area_score
+                )
+
+                if (
+                    strong_hysteresis_match
+                    or bounded_rapid_motion_match
                 ):
                     self.entity_bindings[
                         current_entity_id

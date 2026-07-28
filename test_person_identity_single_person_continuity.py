@@ -75,5 +75,56 @@ assert len(multiple_ids) == 2, (
 )
 
 print()
+print("===== RAPID SINGLE-PERSON MOTION =====")
+
+rapid_manager = PersonIdentityManager()
+
+rapid_first = rapid_manager.assign_identities([
+    person("person-101", 0, 0, 151, 480),
+])[0]
+
+rapid_identity_id = rapid_first["identity_id"]
+
+rapid_migrated = rapid_manager.assign_identities([
+    person("person-102", 486, 0, 637, 480),
+])[0]
+
+print("first:", rapid_first)
+print("migrated:", rapid_migrated)
+
+assert rapid_migrated["identity_id"] == rapid_identity_id, (
+    "A continuously visible single person lost identity after "
+    "rapid motion and a transient entity-ID change."
+)
+
+print()
+print("===== EMPTY FRAME BREAKS CONTINUITY =====")
+
+interrupted_manager = PersonIdentityManager()
+
+before_gap = interrupted_manager.assign_identities([
+    person("person-201", 0, 0, 151, 480),
+])[0]
+
+interrupted_manager.assign_identities([])
+
+after_gap = interrupted_manager.assign_identities([
+    person("person-202", 486, 0, 637, 480),
+])[0]
+
+print("before_gap:", before_gap)
+print("after_gap:", after_gap)
+
+assert (
+    after_gap["identity_id"]
+    != before_gap["identity_id"]
+), (
+    "A person appearing after an empty frame inherited the "
+    "previous single-person continuity identity."
+)
+
+print()
 print("PASS: Single-person entity migration retained identity.")
+print("PASS: Rapid continuous motion retained identity.")
+print("PASS: Empty frame cleared relaxed continuity.")
 print("PASS: Simultaneous people remained identity-distinct.")
