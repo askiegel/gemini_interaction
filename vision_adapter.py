@@ -454,6 +454,170 @@ class VisionAdapter:
 
         return []
 
+    def _nested_person_duplicate(
+        self,
+        first: Dict[str, Any],
+        second: Dict[str, Any],
+    ) -> bool:
+        first_bbox = self._extract_bbox(first)
+        second_bbox = self._extract_bbox(second)
+
+        if first_bbox is None or second_bbox is None:
+            return False
+
+        intersection_width = max(
+            0.0,
+            min(first_bbox["x2"], second_bbox["x2"])
+            - max(first_bbox["x1"], second_bbox["x1"]),
+        )
+        intersection_height = max(
+            0.0,
+            min(first_bbox["y2"], second_bbox["y2"])
+            - max(first_bbox["y1"], second_bbox["y1"]),
+        )
+        intersection = (
+            intersection_width * intersection_height
+        )
+
+        first_width = max(
+            0.0,
+            first_bbox["x2"] - first_bbox["x1"],
+        )
+        first_height = max(
+            0.0,
+            first_bbox["y2"] - first_bbox["y1"],
+        )
+        second_width = max(
+            0.0,
+            second_bbox["x2"] - second_bbox["x1"],
+        )
+        second_height = max(
+            0.0,
+            second_bbox["y2"] - second_bbox["y1"],
+        )
+
+        first_area = first_width * first_height
+        second_area = second_width * second_height
+        smaller_area = min(first_area, second_area)
+        union = first_area + second_area - intersection
+
+        if smaller_area <= 0.0 or union <= 0.0:
+            return False
+
+        containment = intersection / smaller_area
+        iou = intersection / union
+
+        first_cx = (
+            first_bbox["x1"] + first_bbox["x2"]
+        ) / 2.0
+        first_cy = (
+            first_bbox["y1"] + first_bbox["y2"]
+        ) / 2.0
+        second_cx = (
+            second_bbox["x1"] + second_bbox["x2"]
+        ) / 2.0
+        second_cy = (
+            second_bbox["y1"] + second_bbox["y2"]
+        ) / 2.0
+
+        maximum_width = max(first_width, second_width)
+        maximum_height = max(first_height, second_height)
+
+        center_x_ratio = (
+            abs(first_cx - second_cx) / maximum_width
+            if maximum_width > 0.0
+            else 1.0
+        )
+        center_y_ratio = (
+            abs(first_cy - second_cy) / maximum_height
+            if maximum_height > 0.0
+            else 1.0
+        )
+
+        return (
+            containment >= 0.90
+            and iou >= 0.20
+            and center_x_ratio <= 0.30
+            and center_y_ratio <= 0.30
+        )
+
+    def _deduplicate_nested_people(
+        self,
+        detections: List[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        deduplicated = []
+
+        for detection in detections:
+            if not isinstance(detection, dict):
+                deduplicated.append(detection)
+                continue
+
+            label = self._normalize_label(
+                detection.get("label")
+                or detection.get("class")
+                or detection.get("name")
+                or detection.get("object")
+            )
+
+            if label != "person":
+                deduplicated.append(detection)
+                continue
+
+            duplicate_position = None
+
+            for position, existing in enumerate(
+                deduplicated
+            ):
+                if not isinstance(existing, dict):
+                    continue
+
+                existing_label = self._normalize_label(
+                    existing.get("label")
+                    or existing.get("class")
+                    or existing.get("name")
+                    or existing.get("object")
+                )
+
+                if (
+                    existing_label == "person"
+                    and self._nested_person_duplicate(
+                        existing,
+                        detection,
+                    )
+                ):
+                    duplicate_position = position
+                    break
+
+            if duplicate_position is None:
+                deduplicated.append(detection)
+                continue
+
+            existing = deduplicated[duplicate_position]
+
+            existing_rank = (
+                float(
+                    existing.get("confidence")
+                    or existing.get("conf")
+                    or existing.get("score")
+                    or 0.0
+                ),
+                float(existing.get("area") or 0.0),
+            )
+            candidate_rank = (
+                float(
+                    detection.get("confidence")
+                    or detection.get("conf")
+                    or detection.get("score")
+                    or 0.0
+                ),
+                float(detection.get("area") or 0.0),
+            )
+
+            if candidate_rank > existing_rank:
+                deduplicated[duplicate_position] = detection
+
+        return deduplicated
+
     def process_detection_frame(
         self,
         detections: List[Dict[str, Any]],
@@ -466,6 +630,10 @@ class VisionAdapter:
         Identity enrichment updates the already registered observation rather
         than appending a duplicate history entry.
         """
+        detections = self._deduplicate_nested_people(
+            detections
+        )
+
         registered = []
 
         for detection in detections:
