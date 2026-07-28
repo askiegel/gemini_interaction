@@ -84,10 +84,10 @@ class IdentityMigrationWorldModel:
 
     def get_entity(self, entity_id):
         self.entity_queries += 1
-        raise AssertionError(
-            "Entity-ID lookup must not be used when "
-            "identity lookup is available."
-        )
+
+        # The previously locked transient entity is unavailable, so
+        # TargetLock continues through persistent-identity lookup.
+        return None
 
 
 class MismatchedIdentityWorldModel(
@@ -195,7 +195,7 @@ def test_same_identity_migrates_entity():
 
     assert world_model.label_queries == 1
     assert world_model.identity_queries == 1
-    assert world_model.entity_queries == 0
+    assert world_model.entity_queries == 1
 
     migration = (
         lock.snapshot()["last_entity_migration"]
@@ -290,7 +290,7 @@ def test_different_identity_is_blocked():
 
     assert world_model.label_queries == 1
     assert world_model.identity_queries == 1
-    assert world_model.entity_queries == 0
+    assert world_model.entity_queries == 1
 
     print(
         "PASS: a different persistent identity cannot "

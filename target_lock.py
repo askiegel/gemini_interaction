@@ -318,6 +318,47 @@ class TargetLock:
             ),
         }
 
+    def _identity_mismatch_result(
+        self,
+        observation: Dict[str, Any],
+        observed_identity_id: str,
+    ) -> Dict[str, Any]:
+        """
+        Block silent transfer of persistent mission ownership.
+        """
+        if (
+            self.tracking_mode
+            == self.MODE_WAITING_FOR_IDENTITY
+        ):
+            result = self._waiting_result()
+        else:
+            result = {
+                **observation,
+                "found": False,
+                "entity_id": self.locked_entity_id,
+            }
+
+        return {
+            **result,
+            "identity_id": self.locked_identity_id,
+            "locked_identity_id": (
+                self.locked_identity_id
+            ),
+            "observed_identity_id": (
+                observed_identity_id
+            ),
+            "identity_mismatch": True,
+            "identity_refreshed": False,
+            "reacquisition_blocked": True,
+            "label_reacquisition_blocked": True,
+            "reason": (
+                "The currently observed entity reports a "
+                "different persistent identity. Mission "
+                "ownership remains with the originally "
+                "selected identity."
+            ),
+        }
+
     def _resolve_waiting_identity(
         self,
     ) -> Dict[str, Any]:
@@ -356,10 +397,24 @@ class TargetLock:
                 ).strip() or None
 
                 previous_identity_id = self.locked_identity_id
-                identity_refreshed = bool(
-                    observed_identity_id
+                identity_mismatch = bool(
+                    previous_identity_id
+                    and observed_identity_id
                     and observed_identity_id
                     != previous_identity_id
+                )
+
+                if identity_mismatch:
+                    return self._identity_mismatch_result(
+                        continuity_result,
+                        observed_identity_id,
+                    )
+
+                # Adopt an identity only when the mission does not
+                # already own one.
+                identity_refreshed = bool(
+                    observed_identity_id
+                    and not previous_identity_id
                 )
 
                 if identity_refreshed:
@@ -654,10 +709,24 @@ class TargetLock:
             ).strip() or None
 
             previous_identity_id = self.locked_identity_id
-            identity_refreshed = bool(
-                observed_identity_id
+            identity_mismatch = bool(
+                previous_identity_id
+                and observed_identity_id
                 and observed_identity_id
                 != previous_identity_id
+            )
+
+            if identity_mismatch:
+                return self._identity_mismatch_result(
+                    continuity_result,
+                    observed_identity_id,
+                )
+
+            # Adopt an identity only when the mission does not
+            # already own one.
+            identity_refreshed = bool(
+                observed_identity_id
+                and not previous_identity_id
             )
 
             if identity_refreshed:

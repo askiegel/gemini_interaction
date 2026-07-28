@@ -171,8 +171,9 @@ assert lock.locked_entity_id == "person-001"
 assert lock.locked_identity_id == old_identity
 assert lock.tracking_mode == TargetLock.MODE_LOCKED
 
-# The same transient entity remains visible, but the identity manager refines
-# its persistent identity assignment.
+# The same transient entity remains visible but is now assigned a different
+# persistent identity. Mission ownership must remain with the original
+# identity rather than silently transferring to the replacement.
 world.entities["person-001"] = make_person(
     entity_id="person-001",
     identity_id=new_identity,
@@ -183,28 +184,26 @@ second = lock.resolve(
     target_label="person",
 )
 
-assert second["found"] is True
-assert second["entity_id"] == "person-001"
-assert second["identity_refreshed"] is True
-assert second["previous_identity_id"] == old_identity
-assert second["new_identity_id"] == new_identity
+assert second["found"] is False
+assert second["identity_mismatch"] is True
+assert second["reacquisition_blocked"] is True
+assert second["observed_identity_id"] == new_identity
+assert second["identity_id"] == old_identity
 
 assert lock.locked_entity_id == "person-001"
-assert lock.locked_identity_id == new_identity
+assert lock.locked_identity_id == old_identity
 assert lock.tracking_mode == TargetLock.MODE_LOCKED
 
-# Once refreshed, the stable identity should remain selected.
 third = lock.resolve(
     mission_id="mission-follow-001",
     target_label="person",
 )
 
-assert third["found"] is True
-assert third["identity_refreshed"] is False
-assert lock.locked_identity_id == new_identity
-assert lock.tracking_mode == TargetLock.MODE_LOCKED
+assert third["found"] is False
+assert third["identity_mismatch"] is True
+assert lock.locked_identity_id == old_identity
 
 print(
-    "PASS: TargetLock refreshed identity while preserving "
-    "same-entity continuity."
+    "PASS: Same-entity identity mismatch was blocked and "
+    "mission identity ownership remained immutable."
 )

@@ -186,28 +186,33 @@ assert lock.waiting_entity_id == "person-001"
 assert lock.locked_identity_id == temporary_identity
 assert waiting["entity_id"] is None
 
-# The same exact transient entity becomes fresh again, but now carries the
-# stabilized identity.
+# The same transient entity becomes fresh again but now carries a different
+# identity. Waiting ownership must remain with the originally selected
+# persistent identity.
 world.entities["person-001"] = make_person(
     stable_identity
 )
 
-resumed = lock.resolve(
+blocked = lock.resolve(
     mission_id="mission-follow-001",
     target_label="person",
 )
 
-assert resumed["found"] is True
-assert resumed["entity_id"] == "person-001"
-assert resumed["identity_refreshed"] is True
-assert resumed["previous_identity_id"] == temporary_identity
-assert resumed["new_identity_id"] == stable_identity
+assert blocked["found"] is False
+assert blocked["identity_mismatch"] is True
+assert blocked["reacquisition_blocked"] is True
+assert blocked["observed_identity_id"] == stable_identity
+assert blocked["identity_id"] == temporary_identity
 
-assert lock.locked_entity_id == "person-001"
-assert lock.locked_identity_id == stable_identity
-assert lock.tracking_mode == TargetLock.MODE_LOCKED
+assert lock.locked_entity_id is None
+assert lock.waiting_entity_id == "person-001"
+assert lock.locked_identity_id == temporary_identity
+assert (
+    lock.tracking_mode
+    == TargetLock.MODE_WAITING_FOR_IDENTITY
+)
 
 print(
-    "PASS: Waiting TargetLock resumed through the same entity "
-    "and accepted its stabilized identity."
+    "PASS: Waiting TargetLock rejected a changed identity "
+    "and retained original mission ownership."
 )
