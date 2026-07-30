@@ -65,7 +65,7 @@ def main():
             print("===== GET CONFIG =====")
             status, response = request_json("GET", f"{base_url}/config")
             assert status == 200
-            assert response["config"]["robot"]["name"] == "Tony-01"
+            assert response["config"]["robot"]["name"] == "Mayday"
 
             print("===== PUT CONFIG =====")
             updated = response["config"]

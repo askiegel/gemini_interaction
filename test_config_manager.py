@@ -18,7 +18,7 @@ def main():
 
         print("===== DEFAULT CREATION =====")
         assert path.exists()
-        assert manager.get_config()["robot"]["name"] == "Tony-01"
+        assert manager.get_config()["robot"]["name"] == "Mayday"
 
         updated = manager.get_config()
         updated["robot"]["name"] = "Tony-02"
