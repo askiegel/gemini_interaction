@@ -12,8 +12,19 @@ class Runtime:
         return {"running": True, "runtime_state": "IDLE", "uptime_seconds": 12, "active_mission": None, "queue": [], "history_count": 2, "last_error": None}
 
 class Config:
+    robot_bridge_url = "http://127.0.0.1:1"
+    camera_relay_url = "http://127.0.0.1:1/camera/latest.jpg"
+
     def get_config(self):
-        return {"network": {"robot_ip": "127.0.0.1", "robot_bridge_port": 1}, "vision": {"server_url": "http://127.0.0.1:1/nope"}}
+        return {
+            "network": {
+                "robot_ip": "192.0.2.1",
+                "robot_bridge_port": 8090,
+            },
+            "vision": {
+                "server_url": "http://127.0.0.1:1/nope",
+            },
+        }
 
 with tempfile.TemporaryDirectory() as directory:
     manager = DiagnosticsManager(Runtime(), Config(), project_dir=Path(directory), probe_timeout=0.01)

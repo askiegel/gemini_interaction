@@ -18,6 +18,7 @@ if str(PROJECT_DIR) not in sys.path:
     sys.path.insert(0, str(PROJECT_DIR))
 
 
+from config.config_manager import ConfigurationManager
 from conversation_manager import ConversationError
 from conversation_service import create_conversation_service
 
@@ -45,10 +46,11 @@ VISION_SERVER_URL = os.getenv(
     "http://127.0.0.1:8000/detections/latest",
 )
 
-ROBOT_BRIDGE_URL = os.getenv(
-    "ROBOT_BRIDGE_URL",
-    "http://192.168.68.124:8090",
-).rstrip("/")
+ROBOT_BRIDGE_URL = (
+    ConfigurationManager()
+    .robot_bridge_url
+    .rstrip("/")
+)
 
 
 _CONVERSATION_SERVICE = None

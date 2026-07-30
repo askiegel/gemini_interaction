@@ -121,16 +121,18 @@ class DiagnosticsManager:
     def collect(self) -> Dict[str, Any]:
         config = self.config_manager.get_config()
         runtime_status = self.runtime.get_status()
-        network = config.get("network", {})
-        robot_ip = network.get("robot_ip", "")
-        bridge_port = network.get("robot_bridge_port", 8090)
         vision_url = config.get("vision", {}).get("server_url", "")
-        bridge_url = f"http://{robot_ip}:{bridge_port}/status"
-        camera_url = f"http://{robot_ip}:8091/camera/latest.jpg"
+        bridge_url = (
+            f"{self.config_manager.robot_bridge_url}/status"
+        )
+        camera_url = self.config_manager.camera_relay_url
 
-        robot = self._probe_json(bridge_url) if robot_ip else {"online": False, "error": "Robot IP is not configured."}
-        vision = self._probe_json(vision_url) if vision_url else {"online": False, "error": "Vision URL is not configured."}
-        camera = self._probe_json(camera_url) if robot_ip else {"online": False, "error": "Robot IP is not configured."}
+        robot = self._probe_json(bridge_url)
+        vision = self._probe_json(vision_url) if vision_url else {
+            "online": False,
+            "error": "Vision URL is not configured.",
+        }
+        camera = self._probe_json(camera_url)
 
         try:
             entity_count = len(self.runtime.world_model.get_entities())

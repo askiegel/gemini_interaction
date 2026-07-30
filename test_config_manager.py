@@ -22,12 +22,17 @@ def main():
 
         updated = manager.get_config()
         updated["robot"]["name"] = "Tony-02"
+        updated["robot"]["hostname"] = "demo-pupper.local"
         updated["network"]["robot_ip"] = "192.168.68.155"
         saved = manager.update_config(updated)
 
         print("===== ATOMIC UPDATE =====")
         assert saved["robot"]["name"] == "Tony-02"
-        assert manager.robot_bridge_url == "http://192.168.68.155:8090"
+        assert manager.robot_host == "demo-pupper.local"
+        assert manager.robot_bridge_url == "http://demo-pupper.local:8090"
+        assert manager.camera_relay_url == (
+            "http://demo-pupper.local:8091/camera/latest.jpg"
+        )
         assert json.loads(path.read_text())["robot"]["name"] == "Tony-02"
 
         print("===== DEFENSIVE COPY =====")

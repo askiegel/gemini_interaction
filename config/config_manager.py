@@ -25,7 +25,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         ],
         "model": "Mini Pupper 2",
         "role": "primary",
-        "hostname": "minipupper",
+        "hostname": "minipupperv2.local",
         "platform_version": "1.1.0",
     },
     "network": {
@@ -289,15 +289,44 @@ class ConfigurationManager:
             return self.get_config()
 
     @property
+    def robot_host(self) -> str:
+        """
+        Return the preferred network address for the Mini Pupper.
+
+        MINI_PUPPER_HOST remains the highest-priority operational override.
+        The configured hostname is authoritative during normal operation.
+        network.robot_ip is retained as compatibility and reference data.
+        """
+        override = os.getenv("MINI_PUPPER_HOST")
+        if override:
+            return override.strip()
+
+        config = self.get_config()
+        hostname = config["robot"]["hostname"].strip()
+        if hostname:
+            return hostname
+
+        return config["network"]["robot_ip"].strip()
+
+    @property
     def robot_bridge_url(self) -> str:
         override = os.getenv("ROBOT_BRIDGE_URL")
         if override:
             return override.rstrip("/")
+
         config = self.get_config()
-        network = config["network"]
+        bridge_port = config["network"]["robot_bridge_port"]
+        return f"http://{self.robot_host}:{bridge_port}"
+
+    @property
+    def camera_relay_url(self) -> str:
+        override = os.getenv("CAMERA_RELAY_URL")
+        if override:
+            return override
+
         return (
-            f"http://{network['robot_ip']}:"
-            f"{network['robot_bridge_port']}"
+            f"http://{self.robot_host}:8091/"
+            "camera/latest.jpg"
         )
 
     def _write_atomic(self, payload: Mapping[str, Any]) -> None:

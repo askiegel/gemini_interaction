@@ -15,15 +15,21 @@ from typing import Iterable, Optional
 
 
 PROJECT_DIR = Path(__file__).resolve().parents[1]
+
+if str(PROJECT_DIR) not in sys.path:
+    sys.path.insert(0, str(PROJECT_DIR))
+
+from config.config_manager import ConfigurationManager
+
+
 PLATFORM_LOG_DIR = PROJECT_DIR / "logs" / "platform"
 PLATFORM_RUN_DIR = PROJECT_DIR / ".run"
 
 VISION_SERVER_DIR = Path.home() / "vision_server"
 
-ROBOT_HOST = os.getenv(
-    "MINI_PUPPER_HOST",
-    "192.168.68.124",
-)
+CONFIG_MANAGER = ConfigurationManager()
+
+ROBOT_HOST = CONFIG_MANAGER.robot_host
 
 ROBOT_USER = os.getenv(
     "MINI_PUPPER_USER",
@@ -32,15 +38,9 @@ ROBOT_USER = os.getenv(
 
 ROBOT_SSH_TARGET = f"{ROBOT_USER}@{ROBOT_HOST}"
 
-ROBOT_BRIDGE_URL = os.getenv(
-    "ROBOT_BRIDGE_URL",
-    f"http://{ROBOT_HOST}:8090",
-)
+ROBOT_BRIDGE_URL = CONFIG_MANAGER.robot_bridge_url
 
-CAMERA_RELAY_URL = os.getenv(
-    "CAMERA_RELAY_URL",
-    f"http://{ROBOT_HOST}:8091/camera/latest.jpg",
-)
+CAMERA_RELAY_URL = CONFIG_MANAGER.camera_relay_url
 
 VISION_SERVER_URL = os.getenv(
     "VISION_SERVER_URL",
