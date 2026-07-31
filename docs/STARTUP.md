@@ -569,6 +569,8 @@ Power off the Mini Pupper only after motion has stopped.
 
 ## Automated Startup
 
+For the validated network-independent startup and live rehearsal, see [Portable Demo Guide](PORTABLE_DEMO.md).
+
 The implemented startup script is the preferred startup method:
 
 ```bash

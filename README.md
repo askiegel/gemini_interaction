@@ -102,6 +102,7 @@ Hardware-dependent and explicitly live tests are not run automatically. Follow `
 - `docs/ARCHITECTURE.md`
 - `docs/PERSISTENT_IDENTITY.md`
 - `docs/STARTUP.md`
+- `docs/PORTABLE_DEMO.md`
 - `docs/OPERATIONS.md`
 - `docs/SESSION_CHECKLIST.md`
 - `docs/ROADMAP.md`
