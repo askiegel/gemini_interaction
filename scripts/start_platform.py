@@ -68,6 +68,10 @@ ROBOT_BRIDGE_URL = CONFIG_MANAGER.robot_bridge_url
 
 CAMERA_RELAY_URL = CONFIG_MANAGER.camera_relay_url
 
+# The separate YOLO Vision Server reads VISION_CAMERA_URL. Give it the
+# same resolved Camera Relay URL used by the startup health checks.
+os.environ["VISION_CAMERA_URL"] = CAMERA_RELAY_URL
+
 VISION_SERVER_URL = os.getenv(
     "VISION_SERVER_URL",
     "http://127.0.0.1:8000/detections/latest",
