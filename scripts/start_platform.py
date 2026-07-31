@@ -20,6 +20,10 @@ if str(PROJECT_DIR) not in sys.path:
     sys.path.insert(0, str(PROJECT_DIR))
 
 from config.config_manager import ConfigurationManager
+from network.robot_address_resolver import (
+    is_expected_robot_bridge,
+    resolve_robot_address,
+)
 
 
 PLATFORM_LOG_DIR = PROJECT_DIR / "logs" / "platform"
@@ -28,8 +32,18 @@ PLATFORM_RUN_DIR = PROJECT_DIR / ".run"
 VISION_SERVER_DIR = Path.home() / "vision_server"
 
 CONFIG_MANAGER = ConfigurationManager()
+SYSTEM_CONFIG = CONFIG_MANAGER.get_config()
 
-ROBOT_HOST = CONFIG_MANAGER.robot_host
+ROBOT_ADDRESS = resolve_robot_address(
+    CONFIG_MANAGER.robot_host,
+    SYSTEM_CONFIG["network"].get("robot_ip"),
+)
+
+ROBOT_HOST = ROBOT_ADDRESS.address
+
+# Child services inherit the verified startup address instead of repeatedly
+# depending on hostname resolution while the demonstration is running.
+os.environ["MINI_PUPPER_HOST"] = ROBOT_HOST
 
 ROBOT_USER = os.getenv(
     "MINI_PUPPER_USER",
@@ -729,8 +743,7 @@ def service_status():
     return {
         "robot_bridge": {
             "ready": bool(
-                bridge
-                and bridge.get("ok")
+                is_expected_robot_bridge(bridge)
                 and bridge.get("ros_ready")
             ),
             "details": bridge,
