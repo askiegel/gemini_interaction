@@ -646,17 +646,40 @@ export ROS_LOCALHOST_ONLY=0
 
 is_running() {
     local pid_file="$1"
+    local expected_marker="$2"
 
     [ -f "$pid_file" ] || return 1
 
     local pid
     pid=$(cat "$pid_file" 2>/dev/null || true)
 
-    [ -n "$pid" ] || return 1
-    kill -0 "$pid" 2>/dev/null
+    if ! printf "%s" "$pid" | grep -Eq "^[0-9]+$"; then
+        echo "STALE: $(basename "$pid_file") contains an invalid PID"
+        rm -f -- "$pid_file"
+        return 1
+    fi
+
+    if ! kill -0 "$pid" 2>/dev/null; then
+        echo "STALE: $(basename "$pid_file") references stopped PID $pid"
+        rm -f -- "$pid_file"
+        return 1
+    fi
+
+    local command_line
+    command_line=$(
+        tr "\0" " " < "/proc/$pid/cmdline" 2>/dev/null || true
+    )
+
+    if [[ "$command_line" != *"$expected_marker"* ]]; then
+        echo "STALE: $(basename "$pid_file") PID $pid belongs to another process"
+        rm -f -- "$pid_file"
+        return 1
+    fi
+
+    return 0
 }
 
-if is_running "$RUN_DIR/ros2_bringup.pid"; then
+if is_running "$RUN_DIR/ros2_bringup.pid" "mini_pupper_bringup"; then
     echo "SKIP: ROS2 bringup already running"
 else
     nohup bash -lc '
@@ -673,7 +696,7 @@ fi
 
 sleep 4
 
-if is_running "$RUN_DIR/robot_bridge.pid"; then
+if is_running "$RUN_DIR/robot_bridge.pid" "python3 app.py"; then
     echo "SKIP: Robot Bridge already running"
 else
     cd "$HOME/robot_bridge"
@@ -691,7 +714,7 @@ else
     echo "START: Robot Bridge PID=$(cat "$RUN_DIR/robot_bridge.pid")"
 fi
 
-if is_running "$RUN_DIR/camera_relay.pid"; then
+if is_running "$RUN_DIR/camera_relay.pid" "camera_relay.py"; then
     echo "SKIP: Camera Relay already running"
 else
     cd "$HOME/robot_bridge"
