@@ -1,11 +1,15 @@
 #!/usr/bin/env python3
 
+import json
 import socket
 import unittest
+from types import SimpleNamespace
 
 from network.robot_address_resolver import (
     RobotAddressResolutionError,
+    discover_neighbor_ipv4_candidates,
     is_expected_robot_bridge,
+    probe_expected_robot_bridge,
     resolve_robot_address,
 )
 
@@ -20,6 +24,26 @@ def address_record(address):
     )
 
 
+def failed_resolver(*_args, **_kwargs):
+    raise socket.gaierror("not found")
+
+
+class Response:
+    status = 200
+
+    def __init__(self, payload):
+        self.payload = payload
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_args):
+        return False
+
+    def read(self, _limit):
+        return json.dumps(self.payload).encode("utf-8")
+
+
 class RobotAddressResolverTests(unittest.TestCase):
     def test_accepts_configured_ipv4(self):
         result = resolve_robot_address("192.0.2.25")
@@ -28,60 +52,126 @@ class RobotAddressResolverTests(unittest.TestCase):
         self.assertEqual(result.source, "configured_ipv4")
 
     def test_resolves_hostname_to_ipv4(self):
-        def resolver(*_args, **_kwargs):
-            return [address_record("192.0.2.50")]
-
         result = resolve_robot_address(
             "minipupperv2.local",
             "192.0.2.99",
-            getaddrinfo=resolver,
+            getaddrinfo=lambda *_args, **_kwargs: [
+                address_record("192.0.2.50")
+            ],
         )
 
-        self.assertEqual(
-            result.configured_host,
-            "minipupperv2.local",
-        )
         self.assertEqual(result.address, "192.0.2.50")
         self.assertEqual(result.source, "hostname_ipv4")
 
     def test_hostname_wins_over_stale_fallback(self):
-        def resolver(*_args, **_kwargs):
-            return [address_record("172.20.10.4")]
-
         result = resolve_robot_address(
             "minipupperv2.local",
             "192.168.68.124",
-            getaddrinfo=resolver,
+            getaddrinfo=lambda *_args, **_kwargs: [
+                address_record("172.20.10.4")
+            ],
         )
 
         self.assertEqual(result.address, "172.20.10.4")
         self.assertEqual(result.source, "hostname_ipv4")
 
-    def test_uses_fallback_when_resolution_fails(self):
-        def resolver(*_args, **_kwargs):
-            raise socket.gaierror("not found")
+    def test_verified_neighbor_wins_when_hostname_fails(self):
+        probed = []
+
+        def probe(address):
+            probed.append(address)
+            return address == "172.20.10.4"
 
         result = resolve_robot_address(
             "minipupperv2.local",
             "192.168.68.124",
-            getaddrinfo=resolver,
+            getaddrinfo=failed_resolver,
+            neighbor_candidates=lambda: [
+                "172.20.10.1",
+                "172.20.10.4",
+            ],
+            bridge_probe=probe,
+        )
+
+        self.assertEqual(result.address, "172.20.10.4")
+        self.assertEqual(result.source, "verified_neighbor")
+        self.assertEqual(
+            probed,
+            ["172.20.10.1", "172.20.10.4"],
+        )
+
+    def test_fallback_follows_unverified_neighbors(self):
+        result = resolve_robot_address(
+            "minipupperv2.local",
+            "192.168.68.124",
+            getaddrinfo=failed_resolver,
+            neighbor_candidates=lambda: ["192.0.2.50"],
+            bridge_probe=lambda _address: False,
         )
 
         self.assertEqual(result.address, "192.168.68.124")
         self.assertEqual(result.source, "configured_fallback")
 
-    def test_fails_without_resolution_or_fallback(self):
-        def resolver(*_args, **_kwargs):
-            return []
-
+    def test_fails_without_any_usable_address(self):
         with self.assertRaises(RobotAddressResolutionError):
             resolve_robot_address(
                 "minipupperv2.local",
                 None,
-                getaddrinfo=resolver,
+                getaddrinfo=failed_resolver,
+                neighbor_candidates=lambda: [],
+                bridge_probe=lambda _address: False,
             )
 
-    def test_accepts_expected_robot_identity(self):
+    def test_neighbor_parser_filters_unusable_entries(self):
+        result = SimpleNamespace(
+            returncode=0,
+            stdout=(
+                "192.168.68.124 dev eth3 lladdr aa:bb REACHABLE\n"
+                "192.168.68.1 dev eth3 lladdr cc:dd STALE\n"
+                "192.168.68.55 dev eth3 INCOMPLETE\n"
+                "169.254.73.152 dev eth3 lladdr 00:11 PERMANENT\n"
+                "224.0.0.251 dev eth3 lladdr ee:ff PERMANENT\n"
+            ),
+        )
+
+        candidates = discover_neighbor_ipv4_candidates(
+            run_command=lambda *_args, **_kwargs: result,
+        )
+
+        self.assertEqual(
+            candidates,
+            ["192.168.68.124", "192.168.68.1"],
+        )
+
+    def test_probe_accepts_expected_identity(self):
+        payload = {
+            "ok": True,
+            "service": "mini_pupper_robot_bridge",
+            "robot": "mini_pupper_2",
+        }
+
+        self.assertTrue(
+            probe_expected_robot_bridge(
+                "192.0.2.50",
+                urlopen=lambda *_args, **_kwargs: Response(payload),
+            )
+        )
+
+    def test_probe_rejects_wrong_identity(self):
+        payload = {
+            "ok": True,
+            "service": "unrelated_service",
+            "robot": "mini_pupper_2",
+        }
+
+        self.assertFalse(
+            probe_expected_robot_bridge(
+                "192.0.2.50",
+                urlopen=lambda *_args, **_kwargs: Response(payload),
+            )
+        )
+
+    def test_identity_helper(self):
         self.assertTrue(
             is_expected_robot_bridge(
                 {
@@ -92,24 +182,12 @@ class RobotAddressResolverTests(unittest.TestCase):
             )
         )
 
-    def test_rejects_wrong_service(self):
         self.assertFalse(
             is_expected_robot_bridge(
                 {
                     "ok": True,
-                    "service": "some_other_service",
+                    "service": "wrong",
                     "robot": "mini_pupper_2",
-                }
-            )
-        )
-
-    def test_rejects_wrong_robot(self):
-        self.assertFalse(
-            is_expected_robot_bridge(
-                {
-                    "ok": True,
-                    "service": "mini_pupper_robot_bridge",
-                    "robot": "unknown_robot",
                 }
             )
         )

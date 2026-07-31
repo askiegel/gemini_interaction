@@ -21,7 +21,9 @@ if str(PROJECT_DIR) not in sys.path:
 
 from config.config_manager import ConfigurationManager
 from network.robot_address_resolver import (
+    discover_neighbor_ipv4_candidates,
     is_expected_robot_bridge,
+    probe_expected_robot_bridge,
     resolve_robot_address,
 )
 
@@ -34,9 +36,19 @@ VISION_SERVER_DIR = Path.home() / "vision_server"
 CONFIG_MANAGER = ConfigurationManager()
 SYSTEM_CONFIG = CONFIG_MANAGER.get_config()
 
+ROBOT_BRIDGE_PORT = SYSTEM_CONFIG["network"].get(
+    "robot_bridge_port",
+    8090,
+)
+
 ROBOT_ADDRESS = resolve_robot_address(
     CONFIG_MANAGER.robot_host,
     SYSTEM_CONFIG["network"].get("robot_ip"),
+    neighbor_candidates=discover_neighbor_ipv4_candidates,
+    bridge_probe=lambda address: probe_expected_robot_bridge(
+        address,
+        port=ROBOT_BRIDGE_PORT,
+    ),
 )
 
 ROBOT_HOST = ROBOT_ADDRESS.address
