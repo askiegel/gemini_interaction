@@ -877,3 +877,161 @@ button {
 .network-security-note > span { border-radius: 999px; padding: 6px 10px; background: #fff3cd; color: #7c5a00; font-size: .72rem; font-weight: 900; }
 @media (max-width: 1000px) { .network-summary-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 @media (max-width: 760px) { .network-summary-grid, .network-layout { grid-template-columns: 1fr; } .network-wide { grid-column: auto; } .network-card-heading { flex-direction: column; } }
+
+/* Live read-only LD06 workspace */
+.lidar-layout {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(250px, 320px);
+    gap: 18px;
+    align-items: start;
+}
+
+.lidar-card {
+    min-width: 0;
+    padding: 20px;
+}
+
+.lidar-card-heading {
+    display: flex;
+    justify-content: space-between;
+    gap: 18px;
+    align-items: flex-start;
+    margin-bottom: 14px;
+}
+
+.lidar-card-heading h2,
+.lidar-card-heading p {
+    margin: 0;
+}
+
+.lidar-card-heading p {
+    margin-top: 5px;
+    color: #64748b;
+}
+
+.lidar-freshness {
+    color: #64748b;
+    font-size: 0.9rem;
+    font-weight: 700;
+    white-space: nowrap;
+}
+
+.lidar-stage {
+    position: relative;
+    width: 100%;
+    min-height: 520px;
+    overflow: hidden;
+    border: 1px solid #334155;
+    border-radius: 14px;
+    background: #020617;
+}
+
+#lidarCanvas {
+    display: block;
+    width: 100%;
+    height: 70vh;
+    min-height: 520px;
+    max-height: 760px;
+    background: #020617;
+}
+
+.lidar-canvas-message {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 24px;
+    color: #cbd5e1;
+    text-align: center;
+    font-size: 1.05rem;
+    pointer-events: none;
+}
+
+.lidar-canvas-message[hidden] {
+    display: none;
+}
+
+.lidar-legend {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 12px 22px;
+    margin-top: 13px;
+    color: #475569;
+    font-size: 0.9rem;
+}
+
+.lidar-legend span {
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+}
+
+.lidar-legend-dot {
+    width: 11px;
+    height: 11px;
+    border-radius: 50%;
+    display: inline-block;
+}
+
+.lidar-legend-dot.obstacle {
+    background: #38bdf8;
+}
+
+.lidar-legend-dot.robot {
+    background: #f59e0b;
+}
+
+.lidar-metrics-card {
+    position: sticky;
+    top: 14px;
+}
+
+.lidar-metrics-card .metric strong {
+    overflow-wrap: anywhere;
+    text-align: right;
+}
+
+.lidar-error {
+    margin: 16px 0 0;
+    padding: 11px;
+    border-radius: 9px;
+    color: #991b1b;
+    background: #fee2e2;
+    overflow-wrap: anywhere;
+}
+
+.lidar-safety-note {
+    margin: 18px 0 0;
+    padding-top: 14px;
+    border-top: 1px solid #e2e8f0;
+}
+
+@media (max-width: 900px) {
+    .lidar-layout {
+        grid-template-columns: 1fr;
+    }
+
+    .lidar-metrics-card {
+        position: static;
+    }
+
+    #lidarCanvas {
+        height: 62vh;
+    }
+}
+
+@media (max-width: 650px) {
+    .lidar-card-heading {
+        flex-direction: column;
+    }
+
+    .lidar-stage,
+    #lidarCanvas {
+        min-height: 420px;
+    }
+
+    #lidarCanvas {
+        height: 58vh;
+    }
+}

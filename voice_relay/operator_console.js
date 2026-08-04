@@ -2144,3 +2144,327 @@
         initialize();
     }
 })();
+
+/* Live read-only LD06 visualization */
+(function () {
+    "use strict";
+
+    const ENDPOINT = "/dashboard/lidar";
+    const REFRESH_MS = 250;
+    const DISPLAY_RANGE_METERS = 4.0;
+
+    let timer = null;
+    let requestInFlight = false;
+
+    function byId(id) {
+        return document.getElementById(id);
+    }
+
+    function perceptionIsVisible() {
+        const page = byId("perceptionPage");
+        return Boolean(
+            page
+            && !page.hidden
+            && page.classList.contains("active")
+        );
+    }
+
+    function setText(id, value) {
+        const element = byId(id);
+        if (element) element.textContent = value;
+    }
+
+    function setOffline(message) {
+        const pill = byId("lidarStatusPill");
+        const canvasMessage = byId("lidarCanvasMessage");
+        const error = byId("lidarError");
+
+        if (pill) {
+            pill.textContent = "LiDAR Offline";
+            pill.className = "console-status-pill error";
+        }
+
+        setText("lidarConnection", "Offline");
+        setText("lidarFreshness", "No live scan");
+
+        if (canvasMessage) {
+            canvasMessage.textContent = message;
+            canvasMessage.hidden = false;
+        }
+
+        if (error) {
+            error.textContent = message;
+            error.hidden = false;
+        }
+    }
+
+    function resizeCanvas(canvas) {
+        const ratio = window.devicePixelRatio || 1;
+        const width = Math.max(320, canvas.clientWidth);
+        const height = Math.max(420, canvas.clientHeight);
+        const pixelWidth = Math.round(width * ratio);
+        const pixelHeight = Math.round(height * ratio);
+
+        if (
+            canvas.width !== pixelWidth
+            || canvas.height !== pixelHeight
+        ) {
+            canvas.width = pixelWidth;
+            canvas.height = pixelHeight;
+        }
+
+        const context = canvas.getContext("2d");
+        context.setTransform(ratio, 0, 0, ratio, 0, 0);
+
+        return {
+            context,
+            width,
+            height,
+        };
+    }
+
+    function drawGrid(context, width, height, scale) {
+        const centerX = width / 2;
+        const centerY = height / 2;
+
+        context.fillStyle = "#020617";
+        context.fillRect(0, 0, width, height);
+
+        context.strokeStyle = "rgba(148, 163, 184, 0.24)";
+        context.lineWidth = 1;
+
+        for (
+            let meters = 1;
+            meters <= DISPLAY_RANGE_METERS;
+            meters += 1
+        ) {
+            context.beginPath();
+            context.arc(
+                centerX,
+                centerY,
+                meters * scale,
+                0,
+                Math.PI * 2
+            );
+            context.stroke();
+
+            context.fillStyle = "#94a3b8";
+            context.font = "12px system-ui";
+            context.fillText(
+                `${meters} m`,
+                centerX + 5,
+                centerY - meters * scale + 15
+            );
+        }
+
+        context.beginPath();
+        context.moveTo(centerX, 0);
+        context.lineTo(centerX, height);
+        context.moveTo(0, centerY);
+        context.lineTo(width, centerY);
+        context.stroke();
+
+        context.fillStyle = "#94a3b8";
+        context.font = "700 13px system-ui";
+        context.textAlign = "center";
+        context.fillText("FORWARD", centerX, 20);
+        context.textAlign = "start";
+    }
+
+    function drawRobot(context, centerX, centerY) {
+        context.save();
+        context.translate(centerX, centerY);
+
+        context.fillStyle = "#f59e0b";
+        context.strokeStyle = "#fbbf24";
+        context.lineWidth = 2;
+
+        context.beginPath();
+        context.moveTo(0, -20);
+        context.lineTo(14, 13);
+        context.lineTo(0, 8);
+        context.lineTo(-14, 13);
+        context.closePath();
+        context.fill();
+        context.stroke();
+
+        context.restore();
+    }
+
+    function drawScan(scan) {
+        const canvas = byId("lidarCanvas");
+        if (!canvas) return;
+
+        const drawing = resizeCanvas(canvas);
+        const context = drawing.context;
+        const width = drawing.width;
+        const height = drawing.height;
+        const centerX = width / 2;
+        const centerY = height / 2;
+        const radius = Math.max(
+            80,
+            Math.min(width, height) / 2 - 34
+        );
+        const scale = radius / DISPLAY_RANGE_METERS;
+
+        drawGrid(context, width, height, scale);
+
+        context.fillStyle = "#38bdf8";
+        context.shadowColor = "rgba(56, 189, 248, 0.65)";
+        context.shadowBlur = 3;
+
+        let angle = Number(scan.angle_min);
+        const increment = Number(scan.angle_increment);
+        const minimum = Number(scan.range_min);
+        const maximum = Math.min(
+            Number(scan.range_max),
+            DISPLAY_RANGE_METERS
+        );
+
+        scan.ranges.forEach(function (rawRange) {
+            if (rawRange !== null) {
+                const range = Number(rawRange);
+
+                if (
+                    Number.isFinite(range)
+                    && range >= minimum
+                    && range <= maximum
+                ) {
+                    const x = (
+                        centerX
+                        + Math.sin(angle) * range * scale
+                    );
+                    const y = (
+                        centerY
+                        - Math.cos(angle) * range * scale
+                    );
+
+                    context.beginPath();
+                    context.arc(x, y, 2.2, 0, Math.PI * 2);
+                    context.fill();
+                }
+            }
+
+            angle += increment;
+        });
+
+        context.shadowBlur = 0;
+        drawRobot(context, centerX, centerY);
+    }
+
+    function render(payload) {
+        const telemetry = payload.telemetry;
+        const scan = telemetry.scan;
+        const pill = byId("lidarStatusPill");
+        const message = byId("lidarCanvasMessage");
+        const error = byId("lidarError");
+        const age = Number(telemetry.age_seconds);
+
+        drawScan(scan);
+
+        if (pill) {
+            pill.textContent = "LiDAR Live";
+            pill.className = "console-status-pill ready";
+        }
+
+        if (message) message.hidden = true;
+        if (error) error.hidden = true;
+
+        setText("lidarConnection", "Connected");
+        setText("lidarFrame", scan.frame_id || "—");
+        setText(
+            "lidarSamples",
+            Number(scan.sample_count).toLocaleString()
+        );
+        setText(
+            "lidarValidSamples",
+            Number(scan.valid_sample_count).toLocaleString()
+        );
+        setText("lidarAge", `${age.toFixed(3)} s`);
+        setText(
+            "lidarFreshness",
+            `Updated ${age.toFixed(2)} seconds ago`
+        );
+        setText(
+            "lidarScanTime",
+            `${Number(scan.scan_time).toFixed(3)} s`
+        );
+        setText(
+            "lidarRange",
+            `${Number(scan.range_min).toFixed(2)}–`
+            + `${Number(scan.range_max).toFixed(1)} m`
+        );
+    }
+
+    async function refresh() {
+        if (!perceptionIsVisible() || requestInFlight) return;
+
+        requestInFlight = true;
+
+        try {
+            const response = await fetch(ENDPOINT, {
+                cache: "no-store",
+            });
+            const payload = await response.json();
+
+            if (
+                !response.ok
+                || !payload.ok
+                || !payload.telemetry
+                || !payload.telemetry.available
+                || !payload.telemetry.scan
+            ) {
+                throw new Error(
+                    payload.error
+                    || "Mayday LiDAR telemetry is unavailable."
+                );
+            }
+
+            render(payload);
+        } catch (error) {
+            setOffline(error.message);
+        } finally {
+            requestInFlight = false;
+        }
+    }
+
+    function initialize() {
+        if (!byId("lidarCanvas")) return;
+
+        const canvas = byId("lidarCanvas");
+        const context = canvas.getContext("2d");
+
+        context.fillStyle = "#020617";
+        context.fillRect(0, 0, canvas.width, canvas.height);
+
+        refresh();
+        timer = window.setInterval(refresh, REFRESH_MS);
+
+        window.addEventListener(
+            "resize",
+            function () {
+                if (perceptionIsVisible()) refresh();
+            }
+        );
+
+        window.addEventListener(
+            "beforeunload",
+            function () {
+                if (timer !== null) {
+                    window.clearInterval(timer);
+                }
+            },
+            {once: true}
+        );
+    }
+
+    if (document.readyState === "loading") {
+        document.addEventListener(
+            "DOMContentLoaded",
+            initialize,
+            {once: true}
+        );
+    } else {
+        initialize();
+    }
+})();

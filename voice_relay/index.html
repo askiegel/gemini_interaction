@@ -794,12 +794,115 @@
 
 
 
-<main id="perceptionPage" class="console-page console-placeholder-page" hidden>
+<main id="perceptionPage" class="console-page" hidden>
     <section class="console-page-heading">
-        <div><div class="console-eyebrow">Operator Console</div><h2>Perception</h2><p>Dedicated perception tools will be added here while the live camera remains available in Mission Control.</p></div>
-        <span class="console-status-pill planned">Planned</span>
+        <div>
+            <div class="console-eyebrow">Operator Console</div>
+            <h2>Perception</h2>
+            <p>
+                Live, read-only LD06 spatial telemetry delivered through
+                Mayday's Robot Bridge. ROS 2 remains isolated on the robot.
+            </p>
+        </div>
+        <span
+            id="lidarStatusPill"
+            class="console-status-pill planned"
+        >
+            Waiting for LiDAR
+        </span>
     </section>
-    <section class="administration-grid"><article class="card administration-card"><div class="administration-card-header"><div class="administration-icon">VIS</div><div><h2>Vision Workspace</h2><p>Future controls for detections, overlays, snapshots, and perception tuning.</p></div></div><div class="administration-field"><span>Live detections</span><strong>Mission Control</strong></div><div class="administration-field"><span>Model controls</span><strong>Coming soon</strong></div></article></section>
+
+    <section class="lidar-layout">
+        <article class="card lidar-card">
+            <div class="lidar-card-heading">
+                <div>
+                    <h2>Live LiDAR</h2>
+                    <p>
+                        Top-down scan centered on Mayday. Forward is up.
+                    </p>
+                </div>
+                <div
+                    id="lidarFreshness"
+                    class="lidar-freshness"
+                >
+                    No scan received
+                </div>
+            </div>
+
+            <div class="lidar-stage">
+                <canvas
+                    id="lidarCanvas"
+                    width="1000"
+                    height="700"
+                    aria-label="Live top-down LiDAR scan"
+                ></canvas>
+                <div
+                    id="lidarCanvasMessage"
+                    class="lidar-canvas-message"
+                >
+                    Waiting for Mayday's LD06 scan...
+                </div>
+            </div>
+
+            <div class="lidar-legend" aria-label="LiDAR legend">
+                <span>
+                    <i class="lidar-legend-dot obstacle"></i>
+                    Measured obstacle
+                </span>
+                <span>
+                    <i class="lidar-legend-dot robot"></i>
+                    Mayday
+                </span>
+                <span>
+                    Display radius: 4 meters
+                </span>
+            </div>
+        </article>
+
+        <aside class="card lidar-metrics-card">
+            <h2>Scan Telemetry</h2>
+
+            <div class="metric">
+                <span class="metric-name">Connection</span>
+                <strong id="lidarConnection">Offline</strong>
+            </div>
+            <div class="metric">
+                <span class="metric-name">Frame</span>
+                <strong id="lidarFrame">—</strong>
+            </div>
+            <div class="metric">
+                <span class="metric-name">Samples</span>
+                <strong id="lidarSamples">—</strong>
+            </div>
+            <div class="metric">
+                <span class="metric-name">Valid ranges</span>
+                <strong id="lidarValidSamples">—</strong>
+            </div>
+            <div class="metric">
+                <span class="metric-name">Scan age</span>
+                <strong id="lidarAge">—</strong>
+            </div>
+            <div class="metric">
+                <span class="metric-name">Physical scan time</span>
+                <strong id="lidarScanTime">—</strong>
+            </div>
+            <div class="metric">
+                <span class="metric-name">Sensor range</span>
+                <strong id="lidarRange">—</strong>
+            </div>
+            <div class="metric">
+                <span class="metric-name">HTTP refresh</span>
+                <strong>4 Hz</strong>
+            </div>
+
+            <p id="lidarError" class="lidar-error" hidden></p>
+
+            <p class="small-text lidar-safety-note">
+                Visualization only. This panel cannot publish movement,
+                navigation goals, or ROS commands.
+            </p>
+        </aside>
+    </section>
 </main>
 
 <main id="conversationPage" class="console-page console-placeholder-page" hidden>

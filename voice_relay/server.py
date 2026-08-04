@@ -380,6 +380,37 @@ class VoiceRelayHandler(BaseHTTPRequestHandler):
             "stderr": process.stderr,
         }
 
+    def lidar_status(self):
+        """
+        Proxy transient LiDAR telemetry without making it authoritative.
+
+        The browser remains isolated from ROS 2 and from direct robot network
+        discovery. The World Model remains the cognitive source of truth.
+        """
+        response = request_json(
+            "GET",
+            f"{ROBOT_BRIDGE_URL}/telemetry/lidar",
+            timeout=3.0,
+        )
+
+        if response["ok"] and isinstance(
+            response["data"],
+            dict,
+        ):
+            return 200, response["data"]
+
+        return (
+            response["status_code"] or 503,
+            response["data"] or {
+                "ok": False,
+                "service": "mini_pupper_operator_dashboard",
+                "error": (
+                    response["error"]
+                    or "Mayday LiDAR telemetry is unavailable."
+                ),
+            },
+        )
+
     def dashboard_status(self):
         runtime_response = request_json(
             "GET",
@@ -730,6 +761,11 @@ class VoiceRelayHandler(BaseHTTPRequestHandler):
                     ),
                 },
             )
+            return
+
+        if path == "/dashboard/lidar":
+            status_code, payload = self.lidar_status()
+            self.send_json(status_code, payload)
             return
 
         if path == "/dashboard/status":
