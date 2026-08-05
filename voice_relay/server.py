@@ -411,6 +411,37 @@ class VoiceRelayHandler(BaseHTTPRequestHandler):
             },
         )
 
+    def map_status(self):
+        """
+        Proxy the validated saved map as read-only presentation data.
+
+        The browser remains isolated from ROS 2 and direct robot discovery.
+        This proxy cannot start localization, planning, or robot motion.
+        """
+        response = request_json(
+            "GET",
+            f"{ROBOT_BRIDGE_URL}/telemetry/map",
+            timeout=5.0,
+        )
+
+        if response["ok"] and isinstance(
+            response["data"],
+            dict,
+        ):
+            return 200, response["data"]
+
+        return (
+            response["status_code"] or 503,
+            response["data"] or {
+                "ok": False,
+                "service": "mini_pupper_operator_dashboard",
+                "error": (
+                    response["error"]
+                    or "Mayday saved-map telemetry is unavailable."
+                ),
+            },
+        )
+
     def dashboard_status(self):
         runtime_response = request_json(
             "GET",
@@ -765,6 +796,11 @@ class VoiceRelayHandler(BaseHTTPRequestHandler):
 
         if path == "/dashboard/lidar":
             status_code, payload = self.lidar_status()
+            self.send_json(status_code, payload)
+            return
+
+        if path == "/dashboard/map":
+            status_code, payload = self.map_status()
             self.send_json(status_code, payload)
             return
 

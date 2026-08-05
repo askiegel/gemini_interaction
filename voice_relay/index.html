@@ -903,6 +903,118 @@
             </p>
         </aside>
     </section>
+
+    <section class="map-layout" aria-label="Saved occupancy map">
+        <article class="card map-card">
+            <div class="map-card-heading">
+                <div>
+                    <h2>Saved Occupancy Map</h2>
+                    <p>
+                        Navigation-safe map loaded from Mayday.
+                        Unknown space remains unknown.
+                    </p>
+                </div>
+
+                <div
+                    id="mapFreshness"
+                    class="map-freshness"
+                >
+                    Map not loaded
+                </div>
+            </div>
+
+            <div class="map-stage">
+                <canvas
+                    id="mapCanvas"
+                    width="900"
+                    height="900"
+                    aria-label="Saved occupancy map"
+                ></canvas>
+
+                <div
+                    id="mapCanvasMessage"
+                    class="map-canvas-message"
+                >
+                    Waiting for Mayday's saved map...
+                </div>
+            </div>
+
+            <div class="map-legend" aria-label="Map legend">
+                <span>
+                    <i class="map-legend-swatch unknown"></i>
+                    Unknown
+                </span>
+                <span>
+                    <i class="map-legend-swatch free"></i>
+                    Free
+                </span>
+                <span>
+                    <i class="map-legend-swatch occupied"></i>
+                    Occupied
+                </span>
+                <span>
+                    Read-only saved map
+                </span>
+            </div>
+        </article>
+
+        <aside class="card map-metrics-card">
+            <div class="map-metrics-heading">
+                <h2>Map Telemetry</h2>
+
+                <span
+                    id="mapStatusPill"
+                    class="console-status-pill planned"
+                >
+                    Waiting for map
+                </span>
+            </div>
+
+            <div class="metric">
+                <span class="metric-name">Connection</span>
+                <strong id="mapConnection">Offline</strong>
+            </div>
+            <div class="metric">
+                <span class="metric-name">Map</span>
+                <strong id="mapName">—</strong>
+            </div>
+            <div class="metric">
+                <span class="metric-name">Dimensions</span>
+                <strong id="mapDimensions">—</strong>
+            </div>
+            <div class="metric">
+                <span class="metric-name">Resolution</span>
+                <strong id="mapResolution">—</strong>
+            </div>
+            <div class="metric">
+                <span class="metric-name">Origin</span>
+                <strong id="mapOrigin">—</strong>
+            </div>
+            <div class="metric">
+                <span class="metric-name">Unknown cells</span>
+                <strong id="mapUnknownCells">—</strong>
+            </div>
+            <div class="metric">
+                <span class="metric-name">Free cells</span>
+                <strong id="mapFreeCells">—</strong>
+            </div>
+            <div class="metric">
+                <span class="metric-name">Occupied cells</span>
+                <strong id="mapOccupiedCells">—</strong>
+            </div>
+            <div class="metric">
+                <span class="metric-name">Total cells</span>
+                <strong id="mapTotalCells">—</strong>
+            </div>
+
+            <p id="mapError" class="map-error" hidden></p>
+
+            <p class="small-text map-safety-note">
+                Visualization only. This panel cannot set poses, publish
+                goals, start Nav2, or command robot motion.
+            </p>
+        </aside>
+    </section>
 </main>
 
 <main id="conversationPage" class="console-page console-placeholder-page" hidden>

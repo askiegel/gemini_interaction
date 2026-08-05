@@ -2468,3 +2468,335 @@
         initialize();
     }
 })();
+
+/* Read-only saved occupancy-map visualization */
+(function () {
+    "use strict";
+
+    const MAP_ENDPOINT = "/dashboard/map";
+    const WAITING_REFRESH_MS = 500;
+
+    let timer = null;
+    let requestInFlight = false;
+    let loadedMap = null;
+
+    function byId(id) {
+        return document.getElementById(id);
+    }
+
+    function perceptionIsVisible() {
+        const page = byId("perceptionPage");
+
+        return Boolean(
+            page
+            && !page.hidden
+            && page.classList.contains("active")
+        );
+    }
+
+    function setText(id, value) {
+        const element = byId(id);
+        if (element) element.textContent = value;
+    }
+
+    function resizeCanvas(canvas) {
+        const ratio = window.devicePixelRatio || 1;
+        const width = Math.max(320, canvas.clientWidth);
+        const height = Math.max(480, canvas.clientHeight);
+        const pixelWidth = Math.round(width * ratio);
+        const pixelHeight = Math.round(height * ratio);
+
+        if (
+            canvas.width !== pixelWidth
+            || canvas.height !== pixelHeight
+        ) {
+            canvas.width = pixelWidth;
+            canvas.height = pixelHeight;
+        }
+
+        const context = canvas.getContext("2d");
+        context.setTransform(ratio, 0, 0, ratio, 0, 0);
+
+        return {
+            context,
+            width,
+            height,
+        };
+    }
+
+    function createMapImage(occupancyMap) {
+        const width = Number(occupancyMap.width);
+        const height = Number(occupancyMap.height);
+        const cells = occupancyMap.cells;
+        const imageCanvas = document.createElement("canvas");
+
+        imageCanvas.width = width;
+        imageCanvas.height = height;
+
+        const context = imageCanvas.getContext("2d");
+        const image = context.createImageData(width, height);
+
+        cells.forEach(function (value, index) {
+            const mapX = index % width;
+            const mapY = Math.floor(index / width);
+            const canvasY = height - 1 - mapY;
+            const pixelIndex = (
+                (canvasY * width + mapX) * 4
+            );
+
+            let red = 15;
+            let green = 23;
+            let blue = 42;
+
+            if (value === 0) {
+                red = 248;
+                green = 250;
+                blue = 252;
+            } else if (value === 100) {
+                red = 56;
+                green = 189;
+                blue = 248;
+            }
+
+            image.data[pixelIndex] = red;
+            image.data[pixelIndex + 1] = green;
+            image.data[pixelIndex + 2] = blue;
+            image.data[pixelIndex + 3] = 255;
+        });
+
+        context.putImageData(image, 0, 0);
+        return imageCanvas;
+    }
+
+    function drawMap(occupancyMap) {
+        const canvas = byId("mapCanvas");
+        if (!canvas) return;
+
+        const drawing = resizeCanvas(canvas);
+        const context = drawing.context;
+        const width = drawing.width;
+        const height = drawing.height;
+        const padding = 32;
+        const sourceWidth = Number(occupancyMap.width);
+        const sourceHeight = Number(occupancyMap.height);
+        const scale = Math.min(
+            (width - padding * 2) / sourceWidth,
+            (height - padding * 2) / sourceHeight
+        );
+        const drawWidth = sourceWidth * scale;
+        const drawHeight = sourceHeight * scale;
+        const drawX = (width - drawWidth) / 2;
+        const drawY = (height - drawHeight) / 2;
+        const imageCanvas = createMapImage(occupancyMap);
+
+        context.fillStyle = "#020617";
+        context.fillRect(0, 0, width, height);
+
+        context.imageSmoothingEnabled = false;
+        context.drawImage(
+            imageCanvas,
+            drawX,
+            drawY,
+            drawWidth,
+            drawHeight
+        );
+
+        context.strokeStyle = "#64748b";
+        context.lineWidth = 1;
+        context.strokeRect(
+            drawX - 0.5,
+            drawY - 0.5,
+            drawWidth + 1,
+            drawHeight + 1
+        );
+
+        context.fillStyle = "#94a3b8";
+        context.font = "700 13px system-ui";
+        context.textAlign = "center";
+        context.fillText(
+            "NORTH / +Y",
+            width / 2,
+            Math.max(18, drawY - 10)
+        );
+        context.textAlign = "start";
+    }
+
+    function setOffline(message) {
+        const pill = byId("mapStatusPill");
+        const canvasMessage = byId("mapCanvasMessage");
+        const error = byId("mapError");
+
+        if (pill) {
+            pill.textContent = "Map Offline";
+            pill.className = "console-status-pill error";
+        }
+
+        setText("mapConnection", "Offline");
+        setText("mapFreshness", "Map unavailable");
+
+        if (canvasMessage) {
+            canvasMessage.textContent = message;
+            canvasMessage.hidden = false;
+        }
+
+        if (error) {
+            error.textContent = message;
+            error.hidden = false;
+        }
+    }
+
+    function render(payload) {
+        const telemetry = payload.telemetry;
+        const occupancyMap = telemetry.map;
+        const origin = occupancyMap.origin;
+        const pill = byId("mapStatusPill");
+        const message = byId("mapCanvasMessage");
+        const error = byId("mapError");
+
+        loadedMap = occupancyMap;
+        drawMap(occupancyMap);
+
+        if (pill) {
+            pill.textContent = "Map Ready";
+            pill.className = "console-status-pill ready";
+        }
+
+        if (message) message.hidden = true;
+        if (error) error.hidden = true;
+
+        setText("mapConnection", "Connected");
+        setText("mapName", occupancyMap.name || "—");
+        setText(
+            "mapDimensions",
+            `${Number(occupancyMap.width).toLocaleString()} × `
+            + `${Number(occupancyMap.height).toLocaleString()} cells`
+        );
+        setText(
+            "mapResolution",
+            `${Number(occupancyMap.resolution).toFixed(3)} m/cell`
+        );
+        setText(
+            "mapOrigin",
+            `${Number(origin.x).toFixed(2)}, `
+            + `${Number(origin.y).toFixed(2)}, `
+            + `${Number(origin.yaw).toFixed(2)} rad`
+        );
+        setText(
+            "mapUnknownCells",
+            Number(
+                occupancyMap.unknown_cell_count
+            ).toLocaleString()
+        );
+        setText(
+            "mapFreeCells",
+            Number(
+                occupancyMap.free_cell_count
+            ).toLocaleString()
+        );
+        setText(
+            "mapOccupiedCells",
+            Number(
+                occupancyMap.occupied_cell_count
+            ).toLocaleString()
+        );
+        setText(
+            "mapTotalCells",
+            Number(occupancyMap.cell_count).toLocaleString()
+        );
+        setText(
+            "mapFreshness",
+            "Validated saved map loaded"
+        );
+    }
+
+    async function refresh() {
+        if (
+            loadedMap
+            || !perceptionIsVisible()
+            || requestInFlight
+        ) {
+            return;
+        }
+
+        requestInFlight = true;
+
+        try {
+            const response = await fetch(MAP_ENDPOINT, {
+                cache: "no-store",
+            });
+            const payload = await response.json();
+
+            if (
+                !response.ok
+                || !payload.ok
+                || !payload.telemetry
+                || !payload.telemetry.available
+                || !payload.telemetry.map
+            ) {
+                throw new Error(
+                    payload.error
+                    || "Mayday saved map is unavailable."
+                );
+            }
+
+            render(payload);
+
+            if (timer !== null) {
+                window.clearInterval(timer);
+                timer = null;
+            }
+        } catch (error) {
+            setOffline(error.message);
+        } finally {
+            requestInFlight = false;
+        }
+    }
+
+    function initialize() {
+        if (!byId("mapCanvas")) return;
+
+        const canvas = byId("mapCanvas");
+        const context = canvas.getContext("2d");
+
+        context.fillStyle = "#020617";
+        context.fillRect(0, 0, canvas.width, canvas.height);
+
+        refresh();
+        timer = window.setInterval(
+            refresh,
+            WAITING_REFRESH_MS
+        );
+
+        window.addEventListener(
+            "resize",
+            function () {
+                if (
+                    perceptionIsVisible()
+                    && loadedMap
+                ) {
+                    drawMap(loadedMap);
+                }
+            }
+        );
+
+        window.addEventListener(
+            "beforeunload",
+            function () {
+                if (timer !== null) {
+                    window.clearInterval(timer);
+                }
+            },
+            {once: true}
+        );
+    }
+
+    if (document.readyState === "loading") {
+        document.addEventListener(
+            "DOMContentLoaded",
+            initialize,
+            {once: true}
+        );
+    } else {
+        initialize();
+    }
+})();
