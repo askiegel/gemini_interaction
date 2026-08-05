@@ -2153,6 +2153,15 @@
     const REFRESH_MS = 250;
     const DISPLAY_RANGE_METERS = 4.0;
 
+    /*
+     * The physical lidar_link axes differ from the operator view.
+     * Rotate scan points by 90 degrees so physical forward is up,
+     * then mirror the horizontal display axis so Mayday's physical
+     * right side appears on the canvas right. This is presentation-only
+     * and does not modify ROS sensor data.
+     */
+    const SCAN_DISPLAY_ROTATION_RADIANS = Math.PI / 2;
+
     let timer = null;
     let requestInFlight = false;
 
@@ -2313,7 +2322,10 @@
         context.shadowColor = "rgba(56, 189, 248, 0.65)";
         context.shadowBlur = 3;
 
-        let angle = Number(scan.angle_min);
+        let angle = (
+            Number(scan.angle_min)
+            + SCAN_DISPLAY_ROTATION_RADIANS
+        );
         const increment = Number(scan.angle_increment);
         const minimum = Number(scan.range_min);
         const maximum = Math.min(
@@ -2332,7 +2344,7 @@
                 ) {
                     const x = (
                         centerX
-                        + Math.sin(angle) * range * scale
+                        - Math.sin(angle) * range * scale
                     );
                     const y = (
                         centerY

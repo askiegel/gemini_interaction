@@ -54,6 +54,31 @@ def test_lidar_canvas_has_large_responsive_layout():
     assert 'height: 70vh' in CSS
 
 
+def test_lidar_display_corrects_physical_orientation():
+    assert (
+        'const SCAN_DISPLAY_ROTATION_RADIANS = Math.PI / 2'
+        in JS
+    )
+    assert (
+        'Number(scan.angle_min)\n'
+        '            + SCAN_DISPLAY_ROTATION_RADIANS'
+        in JS
+    )
+    assert (
+        'presentation-only'
+        in JS
+    )
+    assert (
+        'does not modify ROS sensor data'
+        in JS
+    )
+    assert (
+        'centerX\n'
+        '                        - Math.sin(angle) * range * scale'
+        in JS
+    )
+
+
 def test_lidar_javascript_is_read_only():
     assert 'const ENDPOINT = "/dashboard/lidar"' in JS
     assert 'const REFRESH_MS = 250' in JS
