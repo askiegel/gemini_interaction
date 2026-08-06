@@ -931,6 +931,20 @@
                     aria-label="Saved occupancy map"
                 ></canvas>
 
+                <canvas
+                    id="localizationPoseCanvas"
+                    width="900"
+                    height="900"
+                    aria-label="Mayday localized pose"
+                ></canvas>
+
+                <div
+                    id="localizationOverlayStatus"
+                    class="localization-overlay-status stopped"
+                >
+                    Localization stopped
+                </div>
+
                 <div
                     id="mapCanvasMessage"
                     class="map-canvas-message"
@@ -951,6 +965,10 @@
                 <span>
                     <i class="map-legend-swatch occupied"></i>
                     Occupied
+                </span>
+                <span>
+                    <i class="map-legend-swatch robot"></i>
+                    Mayday pose
                 </span>
                 <span>
                     Read-only saved map
@@ -1005,6 +1023,25 @@
             <div class="metric">
                 <span class="metric-name">Total cells</span>
                 <strong id="mapTotalCells">—</strong>
+            </div>
+
+            <div class="metric localization-metric">
+                <span class="metric-name">Localization</span>
+                <strong id="localizationConnection">
+                    Stopped
+                </strong>
+            </div>
+            <div class="metric localization-metric">
+                <span class="metric-name">Robot pose</span>
+                <strong id="localizationPose">—</strong>
+            </div>
+            <div class="metric localization-metric">
+                <span class="metric-name">Heading</span>
+                <strong id="localizationHeading">—</strong>
+            </div>
+            <div class="metric localization-metric">
+                <span class="metric-name">Pose age</span>
+                <strong id="localizationPoseAge">—</strong>
             </div>
 
             <p id="mapError" class="map-error" hidden></p>

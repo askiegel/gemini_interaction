@@ -411,6 +411,45 @@ class VoiceRelayHandler(BaseHTTPRequestHandler):
             },
         )
 
+    def localization_status(self):
+        """
+        Proxy guarded localization pose as read-only presentation data.
+
+        Robot Bridge remains responsible for determining whether AMCL is
+        active. A stopped localization runtime cannot expose a cached pose.
+        This proxy cannot start localization, publish an initial pose,
+        execute a navigation goal, or command robot motion.
+        """
+        response = request_json(
+            "GET",
+            f"{ROBOT_BRIDGE_URL}/telemetry/localization",
+            timeout=5.0,
+        )
+
+        if isinstance(response["data"], dict):
+            return (
+                response["status_code"] or 503,
+                response["data"],
+            )
+
+        return (
+            response["status_code"] or 503,
+            {
+                "ok": False,
+                "runtime_active": False,
+                "service": "mini_pupper_operator_dashboard",
+                "telemetry": {
+                    "available": False,
+                    "pose": None,
+                    "status": "LOCALIZATION_UNAVAILABLE",
+                },
+                "error": (
+                    response["error"]
+                    or "Mayday localization telemetry is unavailable."
+                ),
+            },
+        )
+
     def map_status(self):
         """
         Proxy the validated saved map as read-only presentation data.
@@ -796,6 +835,11 @@ class VoiceRelayHandler(BaseHTTPRequestHandler):
 
         if path == "/dashboard/lidar":
             status_code, payload = self.lidar_status()
+            self.send_json(status_code, payload)
+            return
+
+        if path == "/dashboard/localization":
+            status_code, payload = self.localization_status()
             self.send_json(status_code, payload)
             return
 

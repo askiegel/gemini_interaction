@@ -1211,3 +1211,80 @@ button {
         height: 62vh;
     }
 }
+
+/* Read-only localization pose overlay */
+.map-stage {
+    position: relative;
+}
+
+#localizationPoseCanvas {
+    position: absolute;
+    inset: 0;
+    z-index: 3;
+    display: block;
+    width: 100%;
+    height: 76vh;
+    min-height: 620px;
+    max-height: 900px;
+    pointer-events: none;
+    background: transparent;
+}
+
+.localization-overlay-status {
+    position: absolute;
+    top: 14px;
+    right: 14px;
+    z-index: 4;
+    padding: 7px 11px;
+    border: 1px solid rgba(148, 163, 184, 0.45);
+    border-radius: 999px;
+    background: rgba(15, 23, 42, 0.88);
+    color: #cbd5e1;
+    font-size: 12px;
+    font-weight: 800;
+    letter-spacing: 0.02em;
+    pointer-events: none;
+}
+
+.localization-overlay-status.ready {
+    border-color: rgba(34, 197, 94, 0.65);
+    color: #bbf7d0;
+}
+
+.localization-overlay-status.stopped {
+    border-color: rgba(148, 163, 184, 0.45);
+    color: #cbd5e1;
+}
+
+.localization-overlay-status.error {
+    border-color: rgba(239, 68, 68, 0.65);
+    color: #fecaca;
+}
+
+.map-legend-swatch.robot {
+    border-color: #f59e0b;
+    background: #f59e0b;
+}
+
+.localization-metric strong {
+    max-width: 190px;
+    text-align: right;
+}
+
+@media (max-width: 1100px) {
+    #localizationPoseCanvas {
+        height: 68vh;
+    }
+}
+
+@media (max-width: 720px) {
+    #localizationPoseCanvas {
+        min-height: 480px;
+    }
+}
+
+@media (max-height: 760px) {
+    #localizationPoseCanvas {
+        height: 62vh;
+    }
+}

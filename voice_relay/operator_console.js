@@ -2812,3 +2812,451 @@
         initialize();
     }
 })();
+
+
+/* Read-only localization pose overlay */
+(function () {
+    "use strict";
+
+    const LOCALIZATION_ENDPOINT =
+        "/dashboard/localization";
+    const MAP_ENDPOINT =
+        "/dashboard/map";
+    const REFRESH_MS = 500;
+    const MAP_PADDING = 32;
+
+    let timer = null;
+    let requestInFlight = false;
+    let occupancyMap = null;
+    let lastPose = null;
+
+    function byId(id) {
+        return document.getElementById(id);
+    }
+
+    function perceptionIsVisible() {
+        const page = byId("perceptionPage");
+
+        return Boolean(
+            page
+            && !page.hidden
+            && page.classList.contains("active")
+        );
+    }
+
+    function setText(id, value) {
+        const element = byId(id);
+        if (element) element.textContent = value;
+    }
+
+    function setOverlayStatus(label, state) {
+        const status = byId("localizationOverlayStatus");
+
+        if (!status) return;
+
+        status.textContent = label;
+        status.className =
+            "localization-overlay-status " + state;
+    }
+
+    function resizeOverlayCanvas(canvas) {
+        const mapCanvas = byId("mapCanvas");
+        const ratio = window.devicePixelRatio || 1;
+        const width = Math.max(
+            320,
+            mapCanvas
+                ? mapCanvas.clientWidth
+                : canvas.clientWidth
+        );
+        const height = Math.max(
+            480,
+            mapCanvas
+                ? mapCanvas.clientHeight
+                : canvas.clientHeight
+        );
+        const pixelWidth = Math.round(width * ratio);
+        const pixelHeight = Math.round(height * ratio);
+
+        if (
+            canvas.width !== pixelWidth
+            || canvas.height !== pixelHeight
+        ) {
+            canvas.width = pixelWidth;
+            canvas.height = pixelHeight;
+        }
+
+        const context = canvas.getContext("2d");
+        context.setTransform(
+            ratio,
+            0,
+            0,
+            ratio,
+            0,
+            0
+        );
+
+        return {
+            context,
+            width,
+            height,
+        };
+    }
+
+    function clearPose() {
+        const canvas = byId("localizationPoseCanvas");
+        if (!canvas) return;
+
+        const drawing = resizeOverlayCanvas(canvas);
+        drawing.context.clearRect(
+            0,
+            0,
+            drawing.width,
+            drawing.height
+        );
+
+        lastPose = null;
+    }
+
+    function mapToCanvas(position, drawing) {
+        const sourceWidth = Number(occupancyMap.width);
+        const sourceHeight = Number(occupancyMap.height);
+        const resolution = Number(occupancyMap.resolution);
+        const origin = occupancyMap.origin;
+
+        const scale = Math.min(
+            (
+                drawing.width
+                - MAP_PADDING * 2
+            ) / sourceWidth,
+            (
+                drawing.height
+                - MAP_PADDING * 2
+            ) / sourceHeight
+        );
+
+        const drawWidth = sourceWidth * scale;
+        const drawHeight = sourceHeight * scale;
+        const drawX = (
+            drawing.width - drawWidth
+        ) / 2;
+        const drawY = (
+            drawing.height - drawHeight
+        ) / 2;
+
+        const mapCellX = (
+            Number(position.x) - Number(origin.x)
+        ) / resolution;
+        const mapCellY = (
+            Number(position.y) - Number(origin.y)
+        ) / resolution;
+
+        return {
+            x: drawX + mapCellX * scale,
+            y: (
+                drawY
+                + (sourceHeight - mapCellY) * scale
+            ),
+            inside: (
+                mapCellX >= 0
+                && mapCellX <= sourceWidth
+                && mapCellY >= 0
+                && mapCellY <= sourceHeight
+            ),
+        };
+    }
+
+    function drawRobot(pose) {
+        if (!occupancyMap || !pose) return;
+
+        const canvas = byId("localizationPoseCanvas");
+        if (!canvas) return;
+
+        const drawing = resizeOverlayCanvas(canvas);
+        const context = drawing.context;
+        const point = mapToCanvas(
+            pose.position,
+            drawing
+        );
+        const yaw = Number(pose.yaw_radians);
+
+        context.clearRect(
+            0,
+            0,
+            drawing.width,
+            drawing.height
+        );
+
+        if (
+            !point.inside
+            || !Number.isFinite(yaw)
+        ) {
+            setOverlayStatus(
+                "Pose outside saved map",
+                "error"
+            );
+            return;
+        }
+
+        context.save();
+        context.translate(point.x, point.y);
+
+        /*
+         * ROS map yaw zero points along +X. Canvas +Y points down,
+         * so the rendered heading uses negative sine vertically.
+         */
+        context.rotate(-yaw);
+
+        context.shadowColor =
+            "rgba(245, 158, 11, 0.85)";
+        context.shadowBlur = 10;
+
+        context.fillStyle = "#f59e0b";
+        context.strokeStyle = "#fff7ed";
+        context.lineWidth = 2;
+
+        context.beginPath();
+        context.moveTo(19, 0);
+        context.lineTo(-12, -11);
+        context.lineTo(-7, 0);
+        context.lineTo(-12, 11);
+        context.closePath();
+        context.fill();
+        context.stroke();
+
+        context.restore();
+
+        context.save();
+        context.fillStyle = "#f8fafc";
+        context.strokeStyle = "rgba(15, 23, 42, 0.9)";
+        context.lineWidth = 4;
+        context.font = "800 13px system-ui";
+        context.textAlign = "center";
+        context.strokeText(
+            "Mayday",
+            point.x,
+            point.y - 22
+        );
+        context.fillText(
+            "Mayday",
+            point.x,
+            point.y - 22
+        );
+        context.restore();
+
+        lastPose = pose;
+    }
+
+    function renderStopped(payload) {
+        clearPose();
+
+        const telemetry = payload.telemetry || {};
+        const status = telemetry.status
+            || "LOCALIZATION_STOPPED";
+
+        setOverlayStatus(
+            status === "LOCALIZATION_STOPPED"
+                ? "Localization stopped"
+                : "Waiting for localization",
+            "stopped"
+        );
+
+        setText(
+            "localizationConnection",
+            status === "LOCALIZATION_STOPPED"
+                ? "Stopped"
+                : "Waiting"
+        );
+        setText("localizationPose", "—");
+        setText("localizationHeading", "—");
+        setText("localizationPoseAge", "—");
+    }
+
+    function renderPose(payload) {
+        const telemetry = payload.telemetry;
+        const pose = telemetry.pose;
+
+        if (
+            payload.runtime_active !== true
+            || telemetry.available !== true
+            || !pose
+            || pose.frame_id !== "map"
+        ) {
+            renderStopped(payload);
+            return;
+        }
+
+        drawRobot(pose);
+
+        setOverlayStatus(
+            "Localization active",
+            "ready"
+        );
+        setText("localizationConnection", "Active");
+        setText(
+            "localizationPose",
+            `${Number(pose.position.x).toFixed(2)}, `
+            + `${Number(pose.position.y).toFixed(2)} m`
+        );
+        setText(
+            "localizationHeading",
+            `${Number(pose.yaw_degrees).toFixed(1)}°`
+        );
+        setText(
+            "localizationPoseAge",
+            Number.isFinite(
+                Number(telemetry.age_seconds)
+            )
+                ? `${Number(
+                    telemetry.age_seconds
+                ).toFixed(1)} s`
+                : "—"
+        );
+    }
+
+    async function loadMap() {
+        if (occupancyMap) return true;
+
+        const response = await fetch(MAP_ENDPOINT, {
+            cache: "no-store",
+        });
+        const payload = await response.json();
+
+        if (
+            !response.ok
+            || !payload.ok
+            || !payload.telemetry
+            || !payload.telemetry.map
+        ) {
+            return false;
+        }
+
+        occupancyMap = payload.telemetry.map;
+        return true;
+    }
+
+    async function refresh() {
+        if (
+            !perceptionIsVisible()
+            || requestInFlight
+        ) {
+            return;
+        }
+
+        requestInFlight = true;
+
+        try {
+            const mapReady = await loadMap();
+
+            if (!mapReady) {
+                clearPose();
+                setOverlayStatus(
+                    "Map unavailable",
+                    "error"
+                );
+                setText(
+                    "localizationConnection",
+                    "Map unavailable"
+                );
+                return;
+            }
+
+            const response = await fetch(
+                LOCALIZATION_ENDPOINT,
+                {cache: "no-store"}
+            );
+            const payload = await response.json();
+
+            /*
+             * A 503 from the guarded Robot Bridge endpoint is an
+             * expected stopped/waiting state, not a pose to cache.
+             */
+            if (
+                response.status === 503
+                && payload.runtime_active === false
+            ) {
+                renderStopped(payload);
+                return;
+            }
+
+            if (
+                !response.ok
+                || !payload.ok
+            ) {
+                renderStopped(payload);
+                return;
+            }
+
+            renderPose(payload);
+        } catch (error) {
+            clearPose();
+            setOverlayStatus(
+                "Localization unavailable",
+                "error"
+            );
+            setText(
+                "localizationConnection",
+                "Offline"
+            );
+            setText("localizationPose", "—");
+            setText("localizationHeading", "—");
+            setText("localizationPoseAge", "—");
+        } finally {
+            requestInFlight = false;
+        }
+    }
+
+    function initialize() {
+        if (!byId("localizationPoseCanvas")) {
+            return;
+        }
+
+        clearPose();
+        renderStopped({
+            telemetry: {
+                status: "LOCALIZATION_STOPPED",
+            },
+        });
+
+        refresh();
+        timer = window.setInterval(
+            refresh,
+            REFRESH_MS
+        );
+
+        window.addEventListener(
+            "resize",
+            function () {
+                const pose = lastPose;
+                clearPose();
+
+                if (
+                    perceptionIsVisible()
+                    && pose
+                    && occupancyMap
+                ) {
+                    drawRobot(pose);
+                }
+            }
+        );
+
+        window.addEventListener(
+            "beforeunload",
+            function () {
+                if (timer !== null) {
+                    window.clearInterval(timer);
+                }
+            },
+            {once: true}
+        );
+    }
+
+    if (document.readyState === "loading") {
+        document.addEventListener(
+            "DOMContentLoaded",
+            initialize,
+            {once: true}
+        );
+    } else {
+        initialize();
+    }
+})();
