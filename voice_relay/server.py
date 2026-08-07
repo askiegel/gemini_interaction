@@ -411,6 +411,50 @@ class VoiceRelayHandler(BaseHTTPRequestHandler):
             },
         )
 
+    def localization_control_status(self):
+        """Proxy Robot Bridge localization ownership state."""
+        response = request_json(
+            "GET",
+            f"{ROBOT_BRIDGE_URL}/localization/status",
+            timeout=5.0,
+        )
+
+        return (
+            response["status_code"] or 503,
+            response["data"] or {
+                "ok": False,
+                "error": (
+                    response["error"]
+                    or "Localization control is unavailable."
+                ),
+            },
+        )
+
+    def localization_control_action(self, action):
+        """Forward only fixed guarded start or stop actions."""
+        if action not in ("start", "stop"):
+            return 400, {
+                "ok": False,
+                "error": "Unsupported localization action.",
+            }
+
+        response = request_json(
+            "POST",
+            f"{ROBOT_BRIDGE_URL}/localization/{action}",
+            timeout=20.0,
+        )
+
+        return (
+            response["status_code"] or 503,
+            response["data"] or {
+                "ok": False,
+                "error": (
+                    response["error"]
+                    or f"Localization {action} failed."
+                ),
+            },
+        )
+
     def localization_status(self):
         """
         Proxy guarded localization pose as read-only presentation data.
@@ -838,6 +882,13 @@ class VoiceRelayHandler(BaseHTTPRequestHandler):
             self.send_json(status_code, payload)
             return
 
+        if path == "/dashboard/localization-control":
+            status_code, payload = (
+                self.localization_control_status()
+            )
+            self.send_json(status_code, payload)
+            return
+
         if path == "/dashboard/localization":
             status_code, payload = self.localization_status()
             self.send_json(status_code, payload)
@@ -999,6 +1050,22 @@ class VoiceRelayHandler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         path = urlparse(self.path).path
+
+        if path in (
+            "/dashboard/localization-start",
+            "/dashboard/localization-stop",
+        ):
+            action = (
+                "start"
+                if path.endswith("-start")
+                else "stop"
+            )
+            status_code, payload = (
+                self.localization_control_action(action)
+            )
+            self.send_json(status_code, payload)
+            return
+
 
         if path in (
             "/network/connect",

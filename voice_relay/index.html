@@ -1025,6 +1025,50 @@
                 <strong id="mapTotalCells">—</strong>
             </div>
 
+            <section class="localization-controls">
+                <div class="localization-controls-heading">
+                    <h3>Localization Control</h3>
+                    <strong
+                        id="localizationControlState"
+                        class="localization-control-state stopped"
+                        aria-live="polite"
+                    >
+                        Stopped
+                    </strong>
+                </div>
+
+                <div class="localization-control-buttons">
+                    <button
+                        id="startLocalizationButton"
+                        class="localization-control-button start"
+                        type="button"
+                    >
+                        Start Localization
+                    </button>
+                    <button
+                        id="stopLocalizationButton"
+                        class="localization-control-button stop"
+                        type="button"
+                        disabled
+                    >
+                        Stop Localization
+                    </button>
+                </div>
+
+                <p
+                    id="localizationControlMessage"
+                    class="localization-control-message"
+                    aria-live="polite"
+                >
+                    Localization is stopped.
+                </p>
+
+                <p class="small-text localization-control-safety">
+                    Uses Mayday's validated saved map. Planning,
+                    navigation goals, and motion control remain disabled.
+                </p>
+            </section>
+
             <div class="metric localization-metric">
                 <span class="metric-name">Localization</span>
                 <strong id="localizationConnection">

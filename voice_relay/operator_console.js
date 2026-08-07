@@ -2481,6 +2481,220 @@
     }
 })();
 
+/* Minimal guarded localization buttons */
+(function () {
+    "use strict";
+
+    const STATUS =
+        "/dashboard/localization-control";
+    const START =
+        "/dashboard/localization-start";
+    const STOP =
+        "/dashboard/localization-stop";
+
+    let busy = false;
+
+    function byId(id) {
+        return document.getElementById(id);
+    }
+
+    function setButtons(startDisabled, stopDisabled) {
+        byId("startLocalizationButton").disabled =
+            startDisabled;
+        byId("stopLocalizationButton").disabled =
+            stopDisabled;
+    }
+
+    function setDisplay(label, state, message, error) {
+        const status = byId(
+            "localizationControlState"
+        );
+        const text = byId(
+            "localizationControlMessage"
+        );
+
+        status.textContent = label;
+        status.className =
+            "localization-control-state " + state;
+
+        text.textContent = message;
+        text.className = (
+            "localization-control-message"
+            + (error ? " error" : "")
+        );
+    }
+
+    function validate(payload) {
+        if (
+            !payload
+            || payload.ok !== true
+            || !payload.localization
+        ) {
+            throw new Error(
+                payload && (
+                    payload.error || payload.message
+                )
+                || "Localization control failed."
+            );
+        }
+
+        const control = payload.localization;
+
+        if (
+            control.planning_enabled !== false
+            || control.control_enabled !== false
+        ) {
+            throw new Error(
+                "Unsafe localization state rejected."
+            );
+        }
+
+        return control;
+    }
+
+    function render(payload) {
+        const control = validate(payload);
+
+        if (control.running && !control.owned) {
+            setDisplay(
+                "External",
+                "error",
+                "Localization is externally managed.",
+                true
+            );
+            setButtons(true, true);
+            return;
+        }
+
+        if (control.running) {
+            setDisplay(
+                "Running",
+                "running",
+                "Localization is running. "
+                + "Waiting for a fresh pose.",
+                false
+            );
+            setButtons(true, false);
+            return;
+        }
+
+        setDisplay(
+            "Stopped",
+            "stopped",
+            "Localization is stopped.",
+            false
+        );
+        setButtons(false, true);
+    }
+
+    async function read(response) {
+        const payload = await response.json();
+
+        if (!response.ok) {
+            throw new Error(
+                payload.error
+                || payload.message
+                || `HTTP ${response.status}`
+            );
+        }
+
+        return payload;
+    }
+
+    async function refresh() {
+        if (busy) return;
+
+        try {
+            const response = await fetch(
+                STATUS,
+                {cache: "no-store"}
+            );
+            render(await read(response));
+        } catch (error) {
+            setDisplay(
+                "Unavailable",
+                "error",
+                error.message,
+                true
+            );
+            setButtons(true, true);
+        }
+    }
+
+    async function act(endpoint, label) {
+        if (busy) return;
+
+        busy = true;
+        setButtons(true, true);
+        setDisplay(
+            label,
+            "busy",
+            `${label} guarded localization...`,
+            false
+        );
+
+        try {
+            const response = await fetch(
+                endpoint,
+                {
+                    method: "POST",
+                    cache: "no-store",
+                }
+            );
+            render(await read(response));
+        } catch (error) {
+            setDisplay(
+                "Error",
+                "error",
+                error.message,
+                true
+            );
+            setButtons(true, true);
+        } finally {
+            busy = false;
+            window.setTimeout(refresh, 250);
+        }
+    }
+
+    function initialize() {
+        const start = byId(
+            "startLocalizationButton"
+        );
+        const stop = byId(
+            "stopLocalizationButton"
+        );
+
+        if (!start || !stop) return;
+
+        start.addEventListener(
+            "click",
+            function () {
+                act(START, "Starting");
+            }
+        );
+
+        stop.addEventListener(
+            "click",
+            function () {
+                act(STOP, "Stopping");
+            }
+        );
+
+        refresh();
+        window.setInterval(refresh, 1000);
+    }
+
+    if (document.readyState === "loading") {
+        document.addEventListener(
+            "DOMContentLoaded",
+            initialize,
+            {once: true}
+        );
+    } else {
+        initialize();
+    }
+})();
+
 /* Read-only saved occupancy-map visualization */
 (function () {
     "use strict";
