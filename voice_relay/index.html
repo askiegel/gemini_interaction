@@ -932,11 +932,25 @@
                 ></canvas>
 
                 <canvas
+                    id="localizedLidarCanvas"
+                    width="900"
+                    height="900"
+                    aria-label="Live localized LiDAR scan"
+                ></canvas>
+
+                <canvas
                     id="localizationPoseCanvas"
                     width="900"
                     height="900"
                     aria-label="Mayday localized pose"
                 ></canvas>
+
+                <div
+                    id="localizedLidarOverlayStatus"
+                    class="localized-lidar-overlay-status stopped"
+                >
+                    Localized scan stopped
+                </div>
 
                 <div
                     id="localizationOverlayStatus"
@@ -965,6 +979,10 @@
                 <span>
                     <i class="map-legend-swatch occupied"></i>
                     Occupied
+                </span>
+                <span>
+                    <i class="map-legend-swatch localized-lidar"></i>
+                    Live localized LiDAR
                 </span>
                 <span>
                     <i class="map-legend-swatch robot"></i>

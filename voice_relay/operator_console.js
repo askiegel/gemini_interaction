@@ -2695,6 +2695,469 @@
     }
 })();
 
+/* Read-only localized LiDAR map overlay */
+(function () {
+    "use strict";
+
+    const MAP_ENDPOINT = "/dashboard/map";
+    const LIDAR_ENDPOINT = "/dashboard/lidar";
+    const LOCALIZATION_ENDPOINT =
+        "/dashboard/localization";
+
+    const REFRESH_MS = 500;
+    const MAP_PADDING = 32;
+    const DISPLAY_RANGE_METERS = 6.0;
+
+    /*
+     * Hardware-validated lidar_link correction:
+     * raw zero is Mayday's right side. Adding +90 degrees makes
+     * zero correspond to Mayday's physical forward direction.
+     */
+    const SCAN_TO_BASE_ROTATION_RADIANS =
+        Math.PI / 2;
+
+    let timer = null;
+    let requestInFlight = false;
+    let occupancyMap = null;
+
+    function byId(id) {
+        return document.getElementById(id);
+    }
+
+    function perceptionIsVisible() {
+        const page = byId("perceptionPage");
+
+        return Boolean(
+            page
+            && !page.hidden
+            && page.classList.contains("active")
+        );
+    }
+
+    function setStatus(label, state) {
+        const status = byId(
+            "localizedLidarOverlayStatus"
+        );
+
+        if (!status) return;
+
+        status.textContent = label;
+        status.className =
+            "localized-lidar-overlay-status " + state;
+    }
+
+    function resizeCanvas(canvas) {
+        const mapCanvas = byId("mapCanvas");
+        const ratio = window.devicePixelRatio || 1;
+        const width = Math.max(
+            320,
+            mapCanvas
+                ? mapCanvas.clientWidth
+                : canvas.clientWidth
+        );
+        const height = Math.max(
+            480,
+            mapCanvas
+                ? mapCanvas.clientHeight
+                : canvas.clientHeight
+        );
+        const pixelWidth = Math.round(width * ratio);
+        const pixelHeight = Math.round(height * ratio);
+
+        if (
+            canvas.width !== pixelWidth
+            || canvas.height !== pixelHeight
+        ) {
+            canvas.width = pixelWidth;
+            canvas.height = pixelHeight;
+        }
+
+        const context = canvas.getContext("2d");
+
+        context.setTransform(
+            ratio,
+            0,
+            0,
+            ratio,
+            0,
+            0
+        );
+
+        return {
+            context,
+            width,
+            height,
+        };
+    }
+
+    function clearScan() {
+        const canvas = byId("localizedLidarCanvas");
+
+        if (!canvas) return;
+
+        const drawing = resizeCanvas(canvas);
+
+        drawing.context.clearRect(
+            0,
+            0,
+            drawing.width,
+            drawing.height
+        );
+    }
+
+    function mapGeometry(drawing) {
+        const sourceWidth = Number(occupancyMap.width);
+        const sourceHeight = Number(occupancyMap.height);
+
+        const scale = Math.min(
+            (
+                drawing.width - MAP_PADDING * 2
+            ) / sourceWidth,
+            (
+                drawing.height - MAP_PADDING * 2
+            ) / sourceHeight
+        );
+
+        const drawWidth = sourceWidth * scale;
+        const drawHeight = sourceHeight * scale;
+
+        return {
+            sourceWidth,
+            sourceHeight,
+            resolution: Number(
+                occupancyMap.resolution
+            ),
+            origin: occupancyMap.origin,
+            scale,
+            drawX: (
+                drawing.width - drawWidth
+            ) / 2,
+            drawY: (
+                drawing.height - drawHeight
+            ) / 2,
+        };
+    }
+
+    function mapPointToCanvas(
+        mapX,
+        mapY,
+        geometry
+    ) {
+        const cellX = (
+            mapX - Number(geometry.origin.x)
+        ) / geometry.resolution;
+
+        const cellY = (
+            mapY - Number(geometry.origin.y)
+        ) / geometry.resolution;
+
+        return {
+            x: (
+                geometry.drawX
+                + cellX * geometry.scale
+            ),
+            y: (
+                geometry.drawY
+                + (
+                    geometry.sourceHeight
+                    - cellY
+                ) * geometry.scale
+            ),
+            inside: (
+                cellX >= 0
+                && cellX <= geometry.sourceWidth
+                && cellY >= 0
+                && cellY <= geometry.sourceHeight
+            ),
+        };
+    }
+
+    function drawScan(scan, pose) {
+        const canvas = byId("localizedLidarCanvas");
+
+        if (
+            !canvas
+            || !occupancyMap
+            || !scan
+            || !pose
+        ) {
+            clearScan();
+            return 0;
+        }
+
+        const drawing = resizeCanvas(canvas);
+        const context = drawing.context;
+        const geometry = mapGeometry(drawing);
+
+        const robotX = Number(pose.position.x);
+        const robotY = Number(pose.position.y);
+        const robotYaw = Number(pose.yaw_radians);
+
+        const angleMinimum = Number(scan.angle_min);
+        const angleIncrement = Number(
+            scan.angle_increment
+        );
+        const rangeMinimum = Number(scan.range_min);
+        const rangeMaximum = Math.min(
+            Number(scan.range_max),
+            DISPLAY_RANGE_METERS
+        );
+
+        context.clearRect(
+            0,
+            0,
+            drawing.width,
+            drawing.height
+        );
+
+        context.fillStyle = "#a3e635";
+        context.shadowColor =
+            "rgba(163, 230, 53, 0.80)";
+        context.shadowBlur = 4;
+
+        let drawn = 0;
+
+        scan.ranges.forEach(
+            function (rawRange, index) {
+                if (
+                    typeof rawRange !== "number"
+                    || !Number.isFinite(rawRange)
+                    || rawRange < rangeMinimum
+                    || rawRange > rangeMaximum
+                ) {
+                    return;
+                }
+
+                const rawAngle = (
+                    angleMinimum
+                    + index * angleIncrement
+                );
+
+                const mapBearing = (
+                    robotYaw
+                    + rawAngle
+                    + SCAN_TO_BASE_ROTATION_RADIANS
+                );
+
+                const mapX = (
+                    robotX
+                    + rawRange * Math.cos(mapBearing)
+                );
+
+                const mapY = (
+                    robotY
+                    + rawRange * Math.sin(mapBearing)
+                );
+
+                const point = mapPointToCanvas(
+                    mapX,
+                    mapY,
+                    geometry
+                );
+
+                if (!point.inside) return;
+
+                context.beginPath();
+                context.arc(
+                    point.x,
+                    point.y,
+                    2.1,
+                    0,
+                    Math.PI * 2
+                );
+                context.fill();
+
+                drawn += 1;
+            }
+        );
+
+        context.shadowBlur = 0;
+
+        return drawn;
+    }
+
+    async function loadMap() {
+        if (occupancyMap) return true;
+
+        const response = await fetch(
+            MAP_ENDPOINT,
+            {cache: "no-store"}
+        );
+        const payload = await response.json();
+
+        if (
+            !response.ok
+            || !payload.ok
+            || !payload.telemetry
+            || !payload.telemetry.map
+        ) {
+            return false;
+        }
+
+        occupancyMap = payload.telemetry.map;
+        return true;
+    }
+
+    async function refresh() {
+        if (
+            requestInFlight
+            || !perceptionIsVisible()
+        ) {
+            return;
+        }
+
+        requestInFlight = true;
+
+        try {
+            const mapReady = await loadMap();
+
+            if (!mapReady) {
+                clearScan();
+                setStatus("Map unavailable", "error");
+                return;
+            }
+
+            const responses = await Promise.all([
+                fetch(
+                    LOCALIZATION_ENDPOINT,
+                    {cache: "no-store"}
+                ),
+                fetch(
+                    LIDAR_ENDPOINT,
+                    {cache: "no-store"}
+                ),
+            ]);
+
+            const localizationResponse = responses[0];
+            const lidarResponse = responses[1];
+
+            const localization =
+                await localizationResponse.json();
+            const lidar = await lidarResponse.json();
+
+            if (
+                localizationResponse.status === 503
+                || localization.runtime_active !== true
+                || !localization.telemetry
+                || localization.telemetry.available
+                    !== true
+                || !localization.telemetry.pose
+            ) {
+                clearScan();
+                setStatus(
+                    "Localized scan stopped",
+                    "stopped"
+                );
+                return;
+            }
+
+            if (
+                !lidarResponse.ok
+                || !lidar.ok
+                || !lidar.telemetry
+                || lidar.telemetry.available !== true
+                || !lidar.telemetry.scan
+            ) {
+                clearScan();
+                setStatus(
+                    "Waiting for live scan",
+                    "waiting"
+                );
+                return;
+            }
+
+            if (
+                Number(lidar.telemetry.age_seconds)
+                > 1.0
+            ) {
+                clearScan();
+                setStatus(
+                    "Live scan is stale",
+                    "waiting"
+                );
+                return;
+            }
+
+            const pose = localization.telemetry.pose;
+            const scan = lidar.telemetry.scan;
+
+            if (
+                pose.frame_id !== "map"
+                || scan.frame_id !== "lidar_link"
+            ) {
+                clearScan();
+                setStatus(
+                    "Frame mismatch",
+                    "error"
+                );
+                return;
+            }
+
+            const drawn = drawScan(scan, pose);
+
+            setStatus(
+                `Live map scan: ${drawn} points`,
+                drawn > 0 ? "ready" : "waiting"
+            );
+        } catch (error) {
+            clearScan();
+            setStatus(
+                "Localized scan unavailable",
+                "error"
+            );
+        } finally {
+            requestInFlight = false;
+        }
+    }
+
+    function initialize() {
+        if (!byId("localizedLidarCanvas")) {
+            return;
+        }
+
+        clearScan();
+        setStatus(
+            "Localized scan stopped",
+            "stopped"
+        );
+
+        refresh();
+
+        timer = window.setInterval(
+            refresh,
+            REFRESH_MS
+        );
+
+        window.addEventListener(
+            "resize",
+            function () {
+                clearScan();
+                refresh();
+            }
+        );
+
+        window.addEventListener(
+            "beforeunload",
+            function () {
+                if (timer !== null) {
+                    window.clearInterval(timer);
+                }
+            },
+            {once: true}
+        );
+    }
+
+    if (document.readyState === "loading") {
+        document.addEventListener(
+            "DOMContentLoaded",
+            initialize,
+            {once: true}
+        );
+    } else {
+        initialize();
+    }
+})();
+
 /* Read-only saved occupancy-map visualization */
 (function () {
     "use strict";
