@@ -584,6 +584,45 @@ class VoiceRelayHandler(BaseHTTPRequestHandler):
             },
         )
 
+    def live_mapping_map_status(self):
+        """
+        Proxy the current Cartographer grid as read-only data.
+
+        Robot Bridge owns mapping runtime state and stale-grid clearing.
+        This proxy cannot start, stop, save, promote, navigate, or move.
+        """
+        response = request_json(
+            "GET",
+            f"{ROBOT_BRIDGE_URL}/telemetry/mapping-map",
+            timeout=10.0,
+        )
+
+        if isinstance(response["data"], dict):
+            return (
+                response["status_code"] or 503,
+                response["data"],
+            )
+
+        return (
+            response["status_code"] or 503,
+            {
+                "ok": False,
+                "runtime_active": False,
+                "read_only": True,
+                "authoritative": False,
+                "service": "mini_pupper_operator_dashboard",
+                "telemetry": {
+                    "available": False,
+                    "status": "MAPPING_MAP_UNAVAILABLE",
+                    "map": None,
+                },
+                "error": (
+                    response["error"]
+                    or "Mayday live mapping telemetry is unavailable."
+                ),
+            },
+        )
+
     def candidate_map_status(self):
         """
         Proxy candidate maps as read-only review data.
@@ -987,6 +1026,13 @@ class VoiceRelayHandler(BaseHTTPRequestHandler):
 
         if path == "/dashboard/map":
             status_code, payload = self.map_status()
+            self.send_json(status_code, payload)
+            return
+
+        if path == "/dashboard/mapping-map":
+            status_code, payload = (
+                self.live_mapping_map_status()
+            )
             self.send_json(status_code, payload)
             return
 

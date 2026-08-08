@@ -905,6 +905,134 @@
     </section>
 
     <section
+        class="live-mapping-layout"
+        aria-label="Live mapping map"
+    >
+        <article class="card live-mapping-card">
+            <div class="live-mapping-heading">
+                <div>
+                    <h2>Live Mapping Map</h2>
+                    <p>
+                        Cartographer occupancy updates while supervised
+                        mapping is active. This transient map is not the
+                        navigation map until separately saved and reviewed.
+                    </p>
+                </div>
+
+                <span
+                    id="liveMappingStatus"
+                    class="live-mapping-status stopped"
+                    aria-live="polite"
+                >
+                    Mapping stopped
+                </span>
+            </div>
+
+            <div class="live-mapping-stage">
+                <canvas
+                    id="liveMappingCanvas"
+                    width="1000"
+                    height="760"
+                    aria-label="Live Cartographer occupancy map"
+                ></canvas>
+
+                <div
+                    id="liveMappingMessage"
+                    class="live-mapping-message"
+                >
+                    Start supervised mapping to build a live map.
+                </div>
+            </div>
+
+            <div
+                class="live-mapping-legend"
+                aria-label="Live mapping legend"
+            >
+                <span>
+                    <i class="live-mapping-swatch unknown"></i>
+                    Unknown
+                </span>
+                <span>
+                    <i class="live-mapping-swatch free"></i>
+                    Free probability
+                </span>
+                <span>
+                    <i class="live-mapping-swatch occupied"></i>
+                    Occupied probability
+                </span>
+                <span>Orientation: MAP +Y</span>
+                <span>Transient and read-only</span>
+            </div>
+        </article>
+
+        <aside class="card live-mapping-metrics">
+            <div class="live-mapping-metrics-heading">
+                <h2>Live Grid</h2>
+                <strong id="liveMappingFreshness">Stopped</strong>
+            </div>
+
+            <div class="metric">
+                <span class="metric-name">Runtime</span>
+                <strong id="liveMappingRuntime">Stopped</strong>
+            </div>
+            <div class="metric">
+                <span class="metric-name">Frame</span>
+                <strong id="liveMappingFrame">—</strong>
+            </div>
+            <div class="metric">
+                <span class="metric-name">Dimensions</span>
+                <strong id="liveMappingDimensions">—</strong>
+            </div>
+            <div class="metric">
+                <span class="metric-name">Resolution</span>
+                <strong id="liveMappingResolution">—</strong>
+            </div>
+            <div class="metric">
+                <span class="metric-name">Origin</span>
+                <strong id="liveMappingOrigin">—</strong>
+            </div>
+            <div class="metric">
+                <span class="metric-name">Unknown cells</span>
+                <strong id="liveMappingUnknown">—</strong>
+            </div>
+            <div class="metric">
+                <span class="metric-name">Free cells</span>
+                <strong id="liveMappingFree">—</strong>
+            </div>
+            <div class="metric">
+                <span class="metric-name">
+                    Probability cells
+                </span>
+                <strong id="liveMappingProbability">—</strong>
+            </div>
+            <div class="metric">
+                <span class="metric-name">Occupied cells</span>
+                <strong id="liveMappingOccupied">—</strong>
+            </div>
+            <div class="metric">
+                <span class="metric-name">Total cells</span>
+                <strong id="liveMappingTotal">—</strong>
+            </div>
+            <div class="metric">
+                <span class="metric-name">Grid age</span>
+                <strong id="liveMappingAge">—</strong>
+            </div>
+
+            <p
+                id="liveMappingError"
+                class="live-mapping-error"
+                hidden
+            ></p>
+
+            <p class="small-text live-mapping-safety">
+                Visualization only. This transient panel cannot start,
+                stop, save, promote, navigate, replace the validated
+                map, or command Mayday.
+            </p>
+        </aside>
+    </section>
+
+    <section
         class="candidate-review-layout"
         aria-label="Candidate map review"
     >

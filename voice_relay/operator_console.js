@@ -3003,6 +3003,461 @@
     }
 })();
 
+/* Read-only live Cartographer mapping map */
+(function () {
+    "use strict";
+
+    const ENDPOINT = "/dashboard/mapping-map";
+    const REFRESH_MS = 1000;
+
+    let timer = null;
+    let requestInFlight = false;
+    let liveMap = null;
+
+    function byId(id) {
+        return document.getElementById(id);
+    }
+
+    function perceptionIsVisible() {
+        const page = byId("perceptionPage");
+
+        return Boolean(
+            page
+            && !page.hidden
+            && page.classList.contains("active")
+        );
+    }
+
+    function setText(id, value) {
+        const element = byId(id);
+        if (element) element.textContent = value;
+    }
+
+    function setStatus(label, state) {
+        const status = byId("liveMappingStatus");
+
+        if (!status) return;
+
+        status.textContent = label;
+        status.className =
+            "live-mapping-status " + state;
+    }
+
+    function resizeCanvas(canvas) {
+        const ratio = window.devicePixelRatio || 1;
+        const width = Math.max(320, canvas.clientWidth);
+        const height = Math.max(420, canvas.clientHeight);
+        const pixelWidth = Math.round(width * ratio);
+        const pixelHeight = Math.round(height * ratio);
+
+        if (
+            canvas.width !== pixelWidth
+            || canvas.height !== pixelHeight
+        ) {
+            canvas.width = pixelWidth;
+            canvas.height = pixelHeight;
+        }
+
+        const context = canvas.getContext("2d");
+        context.setTransform(ratio, 0, 0, ratio, 0, 0);
+
+        return {
+            context,
+            width,
+            height,
+        };
+    }
+
+    function clearCanvas() {
+        const canvas = byId("liveMappingCanvas");
+        if (!canvas) return;
+
+        const drawing = resizeCanvas(canvas);
+
+        drawing.context.fillStyle = "#020617";
+        drawing.context.fillRect(
+            0,
+            0,
+            drawing.width,
+            drawing.height
+        );
+    }
+
+    function createMapImage(occupancyMap) {
+        const width = Number(occupancyMap.width);
+        const height = Number(occupancyMap.height);
+        const imageCanvas =
+            document.createElement("canvas");
+
+        imageCanvas.width = width;
+        imageCanvas.height = height;
+
+        const context = imageCanvas.getContext("2d");
+        const image = context.createImageData(
+            width,
+            height
+        );
+
+        occupancyMap.cells.forEach(
+            function (rawValue, index) {
+                const value = Number(rawValue);
+                const mapX = index % width;
+                const mapY = Math.floor(index / width);
+                const canvasY = height - 1 - mapY;
+                const pixelIndex = (
+                    (canvasY * width + mapX) * 4
+                );
+
+                let red = 15;
+                let green = 23;
+                let blue = 42;
+
+                if (value >= 0 && value <= 100) {
+                    const shade = Math.round(
+                        248 - value * 2.2
+                    );
+
+                    red = shade;
+                    green = shade;
+                    blue = shade;
+                }
+
+                image.data[pixelIndex] = red;
+                image.data[pixelIndex + 1] = green;
+                image.data[pixelIndex + 2] = blue;
+                image.data[pixelIndex + 3] = 255;
+            }
+        );
+
+        context.putImageData(image, 0, 0);
+        return imageCanvas;
+    }
+
+    function drawMap(occupancyMap) {
+        const canvas = byId("liveMappingCanvas");
+        if (!canvas) return;
+
+        const drawing = resizeCanvas(canvas);
+        const context = drawing.context;
+        const padding = 32;
+        const sourceWidth = Number(occupancyMap.width);
+        const sourceHeight = Number(occupancyMap.height);
+        const scale = Math.min(
+            (
+                drawing.width - padding * 2
+            ) / sourceWidth,
+            (
+                drawing.height - padding * 2
+            ) / sourceHeight
+        );
+        const drawWidth = sourceWidth * scale;
+        const drawHeight = sourceHeight * scale;
+        const drawX = (
+            drawing.width - drawWidth
+        ) / 2;
+        const drawY = (
+            drawing.height - drawHeight
+        ) / 2;
+        const image = createMapImage(occupancyMap);
+
+        context.fillStyle = "#020617";
+        context.fillRect(
+            0,
+            0,
+            drawing.width,
+            drawing.height
+        );
+
+        context.imageSmoothingEnabled = false;
+        context.drawImage(
+            image,
+            drawX,
+            drawY,
+            drawWidth,
+            drawHeight
+        );
+
+        context.strokeStyle = "#38bdf8";
+        context.lineWidth = 1;
+        context.strokeRect(
+            drawX - 0.5,
+            drawY - 0.5,
+            drawWidth + 1,
+            drawHeight + 1
+        );
+
+        context.fillStyle = "#7dd3fc";
+        context.font = "700 13px system-ui";
+        context.textAlign = "center";
+        context.fillText(
+            "LIVE MAP +Y",
+            drawing.width / 2,
+            Math.max(18, drawY - 10)
+        );
+        context.textAlign = "start";
+    }
+
+    function resetMetrics() {
+        setText("liveMappingFrame", "—");
+        setText("liveMappingDimensions", "—");
+        setText("liveMappingResolution", "—");
+        setText("liveMappingOrigin", "—");
+        setText("liveMappingUnknown", "—");
+        setText("liveMappingFree", "—");
+        setText("liveMappingProbability", "—");
+        setText("liveMappingOccupied", "—");
+        setText("liveMappingTotal", "—");
+        setText("liveMappingAge", "—");
+    }
+
+    function setMessage(message) {
+        const element = byId("liveMappingMessage");
+
+        if (!element) return;
+
+        element.textContent = message;
+        element.hidden = false;
+    }
+
+    function setStopped() {
+        liveMap = null;
+        clearCanvas();
+        resetMetrics();
+        setStatus("Mapping stopped", "stopped");
+        setText("liveMappingRuntime", "Stopped");
+        setText("liveMappingFreshness", "Stopped");
+        setMessage(
+            "Start supervised mapping to build a live map."
+        );
+
+        const error = byId("liveMappingError");
+        if (error) error.hidden = true;
+    }
+
+    function setWaiting() {
+        liveMap = null;
+        clearCanvas();
+        resetMetrics();
+        setStatus("Waiting for grid", "waiting");
+        setText("liveMappingRuntime", "Running");
+        setText("liveMappingFreshness", "Waiting");
+        setMessage(
+            "Cartographer is running. Waiting for the first map grid..."
+        );
+
+        const error = byId("liveMappingError");
+        if (error) error.hidden = true;
+    }
+
+    function setUnavailable(message) {
+        liveMap = null;
+        clearCanvas();
+        resetMetrics();
+        setStatus("Map unavailable", "error");
+        setText("liveMappingRuntime", "Unavailable");
+        setText("liveMappingFreshness", "Unavailable");
+        setMessage(message);
+
+        const error = byId("liveMappingError");
+
+        if (error) {
+            error.textContent = message;
+            error.hidden = false;
+        }
+    }
+
+    function render(payload) {
+        const telemetry = payload.telemetry;
+        const occupancyMap = telemetry.map;
+        const origin = occupancyMap.origin;
+        const age = Number(telemetry.age_seconds);
+        const message = byId("liveMappingMessage");
+        const error = byId("liveMappingError");
+
+        if (
+            payload.read_only !== true
+            || payload.authoritative !== false
+            || payload.runtime_active !== true
+            || telemetry.available !== true
+            || telemetry.status !== "READY"
+            || occupancyMap.frame_id !== "map"
+            || occupancyMap.encoding
+                !== "ros_occupancy_probabilities"
+        ) {
+            throw new Error(
+                "Live mapping safety state is invalid."
+            );
+        }
+
+        liveMap = occupancyMap;
+        drawMap(liveMap);
+
+        if (message) message.hidden = true;
+        if (error) error.hidden = true;
+
+        setStatus("Live mapping", "ready");
+        setText("liveMappingRuntime", "Running");
+        setText(
+            "liveMappingFreshness",
+            Number.isFinite(age)
+                ? `Updated ${age.toFixed(1)} seconds ago`
+                : "Live"
+        );
+        setText("liveMappingFrame", occupancyMap.frame_id);
+        setText(
+            "liveMappingDimensions",
+            `${Number(occupancyMap.width).toLocaleString()} × `
+            + `${Number(occupancyMap.height).toLocaleString()} cells`
+        );
+        setText(
+            "liveMappingResolution",
+            `${Number(occupancyMap.resolution).toFixed(3)} m/cell`
+        );
+        setText(
+            "liveMappingOrigin",
+            `${Number(origin.x).toFixed(2)}, `
+            + `${Number(origin.y).toFixed(2)}, `
+            + `${Number(origin.yaw).toFixed(2)} rad`
+        );
+        setText(
+            "liveMappingUnknown",
+            Number(
+                occupancyMap.unknown_cell_count
+            ).toLocaleString()
+        );
+        setText(
+            "liveMappingFree",
+            Number(
+                occupancyMap.free_cell_count
+            ).toLocaleString()
+        );
+        setText(
+            "liveMappingProbability",
+            Number(
+                occupancyMap.probability_cell_count
+            ).toLocaleString()
+        );
+        setText(
+            "liveMappingOccupied",
+            Number(
+                occupancyMap.occupied_cell_count
+            ).toLocaleString()
+        );
+        setText(
+            "liveMappingTotal",
+            Number(
+                occupancyMap.cell_count
+            ).toLocaleString()
+        );
+        setText(
+            "liveMappingAge",
+            Number.isFinite(age)
+                ? `${age.toFixed(2)} s`
+                : "—"
+        );
+    }
+
+    async function refresh() {
+        if (
+            !perceptionIsVisible()
+            || requestInFlight
+        ) {
+            return;
+        }
+
+        requestInFlight = true;
+
+        try {
+            const response = await fetch(ENDPOINT, {
+                cache: "no-store",
+            });
+            const payload = await response.json();
+
+            if (
+                response.status === 503
+                && payload.runtime_active === false
+                && payload.telemetry
+                && payload.telemetry.status
+                    === "MAPPING_STOPPED"
+            ) {
+                setStopped();
+                return;
+            }
+
+            if (
+                response.status === 503
+                && payload.runtime_active === true
+                && payload.telemetry
+                && payload.telemetry.map === null
+            ) {
+                setWaiting();
+                return;
+            }
+
+            if (!response.ok || !payload.ok) {
+                throw new Error(
+                    payload.error
+                    || (
+                        payload.telemetry
+                        && payload.telemetry.error
+                    )
+                    || "Live mapping telemetry is unavailable."
+                );
+            }
+
+            render(payload);
+        } catch (error) {
+            setUnavailable(error.message);
+        } finally {
+            requestInFlight = false;
+        }
+    }
+
+    function initialize() {
+        if (!byId("liveMappingCanvas")) return;
+
+        setStopped();
+        refresh();
+
+        timer = window.setInterval(
+            refresh,
+            REFRESH_MS
+        );
+
+        window.addEventListener(
+            "resize",
+            function () {
+                if (
+                    perceptionIsVisible()
+                    && liveMap
+                ) {
+                    drawMap(liveMap);
+                }
+            }
+        );
+
+        window.addEventListener(
+            "beforeunload",
+            function () {
+                if (timer !== null) {
+                    window.clearInterval(timer);
+                }
+            },
+            {once: true}
+        );
+    }
+
+    if (document.readyState === "loading") {
+        document.addEventListener(
+            "DOMContentLoaded",
+            initialize,
+            {once: true}
+        );
+    } else {
+        initialize();
+    }
+})();
+
 /* Read-only candidate map review */
 (function () {
     "use strict";
@@ -3191,7 +3646,7 @@
         context.font = "700 13px system-ui";
         context.textAlign = "center";
         context.fillText(
-            "CANDIDATE — NORTH / +Y",
+            "CANDIDATE — MAP +Y",
             drawing.width / 2,
             Math.max(18, drawY - 10)
         );
@@ -4117,7 +4572,7 @@
         context.font = "700 13px system-ui";
         context.textAlign = "center";
         context.fillText(
-            "NORTH / +Y",
+            "MAP +Y",
             width / 2,
             Math.max(18, drawY - 10)
         );
