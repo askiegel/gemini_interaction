@@ -104,7 +104,11 @@ def test_invalid_candidate_is_listed_but_not_rendered():
     assert 'renderInventory(candidates)' in REVIEW
     assert 'candidate.classification' in REVIEW
     assert 'candidate.map' in REVIEW
-    assert 'const ready = candidates.find(' in REVIEW
+    assert (
+        'const readyCandidates = candidates.filter('
+        in REVIEW
+    )
+    assert 'candidateIsRenderable' in REVIEW
 
 
 def test_voice_relay_defines_candidate_proxy():
@@ -180,3 +184,58 @@ def test_candidate_proxy_reports_unavailable_robot():
     assert status_code == 503
     assert payload['ok'] is False
     assert payload['error'] == 'Robot unavailable'
+
+def test_review_ready_candidates_are_selectable():
+    assert 'let selectedCandidateName = null;' in REVIEW
+    assert 'let reviewCandidates = [];' in REVIEW
+    assert 'function candidateIsRenderable(' in REVIEW
+    assert 'function selectCandidate(candidate)' in REVIEW
+    assert 'item.addEventListener(' in REVIEW
+    assert '"click"' in REVIEW
+    assert 'selectCandidate(candidate);' in REVIEW
+    assert '"aria-pressed"' in REVIEW
+
+
+def test_candidate_selection_survives_refresh():
+    assert 'candidate.name' in REVIEW
+    assert '=== selectedCandidateName' in REVIEW
+    assert 'selectedCandidateName = ready.name;' in REVIEW
+    assert (
+        'readyCandidates.length - 1'
+        in REVIEW
+    )
+
+
+def test_invalid_candidates_remain_noninteractive():
+    assert (
+        'const selectable ='
+        in REVIEW
+    )
+    assert (
+        'selectable ? "button" : "div"'
+        in REVIEW
+    )
+    assert (
+        'candidate.classification'
+        in REVIEW
+    )
+    assert '"REVIEW_READY"' in REVIEW
+    assert '&& candidate.map' in REVIEW
+
+
+def test_candidate_selection_remains_read_only():
+    forbidden = (
+        'method: "POST"',
+        'method: "PUT"',
+        'method: "PATCH"',
+        'method: "DELETE"',
+        '/mapping/start',
+        '/mapping/stop',
+        '/mapping/save-candidate',
+        'promote',
+        'cmd_vel',
+        'navigation goal',
+    )
+
+    for marker in forbidden:
+        assert marker not in REVIEW

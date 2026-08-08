@@ -3013,6 +3013,8 @@
     let timer = null;
     let requestInFlight = false;
     let reviewMap = null;
+    let reviewCandidates = [];
+    let selectedCandidateName = null;
 
     function byId(id) {
         return document.getElementById(id);
@@ -3196,6 +3198,25 @@
         context.textAlign = "start";
     }
 
+    function candidateIsRenderable(candidate) {
+        return Boolean(
+            candidate
+            && candidate.review_ready === true
+            && candidate.classification
+                === "REVIEW_READY"
+            && candidate.map
+        );
+    }
+
+    function selectCandidate(candidate) {
+        if (!candidateIsRenderable(candidate)) return;
+
+        selectedCandidateName = candidate.name;
+        renderInventory(reviewCandidates);
+        renderReadyCandidate(candidate);
+        finishReadyCandidate(candidate);
+    }
+
     function renderInventory(candidates) {
         const list = byId("candidateInventoryList");
         if (!list) return;
@@ -3203,17 +3224,27 @@
         list.replaceChildren();
 
         candidates.forEach(function (candidate) {
-            const item = document.createElement("div");
+            const selectable =
+                candidateIsRenderable(candidate);
+            const item = document.createElement(
+                selectable ? "button" : "div"
+            );
             const name = document.createElement("strong");
             const classification =
                 document.createElement("span");
 
+            if (selectable) {
+                item.type = "button";
+            }
+
             item.className = (
                 "candidate-inventory-item "
+                + (selectable ? "ready" : "invalid")
                 + (
-                    candidate.review_ready === true
-                        ? "ready"
-                        : "invalid"
+                    candidate.name
+                        === selectedCandidateName
+                        ? " selected"
+                        : ""
                 )
             );
 
@@ -3223,6 +3254,23 @@
 
             item.appendChild(name);
             item.appendChild(classification);
+
+            if (selectable) {
+                item.setAttribute(
+                    "aria-pressed",
+                    candidate.name
+                        === selectedCandidateName
+                        ? "true"
+                        : "false"
+                );
+                item.addEventListener(
+                    "click",
+                    function () {
+                        selectCandidate(candidate);
+                    }
+                );
+            }
+
             list.appendChild(item);
         });
     }
@@ -3325,17 +3373,27 @@
     function render(payload) {
         const telemetry = payload.telemetry || payload;
         const candidates = telemetry.candidates || [];
-        const ready = candidates.find(
+        const readyCandidates = candidates.filter(
+            candidateIsRenderable
+        );
+        let ready = readyCandidates.find(
             function (candidate) {
                 return (
-                    candidate.review_ready === true
-                    && candidate.classification
-                        === "REVIEW_READY"
-                    && candidate.map
+                    candidate.name
+                    === selectedCandidateName
                 );
             }
         );
         const error = byId("candidateReviewError");
+
+        reviewCandidates = candidates;
+
+        if (!ready && readyCandidates.length > 0) {
+            ready = readyCandidates[
+                readyCandidates.length - 1
+            ];
+            selectedCandidateName = ready.name;
+        }
 
         if (
             telemetry.read_only !== true

@@ -1632,6 +1632,30 @@ button {
     font-size: 0.78rem;
 }
 
+button.candidate-inventory-item {
+    width: 100%;
+    appearance: none;
+    font: inherit;
+    text-align: left;
+    cursor: pointer;
+}
+
+button.candidate-inventory-item:hover {
+    border-color: #16a34a;
+    background: #dcfce7;
+}
+
+button.candidate-inventory-item:focus-visible {
+    outline: 3px solid rgba(37, 99, 235, 0.35);
+    outline-offset: 2px;
+}
+
+.candidate-inventory-item.selected {
+    border-color: #15803d;
+    box-shadow: 0 0 0 2px rgba(21, 128, 61, 0.2);
+    background: #dcfce7;
+}
+
 .candidate-inventory-item.ready {
     border-color: #86efac;
     background: #f0fdf4;
