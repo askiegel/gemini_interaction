@@ -455,6 +455,65 @@ class VoiceRelayHandler(BaseHTTPRequestHandler):
             },
         )
 
+    def mapping_control_status(self):
+        """Proxy guarded mapping ownership and safety state."""
+        response = request_json(
+            "GET",
+            f"{ROBOT_BRIDGE_URL}/mapping/status",
+            timeout=5.0,
+        )
+
+        return (
+            response["status_code"] or 503,
+            response["data"] or {
+                "ok": False,
+                "error": (
+                    response["error"]
+                    or "Mapping control is unavailable."
+                ),
+            },
+        )
+
+    def mapping_control_action(self, action):
+        """
+        Forward one fixed guarded mapping action.
+
+        No browser-provided command, map path, launch parameter, motion
+        value, or candidate name is accepted.
+        """
+        routes = {
+            "start": ("start", 20.0),
+            "stop": ("stop", 20.0),
+            "save-candidate": (
+                "save-candidate",
+                180.0,
+            ),
+        }
+
+        if action not in routes:
+            return 400, {
+                "ok": False,
+                "error": "Unsupported mapping action.",
+            }
+
+        route, timeout = routes[action]
+        response = request_json(
+            "POST",
+            f"{ROBOT_BRIDGE_URL}/mapping/{route}",
+            timeout=timeout,
+        )
+
+        return (
+            response["status_code"] or 503,
+            response["data"] or {
+                "ok": False,
+                "error": (
+                    response["error"]
+                    or f"Mapping {action} failed."
+                ),
+            },
+        )
+
     def localization_status(self):
         """
         Proxy guarded localization pose as read-only presentation data.
@@ -931,6 +990,13 @@ class VoiceRelayHandler(BaseHTTPRequestHandler):
             self.send_json(status_code, payload)
             return
 
+        if path == "/dashboard/mapping-control":
+            status_code, payload = (
+                self.mapping_control_status()
+            )
+            self.send_json(status_code, payload)
+            return
+
         if path == "/dashboard/map-candidates":
             status_code, payload = (
                 self.candidate_map_status()
@@ -1089,6 +1155,23 @@ class VoiceRelayHandler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         path = urlparse(self.path).path
+
+        mapping_actions = {
+            "/dashboard/mapping-start": "start",
+            "/dashboard/mapping-stop": "stop",
+            "/dashboard/mapping-save-candidate": (
+                "save-candidate"
+            ),
+        }
+
+        if path in mapping_actions:
+            status_code, payload = (
+                self.mapping_control_action(
+                    mapping_actions[path]
+                )
+            )
+            self.send_json(status_code, payload)
+            return
 
         if path in (
             "/dashboard/localization-start",

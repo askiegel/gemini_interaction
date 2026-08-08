@@ -1007,6 +1007,69 @@
                 <strong id="candidateResolutionMatch">—</strong>
             </div>
 
+            <section class="mapping-controls">
+                <div class="mapping-controls-heading">
+                    <h3>Supervised Mapping</h3>
+                    <strong
+                        id="mappingControlState"
+                        class="mapping-control-state stopped"
+                        aria-live="polite"
+                    >
+                        Stopped
+                    </strong>
+                </div>
+
+                <div class="mapping-control-buttons">
+                    <button
+                        id="startMappingButton"
+                        class="mapping-control-button start"
+                        type="button"
+                    >
+                        Start Mapping
+                    </button>
+
+                    <button
+                        id="stopMappingButton"
+                        class="mapping-control-button stop"
+                        type="button"
+                        disabled
+                    >
+                        Stop Without Saving
+                    </button>
+
+                    <button
+                        id="saveCandidateButton"
+                        class="mapping-control-button save"
+                        type="button"
+                        disabled
+                    >
+                        Save Review Candidate
+                    </button>
+                </div>
+
+                <p
+                    id="mappingControlMessage"
+                    class="mapping-control-message"
+                    aria-live="polite"
+                >
+                    Mapping is stopped.
+                </p>
+
+                <div class="mapping-readiness">
+                    <span>Export requirement</span>
+                    <strong id="mappingReadinessThreshold">
+                        3 submaps, 2 mature
+                    </strong>
+                </div>
+
+                <p class="small-text mapping-control-safety">
+                    Headless mapping only. Manually supervise Mayday
+                    while mapping. No navigation, autonomous motion,
+                    candidate promotion, or validated-map replacement
+                    is available here.
+                </p>
+            </section>
+
             <h3 class="candidate-inventory-heading">
                 Candidate Inventory
             </h3>

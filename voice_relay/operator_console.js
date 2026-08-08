@@ -2695,6 +2695,314 @@
     }
 })();
 
+/* Guarded supervised mapping controls */
+(function () {
+    "use strict";
+
+    const STATUS_ENDPOINT =
+        "/dashboard/mapping-control";
+    const START_ENDPOINT =
+        "/dashboard/mapping-start";
+    const STOP_ENDPOINT =
+        "/dashboard/mapping-stop";
+    const SAVE_ENDPOINT =
+        "/dashboard/mapping-save-candidate";
+    const REFRESH_MS = 1000;
+
+    let timer = null;
+    let requestInFlight = false;
+    let actionInFlight = false;
+
+    function byId(id) {
+        return document.getElementById(id);
+    }
+
+    function perceptionIsVisible() {
+        const page = byId("perceptionPage");
+
+        return Boolean(
+            page
+            && !page.hidden
+            && page.classList.contains("active")
+        );
+    }
+
+    function setState(label, state) {
+        const indicator = byId("mappingControlState");
+
+        if (!indicator) return;
+
+        indicator.textContent = label;
+        indicator.className =
+            "mapping-control-state " + state;
+    }
+
+    function setMessage(message, isError) {
+        const element = byId("mappingControlMessage");
+
+        if (!element) return;
+
+        element.textContent = message;
+        element.className = (
+            "mapping-control-message"
+            + (isError ? " error" : "")
+        );
+    }
+
+    function updateButtons(running) {
+        const start = byId("startMappingButton");
+        const stop = byId("stopMappingButton");
+        const save = byId("saveCandidateButton");
+
+        if (start) {
+            start.disabled = actionInFlight || running;
+        }
+
+        if (stop) {
+            stop.disabled = actionInFlight || !running;
+        }
+
+        if (save) {
+            save.disabled = actionInFlight || !running;
+        }
+    }
+
+    function renderStatus(payload) {
+        const mapping = payload.mapping;
+
+        if (!mapping || mapping.planning_enabled !== false) {
+            throw new Error(
+                "Mapping safety state is unavailable."
+            );
+        }
+
+        if (mapping.validated_map_mutable !== false) {
+            throw new Error(
+                "Validated-map protection is unavailable."
+            );
+        }
+
+        const running = (
+            mapping.running === true
+            && mapping.owned === true
+            && mapping.state === "RUNNING"
+        );
+
+        updateButtons(running);
+
+        setTextThreshold(mapping);
+
+        if (running) {
+            setState("Running", "running");
+            setMessage(
+                "Headless mapping is active. Supervise Mayday "
+                + "manually, then stop or save a review candidate.",
+                false
+            );
+        } else {
+            setState("Stopped", "stopped");
+            setMessage(
+                "Mapping is stopped. The validated map is unchanged.",
+                false
+            );
+        }
+    }
+
+    function setTextThreshold(mapping) {
+        const element = byId(
+            "mappingReadinessThreshold"
+        );
+
+        if (!element) return;
+
+        element.textContent = (
+            `${mapping.candidate_minimum_submaps} submaps, `
+            + `${mapping.candidate_minimum_mature_submaps} mature, `
+            + `version ${mapping.candidate_minimum_mature_version}`
+        );
+    }
+
+    async function readJson(response) {
+        try {
+            return await response.json();
+        } catch (error) {
+            return {
+                ok: false,
+                error: "Mapping service returned invalid data.",
+            };
+        }
+    }
+
+    async function refresh() {
+        if (
+            !perceptionIsVisible()
+            || requestInFlight
+            || actionInFlight
+        ) {
+            return;
+        }
+
+        requestInFlight = true;
+
+        try {
+            const response = await fetch(
+                STATUS_ENDPOINT,
+                {cache: "no-store"}
+            );
+            const payload = await readJson(response);
+
+            if (!response.ok || !payload.ok) {
+                throw new Error(
+                    payload.error
+                    || "Mapping status is unavailable."
+                );
+            }
+
+            renderStatus(payload);
+        } catch (error) {
+            setState("Unavailable", "error");
+            setMessage(error.message, true);
+            updateButtons(false);
+        } finally {
+            requestInFlight = false;
+        }
+    }
+
+    async function performAction(
+        endpoint,
+        busyLabel,
+        busyMessage
+    ) {
+        if (actionInFlight) return;
+
+        actionInFlight = true;
+        setState(busyLabel, "busy");
+        setMessage(busyMessage, false);
+        updateButtons(false);
+
+        try {
+            const response = await fetch(endpoint, {
+                method: "POST",
+                cache: "no-store",
+                headers: {
+                    "Content-Type": "application/json",
+                },
+            });
+            const payload = await readJson(response);
+
+            if (!response.ok || !payload.ok) {
+                throw new Error(
+                    payload.error
+                    || payload.message
+                    || "Mapping action failed."
+                );
+            }
+
+            if (payload.mapping) {
+                renderStatus(payload);
+            }
+
+            if (
+                endpoint === SAVE_ENDPOINT
+                && payload.candidate
+            ) {
+                setState("Candidate Saved", "stopped");
+                setMessage(
+                    "Review candidate saved. Mapping stopped; "
+                    + "the validated map remains unchanged.",
+                    false
+                );
+
+            }
+        } catch (error) {
+            setState("Action Failed", "error");
+            setMessage(error.message, true);
+        } finally {
+            actionInFlight = false;
+            await refresh();
+        }
+    }
+
+    function startMapping() {
+        performAction(
+            START_ENDPOINT,
+            "Starting...",
+            "Starting guarded headless mapping..."
+        );
+    }
+
+    function stopMapping() {
+        if (
+            !window.confirm(
+                "Stop mapping without saving a candidate?"
+            )
+        ) {
+            return;
+        }
+
+        performAction(
+            STOP_ENDPOINT,
+            "Stopping...",
+            "Stopping mapping without saving..."
+        );
+    }
+
+    function saveCandidate() {
+        if (
+            !window.confirm(
+                "Stop mapping and save a review-only candidate? "
+                + "This will not replace the validated map."
+            )
+        ) {
+            return;
+        }
+
+        performAction(
+            SAVE_ENDPOINT,
+            "Saving...",
+            "Checking submap maturity and saving candidate..."
+        );
+    }
+
+    function initialize() {
+        const start = byId("startMappingButton");
+        const stop = byId("stopMappingButton");
+        const save = byId("saveCandidateButton");
+
+        if (!start || !stop || !save) return;
+
+        start.addEventListener("click", startMapping);
+        stop.addEventListener("click", stopMapping);
+        save.addEventListener("click", saveCandidate);
+
+        refresh();
+        timer = window.setInterval(
+            refresh,
+            REFRESH_MS
+        );
+
+        window.addEventListener(
+            "beforeunload",
+            function () {
+                if (timer !== null) {
+                    window.clearInterval(timer);
+                }
+            },
+            {once: true}
+        );
+    }
+
+    if (document.readyState === "loading") {
+        document.addEventListener(
+            "DOMContentLoaded",
+            initialize,
+            {once: true}
+        );
+    } else {
+        initialize();
+    }
+})();
+
 /* Read-only candidate map review */
 (function () {
     "use strict";

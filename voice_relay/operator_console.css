@@ -1685,3 +1685,133 @@ button {
         height: 58vh;
     }
 }
+
+/* Guarded supervised mapping controls */
+.mapping-controls {
+    margin-top: 20px;
+    padding: 14px;
+    border: 1px solid #cbd5e1;
+    border-radius: 11px;
+    background: #f8fafc;
+}
+
+.mapping-controls-heading {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 12px;
+}
+
+.mapping-controls-heading h3 {
+    margin: 0;
+    font-size: 0.98rem;
+}
+
+.mapping-control-state {
+    padding: 6px 10px;
+    border-radius: 999px;
+    font-size: 0.76rem;
+    font-weight: 800;
+    white-space: nowrap;
+}
+
+.mapping-control-state.stopped {
+    color: #475569;
+    background: #e2e8f0;
+}
+
+.mapping-control-state.running {
+    color: #166534;
+    background: #dcfce7;
+}
+
+.mapping-control-state.busy {
+    color: #92400e;
+    background: #fef3c7;
+}
+
+.mapping-control-state.error {
+    color: #991b1b;
+    background: #fee2e2;
+}
+
+.mapping-control-buttons {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 9px;
+    margin-top: 13px;
+}
+
+.mapping-control-button {
+    min-height: 46px;
+    padding: 10px;
+    border: 0;
+    border-radius: 9px;
+    color: white;
+    font: inherit;
+    font-size: 0.86rem;
+    font-weight: 800;
+    cursor: pointer;
+}
+
+.mapping-control-button.start {
+    background: #15803d;
+}
+
+.mapping-control-button.stop {
+    background: #b91c1c;
+}
+
+.mapping-control-button.save {
+    grid-column: 1 / -1;
+    background: #b45309;
+}
+
+.mapping-control-button:disabled {
+    cursor: not-allowed;
+    opacity: 0.42;
+}
+
+.mapping-control-message {
+    min-height: 2.6em;
+    margin: 12px 0 0;
+    color: #334155;
+    font-size: 0.86rem;
+}
+
+.mapping-control-message.error {
+    color: #991b1b;
+    font-weight: 700;
+}
+
+.mapping-readiness {
+    display: flex;
+    justify-content: space-between;
+    gap: 12px;
+    margin-top: 12px;
+    padding-top: 12px;
+    border-top: 1px solid #e2e8f0;
+    color: #64748b;
+    font-size: 0.82rem;
+}
+
+.mapping-readiness strong {
+    color: #1e293b;
+    text-align: right;
+}
+
+.mapping-control-safety {
+    margin: 12px 0 0;
+    padding-top: 12px;
+    border-top: 1px solid #e2e8f0;
+}
+
+@media (max-width: 500px) {
+    .mapping-control-buttons {
+        grid-template-columns: 1fr;
+    }
+
+    .mapping-control-button.save {
+        grid-column: auto;
+    }
+}
