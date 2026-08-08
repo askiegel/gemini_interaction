@@ -1189,6 +1189,71 @@
                         3 submaps, 2 mature
                     </strong>
                 </div>
+                <div
+                    class="mapping-readiness-live"
+                    id="mappingReadinessLive"
+                >
+                    <div class="mapping-readiness-live-heading">
+                        <span>Live export readiness</span>
+                        <strong
+                            id="mappingReadinessStatus"
+                            class="mapping-readiness-live-status stopped"
+                        >
+                            Mapping stopped
+                        </strong>
+                    </div>
+
+                    <div class="mapping-readiness-progress">
+                        <div class="mapping-readiness-progress-label">
+                            <span>Submaps</span>
+                            <strong id="mappingSubmapProgressText">
+                                0 / 3
+                            </strong>
+                        </div>
+                        <div
+                            class="mapping-readiness-progress-track"
+                            role="progressbar"
+                            aria-label="Submap progress"
+                            aria-valuemin="0"
+                            aria-valuemax="100"
+                            aria-valuenow="0"
+                            id="mappingSubmapProgress"
+                        >
+                            <span
+                                id="mappingSubmapProgressBar"
+                            ></span>
+                        </div>
+                    </div>
+
+                    <div class="mapping-readiness-progress">
+                        <div class="mapping-readiness-progress-label">
+                            <span>Mature submaps</span>
+                            <strong id="mappingMatureProgressText">
+                                0 / 2
+                            </strong>
+                        </div>
+                        <div
+                            class="mapping-readiness-progress-track"
+                            role="progressbar"
+                            aria-label="Mature submap progress"
+                            aria-valuemin="0"
+                            aria-valuemax="100"
+                            aria-valuenow="0"
+                            id="mappingMatureProgress"
+                        >
+                            <span
+                                id="mappingMatureProgressBar"
+                            ></span>
+                        </div>
+                    </div>
+
+                    <div class="mapping-submap-versions">
+                        <span>Submap versions</span>
+                        <strong id="mappingSubmapVersions">
+                            No live submaps
+                        </strong>
+                    </div>
+                </div>
 
                 <p class="small-text mapping-control-safety">
                     Headless mapping only. Manually supervise Mayday

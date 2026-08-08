@@ -2712,6 +2712,7 @@
     let timer = null;
     let requestInFlight = false;
     let actionInFlight = false;
+    let latestReadinessReady = false;
 
     function byId(id) {
         return document.getElementById(id);
@@ -2764,6 +2765,186 @@
 
         if (save) {
             save.disabled = actionInFlight || !running;
+
+            if (
+                !save.disabled
+                && !latestReadinessReady
+            ) {
+                save.disabled = true;
+            }
+
+            save.title = (
+                latestReadinessReady
+                ? "Mapping is mature and ready to save."
+                : "Wait for the live readiness requirements."
+            );
+        }
+    }
+
+    function clampProgress(value) {
+        const number = Number(value);
+
+        if (!Number.isFinite(number)) return 0;
+
+        return Math.max(0, Math.min(1, number));
+    }
+
+    function setProgress(trackId, barId, progress) {
+        const track = byId(trackId);
+        const bar = byId(barId);
+        const percentage = Math.round(
+            clampProgress(progress) * 100
+        );
+
+        if (track) {
+            track.setAttribute(
+                "aria-valuenow",
+                String(percentage)
+            );
+        }
+
+        if (bar) {
+            bar.style.width = `${percentage}%`;
+        }
+    }
+
+    function fallbackReadiness(mapping, running) {
+        return {
+            available: false,
+            status: (
+                running
+                ? "WAITING_FOR_SUBMAPS"
+                : "MAPPING_STOPPED"
+            ),
+            ready: false,
+            submap_count: 0,
+            mature_submap_count: 0,
+            minimum_submap_count:
+                mapping.candidate_minimum_submaps,
+            minimum_mature_submap_count:
+                mapping.candidate_minimum_mature_submaps,
+            minimum_mature_version:
+                mapping.candidate_minimum_mature_version,
+            submap_progress: 0,
+            mature_submap_progress: 0,
+            submaps: [],
+        };
+    }
+
+    function renderReadiness(readiness, running) {
+        const workspace = byId(
+            "mappingReadinessLive"
+        );
+        const status = byId(
+            "mappingReadinessStatus"
+        );
+        const submapText = byId(
+            "mappingSubmapProgressText"
+        );
+        const matureText = byId(
+            "mappingMatureProgressText"
+        );
+        const versions = byId(
+            "mappingSubmapVersions"
+        );
+
+        const submapCount = Number(
+            readiness.submap_count || 0
+        );
+        const matureCount = Number(
+            readiness.mature_submap_count || 0
+        );
+        const requiredSubmaps = Number(
+            readiness.minimum_submap_count || 0
+        );
+        const requiredMature = Number(
+            readiness.minimum_mature_submap_count || 0
+        );
+        const requiredVersion = Number(
+            readiness.minimum_mature_version || 0
+        );
+
+        let label = "Waiting";
+        let state = "waiting";
+
+        if (!running) {
+            label = "Mapping stopped";
+            state = "stopped";
+        } else if (
+            readiness.status === "READY_TO_SAVE"
+            && readiness.ready === true
+        ) {
+            label = "Ready to save";
+            state = "ready";
+        } else if (
+            readiness.status === "BUILDING_SUBMAPS"
+        ) {
+            label = "Building map";
+            state = "building";
+        } else if (
+            readiness.status === "INVALID_SUBMAP_LIST"
+        ) {
+            label = "Readiness error";
+            state = "error";
+        } else {
+            label = "Waiting for submaps";
+            state = "waiting";
+        }
+
+        if (workspace) {
+            workspace.className = (
+                "mapping-readiness-live " + state
+            );
+        }
+
+        if (status) {
+            status.textContent = label;
+            status.className = (
+                "mapping-readiness-live-status "
+                + state
+            );
+        }
+
+        if (submapText) {
+            submapText.textContent = (
+                `${submapCount} / ${requiredSubmaps}`
+            );
+        }
+
+        if (matureText) {
+            matureText.textContent = (
+                `${matureCount} / ${requiredMature}`
+                + ` at v${requiredVersion}`
+            );
+        }
+
+        setProgress(
+            "mappingSubmapProgress",
+            "mappingSubmapProgressBar",
+            readiness.submap_progress
+        );
+        setProgress(
+            "mappingMatureProgress",
+            "mappingMatureProgressBar",
+            readiness.mature_submap_progress
+        );
+
+        const submaps = (
+            Array.isArray(readiness.submaps)
+            ? readiness.submaps
+            : []
+        );
+
+        if (versions) {
+            versions.textContent = (
+                submaps.length
+                ? submaps.map(
+                    (submap) => (
+                        `#${submap.index} v${submap.version}`
+                    )
+                ).join(" · ")
+                : "No live submaps"
+            );
         }
     }
 
@@ -2787,16 +2968,33 @@
             && mapping.owned === true
             && mapping.state === "RUNNING"
         );
+        const readiness = (
+            mapping.readiness
+            || fallbackReadiness(mapping, running)
+        );
+
+        latestReadinessReady = (
+            running
+            && readiness.ready === true
+            && readiness.status === "READY_TO_SAVE"
+        );
 
         updateButtons(running);
-
+        renderReadiness(readiness, running);
         setTextThreshold(mapping);
 
-        if (running) {
+        if (running && latestReadinessReady) {
+            setState("Ready", "running");
+            setMessage(
+                "Mapping maturity requirements are met. "
+                + "Stop Mayday, then save a review candidate.",
+                false
+            );
+        } else if (running) {
             setState("Running", "running");
             setMessage(
-                "Headless mapping is active. Supervise Mayday "
-                + "manually, then stop or save a review candidate.",
+                "Headless mapping is active. Continue the "
+                + "supervised route until readiness is complete.",
                 false
             );
         } else {
@@ -2860,6 +3058,7 @@
 
             renderStatus(payload);
         } catch (error) {
+            latestReadinessReady = false;
             setState("Unavailable", "error");
             setMessage(error.message, true);
             updateButtons(false);
@@ -2948,6 +3147,15 @@
     }
 
     function saveCandidate() {
+        if (!latestReadinessReady) {
+            setMessage(
+                "Mapping is still building. Wait until live "
+                + "readiness reports Ready to save.",
+                true
+            );
+            return;
+        }
+
         if (
             !window.confirm(
                 "Stop mapping and save a review-only candidate? "

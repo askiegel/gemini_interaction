@@ -2027,6 +2027,103 @@ button.candidate-inventory-item:focus-visible {
     text-align: right;
 }
 
+.mapping-readiness-live {
+    display: grid;
+    gap: 0.65rem;
+    padding: 0.7rem;
+    border: 1px solid #d9e2ec;
+    border-radius: 0.55rem;
+    background: #ffffff;
+}
+
+.mapping-readiness-live-heading,
+.mapping-readiness-progress-label,
+.mapping-submap-versions {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 0.75rem;
+}
+
+.mapping-readiness-live-heading span,
+.mapping-readiness-progress-label span,
+.mapping-submap-versions span {
+    color: #66788a;
+    font-size: 0.72rem;
+}
+
+.mapping-readiness-live-heading strong,
+.mapping-readiness-progress-label strong,
+.mapping-submap-versions strong {
+    color: #263442;
+    font-size: 0.72rem;
+    text-align: right;
+}
+
+.mapping-readiness-live-status {
+    padding: 0.15rem 0.4rem;
+    border-radius: 999px;
+    background: #e8edf3;
+}
+
+.mapping-readiness-live-status.waiting,
+.mapping-readiness-live-status.building {
+    color: #8a5600;
+    background: #fff1cf;
+}
+
+.mapping-readiness-live-status.ready {
+    color: #087b3e;
+    background: #dff8e8;
+}
+
+.mapping-readiness-live-status.stopped {
+    color: #536273;
+    background: #e8edf3;
+}
+
+.mapping-readiness-live-status.error {
+    color: #b42318;
+    background: #fee4e2;
+}
+
+.mapping-readiness-progress {
+    display: grid;
+    gap: 0.3rem;
+}
+
+.mapping-readiness-progress-track {
+    width: 100%;
+    height: 0.45rem;
+    overflow: hidden;
+    border-radius: 999px;
+    background: #e6ebf1;
+}
+
+.mapping-readiness-progress-track span {
+    display: block;
+    width: 0;
+    height: 100%;
+    border-radius: inherit;
+    background: #e49a16;
+    transition: width 180ms ease;
+}
+
+.mapping-readiness-live.ready
+.mapping-readiness-progress-track span {
+    background: #17a05d;
+}
+
+.mapping-submap-versions {
+    padding-top: 0.1rem;
+    border-top: 1px solid #e6ebf1;
+}
+
+.mapping-submap-versions strong {
+    max-width: 62%;
+    overflow-wrap: anywhere;
+}
+
 .mapping-control-safety {
     margin: 12px 0 0;
     padding-top: 12px;
