@@ -525,6 +525,38 @@ class VoiceRelayHandler(BaseHTTPRequestHandler):
             },
         )
 
+    def candidate_map_status(self):
+        """
+        Proxy candidate maps as read-only review data.
+
+        Candidate classification and occupancy parsing remain owned by the
+        Robot Bridge. This proxy cannot promote, delete, save, or modify a
+        candidate or the validated map.
+        """
+        response = request_json(
+            "GET",
+            f"{ROBOT_BRIDGE_URL}/telemetry/map-candidates",
+            timeout=10.0,
+        )
+
+        if response["ok"] and isinstance(
+            response["data"],
+            dict,
+        ):
+            return 200, response["data"]
+
+        return (
+            response["status_code"] or 503,
+            response["data"] or {
+                "ok": False,
+                "service": "mini_pupper_operator_dashboard",
+                "error": (
+                    response["error"]
+                    or "Mayday candidate-map review is unavailable."
+                ),
+            },
+        )
+
     def dashboard_status(self):
         runtime_response = request_json(
             "GET",
@@ -896,6 +928,13 @@ class VoiceRelayHandler(BaseHTTPRequestHandler):
 
         if path == "/dashboard/map":
             status_code, payload = self.map_status()
+            self.send_json(status_code, payload)
+            return
+
+        if path == "/dashboard/map-candidates":
+            status_code, payload = (
+                self.candidate_map_status()
+            )
             self.send_json(status_code, payload)
             return
 

@@ -1442,3 +1442,246 @@ button {
     background: #a3e635;
     box-shadow: 0 0 5px rgba(163, 230, 53, 0.7);
 }
+
+/* Read-only candidate map review */
+.candidate-review-layout {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(300px, 360px);
+    gap: 18px;
+    align-items: start;
+    margin-top: 22px;
+}
+
+.candidate-review-card {
+    min-width: 0;
+    padding: 20px;
+}
+
+.candidate-review-heading {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 18px;
+    margin-bottom: 14px;
+}
+
+.candidate-review-heading h2,
+.candidate-review-heading p {
+    margin: 0;
+}
+
+.candidate-review-heading p {
+    margin-top: 5px;
+    color: #64748b;
+}
+
+.candidate-review-status {
+    flex: 0 0 auto;
+    padding: 7px 11px;
+    border-radius: 999px;
+    font-size: 0.78rem;
+    font-weight: 800;
+    white-space: nowrap;
+}
+
+.candidate-review-status.waiting {
+    color: #92400e;
+    background: #fef3c7;
+}
+
+.candidate-review-status.ready {
+    color: #166534;
+    background: #dcfce7;
+}
+
+.candidate-review-status.error {
+    color: #991b1b;
+    background: #fee2e2;
+}
+
+.candidate-review-stage {
+    position: relative;
+    width: 100%;
+    min-height: 540px;
+    overflow: hidden;
+    border: 1px solid #334155;
+    border-radius: 14px;
+    background: #020617;
+}
+
+#candidateReviewCanvas {
+    display: block;
+    width: 100%;
+    height: 68vh;
+    min-height: 540px;
+    max-height: 760px;
+    background: #020617;
+}
+
+.candidate-review-message {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 24px;
+    color: #cbd5e1;
+    text-align: center;
+    font-size: 1.02rem;
+    pointer-events: none;
+}
+
+.candidate-review-message[hidden] {
+    display: none;
+}
+
+.candidate-review-legend {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 12px 22px;
+    margin-top: 13px;
+    color: #475569;
+    font-size: 0.9rem;
+}
+
+.candidate-review-legend span {
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+}
+
+.candidate-swatch {
+    display: inline-block;
+    width: 14px;
+    height: 14px;
+    border: 1px solid #64748b;
+    border-radius: 3px;
+}
+
+.candidate-swatch.unknown {
+    background: #0f172a;
+}
+
+.candidate-swatch.free {
+    background: #f8fafc;
+}
+
+.candidate-swatch.occupied {
+    background: #f59e0b;
+}
+
+.candidate-review-metrics {
+    position: sticky;
+    top: 14px;
+}
+
+.candidate-review-metrics-heading {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 12px;
+    margin-bottom: 8px;
+}
+
+.candidate-review-metrics-heading h2 {
+    margin: 0;
+}
+
+.candidate-review-metrics-heading strong {
+    color: #475569;
+    font-size: 0.85rem;
+    text-align: right;
+}
+
+.candidate-review-metrics .metric strong {
+    overflow-wrap: anywhere;
+    text-align: right;
+}
+
+.candidate-inventory-heading {
+    margin: 20px 0 10px;
+    font-size: 0.95rem;
+}
+
+.candidate-inventory-list {
+    display: grid;
+    gap: 9px;
+}
+
+.candidate-inventory-item {
+    padding: 10px;
+    border: 1px solid #cbd5e1;
+    border-radius: 9px;
+    background: #f8fafc;
+}
+
+.candidate-inventory-item strong,
+.candidate-inventory-item span {
+    display: block;
+    overflow-wrap: anywhere;
+}
+
+.candidate-inventory-item strong {
+    color: #0f172a;
+    font-size: 0.82rem;
+}
+
+.candidate-inventory-item span {
+    margin-top: 4px;
+    color: #64748b;
+    font-size: 0.78rem;
+}
+
+.candidate-inventory-item.ready {
+    border-color: #86efac;
+    background: #f0fdf4;
+}
+
+.candidate-inventory-item.invalid {
+    border-color: #fca5a5;
+    background: #fef2f2;
+}
+
+.candidate-review-error {
+    margin: 14px 0 0;
+    padding: 11px;
+    border-radius: 9px;
+    color: #991b1b;
+    background: #fee2e2;
+    overflow-wrap: anywhere;
+}
+
+.candidate-review-safety {
+    margin: 18px 0 0;
+    padding-top: 14px;
+    border-top: 1px solid #e2e8f0;
+}
+
+@media (max-width: 950px) {
+    .candidate-review-layout {
+        grid-template-columns: 1fr;
+    }
+
+    .candidate-review-metrics {
+        position: static;
+    }
+
+    #candidateReviewCanvas {
+        height: 62vh;
+    }
+}
+
+@media (max-width: 650px) {
+    .candidate-review-heading {
+        flex-direction: column;
+    }
+
+    .candidate-review-stage,
+    #candidateReviewCanvas {
+        min-height: 440px;
+    }
+
+    #candidateReviewCanvas {
+        height: 58vh;
+    }
+}

@@ -904,6 +904,134 @@
         </aside>
     </section>
 
+    <section
+        class="candidate-review-layout"
+        aria-label="Candidate map review"
+    >
+        <article class="card candidate-review-card">
+            <div class="candidate-review-heading">
+                <div>
+                    <h2>Candidate Map Review</h2>
+                    <p>
+                        Read-only comparison against Mayday's validated
+                        saved map. Candidates are never authoritative
+                        until separately reviewed and promoted.
+                    </p>
+                </div>
+
+                <span
+                    id="candidateReviewStatus"
+                    class="candidate-review-status waiting"
+                    aria-live="polite"
+                >
+                    Waiting for candidates
+                </span>
+            </div>
+
+            <div class="candidate-review-stage">
+                <canvas
+                    id="candidateReviewCanvas"
+                    width="900"
+                    height="760"
+                    aria-label="Review-ready candidate occupancy map"
+                ></canvas>
+
+                <div
+                    id="candidateReviewMessage"
+                    class="candidate-review-message"
+                >
+                    Waiting for candidate-map inventory...
+                </div>
+            </div>
+
+            <div
+                class="candidate-review-legend"
+                aria-label="Candidate map legend"
+            >
+                <span>
+                    <i class="candidate-swatch unknown"></i>
+                    Unknown
+                </span>
+                <span>
+                    <i class="candidate-swatch free"></i>
+                    Free
+                </span>
+                <span>
+                    <i class="candidate-swatch occupied"></i>
+                    Occupied
+                </span>
+                <span>Read-only review candidate</span>
+            </div>
+        </article>
+
+        <aside class="card candidate-review-metrics">
+            <div class="candidate-review-metrics-heading">
+                <h2>Review Summary</h2>
+                <strong id="candidateReviewCounts">—</strong>
+            </div>
+
+            <div class="metric">
+                <span class="metric-name">Candidate</span>
+                <strong id="candidateReviewName">—</strong>
+            </div>
+            <div class="metric">
+                <span class="metric-name">Classification</span>
+                <strong id="candidateReviewClassification">—</strong>
+            </div>
+            <div class="metric">
+                <span class="metric-name">Dimensions</span>
+                <strong id="candidateReviewDimensions">—</strong>
+            </div>
+            <div class="metric">
+                <span class="metric-name">Resolution</span>
+                <strong id="candidateReviewResolution">—</strong>
+            </div>
+            <div class="metric">
+                <span class="metric-name">Dimension delta</span>
+                <strong id="candidateDimensionDelta">—</strong>
+            </div>
+            <div class="metric">
+                <span class="metric-name">Origin delta</span>
+                <strong id="candidateOriginDelta">—</strong>
+            </div>
+            <div class="metric">
+                <span class="metric-name">Cell-count delta</span>
+                <strong id="candidateCellDelta">—</strong>
+            </div>
+            <div class="metric">
+                <span class="metric-name">Map frame</span>
+                <strong id="candidateFrameMatch">—</strong>
+            </div>
+            <div class="metric">
+                <span class="metric-name">Map resolution</span>
+                <strong id="candidateResolutionMatch">—</strong>
+            </div>
+
+            <h3 class="candidate-inventory-heading">
+                Candidate Inventory
+            </h3>
+
+            <div
+                id="candidateInventoryList"
+                class="candidate-inventory-list"
+            >
+                Waiting for inventory...
+            </div>
+
+            <p
+                id="candidateReviewError"
+                class="candidate-review-error"
+                hidden
+            ></p>
+
+            <p class="small-text candidate-review-safety">
+                Review only. This panel cannot promote, delete, save,
+                start mapping, navigate, or command Mayday.
+                The validated saved map below remains authoritative.
+            </p>
+        </aside>
+    </section>
+
     <section class="map-layout" aria-label="Saved occupancy map">
         <article class="card map-card">
             <div class="map-card-heading">
