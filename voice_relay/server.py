@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import json
+import math
 import os
 import subprocess
 import sys
@@ -510,6 +511,156 @@ class VoiceRelayHandler(BaseHTTPRequestHandler):
                 "error": (
                     response["error"]
                     or f"Mapping {action} failed."
+                ),
+            },
+        )
+
+    def planning_control_status(self):
+        """Proxy guarded planning ownership and safety state."""
+        response = request_json(
+            "GET",
+            f"{ROBOT_BRIDGE_URL}/planning/status",
+            timeout=5.0,
+        )
+
+        return (
+            response["status_code"] or 503,
+            response["data"] or {
+                "ok": False,
+                "error": (
+                    response["error"]
+                    or "Planning control is unavailable."
+                ),
+            },
+        )
+
+    def planning_control_action(self, action):
+        """Forward only fixed planning start or stop actions."""
+        if action not in ("start", "stop"):
+            return 400, {
+                "ok": False,
+                "error": "Unsupported planning action.",
+            }
+
+        response = request_json(
+            "POST",
+            f"{ROBOT_BRIDGE_URL}/planning/{action}",
+            timeout=20.0,
+        )
+
+        return (
+            response["status_code"] or 503,
+            response["data"] or {
+                "ok": False,
+                "error": (
+                    response["error"]
+                    or f"Planning {action} failed."
+                ),
+            },
+        )
+
+    def planning_initialize_localization(self):
+        """
+        Request only Robot Bridge's fixed stationary AMCL sequence.
+
+        No browser payload, pose, ROS service, topic, frame, planner,
+        controller, command, or motion value is accepted.
+        """
+        response = request_json(
+            "POST",
+            (
+                f"{ROBOT_BRIDGE_URL}"
+                "/planning/initialize-localization"
+            ),
+            payload={},
+            timeout=75.0,
+        )
+
+        return (
+            response["status_code"] or 503,
+            response["data"] or {
+                "ok": False,
+                "error": (
+                    response["error"]
+                    or (
+                        "Planning localization "
+                        "initialization failed."
+                    )
+                ),
+            },
+        )
+
+    def planning_compute_path(self, payload):
+        """
+        Forward one finite map-frame goal for read-only planning.
+
+        The browser cannot choose a ROS action, frame, planner plugin,
+        start pose, launch parameter, command, or map path.
+        """
+        if not isinstance(payload, dict):
+            return 400, {
+                "ok": False,
+                "error": "A JSON request body is required.",
+            }
+
+        if set(payload) != {
+            "goal_x",
+            "goal_y",
+            "goal_yaw",
+        }:
+            return 400, {
+                "ok": False,
+                "error": (
+                    "Exactly goal_x, goal_y, and goal_yaw "
+                    "must be supplied."
+                ),
+            }
+
+        normalized = {}
+
+        for key in (
+            "goal_x",
+            "goal_y",
+            "goal_yaw",
+        ):
+            value = payload.get(key)
+
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+            ):
+                return 400, {
+                    "ok": False,
+                    "error": f"{key} must be a finite number.",
+                }
+
+            value = float(value)
+
+            if not math.isfinite(value):
+                return 400, {
+                    "ok": False,
+                    "error": f"{key} must be finite.",
+                }
+
+            normalized[key] = value
+
+        response = request_json(
+            "POST",
+            (
+                f"{ROBOT_BRIDGE_URL}"
+                "/planning/compute-path"
+            ),
+            payload=normalized,
+            timeout=35.0,
+        )
+
+        return (
+            response["status_code"] or 503,
+            response["data"] or {
+                "ok": False,
+                "error": (
+                    response["error"]
+                    or "Path computation failed."
                 ),
             },
         )
@@ -1087,6 +1238,13 @@ class VoiceRelayHandler(BaseHTTPRequestHandler):
             self.send_json(status_code, payload)
             return
 
+        if path == "/dashboard/planning-control":
+            status_code, payload = (
+                self.planning_control_status()
+            )
+            self.send_json(status_code, payload)
+            return
+
         if path == "/dashboard/localization-control":
             status_code, payload = (
                 self.localization_control_status()
@@ -1297,6 +1455,52 @@ class VoiceRelayHandler(BaseHTTPRequestHandler):
                 status_code,
                 response_payload,
             )
+            return
+
+        if path in (
+            "/dashboard/planning-start",
+            "/dashboard/planning-stop",
+        ):
+            action = (
+                "start"
+                if path.endswith("-start")
+                else "stop"
+            )
+            status_code, payload = (
+                self.planning_control_action(action)
+            )
+            self.send_json(status_code, payload)
+            return
+
+        if (
+            path
+            == "/dashboard/planning-initialize-localization"
+        ):
+            status_code, payload = (
+                self.planning_initialize_localization()
+            )
+            self.send_json(status_code, payload)
+            return
+
+        if path == "/dashboard/planning-compute-path":
+            try:
+                request_payload = self.read_json_body()
+            except ValueError as exc:
+                self.send_json(
+                    400,
+                    {
+                        "ok": False,
+                        "error": str(exc),
+                    },
+                )
+                return
+
+            status_code, payload = (
+                self.planning_compute_path(
+                    request_payload
+                )
+            )
+            self.send_json(status_code, payload)
             return
 
         mapping_actions = {

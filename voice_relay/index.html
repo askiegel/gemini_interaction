@@ -1372,6 +1372,20 @@
                     aria-label="Mayday localized pose"
                 ></canvas>
 
+                <canvas
+                    id="planningPathCanvas"
+                    width="900"
+                    height="900"
+                    aria-label="Read-only computed planning path"
+                ></canvas>
+
+                <div
+                    id="planningPathOverlayStatus"
+                    class="planning-path-overlay-status stopped"
+                >
+                    Planning stopped
+                </div>
+
                 <div
                     id="localizedLidarOverlayStatus"
                     class="localized-lidar-overlay-status stopped"
@@ -1414,6 +1428,14 @@
                 <span>
                     <i class="map-legend-swatch robot"></i>
                     Mayday pose
+                </span>
+                <span>
+                    <i class="map-legend-swatch planning-path"></i>
+                    Computed path
+                </span>
+                <span>
+                    <i class="map-legend-swatch planning-goal"></i>
+                    Selected goal
                 </span>
                 <span>
                     Read-only saved map
@@ -1511,6 +1533,78 @@
                 <p class="small-text localization-control-safety">
                     Uses Mayday's validated saved map. Planning,
                     navigation goals, and motion control remain disabled.
+                </p>
+            </section>
+
+            <section class="planning-path-controls">
+                <div class="planning-path-heading">
+                    <h3>Read-Only Path Planning</h3>
+                    <strong
+                        id="planningPathState"
+                        class="planning-path-state stopped"
+                        aria-live="polite"
+                    >
+                        Stopped
+                    </strong>
+                </div>
+
+                <div class="planning-path-buttons">
+                    <button
+                        id="startPlanningButton"
+                        class="planning-path-button start"
+                        type="button"
+                    >
+                        Start Planning
+                    </button>
+                    <button
+                        id="stopPlanningButton"
+                        class="planning-path-button stop"
+                        type="button"
+                        disabled
+                    >
+                        Stop Planning
+                    </button>
+                    <button
+                        id="computePlanningPathButton"
+                        class="planning-path-button compute"
+                        type="button"
+                        disabled
+                    >
+                        Compute Selected Path
+                    </button>
+                </div>
+
+                <p
+                    id="planningPathMessage"
+                    class="planning-path-message"
+                    aria-live="polite"
+                >
+                    Start planning, wait for a fresh pose, then
+                    select a free map location.
+                </p>
+
+                <div class="planning-path-detail">
+                    <span>Selected goal</span>
+                    <strong id="planningSelectedGoal">—</strong>
+                </div>
+                <div class="planning-path-detail">
+                    <span>Computed path</span>
+                    <strong id="planningPathSummary">—</strong>
+                </div>
+                <div class="planning-path-detail">
+                    <span>Pose uncertainty</span>
+                    <strong id="planningPoseUncertainty">—</strong>
+                </div>
+                <div class="planning-path-detail">
+                    <span>Planning readiness</span>
+                    <strong id="planningReadiness">Stopped</strong>
+                </div>
+
+                <p class="small-text planning-path-safety">
+                    Visualization only. A map click selects a fixed
+                    map-frame goal. This panel cannot execute the path,
+                    start a controller or navigator, publish velocity,
+                    or move Mayday.
                 </p>
             </section>
 
@@ -3035,5 +3129,1073 @@
     }
 })();
 </script>
+
+<script>
+/* Isolated guarded read-only planning path controller */
+(function () {
+    "use strict";
+
+    const STATUS_ENDPOINT =
+        "/dashboard/planning-control";
+    const START_ENDPOINT =
+        "/dashboard/planning-start";
+    const STOP_ENDPOINT =
+        "/dashboard/planning-stop";
+    const INITIALIZE_ENDPOINT =
+        "/dashboard/planning-initialize-localization";
+    const COMPUTE_ENDPOINT =
+        "/dashboard/planning-compute-path";
+    const MAP_ENDPOINT = "/dashboard/map";
+    const LOCALIZATION_ENDPOINT =
+        "/dashboard/localization";
+    const REFRESH_MS = 750;
+    const MAP_PADDING = 32;
+    const MAX_POSITION_STD_METERS = 0.40;
+    const MAX_YAW_STD_RADIANS = 0.80;
+
+    let timer = null;
+    let requestInFlight = false;
+    let actionInFlight = false;
+    let occupancyMap = null;
+    let planningRunning = false;
+    let latestPose = null;
+    let selectedGoal = null;
+    let computedPath = null;
+    let uncertaintyBlocked = true;
+
+    function byId(id) {
+        return document.getElementById(id);
+    }
+
+    function setText(id, value) {
+        const element = byId(id);
+        if (element) element.textContent = value;
+    }
+
+    function perceptionIsVisible() {
+        const page = byId("perceptionPage");
+
+        return Boolean(
+            page
+            && !page.hidden
+            && page.classList.contains("active")
+        );
+    }
+
+    function setState(label, state) {
+        const element = byId("planningPathState");
+
+        if (!element) return;
+
+        element.textContent = label;
+        element.className =
+            "planning-path-state " + state;
+    }
+
+    function setOverlay(label, state) {
+        const element = byId(
+            "planningPathOverlayStatus"
+        );
+
+        if (!element) return;
+
+        element.textContent = label;
+        element.className =
+            "planning-path-overlay-status " + state;
+    }
+
+    function setMessage(message, isError) {
+        const element = byId("planningPathMessage");
+
+        if (!element) return;
+
+        element.textContent = message;
+        element.className = isError
+            ? "planning-path-message error"
+            : "planning-path-message";
+    }
+
+    function resizeCanvas(canvas) {
+        const mapCanvas = byId("mapCanvas");
+        const ratio = window.devicePixelRatio || 1;
+        const width = Math.max(
+            320,
+            mapCanvas
+                ? mapCanvas.clientWidth
+                : canvas.clientWidth
+        );
+        const height = Math.max(
+            480,
+            mapCanvas
+                ? mapCanvas.clientHeight
+                : canvas.clientHeight
+        );
+        const pixelWidth = Math.round(width * ratio);
+        const pixelHeight = Math.round(height * ratio);
+
+        if (
+            canvas.width !== pixelWidth
+            || canvas.height !== pixelHeight
+        ) {
+            canvas.width = pixelWidth;
+            canvas.height = pixelHeight;
+        }
+
+        const context = canvas.getContext("2d");
+        context.setTransform(
+            ratio,
+            0,
+            0,
+            ratio,
+            0,
+            0
+        );
+
+        return {
+            context,
+            width,
+            height,
+        };
+    }
+
+    function geometry(drawing) {
+        if (!occupancyMap) return null;
+
+        const mapWidth = Number(occupancyMap.width);
+        const mapHeight = Number(occupancyMap.height);
+        const scale = Math.min(
+            (
+                drawing.width
+                - MAP_PADDING * 2
+            ) / mapWidth,
+            (
+                drawing.height
+                - MAP_PADDING * 2
+            ) / mapHeight
+        );
+        const drawWidth = mapWidth * scale;
+        const drawHeight = mapHeight * scale;
+
+        return {
+            mapWidth,
+            mapHeight,
+            scale,
+            drawWidth,
+            drawHeight,
+            drawX: (
+                drawing.width - drawWidth
+            ) / 2,
+            drawY: (
+                drawing.height - drawHeight
+            ) / 2,
+        };
+    }
+
+    function mapToCanvas(position, drawing) {
+        const frame = geometry(drawing);
+        if (!frame) return null;
+
+        const resolution = Number(
+            occupancyMap.resolution
+        );
+        const origin = occupancyMap.origin;
+        const cellX = (
+            Number(position.x) - Number(origin.x)
+        ) / resolution;
+        const cellY = (
+            Number(position.y) - Number(origin.y)
+        ) / resolution;
+
+        return {
+            x: frame.drawX + cellX * frame.scale,
+            y: (
+                frame.drawY
+                + (
+                    frame.mapHeight - cellY
+                ) * frame.scale
+            ),
+            inside: (
+                cellX >= 0
+                && cellX < frame.mapWidth
+                && cellY >= 0
+                && cellY < frame.mapHeight
+            ),
+        };
+    }
+
+    function canvasToMap(event, canvas) {
+        if (!occupancyMap) return null;
+
+        const drawing = resizeCanvas(canvas);
+        const frame = geometry(drawing);
+        const bounds = canvas.getBoundingClientRect();
+        const canvasX = event.clientX - bounds.left;
+        const canvasY = event.clientY - bounds.top;
+        const cellX = (
+            canvasX - frame.drawX
+        ) / frame.scale;
+        const cellY = (
+            frame.mapHeight
+            - (
+                canvasY - frame.drawY
+            ) / frame.scale
+        );
+
+        if (
+            cellX < 0
+            || cellX >= frame.mapWidth
+            || cellY < 0
+            || cellY >= frame.mapHeight
+        ) {
+            return null;
+        }
+
+        const column = Math.floor(cellX);
+        const row = Math.floor(cellY);
+        const index = (
+            row * frame.mapWidth + column
+        );
+
+        if (
+            occupancyMap.cells[index] !== 0
+        ) {
+            return {
+                free: false,
+                column,
+                row,
+            };
+        }
+
+        const resolution = Number(
+            occupancyMap.resolution
+        );
+
+        return {
+            free: true,
+            column,
+            row,
+            x: (
+                Number(occupancyMap.origin.x)
+                + (column + 0.5) * resolution
+            ),
+            y: (
+                Number(occupancyMap.origin.y)
+                + (row + 0.5) * resolution
+            ),
+            yaw: 0.0,
+        };
+    }
+
+    function clearPath() {
+        const canvas = byId("planningPathCanvas");
+        if (!canvas) return;
+
+        const drawing = resizeCanvas(canvas);
+
+        drawing.context.clearRect(
+            0,
+            0,
+            drawing.width,
+            drawing.height
+        );
+
+        computedPath = null;
+        setText("planningPathSummary", "—");
+    }
+
+    function drawPath() {
+        const canvas = byId("planningPathCanvas");
+        if (!canvas) return;
+
+        const drawing = resizeCanvas(canvas);
+        const context = drawing.context;
+
+        context.clearRect(
+            0,
+            0,
+            drawing.width,
+            drawing.height
+        );
+
+        if (
+            computedPath
+            && Array.isArray(computedPath.points)
+            && computedPath.points.length > 1
+        ) {
+            context.save();
+            context.strokeStyle = "#a855f7";
+            context.lineWidth = 5;
+            context.lineJoin = "round";
+            context.lineCap = "round";
+            context.shadowColor =
+                "rgba(168, 85, 247, 0.65)";
+            context.shadowBlur = 8;
+            context.beginPath();
+
+            computedPath.points.forEach(
+                function (point, index) {
+                    const canvasPoint = mapToCanvas(
+                        point,
+                        drawing
+                    );
+
+                    if (!canvasPoint) return;
+
+                    if (index === 0) {
+                        context.moveTo(
+                            canvasPoint.x,
+                            canvasPoint.y
+                        );
+                    } else {
+                        context.lineTo(
+                            canvasPoint.x,
+                            canvasPoint.y
+                        );
+                    }
+                }
+            );
+
+            context.stroke();
+            context.restore();
+        }
+
+        if (selectedGoal) {
+            const goalPoint = mapToCanvas(
+                selectedGoal,
+                drawing
+            );
+
+            if (goalPoint && goalPoint.inside) {
+                context.save();
+                context.fillStyle = "#22c55e";
+                context.strokeStyle = "#f0fdf4";
+                context.lineWidth = 3;
+                context.shadowColor =
+                    "rgba(34, 197, 94, 0.75)";
+                context.shadowBlur = 10;
+                context.beginPath();
+                context.arc(
+                    goalPoint.x,
+                    goalPoint.y,
+                    9,
+                    0,
+                    Math.PI * 2
+                );
+                context.fill();
+                context.stroke();
+                context.restore();
+            }
+        }
+    }
+
+    function updateButtons() {
+        const start = byId("startPlanningButton");
+        const stop = byId("stopPlanningButton");
+        const compute = byId(
+            "computePlanningPathButton"
+        );
+
+        if (start) {
+            start.disabled = (
+                actionInFlight
+                || planningRunning
+            );
+        }
+
+        if (stop) {
+            stop.disabled = (
+                actionInFlight
+                || !planningRunning
+            );
+        }
+
+        if (compute) {
+            compute.disabled = (
+                actionInFlight
+                || !planningRunning
+                || !occupancyMap
+                || !latestPose
+                || !selectedGoal
+                || uncertaintyBlocked
+            );
+        }
+    }
+
+    function renderUncertainty(pose) {
+        const uncertainty = pose
+            ? pose.uncertainty || {}
+            : {};
+        const xStd = Number(
+            uncertainty.x_standard_deviation
+        );
+        const yStd = Number(
+            uncertainty.y_standard_deviation
+        );
+        const yawStd = Number(
+            uncertainty.yaw_standard_deviation_radians
+        );
+
+        uncertaintyBlocked = (
+            !Number.isFinite(xStd)
+            || !Number.isFinite(yStd)
+            || !Number.isFinite(yawStd)
+            || xStd > MAX_POSITION_STD_METERS
+            || yStd > MAX_POSITION_STD_METERS
+            || yawStd > MAX_YAW_STD_RADIANS
+        );
+
+        if (
+            Number.isFinite(xStd)
+            && Number.isFinite(yStd)
+            && Number.isFinite(yawStd)
+        ) {
+            setText(
+                "planningPoseUncertainty",
+                `${xStd.toFixed(2)} m, `
+                + `${yStd.toFixed(2)} m, `
+                + `${yawStd.toFixed(2)} rad`
+            );
+        } else {
+            setText(
+                "planningPoseUncertainty",
+                "Unavailable"
+            );
+        }
+
+        setText(
+            "planningReadiness",
+            uncertaintyBlocked
+                ? "Blocked — pose uncertain"
+                : "Ready for read-only planning"
+        );
+    }
+
+    function renderPlanning(payload) {
+        const planning = payload.planning || {};
+
+        planningRunning = (
+            planning.running === true
+            && planning.owned === true
+        );
+
+        if (planningRunning) {
+            setState("Running", "running");
+            setOverlay(
+                "Select a planning goal",
+                "running"
+            );
+        } else {
+            setState("Stopped", "stopped");
+            setOverlay(
+                "Planning stopped",
+                "stopped"
+            );
+            latestPose = null;
+            selectedGoal = null;
+            uncertaintyBlocked = true;
+            setText("planningSelectedGoal", "—");
+            setText("planningPoseUncertainty", "—");
+            setText("planningReadiness", "Stopped");
+            clearPath();
+        }
+
+        updateButtons();
+    }
+
+    function renderLocalization(
+        response,
+        payload
+    ) {
+        if (
+            response.ok
+            && payload
+            && payload.runtime_active === true
+            && payload.telemetry
+            && payload.telemetry.available === true
+            && payload.telemetry.pose
+            && payload.telemetry.pose.frame_id === "map"
+            && Number(payload.telemetry.age_seconds) < 3
+        ) {
+            latestPose = payload.telemetry.pose;
+            renderUncertainty(latestPose);
+        } else {
+            latestPose = null;
+            uncertaintyBlocked = true;
+            setText(
+                "planningPoseUncertainty",
+                "Waiting for fresh pose"
+            );
+            setText(
+                "planningReadiness",
+                "Blocked — no fresh pose"
+            );
+        }
+
+        updateButtons();
+    }
+
+    async function fetchJson(endpoint, options) {
+        const response = await fetch(
+            endpoint,
+            options
+        );
+        let payload = {};
+
+        try {
+            payload = await response.json();
+        } catch (error) {
+            payload = {};
+        }
+
+        return {
+            response,
+            payload,
+        };
+    }
+
+    async function refresh() {
+        if (
+            !perceptionIsVisible()
+            || requestInFlight
+            || actionInFlight
+        ) {
+            return;
+        }
+
+        requestInFlight = true;
+
+        try {
+            const results = await Promise.all([
+                fetchJson(
+                    STATUS_ENDPOINT,
+                    {cache: "no-store"}
+                ),
+                fetchJson(
+                    MAP_ENDPOINT,
+                    {cache: "no-store"}
+                ),
+                fetchJson(
+                    LOCALIZATION_ENDPOINT,
+                    {cache: "no-store"}
+                ),
+            ]);
+
+            const statusResult = results[0];
+            const mapResult = results[1];
+            const localizationResult = results[2];
+
+            if (
+                !statusResult.response.ok
+                || !statusResult.payload.ok
+                || !statusResult.payload.planning
+            ) {
+                throw new Error(
+                    statusResult.payload.error
+                    || "Planning status is unavailable."
+                );
+            }
+
+            renderPlanning(statusResult.payload);
+
+            if (
+                mapResult.response.ok
+                && mapResult.payload.ok
+                && mapResult.payload.telemetry
+                && mapResult.payload.telemetry.available
+                && mapResult.payload.telemetry.map
+            ) {
+                occupancyMap =
+                    mapResult.payload.telemetry.map;
+            }
+
+            renderLocalization(
+                localizationResult.response,
+                localizationResult.payload
+            );
+
+            drawPath();
+        } catch (error) {
+            setState("Error", "error");
+            setOverlay(
+                "Planning unavailable",
+                "error"
+            );
+            setMessage(error.message, true);
+        } finally {
+            requestInFlight = false;
+            updateButtons();
+        }
+    }
+
+    async function startPlanning() {
+        if (actionInFlight) return;
+
+        actionInFlight = true;
+        let planningStarted = false;
+
+        updateButtons();
+        setState("Starting", "busy");
+        setOverlay("Starting planning", "busy");
+        setMessage(
+            "Starting planning-only Nav2...",
+            false
+        );
+
+        try {
+            const startResult = await fetchJson(
+                START_ENDPOINT,
+                {
+                    method: "POST",
+                    headers: {
+                        "Content-Type":
+                            "application/json",
+                    },
+                    body: "{}",
+                }
+            );
+
+            if (
+                !startResult.response.ok
+                || !startResult.payload.ok
+                || !startResult.payload.planning
+                || startResult.payload.planning.running
+                    !== true
+                || startResult.payload.planning.owned
+                    !== true
+            ) {
+                throw new Error(
+                    startResult.payload.error
+                    || "Planning-only Nav2 failed to start."
+                );
+            }
+
+            planningStarted = true;
+            planningRunning = true;
+
+            setState("Localizing", "busy");
+            setOverlay(
+                "Initializing stationary pose",
+                "busy"
+            );
+            setText(
+                "planningPoseUncertainty",
+                "Initializing"
+            );
+            setText(
+                "planningReadiness",
+                "Initializing stationary localization"
+            );
+            setMessage(
+                "Mayday must remain stationary while "
+                + "AMCL compares LiDAR scans to the map...",
+                false
+            );
+            updateButtons();
+
+            const initializeResult = await fetchJson(
+                INITIALIZE_ENDPOINT,
+                {
+                    method: "POST",
+                    headers: {
+                        "Content-Type":
+                            "application/json",
+                    },
+                    body: "{}",
+                }
+            );
+
+            const initialization =
+                initializeResult.payload.initialization;
+
+            if (
+                !initializeResult.response.ok
+                || !initializeResult.payload.ok
+                || !initialization
+                || initialization
+                    .global_localization_requested
+                    !== true
+                || initialization
+                    .nomotion_updates_requested
+                    !== 20
+                || initialization.stationary_required
+                    !== true
+                || initialization.path_computed
+                    !== false
+                || initialization.path_executed
+                    !== false
+                || initialization
+                    .navigation_goal_executed
+                    !== false
+                || initialization.motion_enabled
+                    !== false
+            ) {
+                throw new Error(
+                    initializeResult.payload.error
+                    || (
+                        "Stationary localization "
+                        + "initialization failed."
+                    )
+                );
+            }
+
+            setState("Locating", "busy");
+            setOverlay(
+                "Waiting for verified pose",
+                "busy"
+            );
+            setMessage(
+                "Stationary localization initialized. "
+                + "Waiting for a verified map pose...",
+                false
+            );
+        } catch (error) {
+            if (planningStarted) {
+                try {
+                    await fetchJson(
+                        STOP_ENDPOINT,
+                        {
+                            method: "POST",
+                            headers: {
+                                "Content-Type":
+                                    "application/json",
+                            },
+                            body: "{}",
+                        }
+                    );
+                } catch (stopError) {
+                    // Persistent STOP remains available.
+                }
+            }
+
+            planningRunning = false;
+            latestPose = null;
+            selectedGoal = null;
+            computedPath = null;
+            uncertaintyBlocked = true;
+
+            setText("planningSelectedGoal", "—");
+            setText("planningPathSummary", "—");
+            setText("planningPoseUncertainty", "—");
+            setText(
+                "planningReadiness",
+                "Initialization failed"
+            );
+            setState("Error", "error");
+            setOverlay(
+                "Localization unavailable",
+                "error"
+            );
+            setMessage(error.message, true);
+            drawPath();
+        } finally {
+            actionInFlight = false;
+            updateButtons();
+            await refresh();
+        }
+    }
+
+    async function performAction(
+        endpoint,
+        label
+    ) {
+        if (actionInFlight) return;
+
+        actionInFlight = true;
+        updateButtons();
+        setState("Working", "busy");
+        setMessage(label, false);
+
+        try {
+            const result = await fetchJson(
+                endpoint,
+                {
+                    method: "POST",
+                    headers: {
+                        "Content-Type":
+                            "application/json",
+                    },
+                    body: "{}",
+                }
+            );
+
+            if (
+                !result.response.ok
+                || !result.payload.ok
+            ) {
+                throw new Error(
+                    result.payload.error
+                    || `${label} failed.`
+                );
+            }
+
+            if (endpoint === STOP_ENDPOINT) {
+                planningRunning = false;
+                latestPose = null;
+                selectedGoal = null;
+                uncertaintyBlocked = true;
+                setText("planningSelectedGoal", "—");
+                setText(
+                    "planningPoseUncertainty",
+                    "—"
+                );
+                setText(
+                    "planningReadiness",
+                    "Stopped"
+                );
+                clearPath();
+                setMessage(
+                    "Planning stopped. "
+                    + "No path was executed.",
+                    false
+                );
+            } else {
+                setMessage(
+                    "Planning-only Nav2 started. "
+                    + "Waiting for a fresh map pose.",
+                    false
+                );
+            }
+        } catch (error) {
+            setState("Error", "error");
+            setMessage(error.message, true);
+        } finally {
+            actionInFlight = false;
+            await refresh();
+        }
+    }
+
+    async function computePath() {
+        if (
+            actionInFlight
+            || !planningRunning
+            || !latestPose
+            || !selectedGoal
+            || uncertaintyBlocked
+        ) {
+            return;
+        }
+
+        actionInFlight = true;
+        updateButtons();
+        setState("Computing", "busy");
+        setMessage(
+            "Calculating a read-only path...",
+            false
+        );
+
+        try {
+            const result = await fetchJson(
+                COMPUTE_ENDPOINT,
+                {
+                    method: "POST",
+                    headers: {
+                        "Content-Type":
+                            "application/json",
+                    },
+                    body: JSON.stringify({
+                        goal_x: selectedGoal.x,
+                        goal_y: selectedGoal.y,
+                        goal_yaw: selectedGoal.yaw,
+                    }),
+                }
+            );
+
+            if (
+                !result.response.ok
+                || !result.payload.ok
+                || !result.payload.path
+            ) {
+                throw new Error(
+                    result.payload.error
+                    || "Path computation failed."
+                );
+            }
+
+            const path = result.payload.path;
+
+            if (
+                path.read_only !== true
+                || path.executed !== false
+                || path.motion_enabled !== false
+                || path.frame_id !== "map"
+                || !Array.isArray(path.points)
+            ) {
+                throw new Error(
+                    "Path response violated the "
+                    + "read-only contract."
+                );
+            }
+
+            computedPath = path;
+            drawPath();
+
+            setText(
+                "planningPathSummary",
+                `${Number(path.pose_count)} poses, `
+                + `${Number(
+                    path.length_meters
+                ).toFixed(2)} m`
+            );
+            setState("Path Ready", "ready");
+            setOverlay(
+                "Read-only path ready",
+                "ready"
+            );
+            setMessage(
+                "Path calculated for inspection only. "
+                + "It was not executed.",
+                false
+            );
+        } catch (error) {
+            computedPath = null;
+            drawPath();
+            setState("Error", "error");
+            setOverlay(
+                "Path unavailable",
+                "error"
+            );
+            setMessage(error.message, true);
+        } finally {
+            actionInFlight = false;
+            updateButtons();
+        }
+    }
+
+    function selectGoal(event) {
+        if (!planningRunning || actionInFlight) {
+            return;
+        }
+
+        const canvas = byId("planningPathCanvas");
+        if (!canvas) return;
+
+        const goal = canvasToMap(event, canvas);
+
+        if (!goal) {
+            setMessage(
+                "Select a point inside the saved map.",
+                true
+            );
+            return;
+        }
+
+        if (!goal.free) {
+            setMessage(
+                "That map cell is not free. "
+                + "Select a white free-space cell.",
+                true
+            );
+            return;
+        }
+
+        selectedGoal = {
+            x: goal.x,
+            y: goal.y,
+            yaw: goal.yaw,
+        };
+        computedPath = null;
+
+        setText(
+            "planningSelectedGoal",
+            `${goal.x.toFixed(2)}, `
+            + `${goal.y.toFixed(2)} m`
+        );
+        setText("planningPathSummary", "Not computed");
+
+        drawPath();
+
+        if (!latestPose) {
+            setMessage(
+                "Goal selected. Waiting for a fresh pose.",
+                false
+            );
+        } else if (uncertaintyBlocked) {
+            setMessage(
+                "Goal selected, but localization "
+                + "uncertainty is too high.",
+                true
+            );
+        } else {
+            setMessage(
+                "Goal selected. Compute the read-only path.",
+                false
+            );
+        }
+
+        updateButtons();
+    }
+
+    function initialize() {
+        const canvas = byId("planningPathCanvas");
+        const start = byId("startPlanningButton");
+        const stop = byId("stopPlanningButton");
+        const compute = byId(
+            "computePlanningPathButton"
+        );
+
+        if (!canvas || !start || !stop || !compute) {
+            return;
+        }
+
+        canvas.addEventListener(
+            "click",
+            selectGoal
+        );
+
+        start.addEventListener(
+            "click",
+            startPlanning
+        );
+
+        stop.addEventListener(
+            "click",
+            function () {
+                performAction(
+                    STOP_ENDPOINT,
+                    "Stopping planning-only Nav2..."
+                );
+            }
+        );
+
+        compute.addEventListener(
+            "click",
+            computePath
+        );
+
+        refresh();
+
+        timer = window.setInterval(
+            refresh,
+            REFRESH_MS
+        );
+
+        window.addEventListener(
+            "resize",
+            drawPath
+        );
+
+        window.addEventListener(
+            "beforeunload",
+            function () {
+                if (timer !== null) {
+                    window.clearInterval(timer);
+                }
+            },
+            {once: true}
+        );
+    }
+
+    if (document.readyState === "loading") {
+        document.addEventListener(
+            "DOMContentLoaded",
+            initialize,
+            {once: true}
+        );
+    } else {
+        initialize();
+    }
+})();
+</script>
+
 </body>
 </html>
