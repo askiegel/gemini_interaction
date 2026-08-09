@@ -1257,9 +1257,50 @@
 
                 <p class="small-text mapping-control-safety">
                     Headless mapping only. Manually supervise Mayday
-                    while mapping. No navigation, autonomous motion,
-                    candidate promotion, or validated-map replacement
-                    is available here.
+                    while mapping. No navigation or autonomous
+                    motion is available. Promotion is separately
+                    guarded and only available while mapping and
+                    localization are stopped.
+                </p>
+            </section>
+
+            <section
+                class="candidate-promotion"
+                aria-label="Promote selected candidate"
+            >
+                <div class="candidate-promotion-heading">
+                    <h3>Validated Map Replacement</h3>
+                    <strong
+                        id="candidatePromotionState"
+                        class="candidate-promotion-state unavailable"
+                        aria-live="polite"
+                    >
+                        Unavailable
+                    </strong>
+                </div>
+
+                <button
+                    id="promoteCandidateButton"
+                    class="candidate-promotion-button"
+                    type="button"
+                    disabled
+                >
+                    Promote Selected Candidate
+                </button>
+
+                <p
+                    id="candidatePromotionMessage"
+                    class="candidate-promotion-message"
+                    aria-live="polite"
+                >
+                    Select a review-ready candidate.
+                </p>
+
+                <p class="small-text candidate-promotion-safety">
+                    Promotion requires explicit confirmation. Mayday
+                    must be stopped. The current validated map is
+                    backed up before replacement, and the selected
+                    candidate remains preserved.
                 </p>
             </section>
 
@@ -1281,9 +1322,11 @@
             ></p>
 
             <p class="small-text candidate-review-safety">
-                Review only. This panel cannot promote, delete, save,
-                start mapping, navigate, or command Mayday.
-                The validated saved map below remains authoritative.
+                Review only. Candidates remain non-authoritative until
+                explicitly
+                promoted. This panel cannot delete candidates, navigate,
+                or command Mayday. The validated saved map below remains
+                authoritative until guarded promotion succeeds.
             </p>
         </aside>
     </section>
@@ -2576,5 +2619,421 @@
     );
 </script>
     <script src="/operator_console.js"></script>
+
+<script>
+/* Guarded candidate map promotion */
+(function () {
+    "use strict";
+
+    const INVENTORY_ENDPOINT =
+        "/dashboard/map-candidates";
+    const PROMOTION_ENDPOINT =
+        "/dashboard/map-promote-candidate";
+    const MAPPING_STATUS_ENDPOINT =
+        "/dashboard/mapping-control";
+    const LOCALIZATION_STATUS_ENDPOINT =
+        "/dashboard/localization-control";
+    const CONFIRMATION =
+        "PROMOTE REVIEWED CANDIDATE";
+    const REFRESH_MS = 2000;
+
+    let requestInFlight = false;
+    let actionInFlight = false;
+    let runtimeSafe = false;
+    let candidates = [];
+    let selectedName = null;
+    let timer = null;
+
+    function byId(id) {
+        return document.getElementById(id);
+    }
+
+    function perceptionIsVisible() {
+        const page = byId("perceptionPage");
+
+        return Boolean(
+            page
+            && !page.hidden
+            && page.classList.contains("active")
+        );
+    }
+
+    function selectedCandidate() {
+        return candidates.find(
+            function (candidate) {
+                return candidate.name === selectedName;
+            }
+        ) || null;
+    }
+
+    function candidateIsReviewReady(candidate) {
+        return Boolean(
+            candidate
+            && candidate.review_ready === true
+            && candidate.classification
+                === "REVIEW_READY"
+            && candidate.map
+            && candidate.comparison
+        );
+    }
+
+    function candidateMatchesValidated(candidate) {
+        if (!candidateIsReviewReady(candidate)) {
+            return false;
+        }
+
+        const comparison = candidate.comparison;
+        const dimensions =
+            comparison.dimension_delta_cells || {};
+        const origin =
+            comparison.origin_delta_meters || {};
+
+        return Boolean(
+            comparison.same_frame === true
+            && comparison.same_resolution === true
+            && Number(
+                comparison.cell_count_delta
+            ) === 0
+            && Number(
+                comparison.free_cell_delta
+            ) === 0
+            && Number(
+                comparison.occupied_cell_delta
+            ) === 0
+            && Number(
+                comparison.unknown_cell_delta
+            ) === 0
+            && Number(dimensions.width) === 0
+            && Number(dimensions.height) === 0
+            && Number(origin.x) === 0
+            && Number(origin.y) === 0
+            && Number(origin.yaw) === 0
+        );
+    }
+
+    function setState(
+        label,
+        state,
+        message,
+        isError
+    ) {
+        const status = byId("candidatePromotionState");
+        const messageElement =
+            byId("candidatePromotionMessage");
+
+        if (status) {
+            status.textContent = label;
+            status.className =
+                "candidate-promotion-state " + state;
+        }
+
+        if (messageElement) {
+            messageElement.textContent = message;
+            messageElement.className = (
+                "candidate-promotion-message"
+                + (isError ? " error" : "")
+            );
+        }
+    }
+
+    function updateControls() {
+        const button = byId("promoteCandidateButton");
+        const candidate = selectedCandidate();
+        const ready = candidateIsReviewReady(candidate);
+        const current =
+            candidateMatchesValidated(candidate);
+        const enabled = Boolean(
+            ready
+            && !current
+            && runtimeSafe
+            && !actionInFlight
+        );
+
+        if (button) {
+            button.disabled = !enabled;
+            button.textContent = current
+                ? "Already the Validated Map"
+                : (
+                    actionInFlight
+                        ? "Promoting Candidate..."
+                        : "Promote Selected Candidate"
+                );
+        }
+
+        if (actionInFlight) {
+            setState(
+                "Promoting",
+                "busy",
+                "Creating backup and replacing the validated map...",
+                false
+            );
+        } else if (!ready) {
+            setState(
+                "Unavailable",
+                "unavailable",
+                "Select a review-ready candidate.",
+                false
+            );
+        } else if (current) {
+            setState(
+                "Current map",
+                "current",
+                "This candidate already matches the validated map.",
+                false
+            );
+        } else if (!runtimeSafe) {
+            setState(
+                "Runtime active",
+                "unavailable",
+                "Stop mapping and localization before promotion.",
+                false
+            );
+        } else {
+            setState(
+                "Ready",
+                "ready",
+                "Selected candidate can replace the validated map.",
+                false
+            );
+        }
+    }
+
+    function readPublishedSelection() {
+        const inventory = byId("candidateInventoryList");
+        const published = inventory
+            ? inventory.dataset.selectedCandidateName
+            : "";
+
+        if (published) {
+            selectedName = published;
+        }
+    }
+
+    async function refresh() {
+        if (
+            !perceptionIsVisible()
+            || requestInFlight
+            || actionInFlight
+        ) {
+            return;
+        }
+
+        requestInFlight = true;
+
+        try {
+            readPublishedSelection();
+
+            const responses = await Promise.all([
+                fetch(INVENTORY_ENDPOINT, {
+                    cache: "no-store",
+                }),
+                fetch(MAPPING_STATUS_ENDPOINT, {
+                    cache: "no-store",
+                }),
+                fetch(LOCALIZATION_STATUS_ENDPOINT, {
+                    cache: "no-store",
+                }),
+            ]);
+
+            const inventoryPayload =
+                await responses[0].json();
+            const mappingPayload =
+                await responses[1].json();
+            const localizationPayload =
+                await responses[2].json();
+
+            if (!responses[0].ok) {
+                throw new Error(
+                    inventoryPayload.error
+                    || "Candidate inventory is unavailable."
+                );
+            }
+
+            const telemetry = (
+                inventoryPayload.telemetry
+                || inventoryPayload
+            );
+
+            candidates = telemetry.candidates || [];
+
+            if (!selectedName) {
+                const readyCandidates = candidates.filter(
+                    candidateIsReviewReady
+                );
+
+                if (readyCandidates.length > 0) {
+                    selectedName = readyCandidates[
+                        readyCandidates.length - 1
+                    ].name;
+                }
+            }
+
+            const mapping = mappingPayload.mapping || {};
+            const localization =
+                localizationPayload.localization || {};
+
+            runtimeSafe = Boolean(
+                responses[1].ok
+                && responses[2].ok
+                && mapping.running === false
+                && localization.running === false
+            );
+
+            updateControls();
+        } catch (error) {
+            runtimeSafe = false;
+            setState(
+                "Unavailable",
+                "error",
+                error.message,
+                true
+            );
+
+            const button = byId(
+                "promoteCandidateButton"
+            );
+
+            if (button) button.disabled = true;
+        } finally {
+            requestInFlight = false;
+        }
+    }
+
+    async function promoteSelectedCandidate() {
+        readPublishedSelection();
+        await refresh();
+
+        const candidate = selectedCandidate();
+
+        if (
+            actionInFlight
+            || !runtimeSafe
+            || !candidateIsReviewReady(candidate)
+            || candidateMatchesValidated(candidate)
+        ) {
+            updateControls();
+            return;
+        }
+
+        const accepted = window.confirm(
+            "Replace Mayday's validated saved map with:\n\n"
+            + candidate.name
+            + "\n\nA checksum-protected rollback backup "
+            + "will be created first."
+        );
+
+        if (!accepted) return;
+
+        const confirmation = window.prompt(
+            "Type exactly:\n" + CONFIRMATION
+        );
+
+        if (confirmation !== CONFIRMATION) {
+            setState(
+                "Cancelled",
+                "unavailable",
+                "The exact promotion confirmation was not entered.",
+                true
+            );
+            return;
+        }
+
+        actionInFlight = true;
+        updateControls();
+
+        try {
+            const response = await fetch(
+                PROMOTION_ENDPOINT,
+                {
+                    method: "POST",
+                    headers: {
+                        "Content-Type": "application/json",
+                    },
+                    body: JSON.stringify({
+                        candidate_name: candidate.name,
+                        confirmation,
+                    }),
+                }
+            );
+            const payload = await response.json();
+
+            if (!response.ok || !payload.ok) {
+                throw new Error(
+                    payload.error
+                    || "Candidate promotion failed."
+                );
+            }
+
+            const promotion = payload.promotion || {};
+            const backup = (
+                promotion.backup_directory
+                || "Rollback backup created."
+            );
+
+            setState(
+                "Promoted",
+                "complete",
+                "Validated map replaced. Backup: " + backup,
+                false
+            );
+
+            window.setTimeout(
+                function () {
+                    window.location.reload();
+                },
+                1800
+            );
+        } catch (error) {
+            actionInFlight = false;
+            setState(
+                "Failed",
+                "error",
+                error.message,
+                true
+            );
+            updateControls();
+        }
+    }
+
+    function initialize() {
+        const button = byId("promoteCandidateButton");
+
+        if (!button) return;
+
+        button.addEventListener(
+            "click",
+            promoteSelectedCandidate
+        );
+
+        updateControls();
+        refresh();
+
+        timer = window.setInterval(
+            refresh,
+            REFRESH_MS
+        );
+
+        window.addEventListener(
+            "beforeunload",
+            function () {
+                if (timer !== null) {
+                    window.clearInterval(timer);
+                }
+            },
+            {once: true}
+        );
+    }
+
+    if (document.readyState === "loading") {
+        document.addEventListener(
+            "DOMContentLoaded",
+            initialize,
+            {once: true}
+        );
+    } else {
+        initialize();
+    }
+})();
+</script>
 </body>
 </html>

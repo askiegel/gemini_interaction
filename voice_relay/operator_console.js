@@ -3884,6 +3884,8 @@
         const list = byId("candidateInventoryList");
         if (!list) return;
 
+        list.dataset.selectedCandidateName =
+            selectedCandidateName || "";
         list.replaceChildren();
 
         candidates.forEach(function (candidate) {

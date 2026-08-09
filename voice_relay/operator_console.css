@@ -1801,6 +1801,109 @@ button {
     text-align: right;
 }
 
+/* Guarded candidate-map promotion */
+.candidate-promotion {
+    margin-top: 18px;
+    padding: 14px;
+    border: 1px solid #f0b45e;
+    border-radius: 11px;
+    background: #fffaf0;
+}
+
+.candidate-promotion-heading {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 12px;
+}
+
+.candidate-promotion-heading h3 {
+    margin: 0;
+    font-size: 0.95rem;
+}
+
+.candidate-promotion-state {
+    padding: 5px 8px;
+    border-radius: 999px;
+    font-size: 0.72rem;
+    font-weight: 800;
+    white-space: nowrap;
+}
+
+.candidate-promotion-state.unavailable,
+.candidate-promotion-state.current {
+    color: #475569;
+    background: #e2e8f0;
+}
+
+.candidate-promotion-state.ready {
+    color: #92400e;
+    background: #fef3c7;
+}
+
+.candidate-promotion-state.busy {
+    color: #1d4ed8;
+    background: #dbeafe;
+}
+
+.candidate-promotion-state.complete {
+    color: #166534;
+    background: #dcfce7;
+}
+
+.candidate-promotion-state.error {
+    color: #991b1b;
+    background: #fee2e2;
+}
+
+.candidate-promotion-button {
+    width: 100%;
+    min-height: 46px;
+    margin-top: 12px;
+    padding: 10px;
+    border: 0;
+    border-radius: 9px;
+    color: white;
+    background: #b45309;
+    font: inherit;
+    font-size: 0.84rem;
+    font-weight: 800;
+    cursor: pointer;
+}
+
+.candidate-promotion-button:disabled {
+    cursor: not-allowed;
+    opacity: 0.42;
+}
+
+.candidate-promotion-button:not(:disabled):hover {
+    background: #92400e;
+}
+
+.candidate-promotion-button:focus-visible {
+    outline: 3px solid rgba(180, 83, 9, 0.3);
+    outline-offset: 2px;
+}
+
+.candidate-promotion-message {
+    min-height: 2.6em;
+    margin: 11px 0 0;
+    color: #334155;
+    font-size: 0.82rem;
+    overflow-wrap: anywhere;
+}
+
+.candidate-promotion-message.error {
+    color: #991b1b;
+    font-weight: 700;
+}
+
+.candidate-promotion-safety {
+    margin: 10px 0 0;
+    padding-top: 10px;
+    border-top: 1px solid #f1d5ad;
+}
+
 .candidate-inventory-heading {
     margin: 20px 0 10px;
     font-size: 0.95rem;

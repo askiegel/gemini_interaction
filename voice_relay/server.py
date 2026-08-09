@@ -655,6 +655,81 @@ class VoiceRelayHandler(BaseHTTPRequestHandler):
             },
         )
 
+    def candidate_map_promote(self, payload):
+        """
+        Promote one explicitly selected review-ready candidate.
+
+        The Robot Bridge remains responsible for candidate validation,
+        runtime exclusion, backup creation, replacement, verification,
+        telemetry reload, and rollback.
+        """
+        confirmation = "PROMOTE REVIEWED CANDIDATE"
+
+        if not isinstance(payload, dict):
+            return 400, {
+                "ok": False,
+                "error": "A JSON request body is required.",
+            }
+
+        if set(payload) != {
+            "candidate_name",
+            "confirmation",
+        }:
+            return 400, {
+                "ok": False,
+                "error": (
+                    "Exactly candidate_name and confirmation "
+                    "must be supplied."
+                ),
+            }
+
+        candidate_name = payload.get("candidate_name")
+        supplied_confirmation = payload.get(
+            "confirmation"
+        )
+
+        if (
+            not isinstance(candidate_name, str)
+            or not candidate_name.startswith(
+                "mayday_map_candidate_"
+            )
+        ):
+            return 400, {
+                "ok": False,
+                "error": "Candidate name is invalid.",
+            }
+
+        if supplied_confirmation != confirmation:
+            return 400, {
+                "ok": False,
+                "error": (
+                    "Explicit promotion confirmation is "
+                    "required."
+                ),
+            }
+
+        response = request_json(
+            "POST",
+            f"{ROBOT_BRIDGE_URL}/map/promote-candidate",
+            payload={
+                "candidate_name": candidate_name,
+                "confirmation": supplied_confirmation,
+            },
+            timeout=180.0,
+        )
+
+        return (
+            response["status_code"] or 503,
+            response["data"] or {
+                "ok": False,
+                "error": (
+                    response["error"]
+                    or "Candidate promotion failed."
+                ),
+            },
+        )
+
+
     def dashboard_status(self):
         runtime_response = request_json(
             "GET",
@@ -1201,6 +1276,28 @@ class VoiceRelayHandler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         path = urlparse(self.path).path
+
+        if path == "/dashboard/map-promote-candidate":
+            try:
+                payload = self.read_json_body()
+            except ValueError as exc:
+                self.send_json(
+                    400,
+                    {
+                        "ok": False,
+                        "error": str(exc),
+                    },
+                )
+                return
+
+            status_code, response_payload = (
+                self.candidate_map_promote(payload)
+            )
+            self.send_json(
+                status_code,
+                response_payload,
+            )
+            return
 
         mapping_actions = {
             "/dashboard/mapping-start": "start",
