@@ -3152,6 +3152,9 @@
     const MAP_PADDING = 32;
     const MAX_POSITION_STD_METERS = 0.40;
     const MAX_YAW_STD_RADIANS = 0.80;
+    const INITIALIZE_DISCOVERY_DELAY_MS = 10000;
+    const INITIALIZE_RETRY_DELAY_MS = 10000;
+    const INITIALIZE_MAX_ATTEMPTS = 4;
 
     let timer = null;
     let requestInFlight = false;
@@ -3727,6 +3730,51 @@
         }
     }
 
+    function wait(milliseconds) {
+        return new Promise(function (resolve) {
+            window.setTimeout(resolve, milliseconds);
+        });
+    }
+
+    function validInitialization(result) {
+        const initialization = (
+            result
+            && result.payload
+            && result.payload.initialization
+        );
+
+        return Boolean(
+            result
+            && result.response
+            && result.response.ok
+            && result.payload
+            && result.payload.ok
+            && initialization
+            && initialization
+                .global_localization_requested === true
+            && initialization
+                .nomotion_updates_requested === 20
+            && initialization
+                .stationary_required === true
+            && initialization
+                .initial_pose_supplied === false
+            && initialization
+                .pose_published === false
+            && initialization
+                .path_computed === false
+            && initialization
+                .path_executed === false
+            && initialization
+                .navigation_goal_executed === false
+            && initialization
+                .controller_enabled === false
+            && initialization
+                .navigator_enabled === false
+            && initialization
+                .motion_enabled === false
+        );
+    }
+
     async function startPlanning() {
         if (actionInFlight) return;
 
@@ -3792,50 +3840,103 @@
             );
             updateButtons();
 
-            const initializeResult = await fetchJson(
-                INITIALIZE_ENDPOINT,
-                {
-                    method: "POST",
-                    headers: {
-                        "Content-Type":
-                            "application/json",
-                    },
-                    body: "{}",
-                }
+            setMessage(
+                "Planning-only Nav2 started. Waiting for "
+                + "AMCL services to become available...",
+                false
             );
 
-            const initialization =
-                initializeResult.payload.initialization;
+            await wait(
+                INITIALIZE_DISCOVERY_DELAY_MS
+            );
 
-            if (
-                !initializeResult.response.ok
-                || !initializeResult.payload.ok
-                || !initialization
-                || initialization
-                    .global_localization_requested
-                    !== true
-                || initialization
-                    .nomotion_updates_requested
-                    !== 20
-                || initialization.stationary_required
-                    !== true
-                || initialization.path_computed
-                    !== false
-                || initialization.path_executed
-                    !== false
-                || initialization
-                    .navigation_goal_executed
-                    !== false
-                || initialization.motion_enabled
-                    !== false
+            let initializeResult = null;
+            let initializationComplete = false;
+            let initializationError = (
+                "Stationary localization "
+                + "initialization failed."
+            );
+
+            for (
+                let attempt = 1;
+                attempt <= INITIALIZE_MAX_ATTEMPTS;
+                attempt += 1
             ) {
-                throw new Error(
-                    initializeResult.payload.error
-                    || (
-                        "Stationary localization "
-                        + "initialization failed."
-                    )
+                setState("Localizing", "busy");
+                setOverlay(
+                    "Initializing stationary pose "
+                    + `(${attempt}/`
+                    + `${INITIALIZE_MAX_ATTEMPTS})`,
+                    "busy"
                 );
+                setMessage(
+                    "Requesting guarded stationary "
+                    + "localization. Attempt "
+                    + `${attempt} of `
+                    + `${INITIALIZE_MAX_ATTEMPTS}...`,
+                    false
+                );
+
+                try {
+                    initializeResult = await fetchJson(
+                        INITIALIZE_ENDPOINT,
+                        {
+                            method: "POST",
+                            headers: {
+                                "Content-Type":
+                                    "application/json",
+                            },
+                            body: "{}",
+                        }
+                    );
+
+                    if (
+                        validInitialization(
+                            initializeResult
+                        )
+                    ) {
+                        initializationComplete = true;
+                        break;
+                    }
+
+                    initializationError = (
+                        initializeResult.payload.error
+                        || initializationError
+                    );
+                } catch (initializeError) {
+                    initializationError = (
+                        initializeError.message
+                        || initializationError
+                    );
+                }
+
+                if (
+                    attempt
+                    < INITIALIZE_MAX_ATTEMPTS
+                ) {
+                    setState(
+                        "Waiting",
+                        "busy"
+                    );
+                    setOverlay(
+                        "Waiting for AMCL services",
+                        "busy"
+                    );
+                    setMessage(
+                        "AMCL is still starting. "
+                        + "Planning remains safely active; "
+                        + "the initializer will retry.",
+                        false
+                    );
+
+                    await wait(
+                        INITIALIZE_RETRY_DELAY_MS
+                    );
+                }
+            }
+
+            if (!initializationComplete) {
+                throw new Error(initializationError);
             }
 
             setState("Locating", "busy");

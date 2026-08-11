@@ -261,6 +261,10 @@ def test_start_runs_fixed_initializer_sequence():
         "async function startPlanning()"
         in CONTROL
     )
+    assert (
+        "function validInitialization(result)"
+        in CONTROL
+    )
 
     start = CONTROL.index(
         "async function startPlanning()"
@@ -279,14 +283,52 @@ def test_start_runs_fixed_initializer_sequence():
     )
 
     assert start_fetch < initialize_fetch
-    assert "nomotion_updates_requested" in handler
-    assert "!== 20" in handler
-    assert "stationary_required" in handler
-    assert "path_computed" in handler
-    assert "path_executed" in handler
-    assert "navigation_goal_executed" in handler
-    assert "motion_enabled" in handler
+    assert (
+        "validInitialization("
+        in handler
+    )
+    assert (
+        "INITIALIZE_DISCOVERY_DELAY_MS"
+        in handler
+    )
+    assert (
+        "INITIALIZE_MAX_ATTEMPTS"
+        in handler
+    )
 
+    validator_start = CONTROL.index(
+        "function validInitialization(result)"
+    )
+    validator_end = CONTROL.index(
+        "async function startPlanning()",
+        validator_start,
+    )
+    validator = CONTROL[
+        validator_start:validator_end
+    ]
+
+    required = (
+        "global_localization_requested === true",
+        "nomotion_updates_requested === 20",
+        "stationary_required === true",
+        "initial_pose_supplied === false",
+        "pose_published === false",
+        "path_computed === false",
+        "path_executed === false",
+        "navigation_goal_executed === false",
+        "controller_enabled === false",
+        "navigator_enabled === false",
+        "motion_enabled === false",
+    )
+
+    for value in required:
+        assert value in validator
+
+    assert "STOP_ENDPOINT" in handler
+    assert (
+        handler.index("INITIALIZE_ENDPOINT")
+        < handler.index("STOP_ENDPOINT")
+    )
 
 def test_initializer_failure_stops_planning():
     start = CONTROL.index(
@@ -304,3 +346,91 @@ def test_initializer_failure_stops_planning():
     assert "latestPose = null" in handler
     assert "selectedGoal = null" in handler
     assert "computedPath = null" in handler
+
+def test_planning_start_waits_for_amcl_discovery():
+    assert (
+        "const INITIALIZE_DISCOVERY_DELAY_MS = 10000"
+        in CONTROL
+    )
+    assert (
+        "await wait(\n"
+        "                INITIALIZE_DISCOVERY_DELAY_MS"
+        in CONTROL
+    )
+    assert (
+        "Planning-only Nav2 started. Waiting for "
+        in CONTROL
+    )
+    assert (
+        "AMCL services to become available..."
+        in CONTROL
+    )
+
+
+def test_planning_initializer_retries_are_bounded():
+    assert (
+        "const INITIALIZE_MAX_ATTEMPTS = 4"
+        in CONTROL
+    )
+    assert (
+        "attempt <= INITIALIZE_MAX_ATTEMPTS"
+        in CONTROL
+    )
+    assert (
+        "INITIALIZE_RETRY_DELAY_MS"
+        in CONTROL
+    )
+    assert (
+        "initializationComplete = true"
+        in CONTROL
+    )
+
+
+def test_planning_stays_active_between_initializer_retries():
+    retry_start = CONTROL.index(
+        "for (\n"
+        "                let attempt = 1;"
+    )
+    retry_end = CONTROL.index(
+        "if (!initializationComplete)",
+        retry_start,
+    )
+    retry = CONTROL[retry_start:retry_end]
+
+    assert "INITIALIZE_ENDPOINT" in retry
+    assert "INITIALIZE_RETRY_DELAY_MS" in retry
+    assert "STOP_ENDPOINT" not in retry
+    assert (
+        "Planning remains safely active"
+        in retry
+    )
+
+
+def test_initializer_validation_preserves_safety_contract():
+    validator_start = CONTROL.index(
+        "function validInitialization"
+    )
+    validator_end = CONTROL.index(
+        "async function startPlanning",
+        validator_start,
+    )
+    validator = CONTROL[
+        validator_start:validator_end
+    ]
+
+    required = (
+        "global_localization_requested === true",
+        "nomotion_updates_requested === 20",
+        "stationary_required === true",
+        "initial_pose_supplied === false",
+        "pose_published === false",
+        "path_computed === false",
+        "path_executed === false",
+        "navigation_goal_executed === false",
+        "controller_enabled === false",
+        "navigator_enabled === false",
+        "motion_enabled === false",
+    )
+
+    for value in required:
+        assert value in validator
