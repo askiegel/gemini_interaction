@@ -434,3 +434,156 @@ def test_initializer_validation_preserves_safety_contract():
 
     for value in required:
         assert value in validator
+
+
+def test_pose_refresh_proxy_is_fixed_and_parameter_free():
+    start = SERVER.index(
+        "def planning_refresh_localization"
+    )
+    end = SERVER.index(
+        "def planning_compute_path",
+        start,
+    )
+    proxy = SERVER[start:end]
+
+    assert '"/planning/refresh-localization"' in proxy
+    assert "payload={}" in proxy
+    assert "timeout=20.0" in proxy
+
+    for marker in (
+        "request_payload",
+        "goal_x",
+        "goal_y",
+        "goal_yaw",
+        "initial_pose",
+        '"service"',
+        '"topic"',
+        '"frame"',
+        "planner_id",
+        "cmd_vel",
+    ):
+        assert marker not in proxy
+
+
+def test_pose_refresh_dashboard_route_is_post_only():
+    get_start = SERVER.index("def do_GET(self):")
+    post_start = SERVER.index("def do_POST(self):")
+    get_source = SERVER[get_start:post_start]
+    post_source = SERVER[post_start:]
+    route = "/dashboard/planning-refresh-localization"
+
+    assert route not in get_source
+    assert route in post_source
+    assert "self.planning_refresh_localization()" in post_source
+
+
+def test_compute_refreshes_pose_before_path_submission():
+    start = CONTROL.index("async function computePath()")
+    end = CONTROL.index("function selectGoal", start)
+    handler = CONTROL[start:end]
+
+    assert 'const POSE_REFRESH_ENDPOINT =' in CONTROL
+    assert (
+        '"/dashboard/planning-refresh-localization"'
+        in CONTROL
+    )
+    assert handler.index("POSE_REFRESH_ENDPOINT") < handler.index(
+        "COMPUTE_ENDPOINT"
+    )
+    assert "previousReceivedAt" in handler
+    assert "LOCALIZATION_ENDPOINT" in handler
+    assert "isNewFreshPose(" in handler
+
+
+def test_pose_refresh_contract_preserves_safety():
+    start = CONTROL.index("function validPoseRefresh")
+    end = CONTROL.index("function isNewFreshPose", start)
+    validator = CONTROL[start:end]
+
+    required = (
+        'action\n                === "PLANNING_POSE_REFRESHED"',
+        "nomotion_updates_requested === 1",
+        "global_localization_requested === false",
+        "stationary_required === true",
+        "initial_pose_supplied === false",
+        "pose_published === false",
+        "path_computed === false",
+        "path_executed === false",
+        "navigation_goal_executed === false",
+        "controller_enabled === false",
+        "navigator_enabled === false",
+        "motion_enabled === false",
+    )
+
+    for value in required:
+        assert value in validator
+
+
+def test_refreshed_pose_must_be_new_map_frame_and_fresh():
+    start = CONTROL.index("function isNewFreshPose")
+    end = CONTROL.index("async function startPlanning", start)
+    validator = CONTROL[start:end]
+
+    required = (
+        "payload.runtime_active === true",
+        "telemetry.available === true",
+        'pose.frame_id === "map"',
+        "Number.isFinite(ageSeconds)",
+        "ageSeconds < 3",
+        "telemetry.received_at",
+        "!== previousReceivedAt",
+    )
+
+    for value in required:
+        assert value in validator
+
+
+def test_pose_refresh_wait_is_bounded():
+    assert "const POSE_REFRESH_RETRY_DELAY_MS = 250" in CONTROL
+    assert "const POSE_REFRESH_MAX_ATTEMPTS = 20" in CONTROL
+
+    start = CONTROL.index("async function computePath()")
+    end = CONTROL.index("function selectGoal", start)
+    handler = CONTROL[start:end]
+
+    assert "attempt <= POSE_REFRESH_MAX_ATTEMPTS" in handler
+    assert "POSE_REFRESH_RETRY_DELAY_MS" in handler
+    assert "A new fresh map pose was not received." in handler
+
+
+def test_pose_refresh_keeps_browser_parameters_impossible():
+    start = CONTROL.index("async function computePath()")
+    end = CONTROL.index("function selectGoal", start)
+    handler = CONTROL[start:end]
+    refresh_start = handler.index("POSE_REFRESH_ENDPOINT")
+    refresh_end = handler.index("if (!validPoseRefresh", refresh_start)
+    refresh_request = handler[refresh_start:refresh_end]
+
+    assert 'body: "{}"' in refresh_request
+    for marker in (
+        "service",
+        "initial_pose",
+        "pose_published",
+        "frame_id",
+        "planner_id",
+        "goal_x",
+        "goal_y",
+        "goal_yaw",
+    ):
+        assert marker not in refresh_request
+
+
+def test_pose_refresh_adds_no_motion_or_navigation_execution():
+    forbidden = (
+        "NavigateToPose",
+        "FollowPath",
+        "cmd_vel",
+        "controller_server",
+        "bt_navigator",
+        "behavior_server",
+        "waypoint_follower",
+        "velocity_smoother",
+    )
+
+    for marker in forbidden:
+        assert marker not in CONTROL

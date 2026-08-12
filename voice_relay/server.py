@@ -590,6 +590,37 @@ class VoiceRelayHandler(BaseHTTPRequestHandler):
             },
         )
 
+    def planning_refresh_localization(self):
+        """
+        Request only Robot Bridge's fixed stationary AMCL refresh.
+
+        No browser payload, pose, ROS service, topic, frame, planner,
+        controller, command, or motion value is accepted.
+        """
+        response = request_json(
+            "POST",
+            (
+                f"{ROBOT_BRIDGE_URL}"
+                "/planning/refresh-localization"
+            ),
+            payload={},
+            timeout=20.0,
+        )
+
+        return (
+            response["status_code"] or 503,
+            response["data"] or {
+                "ok": False,
+                "error": (
+                    response["error"]
+                    or (
+                        "Planning localization "
+                        "refresh failed."
+                    )
+                ),
+            },
+        )
+
     def planning_compute_path(self, payload):
         """
         Forward one finite map-frame goal for read-only planning.
@@ -1478,6 +1509,16 @@ class VoiceRelayHandler(BaseHTTPRequestHandler):
         ):
             status_code, payload = (
                 self.planning_initialize_localization()
+            )
+            self.send_json(status_code, payload)
+            return
+
+        if (
+            path
+            == "/dashboard/planning-refresh-localization"
+        ):
+            status_code, payload = (
+                self.planning_refresh_localization()
             )
             self.send_json(status_code, payload)
             return
