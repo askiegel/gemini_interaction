@@ -3154,7 +3154,7 @@
     const MAP_PADDING = 32;
     const MAX_POSITION_STD_METERS = 0.40;
     const MAX_YAW_STD_RADIANS = 0.80;
-    const INITIALIZE_DISCOVERY_DELAY_MS = 10000;
+    const INITIALIZE_DISCOVERY_DELAY_MS = 40000;
     const INITIALIZE_RETRY_DELAY_MS = 10000;
     const INITIALIZE_MAX_ATTEMPTS = 4;
     const POSE_REFRESH_RETRY_DELAY_MS = 250;
@@ -3165,6 +3165,7 @@
     let actionInFlight = false;
     let occupancyMap = null;
     let planningRunning = false;
+    let planningReady = false;
     let latestPose = null;
     let latestPoseReceivedAt = null;
     let selectedGoal = null;
@@ -3574,7 +3575,9 @@
             "planningReadiness",
             uncertaintyBlocked
                 ? "Blocked — pose uncertain"
-                : "Ready for read-only planning"
+                : planningReady
+                    ? "Ready for read-only planning"
+                    : "Waiting for guarded startup verification"
         );
     }
 
@@ -3587,9 +3590,14 @@
         );
 
         if (planningRunning) {
-            setState("Running", "running");
+            setState(
+                planningReady ? "Ready" : "Running",
+                "running"
+            );
             setOverlay(
-                "Select a planning goal",
+                planningReady
+                    ? "Read-only planning ready"
+                    : "Planning startup active",
                 "running"
             );
         } else {
@@ -3598,6 +3606,7 @@
                 "Planning stopped",
                 "stopped"
             );
+            planningReady = false;
             latestPose = null;
             selectedGoal = null;
             uncertaintyBlocked = true;
@@ -3836,6 +3845,12 @@
         const ageSeconds = Number(
             telemetry && telemetry.age_seconds
         );
+        const position = pose && pose.position;
+        const poseX = Number(position && position.x);
+        const poseY = Number(position && position.y);
+        const poseYaw = Number(
+            pose && pose.yaw_radians
+        );
 
         return Boolean(
             result
@@ -3848,6 +3863,9 @@
             && telemetry.available === true
             && pose
             && pose.frame_id === "map"
+            && Number.isFinite(poseX)
+            && Number.isFinite(poseY)
+            && Number.isFinite(poseYaw)
             && Number.isFinite(ageSeconds)
             && ageSeconds < 3
             && telemetry.received_at
@@ -3861,6 +3879,7 @@
 
         actionInFlight = true;
         let planningStarted = false;
+        planningReady = false;
 
         updateButtons();
         setState("Starting", "busy");
@@ -4020,14 +4039,130 @@
                 throw new Error(initializationError);
             }
 
+            const previousReceivedAt =
+                latestPoseReceivedAt;
+
+            setState("Refreshing", "busy");
+            setOverlay(
+                "Refreshing stationary pose",
+                "busy"
+            );
+            setMessage(
+                "Stationary localization initialized. "
+                + "Requesting one guarded no-motion "
+                + "pose refresh...",
+                false
+            );
+
+            const refreshResult = await fetchJson(
+                POSE_REFRESH_ENDPOINT,
+                {
+                    method: "POST",
+                    headers: {
+                        "Content-Type":
+                            "application/json",
+                    },
+                    body: "{}",
+                }
+            );
+
+            if (!validPoseRefresh(refreshResult)) {
+                throw new Error(
+                    refreshResult.payload.error
+                    || "Stationary pose refresh failed."
+                );
+            }
+
+            latestPose = null;
+            latestPoseReceivedAt = null;
+            uncertaintyBlocked = true;
+
             setState("Locating", "busy");
             setOverlay(
                 "Waiting for verified pose",
                 "busy"
             );
+            setText(
+                "planningPoseUncertainty",
+                "Waiting for refreshed pose"
+            );
+            setText(
+                "planningReadiness",
+                "Verifying refreshed stationary pose"
+            );
             setMessage(
-                "Stationary localization initialized. "
-                + "Waiting for a verified map pose...",
+                "Guarded no-motion refresh completed. "
+                + "Waiting for a new verified map pose...",
+                false
+            );
+
+            let freshPoseResult = null;
+
+            for (
+                let attempt = 1;
+                attempt <= POSE_REFRESH_MAX_ATTEMPTS;
+                attempt += 1
+            ) {
+                freshPoseResult = await fetchJson(
+                    LOCALIZATION_ENDPOINT,
+                    {cache: "no-store"}
+                );
+
+                if (
+                    isNewFreshPose(
+                        freshPoseResult,
+                        previousReceivedAt
+                    )
+                ) {
+                    renderLocalization(
+                        freshPoseResult.response,
+                        freshPoseResult.payload
+                    );
+                    break;
+                }
+
+                if (
+                    attempt < POSE_REFRESH_MAX_ATTEMPTS
+                ) {
+                    await wait(
+                        POSE_REFRESH_RETRY_DELAY_MS
+                    );
+                }
+            }
+
+            if (
+                !isNewFreshPose(
+                    freshPoseResult,
+                    previousReceivedAt
+                )
+            ) {
+                throw new Error(
+                    "A new fresh numeric map pose "
+                    + "was not received."
+                );
+            }
+
+            if (!latestPose || uncertaintyBlocked) {
+                throw new Error(
+                    "The refreshed pose is not safe "
+                    + "for read-only planning."
+                );
+            }
+
+            planningReady = true;
+            setState("Ready", "running");
+            setOverlay(
+                "Read-only planning ready",
+                "running"
+            );
+            setText(
+                "planningReadiness",
+                "Ready for read-only planning"
+            );
+            setMessage(
+                "Fresh stationary map pose verified. "
+                + "Read-only planning is ready; "
+                + "no path has been computed.",
                 false
             );
         } catch (error) {
@@ -4050,6 +4185,7 @@
             }
 
             planningRunning = false;
+            planningReady = false;
             latestPose = null;
             latestPoseReceivedAt = null;
             selectedGoal = null;
@@ -4113,6 +4249,7 @@
 
             if (endpoint === STOP_ENDPOINT) {
                 planningRunning = false;
+                planningReady = false;
                 latestPose = null;
                 latestPoseReceivedAt = null;
                 selectedGoal = null;

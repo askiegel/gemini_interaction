@@ -330,6 +330,160 @@ def test_start_runs_fixed_initializer_sequence():
         < handler.index("STOP_ENDPOINT")
     )
 
+
+def test_start_refreshes_pose_once_after_initialization():
+    start = CONTROL.index("async function startPlanning()")
+    end = CONTROL.index(
+        "async function performAction(",
+        start,
+    )
+    handler = CONTROL[start:end]
+
+    initialized = handler.index(
+        "if (!initializationComplete)"
+    )
+    refresh = handler.index(
+        "POSE_REFRESH_ENDPOINT",
+        initialized,
+    )
+    localization = handler.index(
+        "LOCALIZATION_ENDPOINT",
+        refresh,
+    )
+    ready = handler.index(
+        'setState("Ready", "running")',
+        localization,
+    )
+
+    assert initialized < refresh < localization < ready
+    assert handler.count("POSE_REFRESH_ENDPOINT") == 1
+    assert "validPoseRefresh(refreshResult)" in handler
+    assert "previousReceivedAt" in handler
+
+
+def test_startup_pose_refresh_is_parameter_free():
+    start = CONTROL.index("async function startPlanning()")
+    end = CONTROL.index(
+        "async function performAction(",
+        start,
+    )
+    handler = CONTROL[start:end]
+
+    refresh_start = handler.index(
+        "POSE_REFRESH_ENDPOINT"
+    )
+    refresh_end = handler.index(
+        "if (!validPoseRefresh",
+        refresh_start,
+    )
+    request = handler[refresh_start:refresh_end]
+
+    assert 'body: "{}"' in request
+
+    for marker in (
+        "service",
+        "initial_pose",
+        "pose_published",
+        "frame_id",
+        "planner_id",
+        "goal_x",
+        "goal_y",
+        "goal_yaw",
+        "cmd_vel",
+    ):
+        assert marker not in request
+
+
+def test_startup_waits_for_bounded_safe_pose():
+    start = CONTROL.index("async function startPlanning()")
+    end = CONTROL.index(
+        "async function performAction(",
+        start,
+    )
+    handler = CONTROL[start:end]
+
+    assert (
+        "attempt <= POSE_REFRESH_MAX_ATTEMPTS"
+        in handler
+    )
+    assert "POSE_REFRESH_RETRY_DELAY_MS" in handler
+    assert "isNewFreshPose(" in handler
+    assert "renderLocalization(" in handler
+    assert "if (!latestPose || uncertaintyBlocked)" in handler
+    assert "A new fresh numeric map pose " in handler
+
+
+def test_startup_ready_requires_verified_refresh():
+    start = CONTROL.index("async function startPlanning()")
+    end = CONTROL.index(
+        "async function performAction(",
+        start,
+    )
+    handler = CONTROL[start:end]
+
+    refresh_validation = handler.index(
+        "validPoseRefresh(refreshResult)"
+    )
+    new_pose_validation = handler.rindex(
+        "isNewFreshPose("
+    )
+    uncertainty_validation = handler.index(
+        "if (!latestPose || uncertaintyBlocked)"
+    )
+    readiness_assignment = handler.index(
+        "planningReady = true"
+    )
+    ready_state = handler.index(
+        'setState("Ready", "running")'
+    )
+
+    assert (
+        refresh_validation
+        < new_pose_validation
+        < uncertainty_validation
+        < readiness_assignment
+        < ready_state
+    )
+    assert "no path has been computed." in handler
+    assert "COMPUTE_ENDPOINT" not in handler
+
+
+def test_new_pose_requires_numeric_coordinates():
+    start = CONTROL.index("function isNewFreshPose")
+    end = CONTROL.index(
+        "async function startPlanning",
+        start,
+    )
+    validator = CONTROL[start:end]
+
+    for marker in (
+        "pose && pose.position",
+        "position && position.x",
+        "position && position.y",
+        "pose && pose.yaw_radians",
+        "Number.isFinite(poseX)",
+        "Number.isFinite(poseY)",
+        "Number.isFinite(poseYaw)",
+    ):
+        assert marker in validator
+
+
+def test_startup_refresh_failure_stops_planning():
+    start = CONTROL.index("async function startPlanning()")
+    end = CONTROL.index(
+        "async function performAction(",
+        start,
+    )
+    handler = CONTROL[start:end]
+
+    assert (
+        handler.index("POSE_REFRESH_ENDPOINT")
+        < handler.index("STOP_ENDPOINT")
+    )
+    assert "planningReady = false" in handler
+    assert "planningRunning = false" in handler
+    assert "latestPose = null" in handler
+
 def test_initializer_failure_stops_planning():
     start = CONTROL.index(
         "async function startPlanning()"
@@ -349,7 +503,7 @@ def test_initializer_failure_stops_planning():
 
 def test_planning_start_waits_for_amcl_discovery():
     assert (
-        "const INITIALIZE_DISCOVERY_DELAY_MS = 10000"
+        "const INITIALIZE_DISCOVERY_DELAY_MS = 40000"
         in CONTROL
     )
     assert (
