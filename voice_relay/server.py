@@ -696,6 +696,151 @@ class VoiceRelayHandler(BaseHTTPRequestHandler):
             },
         )
 
+    def navigation_control_status(self):
+        """Proxy guarded navigation ownership and limits."""
+        response = request_json(
+            "GET",
+            f"{ROBOT_BRIDGE_URL}/navigation/status",
+            timeout=5.0,
+        )
+
+        return (
+            response["status_code"] or 503,
+            response["data"] or {
+                "ok": False,
+                "error": (
+                    response["error"]
+                    or "Navigation control is unavailable."
+                ),
+            },
+        )
+
+    def navigation_control_action(self, action):
+        """Forward only fixed navigation start or stop actions."""
+        if action not in ("start", "stop"):
+            return 400, {
+                "ok": False,
+                "error": "Unsupported navigation action.",
+            }
+
+        response = request_json(
+            "POST",
+            f"{ROBOT_BRIDGE_URL}/navigation/{action}",
+            timeout=30.0,
+        )
+
+        return (
+            response["status_code"] or 503,
+            response["data"] or {
+                "ok": False,
+                "error": (
+                    response["error"]
+                    or f"Navigation {action} failed."
+                ),
+            },
+        )
+
+    def navigation_initialize_localization(self):
+        """
+        Request Robot Bridge's fixed navigation AMCL sequence.
+
+        No browser-selected service, topic, pose, frame, launch
+        parameter, controller, velocity, or motion value is accepted.
+        """
+        response = request_json(
+            "POST",
+            (
+                f"{ROBOT_BRIDGE_URL}"
+                "/navigation/initialize-localization"
+            ),
+            payload={},
+            timeout=75.0,
+        )
+
+        return (
+            response["status_code"] or 503,
+            response["data"] or {
+                "ok": False,
+                "error": (
+                    response["error"]
+                    or (
+                        "Navigation localization "
+                        "initialization failed."
+                    )
+                ),
+            },
+        )
+
+    def navigation_goal(self, payload):
+        """
+        Forward one exact finite map-frame goal.
+
+        Robot Bridge remains authoritative for the live pose,
+        fixed distance bound, execution timeout, cancellation, and STOP.
+        """
+        if not isinstance(payload, dict):
+            return 400, {
+                "ok": False,
+                "error": "A JSON request body is required.",
+            }
+
+        required = {
+            "goal_x",
+            "goal_y",
+            "goal_yaw",
+        }
+
+        if set(payload) != required:
+            return 400, {
+                "ok": False,
+                "error": (
+                    "Exactly goal_x, goal_y, and goal_yaw "
+                    "must be supplied."
+                ),
+            }
+
+        normalized = {}
+
+        for key in sorted(required):
+            value = payload.get(key)
+
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+            ):
+                return 400, {
+                    "ok": False,
+                    "error": f"{key} must be a finite number.",
+                }
+
+            value = float(value)
+
+            if not math.isfinite(value):
+                return 400, {
+                    "ok": False,
+                    "error": f"{key} must be finite.",
+                }
+
+            normalized[key] = value
+
+        response = request_json(
+            "POST",
+            f"{ROBOT_BRIDGE_URL}/navigation/goal",
+            payload=normalized,
+            timeout=25.0,
+        )
+
+        return (
+            response["status_code"] or 503,
+            response["data"] or {
+                "ok": False,
+                "error": (
+                    response["error"]
+                    or "Guarded navigation goal failed."
+                ),
+            },
+        )
+
     def localization_status(self):
         """
         Proxy guarded localization pose as read-only presentation data.
@@ -1269,6 +1414,13 @@ class VoiceRelayHandler(BaseHTTPRequestHandler):
             self.send_json(status_code, payload)
             return
 
+        if path == "/dashboard/navigation-control":
+            status_code, payload = (
+                self.navigation_control_status()
+            )
+            self.send_json(status_code, payload)
+            return
+
         if path == "/dashboard/planning-control":
             status_code, payload = (
                 self.planning_control_status()
@@ -1486,6 +1638,50 @@ class VoiceRelayHandler(BaseHTTPRequestHandler):
                 status_code,
                 response_payload,
             )
+            return
+
+        if path in (
+            "/dashboard/navigation-start",
+            "/dashboard/navigation-stop",
+        ):
+            action = (
+                "start"
+                if path.endswith("-start")
+                else "stop"
+            )
+            status_code, payload = (
+                self.navigation_control_action(action)
+            )
+            self.send_json(status_code, payload)
+            return
+
+        if (
+            path
+            == "/dashboard/navigation-initialize-localization"
+        ):
+            status_code, payload = (
+                self.navigation_initialize_localization()
+            )
+            self.send_json(status_code, payload)
+            return
+
+        if path == "/dashboard/navigation-goal":
+            try:
+                request_payload = self.read_json_body()
+            except ValueError as exc:
+                self.send_json(
+                    400,
+                    {
+                        "ok": False,
+                        "error": str(exc),
+                    },
+                )
+                return
+
+            status_code, payload = self.navigation_goal(
+                request_payload
+            )
+            self.send_json(status_code, payload)
             return
 
         if path in (
