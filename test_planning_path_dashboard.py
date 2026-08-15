@@ -631,6 +631,49 @@ def test_pose_refresh_dashboard_route_is_post_only():
     assert "self.planning_refresh_localization()" in post_source
 
 
+
+def test_stale_pose_can_reach_guarded_compute_refresh():
+    button_start = CONTROL.index(
+        "function updateButtons()"
+    )
+    button_end = CONTROL.index(
+        "function renderUncertainty",
+        button_start,
+    )
+    buttons = CONTROL[button_start:button_end]
+
+    compute_start = CONTROL.index(
+        "async function computePath()"
+    )
+    compute_end = CONTROL.index(
+        "function selectGoal",
+        compute_start,
+    )
+    handler = CONTROL[compute_start:compute_end]
+
+    assert "|| !occupancyMap" in buttons
+    assert "|| !selectedGoal" in buttons
+    assert "|| !latestPose" not in buttons
+    assert "|| uncertaintyBlocked" not in buttons
+
+    guard_end = handler.index(
+        "actionInFlight = true"
+    )
+    guard = handler[:guard_end]
+
+    assert "|| !planningRunning" in guard
+    assert "|| !selectedGoal" in guard
+    assert "|| !latestPose" not in guard
+    assert "|| uncertaintyBlocked" not in guard
+
+    refresh = handler.index("POSE_REFRESH_ENDPOINT")
+    pose_check = handler.index(
+        "if (!latestPose || uncertaintyBlocked)"
+    )
+    compute = handler.index("COMPUTE_ENDPOINT")
+
+    assert refresh < pose_check < compute
+
 def test_compute_refreshes_pose_before_path_submission():
     start = CONTROL.index("async function computePath()")
     end = CONTROL.index("function selectGoal", start)

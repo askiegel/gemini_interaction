@@ -3428,8 +3428,8 @@
 
         if (
             computedPath
-            && Array.isArray(computedPath.points)
-            && computedPath.points.length > 1
+            && Array.isArray(computedPath.poses)
+            && computedPath.poses.length > 1
         ) {
             context.save();
             context.strokeStyle = "#a855f7";
@@ -3441,7 +3441,7 @@
             context.shadowBlur = 8;
             context.beginPath();
 
-            computedPath.points.forEach(
+            computedPath.poses.forEach(
                 function (point, index) {
                     const canvasPoint = mapToCanvas(
                         point,
@@ -3523,9 +3523,7 @@
                 actionInFlight
                 || !planningRunning
                 || !occupancyMap
-                || !latestPose
                 || !selectedGoal
-                || uncertaintyBlocked
             );
         }
     }
@@ -4289,9 +4287,7 @@
         if (
             actionInFlight
             || !planningRunning
-            || !latestPose
             || !selectedGoal
-            || uncertaintyBlocked
         ) {
             return;
         }
@@ -4429,7 +4425,7 @@
                 || path.executed !== false
                 || path.motion_enabled !== false
                 || path.frame_id !== "map"
-                || !Array.isArray(path.points)
+                || !Array.isArray(path.poses)
             ) {
                 throw new Error(
                     "Path response violated the "
