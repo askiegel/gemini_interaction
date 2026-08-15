@@ -104,3 +104,45 @@ def test_final_velocity_must_be_zero():
 
 def test_success_result_is_unambiguous():
     assert "===== SESSION READY =====" in SCRIPT
+
+def test_prepare_starts_complete_platform():
+    assert (
+        '"$PROJECT_ROOT/scripts/start_platform.py"'
+        in SCRIPT
+    )
+    assert "--start" in SCRIPT
+    assert (
+        "===== START COMPLETE COGNITIVE PLATFORM ====="
+        in SCRIPT
+    )
+
+
+def test_complete_pc_platform_is_required():
+    for contract in (
+        'VISION="${VISION:-http://127.0.0.1:8000}"',
+        'RUNTIME="${RUNTIME:-http://127.0.0.1:8770}"',
+        '"$VISION/detections/latest"',
+        '"$RUNTIME/health"',
+        'vision.get("last_error")',
+        'runtime.get("ok")',
+        'runtime.get("runtime_running")',
+    ):
+        assert contract in SCRIPT
+
+
+def test_check_mode_does_not_start_platform():
+    prepare_start = SCRIPT.index(
+        "===== START COMPLETE COGNITIVE PLATFORM ====="
+    )
+    prepare_branch = SCRIPT.rfind(
+        'if [ "$MODE" = "--prepare" ]; then',
+        0,
+        prepare_start,
+    )
+    check_branch = SCRIPT.index(
+        "\nelse\n",
+        prepare_start,
+    )
+
+    assert prepare_branch >= 0
+    assert prepare_start < check_branch

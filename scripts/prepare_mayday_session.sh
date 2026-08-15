@@ -5,7 +5,19 @@ set -o pipefail
 ROBOT="${ROBOT:-http://192.168.68.124:8090}"
 CAMERA="${CAMERA:-http://192.168.68.124:8091}"
 DASHBOARD="${DASHBOARD:-http://127.0.0.1:8765}"
+VISION="${VISION:-http://127.0.0.1:8000}"
+RUNTIME="${RUNTIME:-http://127.0.0.1:8770}"
 MAYDAY="${MAYDAY:-ubuntu@192.168.68.124}"
+
+SCRIPT_DIRECTORY=$(
+    cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &&
+    pwd
+)
+
+PROJECT_ROOT=$(
+    cd -- "$SCRIPT_DIRECTORY/.." &&
+    pwd
+)
 
 MODE="${1:---check}"
 
@@ -47,7 +59,9 @@ cleanup() {
         /tmp/mayday_session_status.json \
         /tmp/mayday_session_camera.jpg \
         /tmp/mayday_session_lidar.json \
-        /tmp/mayday_session_stop.json
+        /tmp/mayday_session_stop.json \
+        /tmp/mayday_session_vision.json \
+        /tmp/mayday_session_runtime.json
 
     if [ "$prepared" = true ]; then
         safe_stop
@@ -68,6 +82,13 @@ if [ "$MODE" = "--prepare" ]; then
     prepared=true
     echo "PASS: Optional runtimes were stopped."
     echo "PASS: Safety zero was requested."
+
+    echo
+    echo "===== START COMPLETE COGNITIVE PLATFORM ====="
+
+    python3         "$PROJECT_ROOT/scripts/start_platform.py"         --start
+
+    echo "PASS: Complete platform startup finished."
 else
     echo
     echo "INFO: Check mode performs no stop requests."
@@ -88,6 +109,14 @@ curl -fsS --connect-timeout 2 --max-time 10 \
     "$DASHBOARD/" \
     >/dev/null
 
+curl -fsS --connect-timeout 2 --max-time 10 \
+    "$VISION/detections/latest" \
+    >/tmp/mayday_session_vision.json
+
+curl -fsS --connect-timeout 2 --max-time 10 \
+    "$RUNTIME/health" \
+    >/tmp/mayday_session_runtime.json
+
 camera_bytes=$(
     wc -c </tmp/mayday_session_camera.jpg
 )
@@ -97,6 +126,41 @@ test "$camera_bytes" -gt 1000
 echo "PASS: Robot Bridge is reachable."
 echo "PASS: Camera is live (${camera_bytes} bytes)."
 echo "PASS: Dashboard is reachable."
+
+python3 - <<'__VERIFY_COMPLETE_PC_PLATFORM_F092__'
+import json
+from pathlib import Path
+
+vision = json.loads(
+    Path("/tmp/mayday_session_vision.json").read_text(
+        encoding="utf-8"
+    )
+)
+
+if vision.get("last_error"):
+    raise SystemExit(
+        "ERROR: Vision reports: "
+        + str(vision["last_error"])
+    )
+
+if vision.get("camera_running") is False:
+    raise SystemExit("ERROR: Vision camera is not running.")
+
+runtime = json.loads(
+    Path("/tmp/mayday_session_runtime.json").read_text(
+        encoding="utf-8"
+    )
+)
+
+if not runtime.get("ok"):
+    raise SystemExit("ERROR: Cognitive Runtime is unhealthy.")
+
+if runtime.get("runtime_running") is False:
+    raise SystemExit("ERROR: Cognitive Runtime is not running.")
+
+print("PASS: Vision Server is available and error-free.")
+print("PASS: Cognitive Runtime is healthy.")
+__VERIFY_COMPLETE_PC_PLATFORM_F092__
 
 echo
 echo "===== VERIFY ROBOT RUNTIME ====="
@@ -317,7 +381,7 @@ fi
 echo
 echo "===== SESSION READY ====="
 echo "Standard ROS is healthy."
-echo "Robot Bridge, camera, dashboard, LiDAR, and speech are available."
+echo "Vision, Cognitive Runtime, dashboard, Robot Bridge, camera, LiDAR, and speech are available."
 echo "Nav2 and SLAM are stopped."
 
 if [ "$MODE" = "--prepare" ]; then
