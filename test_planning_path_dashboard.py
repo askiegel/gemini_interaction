@@ -190,14 +190,13 @@ def test_existing_saved_map_controller_remains_read_only():
 
 
 def test_safety_copy_is_visible():
-    assert (
-        "This panel cannot execute the path"
-        in HTML
-    )
-    assert (
-        "or move Mayday"
-        in HTML
-    )
+    for marker in (
+        "Preview",
+        "the path first.",
+        "one guarded goal within 0.25 m and 15",
+        "STOP MAYDAY cancels the active goal.",
+    ):
+        assert marker in HTML
 
 def test_initializer_proxy_is_fixed():
     start = SERVER.index(

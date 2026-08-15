@@ -1572,6 +1572,22 @@
                     >
                         Compute Selected Path
                     </button>
+                    <button
+                        id="sendMaydayButton"
+                        class="planning-path-button start"
+                        type="button"
+                        disabled
+                    >
+                        Send Mayday — max 0.25 m
+                    </button>
+                    <button
+                        id="stopMaydayButton"
+                        class="planning-path-button stop"
+                        type="button"
+                        disabled
+                    >
+                        STOP MAYDAY
+                    </button>
                 </div>
 
                 <p
@@ -1601,10 +1617,10 @@
                 </div>
 
                 <p class="small-text planning-path-safety">
-                    Visualization only. A map click selects a fixed
-                    map-frame goal. This panel cannot execute the path,
-                    start a controller or navigator, publish velocity,
-                    or move Mayday.
+                    A map click selects a fixed map-frame goal. Preview
+                    the path first. Send Mayday is limited by Robot
+                    Bridge to one guarded goal within 0.25 m and 15
+                    seconds. STOP MAYDAY cancels the active goal.
                 </p>
             </section>
 
@@ -3147,6 +3163,14 @@
         "/dashboard/planning-refresh-localization";
     const COMPUTE_ENDPOINT =
         "/dashboard/planning-compute-path";
+    const NAVIGATION_START_ENDPOINT =
+        "/dashboard/navigation-start";
+    const NAVIGATION_STOP_ENDPOINT =
+        "/dashboard/navigation-stop";
+    const NAVIGATION_INITIALIZE_ENDPOINT =
+        "/dashboard/navigation-initialize-localization";
+    const NAVIGATION_GOAL_ENDPOINT =
+        "/dashboard/navigation-goal";
     const MAP_ENDPOINT = "/dashboard/map";
     const LOCALIZATION_ENDPOINT =
         "/dashboard/localization";
@@ -3159,6 +3183,7 @@
     const INITIALIZE_MAX_ATTEMPTS = 4;
     const POSE_REFRESH_RETRY_DELAY_MS = 250;
     const POSE_REFRESH_MAX_ATTEMPTS = 20;
+    const MAX_NAVIGATION_DISTANCE_METERS = 0.25;
 
     let timer = null;
     let requestInFlight = false;
@@ -3166,6 +3191,8 @@
     let occupancyMap = null;
     let planningRunning = false;
     let planningReady = false;
+    let navigationExecuting = false;
+    let navigationCancelRequested = false;
     let latestPose = null;
     let latestPoseReceivedAt = null;
     let selectedGoal = null;
@@ -3503,6 +3530,10 @@
         const compute = byId(
             "computePlanningPathButton"
         );
+        const send = byId("sendMaydayButton");
+        const emergencyStop = byId(
+            "stopMaydayButton"
+        );
 
         if (start) {
             start.disabled = (
@@ -3524,6 +3555,30 @@
                 || !planningRunning
                 || !occupancyMap
                 || !selectedGoal
+            );
+        }
+
+        if (send) {
+            const pathLength = Number(
+                computedPath
+                && computedPath.length_meters
+            );
+
+            send.disabled = (
+                actionInFlight
+                || navigationExecuting
+                || !planningRunning
+                || !selectedGoal
+                || !computedPath
+                || !Number.isFinite(pathLength)
+                || pathLength
+                    > MAX_NAVIGATION_DISTANCE_METERS
+            );
+        }
+
+        if (emergencyStop) {
+            emergencyStop.disabled = (
+                !navigationExecuting
             );
         }
     }
@@ -4468,6 +4523,359 @@
         }
     }
 
+
+    function navigationWasStarted(result) {
+        const navigation = (
+            result
+            && result.payload
+            && result.payload.navigation
+        );
+
+        return Boolean(
+            result
+            && result.response
+            && result.response.ok
+            && result.payload
+            && result.payload.ok
+            && navigation
+            && navigation.running === true
+            && navigation.owned === true
+            && navigation.goal_submission_enabled === true
+            && navigation.controller_enabled === true
+            && navigation.navigator_enabled === true
+        );
+    }
+
+    function navigationInitializationSucceeded(result) {
+        const initialization = (
+            result
+            && result.payload
+            && result.payload.initialization
+        );
+
+        return Boolean(
+            result
+            && result.response
+            && result.response.ok
+            && result.payload
+            && result.payload.ok
+            && initialization
+            && initialization
+                .global_localization_requested === true
+            && initialization
+                .nomotion_updates_requested === 20
+            && initialization
+                .stationary_required === true
+            && initialization
+                .initial_pose_supplied === false
+            && initialization
+                .pose_published === false
+            && initialization
+                .path_computed === false
+            && initialization
+                .path_executed === false
+            && initialization
+                .navigation_goal_executed === false
+        );
+    }
+
+    async function stopMayday() {
+        navigationCancelRequested = true;
+        setState("Stopping", "busy");
+        setOverlay("Stopping Mayday", "busy");
+        setMessage(
+            "Cancelling the active navigation goal "
+            + "and stopping guarded navigation...",
+            true
+        );
+
+        try {
+            await fetchJson(
+                NAVIGATION_STOP_ENDPOINT,
+                {
+                    method: "POST",
+                    headers: {
+                        "Content-Type":
+                            "application/json",
+                    },
+                    body: "{}",
+                }
+            );
+        } finally {
+            navigationExecuting = false;
+            planningRunning = false;
+            planningReady = false;
+            actionInFlight = false;
+            updateButtons();
+        }
+    }
+
+    async function sendMayday() {
+        const pathLength = Number(
+            computedPath
+            && computedPath.length_meters
+        );
+
+        if (
+            actionInFlight
+            || navigationExecuting
+            || !planningRunning
+            || !selectedGoal
+            || !computedPath
+            || !Number.isFinite(pathLength)
+            || pathLength > MAX_NAVIGATION_DISTANCE_METERS
+        ) {
+            return;
+        }
+
+        const executionGoal = {
+            x: selectedGoal.x,
+            y: selectedGoal.y,
+            yaw: selectedGoal.yaw,
+        };
+
+        const confirmed = window.confirm(
+            "Send Mayday to the selected goal? "
+            + "This will move the robot up to 0.25 m. "
+            + "Keep STOP MAYDAY available."
+        );
+
+        if (!confirmed) return;
+
+        actionInFlight = true;
+        navigationExecuting = true;
+        navigationCancelRequested = false;
+        updateButtons();
+
+        setState("Arming", "busy");
+        setOverlay("Preparing guarded navigation", "busy");
+        setMessage(
+            "Stopping read-only planning before "
+            + "starting guarded navigation...",
+            false
+        );
+
+        try {
+            const planningStop = await fetchJson(
+                STOP_ENDPOINT,
+                {
+                    method: "POST",
+                    headers: {
+                        "Content-Type":
+                            "application/json",
+                    },
+                    body: "{}",
+                }
+            );
+
+            if (
+                !planningStop.response.ok
+                || !planningStop.payload.ok
+            ) {
+                throw new Error(
+                    planningStop.payload.error
+                    || "Planning could not be stopped."
+                );
+            }
+
+            planningRunning = false;
+            planningReady = false;
+
+            if (navigationCancelRequested) {
+                throw new Error("Navigation was cancelled.");
+            }
+
+            const navigationStart = await fetchJson(
+                NAVIGATION_START_ENDPOINT,
+                {
+                    method: "POST",
+                    headers: {
+                        "Content-Type":
+                            "application/json",
+                    },
+                    body: "{}",
+                }
+            );
+
+            if (!navigationWasStarted(navigationStart)) {
+                throw new Error(
+                    navigationStart.payload.error
+                    || "Guarded navigation failed to start."
+                );
+            }
+
+            setState("Localizing", "busy");
+            setOverlay(
+                "Initializing navigation pose",
+                "busy"
+            );
+            setMessage(
+                "Guarded navigation started. Waiting for "
+                + "Nav2 lifecycle services...",
+                false
+            );
+
+            await wait(INITIALIZE_DISCOVERY_DELAY_MS);
+
+            let initialization = null;
+            let initializationError = (
+                "Navigation localization "
+                + "initialization failed."
+            );
+
+            for (
+                let attempt = 1;
+                attempt <= INITIALIZE_MAX_ATTEMPTS;
+                attempt += 1
+            ) {
+                if (navigationCancelRequested) {
+                    throw new Error(
+                        "Navigation was cancelled."
+                    );
+                }
+
+                try {
+                    initialization = await fetchJson(
+                        NAVIGATION_INITIALIZE_ENDPOINT,
+                        {
+                            method: "POST",
+                            headers: {
+                                "Content-Type":
+                                    "application/json",
+                            },
+                            body: "{}",
+                        }
+                    );
+
+                    if (
+                        navigationInitializationSucceeded(
+                            initialization
+                        )
+                    ) {
+                        break;
+                    }
+
+                    initializationError = (
+                        initialization.payload.error
+                        || initializationError
+                    );
+                } catch (error) {
+                    initializationError = (
+                        error.message
+                        || initializationError
+                    );
+                }
+
+                if (
+                    attempt < INITIALIZE_MAX_ATTEMPTS
+                ) {
+                    await wait(
+                        INITIALIZE_RETRY_DELAY_MS
+                    );
+                }
+            }
+
+            if (
+                !navigationInitializationSucceeded(
+                    initialization
+                )
+            ) {
+                throw new Error(initializationError);
+            }
+
+            if (navigationCancelRequested) {
+                throw new Error("Navigation was cancelled.");
+            }
+
+            setState("Moving", "busy");
+            setOverlay("Mayday navigating", "busy");
+            setMessage(
+                "Executing one bounded guarded goal. "
+                + "STOP MAYDAY remains available.",
+                false
+            );
+
+            const goalResult = await fetchJson(
+                NAVIGATION_GOAL_ENDPOINT,
+                {
+                    method: "POST",
+                    headers: {
+                        "Content-Type":
+                            "application/json",
+                    },
+                    body: JSON.stringify({
+                        goal_x: executionGoal.x,
+                        goal_y: executionGoal.y,
+                        goal_yaw: executionGoal.yaw,
+                    }),
+                }
+            );
+
+            const result = (
+                goalResult.payload
+                && goalResult.payload.result
+            );
+
+            if (
+                !goalResult.response.ok
+                || !goalResult.payload.ok
+                || !result
+                || result.status
+                    !== "NAVIGATION_SUCCEEDED"
+                || result.executed !== true
+                || result.bounded !== true
+                || Number(
+                    result.requested_distance_meters
+                ) > MAX_NAVIGATION_DISTANCE_METERS
+            ) {
+                throw new Error(
+                    goalResult.payload.error
+                    || "Guarded navigation did not succeed."
+                );
+            }
+
+            setState("Arrived", "ready");
+            setOverlay("Goal reached", "ready");
+            setMessage(
+                "Mayday reached the bounded selected goal.",
+                false
+            );
+        } catch (error) {
+            setState("Stopped", "error");
+            setOverlay("Navigation stopped", "error");
+            setMessage(error.message, true);
+        } finally {
+            try {
+                await fetchJson(
+                    NAVIGATION_STOP_ENDPOINT,
+                    {
+                        method: "POST",
+                        headers: {
+                            "Content-Type":
+                                "application/json",
+                        },
+                        body: "{}",
+                    }
+                );
+            } catch (stopError) {
+                // Robot Bridge STOP remains independently available.
+            }
+
+            navigationExecuting = false;
+            navigationCancelRequested = false;
+            planningRunning = false;
+            planningReady = false;
+            actionInFlight = false;
+            latestPose = null;
+            latestPoseReceivedAt = null;
+            selectedGoal = null;
+            computedPath = null;
+            uncertaintyBlocked = true;
+            drawPath();
+            updateButtons();
+        }
+    }
+
     function selectGoal(event) {
         if (!planningRunning || actionInFlight) {
             return;
@@ -4539,8 +4947,19 @@
         const compute = byId(
             "computePlanningPathButton"
         );
+        const send = byId("sendMaydayButton");
+        const emergencyStop = byId(
+            "stopMaydayButton"
+        );
 
-        if (!canvas || !start || !stop || !compute) {
+        if (
+            !canvas
+            || !start
+            || !stop
+            || !compute
+            || !send
+            || !emergencyStop
+        ) {
             return;
         }
 
@@ -4567,6 +4986,16 @@
         compute.addEventListener(
             "click",
             computePath
+        );
+
+        send.addEventListener(
+            "click",
+            sendMayday
+        );
+
+        emergencyStop.addEventListener(
+            "click",
+            stopMayday
         );
 
         refresh();

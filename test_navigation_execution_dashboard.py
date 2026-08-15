@@ -5,6 +5,9 @@ ROOT = Path(__file__).resolve().parent
 SERVER = (
     ROOT / "voice_relay/server.py"
 ).read_text(encoding="utf-8")
+HTML = (
+    ROOT / "voice_relay/index.html"
+).read_text(encoding="utf-8")
 
 
 def method(name, next_name):
@@ -136,3 +139,123 @@ def test_proxy_does_not_expand_navigation_limits():
         "behavior_tree",
     ):
         assert marker not in source
+
+
+def test_send_mayday_controls_exist():
+    for identifier in (
+        "sendMaydayButton",
+        "stopMaydayButton",
+    ):
+        assert HTML.count(f'id="{identifier}"') == 1
+
+    assert "Send Mayday — max 0.25 m" in HTML
+    assert "STOP MAYDAY" in HTML
+
+
+def test_send_mayday_uses_fixed_dashboard_routes():
+    for route in (
+        "/dashboard/navigation-start",
+        "/dashboard/navigation-stop",
+        "/dashboard/navigation-initialize-localization",
+        "/dashboard/navigation-goal",
+    ):
+        assert f'"{route}"' in HTML
+
+
+def test_send_requires_preview_within_fixed_limit():
+    assert (
+        "const MAX_NAVIGATION_DISTANCE_METERS = 0.25"
+        in HTML
+    )
+    assert "function sendMayday()" in HTML
+    assert (
+        "pathLength > MAX_NAVIGATION_DISTANCE_METERS"
+        in HTML
+    )
+    assert "!computedPath" in HTML
+    assert "!selectedGoal" in HTML
+
+
+def test_send_stops_planning_before_navigation():
+    start = HTML.index("async function sendMayday()")
+    end = HTML.index(
+        "function selectGoal",
+        start,
+    )
+    source = HTML[start:end]
+
+    planning_stop = source.index("STOP_ENDPOINT")
+    navigation_start = source.index(
+        "NAVIGATION_START_ENDPOINT"
+    )
+    initialization = source.index(
+        "NAVIGATION_INITIALIZE_ENDPOINT"
+    )
+    goal = source.index("NAVIGATION_GOAL_ENDPOINT")
+
+    assert (
+        planning_stop
+        < navigation_start
+        < initialization
+        < goal
+    )
+
+
+def test_navigation_goal_payload_is_fixed():
+    start = HTML.index("async function sendMayday()")
+    end = HTML.index(
+        "function selectGoal",
+        start,
+    )
+    source = HTML[start:end]
+
+    for marker in (
+        "goal_x: executionGoal.x",
+        "goal_y: executionGoal.y",
+        "goal_yaw: executionGoal.yaw",
+    ):
+        assert marker in source
+
+    for forbidden in (
+        "service:",
+        "topic:",
+        "frame:",
+        "planner_id:",
+        "controller:",
+        "navigator:",
+        "cmd_vel:",
+        "linear_x:",
+        "angular_z:",
+    ):
+        assert forbidden not in source
+
+
+def test_navigation_always_stops():
+    start = HTML.index("async function sendMayday()")
+    end = HTML.index(
+        "function selectGoal",
+        start,
+    )
+    source = HTML[start:end]
+
+    finally_start = source.index("} finally {")
+    finally_source = source[finally_start:]
+
+    assert "NAVIGATION_STOP_ENDPOINT" in finally_source
+    assert "navigationExecuting = false" in finally_source
+    assert "planningRunning = false" in finally_source
+
+
+def test_emergency_stop_remains_separate():
+    assert "async function stopMayday()" in HTML
+    assert (
+        'emergencyStop.addEventListener(\n'
+        '            "click",\n'
+        '            stopMayday'
+        in HTML
+    )
+    assert (
+        "emergencyStop.disabled = (\n"
+        "                !navigationExecuting"
+        in HTML
+    )
