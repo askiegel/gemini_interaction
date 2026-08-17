@@ -191,10 +191,11 @@ def test_existing_saved_map_controller_remains_read_only():
 
 def test_safety_copy_is_visible():
     for marker in (
-        "Preview",
-        "the path first.",
-        "one guarded goal within 0.25 m and 15",
-        "STOP MAYDAY cancels the active goal.",
+        "Click a free map location, then press GO.",
+        "Robot Bridge verifies localization",
+        "guarded goal within 0.25 m and 15 seconds",
+        "STOP",
+        "MAYDAY immediately cancels the active goal.",
     ):
         assert marker in HTML
 
@@ -502,7 +503,7 @@ def test_initializer_failure_stops_planning():
 
 def test_planning_start_waits_for_amcl_discovery():
     assert (
-        "const INITIALIZE_DISCOVERY_DELAY_MS = 40000"
+        "const INITIALIZE_DISCOVERY_DELAY_MS = 2000"
         in CONTROL
     )
     assert (
@@ -522,7 +523,7 @@ def test_planning_start_waits_for_amcl_discovery():
 
 def test_planning_initializer_retries_are_bounded():
     assert (
-        "const INITIALIZE_MAX_ATTEMPTS = 4"
+        "const INITIALIZE_MAX_ATTEMPTS = 10"
         in CONTROL
     )
     assert (
@@ -783,3 +784,91 @@ def test_pose_refresh_adds_no_motion_or_navigation_execution():
 
     for marker in forbidden:
         assert marker not in CONTROL
+
+
+def test_normal_navigation_is_select_then_go():
+    dashboard = Path("voice_relay/index.html").read_text(
+        encoding="utf-8"
+    )
+
+    assert "Guarded Map Navigation" in dashboard
+    assert "GO — max 0.25 m" in dashboard
+    assert (
+        "Click a free map location, then press GO."
+        in dashboard
+    )
+
+    button_start = dashboard.index(
+        "function updateButtons()"
+    )
+    button_end = dashboard.index(
+        "function renderUncertainty",
+        button_start,
+    )
+    buttons = dashboard[button_start:button_end]
+
+    assert "|| !occupancyMap" in buttons
+    assert "|| !selectedGoal" in buttons
+
+    send_start = dashboard.index(
+        "async function sendMayday()"
+    )
+    send_end = dashboard.index(
+        "function selectGoal",
+        send_start,
+    )
+    send = dashboard[send_start:send_end]
+
+    for obsolete_guard in (
+        "|| !planningRunning",
+        "|| !computedPath",
+        "pathLength > MAX_NAVIGATION_DISTANCE_METERS",
+    ):
+        assert obsolete_guard not in send
+
+    assert send.index("NAVIGATION_START_ENDPOINT") < send.index(
+        "NAVIGATION_INITIALIZE_ENDPOINT"
+    )
+    assert send.index("NAVIGATION_INITIALIZE_ENDPOINT") < send.index(
+        "NAVIGATION_GOAL_ENDPOINT"
+    )
+
+    select_start = dashboard.index(
+        "function selectGoal"
+    )
+    select = dashboard[
+        select_start:select_start + 1400
+    ]
+
+    assert "!planningRunning" not in select
+    assert "actionInFlight || navigationExecuting" in select
+
+
+def test_direct_go_uses_short_bounded_initialization_waits():
+    assert (
+        "const INITIALIZE_DISCOVERY_DELAY_MS = 2000;"
+        in CONTROL
+    )
+    assert (
+        "const INITIALIZE_RETRY_DELAY_MS = 2000;"
+        in CONTROL
+    )
+    assert (
+        "const INITIALIZE_MAX_ATTEMPTS = 10;"
+        in CONTROL
+    )
+
+
+def test_planning_buttons_are_hidden_diagnostics():
+    dashboard = Path("voice_relay/index.html").read_text(
+        encoding="utf-8"
+    )
+
+    for button_id in (
+        "startPlanningButton",
+        "stopPlanningButton",
+        "computePlanningPathButton",
+    ):
+        start = dashboard.index(f'id="{button_id}"')
+        end = dashboard.index(">", start)
+        assert "hidden" in dashboard[start:end]

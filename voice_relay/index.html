@@ -1538,7 +1538,7 @@
 
             <section class="planning-path-controls">
                 <div class="planning-path-heading">
-                    <h3>Read-Only Path Planning</h3>
+                    <h3>Guarded Map Navigation</h3>
                     <strong
                         id="planningPathState"
                         class="planning-path-state stopped"
@@ -1553,6 +1553,7 @@
                         id="startPlanningButton"
                         class="planning-path-button start"
                         type="button"
+                        hidden
                     >
                         Start Planning
                     </button>
@@ -1560,6 +1561,7 @@
                         id="stopPlanningButton"
                         class="planning-path-button stop"
                         type="button"
+                        hidden
                         disabled
                     >
                         Stop Planning
@@ -1568,6 +1570,7 @@
                         id="computePlanningPathButton"
                         class="planning-path-button compute"
                         type="button"
+                        hidden
                         disabled
                     >
                         Compute Selected Path
@@ -1578,7 +1581,7 @@
                         type="button"
                         disabled
                     >
-                        Send Mayday — max 0.25 m
+                        GO — max 0.25 m
                     </button>
                     <button
                         id="stopMaydayButton"
@@ -1617,10 +1620,10 @@
                 </div>
 
                 <p class="small-text planning-path-safety">
-                    A map click selects a fixed map-frame goal. Preview
-                    the path first. Send Mayday is limited by Robot
-                    Bridge to one guarded goal within 0.25 m and 15
-                    seconds. STOP MAYDAY cancels the active goal.
+                    Click a free map location, then press GO.
+                    Robot Bridge verifies localization and executes one
+                    guarded goal within 0.25 m and 15 seconds. STOP
+                    MAYDAY immediately cancels the active goal.
                 </p>
             </section>
 
@@ -3178,9 +3181,9 @@
     const MAP_PADDING = 32;
     const MAX_POSITION_STD_METERS = 0.40;
     const MAX_YAW_STD_RADIANS = 0.80;
-    const INITIALIZE_DISCOVERY_DELAY_MS = 40000;
-    const INITIALIZE_RETRY_DELAY_MS = 10000;
-    const INITIALIZE_MAX_ATTEMPTS = 4;
+    const INITIALIZE_DISCOVERY_DELAY_MS = 2000;
+    const INITIALIZE_RETRY_DELAY_MS = 2000;
+    const INITIALIZE_MAX_ATTEMPTS = 10;
     const POSE_REFRESH_RETRY_DELAY_MS = 250;
     const POSE_REFRESH_MAX_ATTEMPTS = 20;
     const MAX_NAVIGATION_DISTANCE_METERS = 0.25;
@@ -3559,20 +3562,11 @@
         }
 
         if (send) {
-            const pathLength = Number(
-                computedPath
-                && computedPath.length_meters
-            );
-
             send.disabled = (
                 actionInFlight
                 || navigationExecuting
-                || !planningRunning
+                || !occupancyMap
                 || !selectedGoal
-                || !computedPath
-                || !Number.isFinite(pathLength)
-                || pathLength
-                    > MAX_NAVIGATION_DISTANCE_METERS
             );
         }
 
@@ -3661,12 +3655,16 @@
             );
             planningReady = false;
             latestPose = null;
-            selectedGoal = null;
             uncertaintyBlocked = true;
-            setText("planningSelectedGoal", "—");
             setText("planningPoseUncertainty", "—");
-            setText("planningReadiness", "Stopped");
-            clearPath();
+            setText(
+                "planningReadiness",
+                selectedGoal
+                    ? "Destination selected — press GO"
+                    : "Select a destination"
+            );
+            computedPath = null;
+            drawPath();
         }
 
         updateButtons();
@@ -4611,19 +4609,11 @@
     }
 
     async function sendMayday() {
-        const pathLength = Number(
-            computedPath
-            && computedPath.length_meters
-        );
-
         if (
             actionInFlight
             || navigationExecuting
-            || !planningRunning
+            || !occupancyMap
             || !selectedGoal
-            || !computedPath
-            || !Number.isFinite(pathLength)
-            || pathLength > MAX_NAVIGATION_DISTANCE_METERS
         ) {
             return;
         }
@@ -4635,8 +4625,8 @@
         };
 
         const confirmed = window.confirm(
-            "Send Mayday to the selected goal? "
-            + "This will move the robot up to 0.25 m. "
+            "Send Mayday directly to the selected goal? "
+            + "Guarded navigation will plan and move up to 0.25 m. "
             + "Keep STOP MAYDAY available."
         );
 
@@ -4650,8 +4640,8 @@
         setState("Arming", "busy");
         setOverlay("Preparing guarded navigation", "busy");
         setMessage(
-            "Stopping read-only planning before "
-            + "starting guarded navigation...",
+            "Starting guarded navigation for the selected "
+            + "destination...",
             false
         );
 
@@ -4877,7 +4867,7 @@
     }
 
     function selectGoal(event) {
-        if (!planningRunning || actionInFlight) {
+        if (actionInFlight || navigationExecuting) {
             return;
         }
 
@@ -4915,7 +4905,7 @@
             `${goal.x.toFixed(2)}, `
             + `${goal.y.toFixed(2)} m`
         );
-        setText("planningPathSummary", "Not computed");
+        setText("planningPathSummary", "Computed automatically");
 
         drawPath();
 
