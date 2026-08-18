@@ -193,7 +193,7 @@ def test_safety_copy_is_visible():
     for marker in (
         "Click a free map location, then press GO.",
         "Robot Bridge verifies localization",
-        "guarded goal within 0.25 m and 15 seconds",
+        "guarded goal within 0.50 m and 15 seconds",
         "STOP",
         "MAYDAY immediately cancels the active goal.",
     ):
@@ -792,7 +792,7 @@ def test_normal_navigation_is_select_then_go():
     )
 
     assert "Guarded Map Navigation" in dashboard
-    assert "GO — max 0.25 m" in dashboard
+    assert "GO — max 0.50 m" in dashboard
     assert (
         "Click a free map location, then press GO."
         in dashboard

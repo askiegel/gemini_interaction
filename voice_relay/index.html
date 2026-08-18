@@ -1581,7 +1581,7 @@
                         type="button"
                         disabled
                     >
-                        GO — max 0.25 m
+                        GO — max 0.50 m
                     </button>
                     <button
                         id="stopMaydayButton"
@@ -1622,7 +1622,7 @@
                 <p class="small-text planning-path-safety">
                     Click a free map location, then press GO.
                     Robot Bridge verifies localization and executes one
-                    guarded goal within 0.25 m and 15 seconds. STOP
+                    guarded goal within 0.50 m and 15 seconds. STOP
                     MAYDAY immediately cancels the active goal.
                 </p>
             </section>
@@ -3186,7 +3186,7 @@
     const INITIALIZE_MAX_ATTEMPTS = 10;
     const POSE_REFRESH_RETRY_DELAY_MS = 250;
     const POSE_REFRESH_MAX_ATTEMPTS = 20;
-    const MAX_NAVIGATION_DISTANCE_METERS = 0.25;
+    const MAX_NAVIGATION_DISTANCE_METERS = 0.50;
 
     let timer = null;
     let requestInFlight = false;
@@ -4626,7 +4626,7 @@
 
         const confirmed = window.confirm(
             "Send Mayday directly to the selected goal? "
-            + "Guarded navigation will plan and move up to 0.25 m. "
+            + "Guarded navigation will plan and move up to 0.50 m. "
             + "Keep STOP MAYDAY available."
         );
 
