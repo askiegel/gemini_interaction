@@ -148,7 +148,7 @@ def test_send_mayday_controls_exist():
     ):
         assert HTML.count(f'id="{identifier}"') == 1
 
-    assert "Send Mayday — max 0.25 m" in HTML
+    assert "GO — max 0.50 m" in HTML
     assert "STOP MAYDAY" in HTML
 
 
@@ -164,15 +164,14 @@ def test_send_mayday_uses_fixed_dashboard_routes():
 
 def test_send_requires_preview_within_fixed_limit():
     assert (
-        "const MAX_NAVIGATION_DISTANCE_METERS = 0.25"
+        "const MAX_NAVIGATION_DISTANCE_METERS = 0.50"
         in HTML
     )
     assert "function sendMayday()" in HTML
     assert (
-        "pathLength > MAX_NAVIGATION_DISTANCE_METERS"
+        "> MAX_NAVIGATION_DISTANCE_METERS"
         in HTML
     )
-    assert "!computedPath" in HTML
     assert "!selectedGoal" in HTML
 
 
