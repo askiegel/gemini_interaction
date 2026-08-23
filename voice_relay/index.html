@@ -914,8 +914,9 @@
                     <h2>Live Mapping Map</h2>
                     <p>
                         Cartographer occupancy updates while supervised
-                        mapping is active. This transient map is not the
-                        navigation map until separately saved and reviewed.
+                        mapping is active. Click an exactly free nearby point
+                        to stage one guarded live-mapping navigation goal.
+                        The validated saved map remains separate.
                     </p>
                 </div>
 
@@ -936,12 +937,56 @@
                     aria-label="Live Cartographer occupancy map"
                 ></canvas>
 
+                <canvas
+                    id="liveMappingGoalCanvas"
+                    width="1000"
+                    height="760"
+                    aria-label="Guarded live-map target selection overlay"
+                ></canvas>
+
                 <div
                     id="liveMappingMessage"
                     class="live-mapping-message"
                 >
                     Start supervised mapping to build a live map.
                 </div>
+            </div>
+
+            <div class="live-mapping-goal-panel">
+                <div class="live-mapping-goal-copy">
+                    <strong>Guarded live-map target</strong>
+                    <span id="liveMappingGoalReadout">
+                        No target selected
+                    </span>
+                    <span id="liveMappingGoalDistance">—</span>
+                </div>
+
+                <div class="live-mapping-goal-actions">
+                    <button
+                        id="liveMappingClearGoalButton"
+                        type="button"
+                        disabled
+                    >
+                        Clear target
+                    </button>
+
+                    <button
+                        id="liveMappingGoButton"
+                        type="button"
+                        disabled
+                    >
+                        GO — max 0.50 m
+                    </button>
+                </div>
+
+                <p
+                    id="liveMappingGoalMessage"
+                    class="live-mapping-goal-message"
+                    aria-live="polite"
+                >
+                    Click an exactly free cell on the live map.
+                    Selection alone never moves Mayday.
+                </p>
             </div>
 
             <div
@@ -961,7 +1006,7 @@
                     Occupied probability
                 </span>
                 <span>Orientation: MAP +Y</span>
-                <span>Transient and read-only</span>
+                <span>Map display read-only; GO is guarded</span>
             </div>
         </article>
 

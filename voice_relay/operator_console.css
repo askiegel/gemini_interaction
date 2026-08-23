@@ -2454,3 +2454,69 @@ button.candidate-inventory-item:focus-visible {
         grid-column: auto;
     }
 }
+
+
+/* Guarded live-mapping click-to-go overlay */
+
+.live-mapping-stage {
+    position: relative;
+}
+
+#liveMappingGoalCanvas {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    z-index: 3;
+    cursor: crosshair;
+    background: transparent;
+}
+
+.live-mapping-goal-panel {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    flex-wrap: wrap;
+    margin-top: 14px;
+    padding: 14px 16px;
+    border: 1px solid rgba(148, 163, 184, 0.28);
+    border-radius: 12px;
+    background: rgba(15, 23, 42, 0.68);
+}
+
+.live-mapping-goal-copy {
+    display: grid;
+    gap: 4px;
+    min-width: 240px;
+}
+
+.live-mapping-goal-copy strong {
+    font-size: 0.95rem;
+}
+
+#liveMappingGoalReadout,
+#liveMappingGoalDistance {
+    font-variant-numeric: tabular-nums;
+}
+
+.live-mapping-goal-actions {
+    display: flex;
+    gap: 10px;
+    flex-wrap: wrap;
+}
+
+.live-mapping-goal-actions button {
+    min-height: 42px;
+}
+
+#liveMappingGoButton {
+    font-weight: 800;
+}
+
+.live-mapping-goal-message {
+    width: 100%;
+    margin: 0;
+    font-size: 0.9rem;
+    line-height: 1.45;
+}

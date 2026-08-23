@@ -5485,3 +5485,1076 @@
         initialize();
     }
 })();
+
+
+/* Guarded live-mapping click-to-go */
+(function () {
+    "use strict";
+
+    const MAP_ENDPOINT =
+        "/dashboard/mapping-map";
+    const POSE_ENDPOINT =
+        "/dashboard/mapping-pose";
+    const START_ENDPOINT =
+        "/dashboard/mapping-navigation-start";
+    const GOAL_ENDPOINT =
+        "/dashboard/mapping-navigation-goal";
+    const STOP_ENDPOINT =
+        "/dashboard/mapping-navigation-stop";
+
+    const MAX_LIVE_MAPPING_GOAL_DISTANCE_METERS = 0.50;
+    const MIN_LIVE_MAPPING_GOAL_DISTANCE_METERS = 0.03;
+    const MAX_MAPPING_POSE_AGE_SECONDS = 1.0;
+    const NAVIGATION_START_SETTLE_MS = 5000;
+    const SELECTED_GOAL_REFRESH_MS = 1500;
+    const MAP_PADDING_PIXELS = 32;
+
+    let selectedLiveGoal = null;
+    let latestLiveMap = null;
+    let latestLivePose = null;
+    let goalInFlight = false;
+    let refreshTimer = null;
+
+    function byId(id) {
+        return document.getElementById(id);
+    }
+
+    function perceptionIsVisible() {
+        const page = byId("perceptionPage");
+
+        return Boolean(
+            page
+            && !page.hidden
+            && page.classList.contains("active")
+        );
+    }
+
+    function sleep(milliseconds) {
+        return new Promise(function (resolve) {
+            window.setTimeout(resolve, milliseconds);
+        });
+    }
+
+    function setGoalMessage(message, isError) {
+        const element = byId("liveMappingGoalMessage");
+
+        if (!element) return;
+
+        element.textContent = message;
+        element.dataset.state = isError ? "error" : "normal";
+    }
+
+    function setGoalUi() {
+        const readout = byId("liveMappingGoalReadout");
+        const distance = byId("liveMappingGoalDistance");
+        const go = byId("liveMappingGoButton");
+        const clear = byId("liveMappingClearGoalButton");
+
+        if (readout) {
+            readout.textContent = selectedLiveGoal
+                ? (
+                    `Target: ${selectedLiveGoal.x.toFixed(3)}, `
+                    + `${selectedLiveGoal.y.toFixed(3)} m`
+                )
+                : "No target selected";
+        }
+
+        if (distance) {
+            distance.textContent = selectedLiveGoal
+                ? (
+                    `Distance: `
+                    + `${selectedLiveGoal.distance.toFixed(3)} m`
+                )
+                : "—";
+        }
+
+        if (go) {
+            go.disabled = Boolean(
+                goalInFlight
+                || !selectedLiveGoal
+            );
+
+            go.textContent = goalInFlight
+                ? "GO running…"
+                : "GO — max 0.50 m";
+        }
+
+        if (clear) {
+            clear.disabled = Boolean(
+                goalInFlight
+                || !selectedLiveGoal
+            );
+        }
+    }
+
+    async function fetchJson(url, options) {
+        const response = await fetch(
+            url,
+            Object.assign(
+                {cache: "no-store"},
+                options || {},
+            ),
+        );
+
+        let payload = null;
+
+        try {
+            payload = await response.json();
+        } catch (error) {
+            throw new Error(
+                `Invalid JSON from ${url}.`
+            );
+        }
+
+        if (!response.ok || !payload || !payload.ok) {
+            throw new Error(
+                (
+                    payload
+                    && (
+                        payload.error
+                        || (
+                            payload.telemetry
+                            && payload.telemetry.error
+                        )
+                    )
+                )
+                || `${url} returned HTTP ${response.status}.`
+            );
+        }
+
+        return payload;
+    }
+
+    async function fetchLiveState() {
+        const results = await Promise.all([
+            fetchJson(MAP_ENDPOINT),
+            fetchJson(POSE_ENDPOINT),
+        ]);
+
+        const mapPayload = results[0];
+        const posePayload = results[1];
+
+        if (
+            mapPayload.runtime_active !== true
+            || mapPayload.read_only !== true
+            || mapPayload.authoritative !== false
+            || !mapPayload.telemetry
+            || mapPayload.telemetry.available !== true
+            || mapPayload.telemetry.status !== "READY"
+            || !mapPayload.telemetry.map
+        ) {
+            throw new Error(
+                "Live Cartographer map is not ready."
+            );
+        }
+
+        const occupancyMap = mapPayload.telemetry.map;
+
+        if (
+            occupancyMap.frame_id !== "map"
+            || occupancyMap.encoding
+                !== "ros_occupancy_probabilities"
+            || !Array.isArray(occupancyMap.cells)
+        ) {
+            throw new Error(
+                "Live Cartographer map safety schema is invalid."
+            );
+        }
+
+        if (
+            posePayload.runtime_active !== true
+            || !posePayload.telemetry
+            || posePayload.telemetry.available !== true
+            || posePayload.telemetry.status !== "READY"
+            || !posePayload.telemetry.pose
+        ) {
+            throw new Error(
+                "Fresh Cartographer robot pose is unavailable."
+            );
+        }
+
+        const poseTelemetry = posePayload.telemetry;
+        const pose = poseTelemetry.pose;
+        const age = Number(poseTelemetry.age_seconds);
+
+        if (
+            pose.frame_id !== "map"
+            || pose.source_frame_id !== "base_link"
+            || !Number.isFinite(age)
+            || age > MAX_MAPPING_POSE_AGE_SECONDS
+        ) {
+            throw new Error(
+                "Cartographer robot pose is stale or invalid."
+            );
+        }
+
+        latestLiveMap = occupancyMap;
+        latestLivePose = poseTelemetry;
+
+        return {
+            map: occupancyMap,
+            poseTelemetry,
+        };
+    }
+
+    function mapGeometry(occupancyMap) {
+        const canvas = byId("liveMappingGoalCanvas");
+
+        if (!canvas) {
+            throw new Error(
+                "Live mapping target overlay is unavailable."
+            );
+        }
+
+        const width = Math.max(320, canvas.clientWidth);
+        const height = Math.max(420, canvas.clientHeight);
+        const sourceWidth = Number(occupancyMap.width);
+        const sourceHeight = Number(occupancyMap.height);
+
+        const scale = Math.min(
+            (
+                width - MAP_PADDING_PIXELS * 2
+            ) / sourceWidth,
+            (
+                height - MAP_PADDING_PIXELS * 2
+            ) / sourceHeight,
+        );
+
+        const drawWidth = sourceWidth * scale;
+        const drawHeight = sourceHeight * scale;
+
+        return {
+            canvas,
+            width,
+            height,
+            sourceWidth,
+            sourceHeight,
+            scale,
+            drawWidth,
+            drawHeight,
+            drawX: (width - drawWidth) / 2,
+            drawY: (height - drawHeight) / 2,
+        };
+    }
+
+    function resizeOverlay() {
+        const canvas = byId("liveMappingGoalCanvas");
+
+        if (!canvas) return null;
+
+        const ratio = window.devicePixelRatio || 1;
+        const width = Math.max(320, canvas.clientWidth);
+        const height = Math.max(420, canvas.clientHeight);
+        const pixelWidth = Math.round(width * ratio);
+        const pixelHeight = Math.round(height * ratio);
+
+        if (
+            canvas.width !== pixelWidth
+            || canvas.height !== pixelHeight
+        ) {
+            canvas.width = pixelWidth;
+            canvas.height = pixelHeight;
+        }
+
+        const context = canvas.getContext("2d");
+        context.setTransform(
+            ratio,
+            0,
+            0,
+            ratio,
+            0,
+            0,
+        );
+
+        return {
+            context,
+            width,
+            height,
+        };
+    }
+
+    function poseYaw(pose) {
+        const q = pose.orientation;
+
+        const x = Number(q.x);
+        const y = Number(q.y);
+        const z = Number(q.z);
+        const w = Number(q.w);
+
+        return Math.atan2(
+            2 * (w * z + x * y),
+            1 - 2 * (y * y + z * z),
+        );
+    }
+
+    function worldToGrid(occupancyMap, x, y) {
+        const origin = occupancyMap.origin;
+        const resolution = Number(
+            occupancyMap.resolution
+        );
+
+        const yaw = Number(origin.yaw || 0);
+        const cosine = Math.cos(yaw);
+        const sine = Math.sin(yaw);
+
+        const dx = x - Number(origin.x);
+        const dy = y - Number(origin.y);
+
+        const localX = cosine * dx + sine * dy;
+        const localY = -sine * dx + cosine * dy;
+
+        const gridX = Math.floor(
+            localX / resolution
+        );
+        const gridY = Math.floor(
+            localY / resolution
+        );
+
+        return {
+            gridX,
+            gridY,
+        };
+    }
+
+    function gridCenterToWorld(
+        occupancyMap,
+        gridX,
+        gridY,
+    ) {
+        const origin = occupancyMap.origin;
+        const resolution = Number(
+            occupancyMap.resolution
+        );
+
+        const localX = (
+            gridX + 0.5
+        ) * resolution;
+
+        const localY = (
+            gridY + 0.5
+        ) * resolution;
+
+        const yaw = Number(origin.yaw || 0);
+        const cosine = Math.cos(yaw);
+        const sine = Math.sin(yaw);
+
+        return {
+            x: (
+                Number(origin.x)
+                + cosine * localX
+                - sine * localY
+            ),
+            y: (
+                Number(origin.y)
+                + sine * localX
+                + cosine * localY
+            ),
+        };
+    }
+
+    function occupancyAtGrid(
+        occupancyMap,
+        gridX,
+        gridY,
+    ) {
+        const width = Number(occupancyMap.width);
+        const height = Number(occupancyMap.height);
+
+        if (
+            gridX < 0
+            || gridY < 0
+            || gridX >= width
+            || gridY >= height
+        ) {
+            return null;
+        }
+
+        const index = gridY * width + gridX;
+
+        return Number(
+            occupancyMap.cells[index]
+        );
+    }
+
+    function occupancyAtWorld(
+        occupancyMap,
+        x,
+        y,
+    ) {
+        const grid = worldToGrid(
+            occupancyMap,
+            x,
+            y,
+        );
+
+        return occupancyAtGrid(
+            occupancyMap,
+            grid.gridX,
+            grid.gridY,
+        );
+    }
+
+    function canvasEventToGrid(
+        event,
+        occupancyMap,
+    ) {
+        const geometry = mapGeometry(occupancyMap);
+        const rect =
+            geometry.canvas.getBoundingClientRect();
+
+        const canvasX = event.clientX - rect.left;
+        const canvasY = event.clientY - rect.top;
+
+        if (
+            canvasX < geometry.drawX
+            || canvasY < geometry.drawY
+            || canvasX >= (
+                geometry.drawX
+                + geometry.drawWidth
+            )
+            || canvasY >= (
+                geometry.drawY
+                + geometry.drawHeight
+            )
+        ) {
+            return null;
+        }
+
+        const gridX = Math.floor(
+            (
+                canvasX - geometry.drawX
+            ) / geometry.scale
+        );
+
+        const canvasGridY = Math.floor(
+            (
+                canvasY - geometry.drawY
+            ) / geometry.scale
+        );
+
+        const gridY = (
+            geometry.sourceHeight
+            - 1
+            - canvasGridY
+        );
+
+        return {
+            gridX,
+            gridY,
+        };
+    }
+
+    function worldToCanvas(
+        occupancyMap,
+        x,
+        y,
+    ) {
+        const geometry = mapGeometry(occupancyMap);
+        const origin = occupancyMap.origin;
+        const resolution = Number(
+            occupancyMap.resolution
+        );
+
+        const yaw = Number(origin.yaw || 0);
+        const cosine = Math.cos(yaw);
+        const sine = Math.sin(yaw);
+
+        const dx = x - Number(origin.x);
+        const dy = y - Number(origin.y);
+
+        const localX = cosine * dx + sine * dy;
+        const localY = -sine * dx + cosine * dy;
+
+        const gridX = localX / resolution;
+        const gridY = localY / resolution;
+
+        return {
+            x: (
+                geometry.drawX
+                + gridX * geometry.scale
+            ),
+            y: (
+                geometry.drawY
+                + (
+                    geometry.sourceHeight
+                    - gridY
+                ) * geometry.scale
+            ),
+        };
+    }
+
+    function validateGoalAgainstState(
+        goal,
+        state,
+    ) {
+        const position =
+            state.poseTelemetry.pose.position;
+
+        const startX = Number(position.x);
+        const startY = Number(position.y);
+
+        const dx = goal.x - startX;
+        const dy = goal.y - startY;
+        const distance = Math.hypot(dx, dy);
+
+        if (
+            !Number.isFinite(distance)
+            || distance
+                < MIN_LIVE_MAPPING_GOAL_DISTANCE_METERS
+        ) {
+            throw new Error(
+                "Choose a target at least 0.03 m away."
+            );
+        }
+
+        if (
+            distance
+            > MAX_LIVE_MAPPING_GOAL_DISTANCE_METERS
+        ) {
+            throw new Error(
+                "Target exceeds the 0.50 m guarded limit."
+            );
+        }
+
+        const targetOccupancy = occupancyAtWorld(
+            state.map,
+            goal.x,
+            goal.y,
+        );
+
+        if (targetOccupancy !== 0) {
+            throw new Error(
+                "Target cell is not exactly free."
+            );
+        }
+
+        const resolution = Number(
+            state.map.resolution
+        );
+
+        const step = Math.max(
+            0.05,
+            resolution,
+        );
+
+        const samples = Math.max(
+            1,
+            Math.ceil(distance / step),
+        );
+
+        for (
+            let sample = 1;
+            sample <= samples;
+            sample += 1
+        ) {
+            const fraction = sample / samples;
+
+            const x = (
+                startX
+                + dx * fraction
+            );
+
+            const y = (
+                startY
+                + dy * fraction
+            );
+
+            const occupancy = occupancyAtWorld(
+                state.map,
+                x,
+                y,
+            );
+
+            if (occupancy !== 0) {
+                throw new Error(
+                    "Straight-line staging check found "
+                    + "unknown or occupied map space."
+                );
+            }
+        }
+
+        return {
+            distance,
+            yaw: Math.atan2(dy, dx),
+        };
+    }
+
+    function drawOverlay() {
+        const drawing = resizeOverlay();
+
+        if (!drawing) return;
+
+        const context = drawing.context;
+
+        context.clearRect(
+            0,
+            0,
+            drawing.width,
+            drawing.height,
+        );
+
+        if (
+            !latestLiveMap
+            || !latestLivePose
+        ) {
+            return;
+        }
+
+        const robotPose =
+            latestLivePose.pose;
+
+        const robot = worldToCanvas(
+            latestLiveMap,
+            Number(robotPose.position.x),
+            Number(robotPose.position.y),
+        );
+
+        const yaw = poseYaw(robotPose);
+
+        context.save();
+
+        context.lineWidth = 3;
+        context.strokeStyle = "#38bdf8";
+        context.fillStyle = "#0ea5e9";
+
+        context.beginPath();
+        context.arc(
+            robot.x,
+            robot.y,
+            7,
+            0,
+            Math.PI * 2,
+        );
+        context.fill();
+
+        context.beginPath();
+        context.moveTo(
+            robot.x,
+            robot.y,
+        );
+        context.lineTo(
+            robot.x + Math.cos(yaw) * 18,
+            robot.y - Math.sin(yaw) * 18,
+        );
+        context.stroke();
+
+        if (selectedLiveGoal) {
+            const target = worldToCanvas(
+                latestLiveMap,
+                selectedLiveGoal.x,
+                selectedLiveGoal.y,
+            );
+
+            context.strokeStyle = "#f43f5e";
+            context.fillStyle = "#f43f5e";
+            context.lineWidth = 3;
+
+            context.beginPath();
+            context.arc(
+                target.x,
+                target.y,
+                9,
+                0,
+                Math.PI * 2,
+            );
+            context.stroke();
+
+            context.beginPath();
+            context.moveTo(
+                target.x - 13,
+                target.y,
+            );
+            context.lineTo(
+                target.x + 13,
+                target.y,
+            );
+            context.moveTo(
+                target.x,
+                target.y - 13,
+            );
+            context.lineTo(
+                target.x,
+                target.y + 13,
+            );
+            context.stroke();
+
+            context.setLineDash([6, 5]);
+            context.lineWidth = 2;
+
+            context.beginPath();
+            context.moveTo(
+                robot.x,
+                robot.y,
+            );
+            context.lineTo(
+                target.x,
+                target.y,
+            );
+            context.stroke();
+
+            context.setLineDash([]);
+        }
+
+        context.restore();
+    }
+
+    function clearSelectedGoal(message) {
+        selectedLiveGoal = null;
+
+        setGoalUi();
+        drawOverlay();
+
+        setGoalMessage(
+            message
+            || (
+                "Click an exactly free cell on the live map. "
+                + "Selection alone never moves Mayday."
+            ),
+            false,
+        );
+    }
+
+    async function selectLiveMappingGoal(event) {
+        if (goalInFlight) {
+            return;
+        }
+
+        try {
+            const state = await fetchLiveState();
+
+            const grid = canvasEventToGrid(
+                event,
+                state.map,
+            );
+
+            if (!grid) {
+                throw new Error(
+                    "Click inside the displayed live map."
+                );
+            }
+
+            const occupancy = occupancyAtGrid(
+                state.map,
+                grid.gridX,
+                grid.gridY,
+            );
+
+            if (occupancy !== 0) {
+                throw new Error(
+                    "Only an exactly free cell (occupancy 0) "
+                    + "can be selected."
+                );
+            }
+
+            const world = gridCenterToWorld(
+                state.map,
+                grid.gridX,
+                grid.gridY,
+            );
+
+            const candidate = {
+                x: world.x,
+                y: world.y,
+                yaw: 0.0,
+                distance: 0.0,
+                gridX: grid.gridX,
+                gridY: grid.gridY,
+            };
+
+            const validated =
+                validateGoalAgainstState(
+                    candidate,
+                    state,
+                );
+
+            candidate.yaw = validated.yaw;
+            candidate.distance =
+                validated.distance;
+
+            selectedLiveGoal = candidate;
+
+            setGoalUi();
+            drawOverlay();
+
+            setGoalMessage(
+                (
+                    "Target staged only. "
+                    + `${candidate.distance.toFixed(3)} m away. `
+                    + "Press GO to authorize one guarded attempt."
+                ),
+                false,
+            );
+        } catch (error) {
+            clearSelectedGoal(
+                error.message
+            );
+
+            setGoalMessage(
+                error.message,
+                true,
+            );
+        }
+    }
+
+    async function refreshSelectedGoal() {
+        if (
+            goalInFlight
+            || !selectedLiveGoal
+            || !perceptionIsVisible()
+        ) {
+            return;
+        }
+
+        try {
+            const state = await fetchLiveState();
+
+            const validated =
+                validateGoalAgainstState(
+                    selectedLiveGoal,
+                    state,
+                );
+
+            selectedLiveGoal.distance =
+                validated.distance;
+
+            selectedLiveGoal.yaw =
+                validated.yaw;
+
+            setGoalUi();
+            drawOverlay();
+        } catch (error) {
+            clearSelectedGoal(
+                "Target cleared: " + error.message
+            );
+        }
+    }
+
+    async function sendLiveMappingGoal() {
+        if (
+            goalInFlight
+            || !selectedLiveGoal
+        ) {
+            return;
+        }
+
+        let navigationStarted = false;
+
+        try {
+            const state = await fetchLiveState();
+
+            const validated =
+                validateGoalAgainstState(
+                    selectedLiveGoal,
+                    state,
+                );
+
+            selectedLiveGoal.distance =
+                validated.distance;
+
+            selectedLiveGoal.yaw =
+                validated.yaw;
+
+            if (
+                !window.confirm(
+                    (
+                        "Move Mayday to the selected live-map target? "
+                        + `Distance ${selectedLiveGoal.distance.toFixed(3)} m. `
+                        + "Backend maximum remains 0.50 m / 15 s. "
+                        + "This submits exactly one goal with no retry."
+                    )
+                )
+            ) {
+                return;
+            }
+
+            goalInFlight = true;
+            setGoalUi();
+
+            setGoalMessage(
+                "Starting guarded live-mapping navigation…",
+                false,
+            );
+
+            await fetchJson(
+                START_ENDPOINT,
+                {
+                    method: "POST",
+                },
+            );
+
+            navigationStarted = true;
+
+            setGoalMessage(
+                "Nav2 starting. Waiting for guarded action server…",
+                false,
+            );
+
+            await sleep(
+                NAVIGATION_START_SETTLE_MS
+            );
+
+            const finalState =
+                await fetchLiveState();
+
+            const finalValidation =
+                validateGoalAgainstState(
+                    selectedLiveGoal,
+                    finalState,
+                );
+
+            selectedLiveGoal.distance =
+                finalValidation.distance;
+
+            selectedLiveGoal.yaw =
+                finalValidation.yaw;
+
+            setGoalUi();
+            drawOverlay();
+
+            const goal = {
+                goal_x: selectedLiveGoal.x,
+                goal_y: selectedLiveGoal.y,
+                goal_yaw: selectedLiveGoal.yaw,
+            };
+
+            setGoalMessage(
+                (
+                    "GO submitted. "
+                    + `${selectedLiveGoal.distance.toFixed(3)} m `
+                    + "guarded goal in progress…"
+                ),
+                false,
+            );
+
+            const result = await fetchJson(
+                GOAL_ENDPOINT,
+                {
+                    method: "POST",
+                    headers: {
+                        "Content-Type":
+                            "application/json",
+                    },
+                    body: JSON.stringify(goal),
+                },
+            );
+
+            setGoalMessage(
+                (
+                    result.message
+                    || "Guarded live-map goal completed."
+                ),
+                false,
+            );
+        } catch (error) {
+            setGoalMessage(
+                "GO failed: " + error.message,
+                true,
+            );
+        } finally {
+            if (navigationStarted) {
+                try {
+                    await fetch(
+                        STOP_ENDPOINT,
+                        {
+                            method: "POST",
+                            cache: "no-store",
+                        },
+                    );
+                } catch (error) {
+                    setGoalMessage(
+                        (
+                            "Goal attempt ended, but dashboard "
+                            + "navigation cleanup reported: "
+                            + error.message
+                        ),
+                        true,
+                    );
+                }
+            }
+
+            goalInFlight = false;
+            selectedLiveGoal = null;
+            setGoalUi();
+
+            try {
+                await fetchLiveState();
+            } catch (error) {
+                latestLiveMap = null;
+                latestLivePose = null;
+            }
+
+            drawOverlay();
+        }
+    }
+
+    function initialize() {
+        const canvas =
+            byId("liveMappingGoalCanvas");
+
+        const go =
+            byId("liveMappingGoButton");
+
+        const clear =
+            byId("liveMappingClearGoalButton");
+
+        if (
+            !canvas
+            || !go
+            || !clear
+        ) {
+            return;
+        }
+
+        setGoalUi();
+        drawOverlay();
+
+        canvas.addEventListener(
+            "click",
+            selectLiveMappingGoal,
+        );
+
+        go.addEventListener(
+            "click",
+            sendLiveMappingGoal,
+        );
+
+        clear.addEventListener(
+            "click",
+            function () {
+                clearSelectedGoal();
+            },
+        );
+
+        window.addEventListener(
+            "resize",
+            drawOverlay,
+        );
+
+        refreshTimer = window.setInterval(
+            refreshSelectedGoal,
+            SELECTED_GOAL_REFRESH_MS,
+        );
+
+        window.addEventListener(
+            "beforeunload",
+            function () {
+                if (refreshTimer !== null) {
+                    window.clearInterval(
+                        refreshTimer
+                    );
+                }
+            },
+            {once: true},
+        );
+    }
+
+    if (document.readyState === "loading") {
+        document.addEventListener(
+            "DOMContentLoaded",
+            initialize,
+            {once: true},
+        );
+    } else {
+        initialize();
+    }
+})();

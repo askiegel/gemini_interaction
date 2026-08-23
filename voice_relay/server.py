@@ -841,6 +841,151 @@ class VoiceRelayHandler(BaseHTTPRequestHandler):
             },
         )
 
+
+    def mapping_pose_status(self):
+        """
+        Proxy Mayday's current Cartographer map-frame base_link pose.
+
+        This endpoint is read-only and cannot initialize localization,
+        publish transforms, start navigation, or command motion.
+        """
+        response = request_json(
+            "GET",
+            f"{ROBOT_BRIDGE_URL}/telemetry/mapping-pose",
+            timeout=5.0,
+        )
+
+        if isinstance(response["data"], dict):
+            return (
+                response["status_code"] or 503,
+                response["data"],
+            )
+
+        return (
+            response["status_code"] or 503,
+            {
+                "ok": False,
+                "runtime_active": False,
+                "service": "mini_pupper_operator_dashboard",
+                "telemetry": {
+                    "available": False,
+                    "status": "MAPPING_POSE_UNAVAILABLE",
+                    "pose": None,
+                },
+                "error": (
+                    response["error"]
+                    or "Mayday live mapping pose is unavailable."
+                ),
+            },
+        )
+
+    def mapping_navigation_control_action(self, action):
+        """
+        Start or stop only Robot Bridge's guarded mapping-navigation mode.
+
+        The browser cannot select a launch file, ROS node, controller,
+        velocity, topic, frame, behavior tree, timeout, or distance limit.
+        """
+        if action not in {"start", "stop"}:
+            return 400, {
+                "ok": False,
+                "error": "Unsupported mapping-navigation action.",
+            }
+
+        response = request_json(
+            "POST",
+            (
+                f"{ROBOT_BRIDGE_URL}"
+                f"/mapping-navigation/{action}"
+            ),
+            timeout=35.0,
+        )
+
+        return (
+            response["status_code"] or 503,
+            response["data"] or {
+                "ok": False,
+                "error": (
+                    response["error"]
+                    or (
+                        "Guarded live-mapping navigation "
+                        f"{action} failed."
+                    )
+                ),
+            },
+        )
+
+    def mapping_navigation_goal(self, payload):
+        """
+        Forward one finite map-frame goal to mapping-navigation only.
+
+        Robot Bridge remains authoritative for current pose validation,
+        the 0.50-meter maximum, 15-second execution limit, cancellation,
+        behavior tree selection, controller ownership, and safety STOP.
+        """
+        if not isinstance(payload, dict):
+            return 400, {
+                "ok": False,
+                "error": "A JSON request body is required.",
+            }
+
+        required = {
+            "goal_x",
+            "goal_y",
+            "goal_yaw",
+        }
+
+        if set(payload) != required:
+            return 400, {
+                "ok": False,
+                "error": (
+                    "Exactly goal_x, goal_y, and goal_yaw "
+                    "must be supplied."
+                ),
+            }
+
+        normalized = {}
+
+        for key in sorted(required):
+            value = payload.get(key)
+
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+            ):
+                return 400, {
+                    "ok": False,
+                    "error": f"{key} must be a finite number.",
+                }
+
+            value = float(value)
+
+            if not math.isfinite(value):
+                return 400, {
+                    "ok": False,
+                    "error": f"{key} must be finite.",
+                }
+
+            normalized[key] = value
+
+        response = request_json(
+            "POST",
+            f"{ROBOT_BRIDGE_URL}/mapping-navigation/goal",
+            payload=normalized,
+            timeout=25.0,
+        )
+
+        return (
+            response["status_code"] or 503,
+            response["data"] or {
+                "ok": False,
+                "error": (
+                    response["error"]
+                    or "Guarded live-mapping goal failed."
+                ),
+            },
+        )
+
     def localization_status(self):
         """
         Proxy guarded localization pose as read-only presentation data.
@@ -1445,6 +1590,11 @@ class VoiceRelayHandler(BaseHTTPRequestHandler):
             self.send_json(status_code, payload)
             return
 
+        if path == "/dashboard/mapping-pose":
+            status_code, payload = self.mapping_pose_status()
+            self.send_json(status_code, payload)
+            return
+
         if path == "/dashboard/mapping-map":
             status_code, payload = (
                 self.live_mapping_map_status()
@@ -1638,6 +1788,43 @@ class VoiceRelayHandler(BaseHTTPRequestHandler):
                 status_code,
                 response_payload,
             )
+            return
+
+\
+        if path in (
+            "/dashboard/mapping-navigation-start",
+            "/dashboard/mapping-navigation-stop",
+        ):
+            action = (
+                "start"
+                if path.endswith("-start")
+                else "stop"
+            )
+            status_code, payload = (
+                self.mapping_navigation_control_action(action)
+            )
+            self.send_json(status_code, payload)
+            return
+
+        if path == "/dashboard/mapping-navigation-goal":
+            try:
+                request_payload = self.read_json_body()
+            except ValueError as exc:
+                self.send_json(
+                    400,
+                    {
+                        "ok": False,
+                        "error": str(exc),
+                    },
+                )
+                return
+
+            status_code, payload = (
+                self.mapping_navigation_goal(
+                    request_payload
+                )
+            )
+            self.send_json(status_code, payload)
             return
 
         if path in (
