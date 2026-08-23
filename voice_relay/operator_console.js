@@ -575,7 +575,20 @@
         );
     }
 
+    function missionControlIsVisible() {
+        const page =
+            document.getElementById("missionPage");
+
+        return Boolean(
+            page
+            && !page.hidden
+            && page.classList.contains("active")
+        );
+    }
+
     async function refreshOperatorConsole() {
+        if (!missionControlIsVisible()) return;
+
         try {
             const response = await fetch(
                 STATUS_URL,
@@ -981,7 +994,19 @@
         el("serviceDiagnostics").innerHTML = `<table class="diagnostics-table"><thead><tr><th>Service</th><th>Status</th><th>Latency</th><th>Details</th></tr></thead><tbody>${Object.entries(payload.services || {}).map(([name, service]) => `<tr><td>${escapeHtml(labels[name] || name)}</td><td>${escapeHtml(service.online ? "Online" : "Offline")}</td><td>${escapeHtml(Number.isFinite(Number(service.latency_ms)) ? `${service.latency_ms} ms` : "—")}</td><td>${escapeHtml(service.error || service.last_error || service.status || "Ready")}</td></tr>`).join("")}</tbody></table>`;
     }
 
+    function diagnosticsIsVisible() {
+        const page = el("diagnosticsPage");
+
+        return Boolean(
+            page
+            && !page.hidden
+            && page.classList.contains("active")
+        );
+    }
+
     async function refresh() {
+        if (!diagnosticsIsVisible()) return;
+
         try {
             const response = await fetch(DIAGNOSTICS_URL, {cache:"no-store"});
             const payload = await response.json();
@@ -1065,7 +1090,19 @@
         renderDetail(visible.filter(function (mission) { return mission.mission_id === selectedMissionId; })[0]);
     }
 
+    function missionHistoryIsVisible() {
+        var page = byId("historyPage");
+
+        return Boolean(
+            page
+            && !page.hidden
+            && page.classList.contains("active")
+        );
+    }
+
     async function refresh() {
+        if (!missionHistoryIsVisible()) return;
+
         var pill = byId("missionHistoryStatusPill");
         var message = byId("missionHistoryMessage");
         try {
@@ -1183,7 +1220,19 @@
         renderEvents();
     }
 
+    function worldModelIsVisible() {
+        var page = byId("worldModelPage");
+
+        return Boolean(
+            page
+            && !page.hidden
+            && page.classList.contains("active")
+        );
+    }
+
     async function refresh() {
+        if (!worldModelIsVisible()) return;
+
         var pill = byId("worldModelStatusPill");
         var message = byId("worldModelMessage");
         try {
@@ -1790,7 +1839,21 @@
             });
     }
 
+    function networkIsVisible() {
+        var page = byId("networkPage");
+
+        return Boolean(
+            page
+            && !page.hidden
+            && page.classList.contains("active")
+        );
+    }
+
     function refresh(rescan) {
+        if (!networkIsVisible()) {
+            return Promise.resolve();
+        }
+
         var scanButton = byId("scanWifiButton");
 
         if (scanButton && rescan) {
@@ -2601,8 +2664,12 @@
         return payload;
     }
 
+    let statusRequestInFlight = false;
+
     async function refresh() {
-        if (busy) return;
+        if (busy || statusRequestInFlight) return;
+
+        statusRequestInFlight = true;
 
         try {
             const response = await fetch(
@@ -2618,6 +2685,8 @@
                 true
             );
             setButtons(true, true);
+        } finally {
+            statusRequestInFlight = false;
         }
     }
 

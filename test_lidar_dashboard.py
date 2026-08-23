@@ -160,3 +160,45 @@ def test_lidar_proxy_reports_unavailable_robot():
     assert status_code == 503
     assert payload['ok'] is False
     assert payload['error'] == 'Robot unavailable'
+
+
+def test_hidden_dashboard_pages_do_not_poll_in_background():
+    required = (
+        'function missionControlIsVisible()',
+        'if (!missionControlIsVisible()) return;',
+        'function diagnosticsIsVisible()',
+        'if (!diagnosticsIsVisible()) return;',
+        'function missionHistoryIsVisible()',
+        'if (!missionHistoryIsVisible()) return;',
+        'function worldModelIsVisible()',
+        'if (!worldModelIsVisible()) return;',
+        'function networkIsVisible()',
+        'if (!networkIsVisible()) return;',
+    )
+
+    for marker in required:
+        assert marker in JS
+
+
+def test_inline_status_polling_is_mission_control_only():
+    assert 'function missionStatusPageIsVisible()' in HTML
+    assert 'if (!missionStatusPageIsVisible()) return;' in HTML
+
+
+def test_localization_status_polling_has_backpressure():
+    source = JS.split(
+        '/* Minimal guarded localization buttons */',
+        1,
+    )[1].split(
+        '"/dashboard/mapping-control"',
+        1,
+    )[0]
+
+    assert 'let statusRequestInFlight = false;' in source
+    assert (
+        'if (busy || statusRequestInFlight) return;'
+        in source
+    )
+    assert 'statusRequestInFlight = true;' in source
+    assert 'finally {' in source
+    assert 'statusRequestInFlight = false;' in source
