@@ -173,7 +173,8 @@ def test_hidden_dashboard_pages_do_not_poll_in_background():
         'function worldModelIsVisible()',
         'if (!worldModelIsVisible()) return;',
         'function networkIsVisible()',
-        'if (!networkIsVisible()) return;',
+        'if (!networkIsVisible()) {',
+        'return Promise.resolve();',
     )
 
     for marker in required:
