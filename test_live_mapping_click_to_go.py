@@ -296,3 +296,39 @@ def test_browser_cannot_override_backend_safety_parameters():
         "Robot Bridge remains authoritative"
         in SERVER
     )
+
+
+def test_manual_live_map_refresh_updates_map_and_pose_only():
+    assert 'id="liveMappingRefreshButton"' in HTML
+
+    start = CLICK_TO_GO.index(
+        "async function refreshLiveMappingState()"
+    )
+
+    end = CLICK_TO_GO.index(
+        "async function sendLiveMappingGoal()",
+        start,
+    )
+
+    refresh = CLICK_TO_GO[start:end]
+
+    assert "await fetchLiveState();" in refresh
+    assert "drawOverlay();" in refresh
+    assert "validateGoalAgainstState(" in refresh
+
+    # Manual refresh must never command the robot.
+    assert 'method: "POST"' not in refresh
+    assert "GOAL_ENDPOINT" not in refresh
+    assert "START_ENDPOINT" not in refresh
+    assert "STOP_ENDPOINT" not in refresh
+    assert "cmd_vel" not in refresh
+
+    assert (
+        'refresh.addEventListener('
+        in CLICK_TO_GO
+    )
+
+    assert (
+        "refreshLiveMappingState,"
+        in CLICK_TO_GO
+    )

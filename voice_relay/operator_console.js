@@ -3693,6 +3693,16 @@
     function initialize() {
         if (!byId("liveMappingCanvas")) return;
 
+        const refreshButton =
+            byId("liveMappingRefreshButton");
+
+        if (refreshButton) {
+            refreshButton.addEventListener(
+                "click",
+                refresh,
+            );
+        }
+
         setStopped();
         refresh();
 
@@ -5516,6 +5526,7 @@
     let latestLiveMap = null;
     let latestLivePose = null;
     let goalInFlight = false;
+    let manualRefreshInFlight = false;
     let refreshTimer = null;
 
     function byId(id) {
@@ -5593,6 +5604,7 @@
         const distance = byId("liveMappingGoalDistance");
         const go = byId("liveMappingGoButton");
         const clear = byId("liveMappingClearGoalButton");
+        const refresh = byId("liveMappingRefreshButton");
 
         if (readout) {
             readout.textContent = selectedLiveGoal
@@ -5628,6 +5640,18 @@
                 goalInFlight
                 || !selectedLiveGoal
             );
+        }
+
+        if (refresh) {
+            refresh.disabled = Boolean(
+                goalInFlight
+                || manualRefreshInFlight
+            );
+
+            refresh.textContent =
+                manualRefreshInFlight
+                    ? "Refreshing…"
+                    : "Refresh Map";
         }
     }
 
@@ -6373,6 +6397,73 @@
         }
     }
 
+    async function refreshLiveMappingState() {
+        if (
+            goalInFlight
+            || manualRefreshInFlight
+            || !perceptionIsVisible()
+        ) {
+            return;
+        }
+
+        manualRefreshInFlight = true;
+        setGoalUi();
+
+        setGoalMessage(
+            "Refreshing live map and robot pose…",
+            false,
+        );
+
+        try {
+            const state = await fetchLiveState();
+
+            if (selectedLiveGoal) {
+                const validated =
+                    validateGoalAgainstState(
+                        selectedLiveGoal,
+                        state,
+                    );
+
+                selectedLiveGoal.distance =
+                    validated.distance;
+
+                selectedLiveGoal.yaw =
+                    validated.yaw;
+            }
+
+            setGoalUi();
+            drawOverlay();
+
+            setGoalMessage(
+                "Live map and robot pose refreshed.",
+                false,
+            );
+        } catch (error) {
+            latestLiveMap = null;
+            latestLivePose = null;
+
+            if (selectedLiveGoal) {
+                clearSelectedGoal();
+
+                setGoalMessage(
+                    "Target cleared after refresh: "
+                    + error.message,
+                    true,
+                );
+            } else {
+                drawOverlay();
+
+                setGoalMessage(
+                    "Refresh failed: " + error.message,
+                    true,
+                );
+            }
+        } finally {
+            manualRefreshInFlight = false;
+            setGoalUi();
+        }
+    }
+
     async function sendLiveMappingGoal() {
         if (
             goalInFlight
@@ -6539,10 +6630,14 @@
         const clear =
             byId("liveMappingClearGoalButton");
 
+        const refresh =
+            byId("liveMappingRefreshButton");
+
         if (
             !canvas
             || !go
             || !clear
+            || !refresh
         ) {
             return;
         }
@@ -6565,6 +6660,11 @@
             function () {
                 clearSelectedGoal();
             },
+        );
+
+        refresh.addEventListener(
+            "click",
+            refreshLiveMappingState,
         );
 
         window.addEventListener(

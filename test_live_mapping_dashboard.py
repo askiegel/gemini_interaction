@@ -217,3 +217,21 @@ def test_live_mapping_remains_read_only():
         'if path == "/dashboard/mapping-map":'
         in SERVER
     )
+
+
+def test_live_mapping_has_manual_refresh_control():
+    assert 'id="liveMappingRefreshButton"' in HTML
+    assert "Refresh Map" in HTML
+
+    assert (
+        'byId("liveMappingRefreshButton")'
+        in LIVE
+    )
+
+    assert (
+        'refreshButton.addEventListener('
+        in LIVE
+    )
+
+    # The map side remains GET-only.
+    assert 'method: "POST"' not in LIVE
