@@ -879,6 +879,36 @@ class VoiceRelayHandler(BaseHTTPRequestHandler):
             },
         )
 
+    def mapping_navigation_status(self):
+        """
+        Return Robot Bridge's guarded mapping-navigation status.
+
+        Robot Bridge remains authoritative for navigation ownership,
+        controller state, navigator state, and goal-submission readiness.
+        """
+        response = request_json(
+            "GET",
+            (
+                f"{ROBOT_BRIDGE_URL}"
+                "/mapping-navigation/status"
+            ),
+            timeout=5.0,
+        )
+
+        return (
+            response["status_code"] or 503,
+            response["data"] or {
+                "ok": False,
+                "error": (
+                    response["error"]
+                    or (
+                        "Guarded live-mapping navigation "
+                        "status is unavailable."
+                    )
+                ),
+            },
+        )
+
     def mapping_navigation_control_action(self, action):
         """
         Start or stop only Robot Bridge's guarded mapping-navigation mode.
@@ -1605,6 +1635,13 @@ class VoiceRelayHandler(BaseHTTPRequestHandler):
         if path == "/dashboard/mapping-control":
             status_code, payload = (
                 self.mapping_control_status()
+            )
+            self.send_json(status_code, payload)
+            return
+
+        if path == "/dashboard/mapping-navigation-status":
+            status_code, payload = (
+                self.mapping_navigation_status()
             )
             self.send_json(status_code, payload)
             return

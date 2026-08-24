@@ -5497,6 +5497,8 @@
         "/dashboard/mapping-pose";
     const START_ENDPOINT =
         "/dashboard/mapping-navigation-start";
+    const STATUS_ENDPOINT =
+        "/dashboard/mapping-navigation-status";
     const GOAL_ENDPOINT =
         "/dashboard/mapping-navigation-goal";
     const STOP_ENDPOINT =
@@ -5505,7 +5507,8 @@
     const MAX_LIVE_MAPPING_GOAL_DISTANCE_METERS = 0.50;
     const MIN_LIVE_MAPPING_GOAL_DISTANCE_METERS = 0.03;
     const MAX_MAPPING_POSE_AGE_SECONDS = 1.0;
-    const NAVIGATION_START_SETTLE_MS = 5000;
+    const NAVIGATION_READY_TIMEOUT_MS = 20000;
+    const NAVIGATION_READY_POLL_MS = 250;
     const SELECTED_GOAL_REFRESH_MS = 1500;
     const MAP_PADDING_PIXELS = 32;
 
@@ -5533,6 +5536,47 @@
         return new Promise(function (resolve) {
             window.setTimeout(resolve, milliseconds);
         });
+    }
+
+    function mappingNavigationIsReady(result) {
+        const navigation = (
+            result
+            && result.mapping_navigation
+        );
+
+        return Boolean(
+            result
+            && result.ok === true
+            && navigation
+            && navigation.running === true
+            && navigation.owned === true
+            && navigation.goal_submission_enabled === true
+            && navigation.controller_enabled === true
+            && navigation.navigator_enabled === true
+        );
+    }
+
+    async function waitForMappingNavigationReady() {
+        const deadline =
+            Date.now() + NAVIGATION_READY_TIMEOUT_MS;
+
+        while (Date.now() < deadline) {
+            const result =
+                await fetchJson(STATUS_ENDPOINT);
+
+            if (mappingNavigationIsReady(result)) {
+                return result;
+            }
+
+            await sleep(
+                NAVIGATION_READY_POLL_MS
+            );
+        }
+
+        throw new Error(
+            "Guarded navigation did not become ready "
+            + "within 20 seconds."
+        );
     }
 
     function setGoalMessage(message, isError) {
@@ -6389,9 +6433,7 @@
                 false,
             );
 
-            await sleep(
-                NAVIGATION_START_SETTLE_MS
-            );
+            await waitForMappingNavigationReady();
 
             const finalState =
                 await fetchLiveState();

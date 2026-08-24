@@ -138,13 +138,16 @@ def test_go_uses_mapping_navigation_only():
     for endpoint in (
         '"/dashboard/mapping-pose"',
         '"/dashboard/mapping-navigation-start"',
+        '"/dashboard/mapping-navigation-status"',
         '"/dashboard/mapping-navigation-goal"',
         '"/dashboard/mapping-navigation-stop"',
     ):
         assert endpoint in CLICK_TO_GO
 
+    assert "NAVIGATION_START_SETTLE_MS" not in CLICK_TO_GO
+
     assert (
-        "NAVIGATION_START_SETTLE_MS = 5000"
+        "await waitForMappingNavigationReady();"
         in CLICK_TO_GO
     )
 
@@ -157,6 +160,42 @@ def test_go_uses_mapping_navigation_only():
     )
 
     assert "cmd_vel" not in CLICK_TO_GO
+
+
+def test_go_waits_for_authoritative_navigation_readiness():
+    assert (
+        "NAVIGATION_READY_TIMEOUT_MS = 20000"
+        in CLICK_TO_GO
+    )
+
+    assert (
+        "NAVIGATION_READY_POLL_MS = 250"
+        in CLICK_TO_GO
+    )
+
+    assert (
+        '"/dashboard/mapping-navigation-status"'
+        in CLICK_TO_GO
+    )
+
+    for readiness_field in (
+        "navigation.running === true",
+        "navigation.owned === true",
+        "navigation.goal_submission_enabled === true",
+        "navigation.controller_enabled === true",
+        "navigation.navigator_enabled === true",
+    ):
+        assert readiness_field in CLICK_TO_GO
+
+    assert (
+        "await waitForMappingNavigationReady();"
+        in CLICK_TO_GO
+    )
+
+    assert (
+        "Guarded navigation did not become ready "
+        in CLICK_TO_GO
+    )
 
 
 def test_go_has_no_retry_loop():
@@ -199,6 +238,11 @@ def test_voice_relay_exposes_mapping_pose_proxy():
 
 def test_voice_relay_exposes_mapping_navigation_proxies():
     assert (
+        "def mapping_navigation_status(self):"
+        in SERVER
+    )
+
+    assert (
         "def mapping_navigation_control_action("
         "self, action):"
         in SERVER
@@ -219,7 +263,13 @@ def test_voice_relay_exposes_mapping_navigation_proxies():
         in SERVER
     )
 
+    assert (
+        '"/mapping-navigation/status"'
+        in SERVER
+    )
+
     for route in (
+        "/dashboard/mapping-navigation-status",
         "/dashboard/mapping-navigation-start",
         "/dashboard/mapping-navigation-stop",
         "/dashboard/mapping-navigation-goal",
