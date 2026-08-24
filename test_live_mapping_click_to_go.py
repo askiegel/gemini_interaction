@@ -164,7 +164,7 @@ def test_go_uses_mapping_navigation_only():
 
 def test_go_waits_for_authoritative_navigation_readiness():
     assert (
-        "NAVIGATION_READY_TIMEOUT_MS = 40000"
+        "NAVIGATION_READY_TIMEOUT_MS = 60000"
         in CLICK_TO_GO
     )
 
