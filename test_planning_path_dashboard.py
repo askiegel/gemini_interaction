@@ -193,7 +193,7 @@ def test_safety_copy_is_visible():
     for marker in (
         "Click a free map location, then press GO.",
         "Robot Bridge verifies localization",
-        "guarded goal within 0.50 m and 15 seconds",
+        "guarded goal within 0.50 m and 25 seconds",
         "STOP",
         "MAYDAY immediately cancels the active goal.",
     ):

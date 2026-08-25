@@ -950,7 +950,7 @@ class VoiceRelayHandler(BaseHTTPRequestHandler):
         Forward one finite map-frame goal to mapping-navigation only.
 
         Robot Bridge remains authoritative for current pose validation,
-        the 0.50-meter maximum, 15-second execution limit, cancellation,
+        the 0.50-meter maximum, 25-second execution limit, cancellation,
         behavior tree selection, controller ownership, and safety STOP.
         """
         if not isinstance(payload, dict):
@@ -1002,7 +1002,7 @@ class VoiceRelayHandler(BaseHTTPRequestHandler):
             "POST",
             f"{ROBOT_BRIDGE_URL}/mapping-navigation/goal",
             payload=normalized,
-            timeout=25.0,
+            timeout=35.0,
         )
 
         return (

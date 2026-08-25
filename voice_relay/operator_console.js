@@ -6539,7 +6539,7 @@
                     (
                         "Move Mayday to the selected live-map target? "
                         + `Distance ${selectedLiveGoal.distance.toFixed(3)} m. `
-                        + "Backend maximum remains 0.50 m / 15 s. "
+                        + "Backend maximum remains 0.50 m / 25 s. "
                         + "This submits exactly one goal with no retry."
                     )
                 )

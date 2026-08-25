@@ -296,6 +296,34 @@ def test_voice_relay_exposes_mapping_pose_proxy():
     )
 
 
+def test_mapping_goal_proxy_outlives_backend_execution_guard():
+    start = SERVER.index(
+        "def mapping_navigation_goal(self, payload):"
+    )
+
+    end = SERVER.index(
+        "def localization_status(self):",
+        start,
+    )
+
+    proxy = SERVER[start:end]
+
+    assert (
+        'f"{ROBOT_BRIDGE_URL}/mapping-navigation/goal"'
+        in proxy
+    )
+
+    # Robot Bridge owns the 25-second motion limit.
+    # Voice Relay only allows enough HTTP response margin
+    # for Robot Bridge to finish or cancel authoritatively.
+    assert "timeout=35.0" in proxy
+
+    assert (
+        "25-second execution limit"
+        in proxy
+    )
+
+
 def test_voice_relay_exposes_mapping_navigation_proxies():
     assert (
         "def mapping_navigation_status(self):"
