@@ -198,6 +198,66 @@ def test_go_waits_for_authoritative_navigation_readiness():
     )
 
 
+def test_go_waits_for_fresh_pose_without_weakening_guard():
+    assert (
+        "MAX_MAPPING_POSE_AGE_SECONDS = 1.0"
+        in CLICK_TO_GO
+    )
+
+    assert (
+        "FINAL_POSE_READY_TIMEOUT_MS = 8000"
+        in CLICK_TO_GO
+    )
+
+    assert (
+        "FINAL_POSE_READY_POLL_MS = 250"
+        in CLICK_TO_GO
+    )
+
+    assert (
+        "async function waitForFreshLiveState()"
+        in CLICK_TO_GO
+    )
+
+    assert (
+        "await waitForFreshLiveState();"
+        in CLICK_TO_GO
+    )
+
+    helper_start = CLICK_TO_GO.index(
+        "async function waitForFreshLiveState()"
+    )
+
+    helper_end = CLICK_TO_GO.index(
+        "function mapGeometry(",
+        helper_start,
+    )
+
+    helper = CLICK_TO_GO[
+        helper_start:helper_end
+    ]
+
+    assert "while (" in helper
+    assert "await fetchLiveState();" in helper
+
+    assert (
+        '"Fresh Cartographer robot pose is unavailable."'
+        in helper
+    )
+
+    assert (
+        '"Cartographer robot pose is stale or invalid."'
+        in helper
+    )
+
+    # Waiting for fresh telemetry must never submit motion.
+    assert "GOAL_ENDPOINT" not in helper
+    assert "START_ENDPOINT" not in helper
+    assert "STOP_ENDPOINT" not in helper
+    assert 'method: "POST"' not in helper
+    assert "cmd_vel" not in helper
+
+
 def test_go_has_no_retry_loop():
     send_start = CLICK_TO_GO.index(
         "async function sendLiveMappingGoal"

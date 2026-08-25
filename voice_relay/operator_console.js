@@ -5519,6 +5519,8 @@
     const MAX_MAPPING_POSE_AGE_SECONDS = 1.0;
     const NAVIGATION_READY_TIMEOUT_MS = 60000;
     const NAVIGATION_READY_POLL_MS = 250;
+    const FINAL_POSE_READY_TIMEOUT_MS = 8000;
+    const FINAL_POSE_READY_POLL_MS = 250;
     const SELECTED_GOAL_REFRESH_MS = 1500;
     const MAP_PADDING_PIXELS = 32;
 
@@ -5763,6 +5765,49 @@
             map: occupancyMap,
             poseTelemetry,
         };
+    }
+
+    async function waitForFreshLiveState() {
+        const deadline =
+            Date.now() + FINAL_POSE_READY_TIMEOUT_MS;
+
+        let lastError = null;
+
+        while (Date.now() < deadline) {
+            try {
+                return await fetchLiveState();
+            } catch (error) {
+                const transientPoseError = Boolean(
+                    error
+                    && (
+                        error.message
+                        === "Fresh Cartographer robot pose is unavailable."
+                        || error.message
+                        === "Cartographer robot pose is stale or invalid."
+                    )
+                );
+
+                if (!transientPoseError) {
+                    throw error;
+                }
+
+                lastError = error;
+            }
+
+            await sleep(
+                FINAL_POSE_READY_POLL_MS
+            );
+        }
+
+        throw new Error(
+            "Fresh Cartographer robot pose did not recover "
+            + "within 8 seconds. "
+            + (
+                lastError
+                    ? lastError.message
+                    : ""
+            )
+        );
     }
 
     function mapGeometry(occupancyMap) {
@@ -6527,7 +6572,7 @@
             await waitForMappingNavigationReady();
 
             const finalState =
-                await fetchLiveState();
+                await waitForFreshLiveState();
 
             const finalValidation =
                 validateGoalAgainstState(
