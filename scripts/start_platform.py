@@ -679,7 +679,23 @@ is_running() {
     return 0
 }
 
-if is_running "$RUN_DIR/ros2_bringup.pid" "mini_pupper_bringup"; then
+# Validate the managed PID file first so stale state is cleaned up.
+# A normally booted Mayday may have a healthy systemd-owned bringup that
+# was not started by this script, so process discovery is authoritative.
+is_running "$RUN_DIR/ros2_bringup.pid" "mini_pupper_bringup" || true
+
+mapfile -t bringup_pids < <(
+    pgrep -f         '[r]os2 launch mini_pupper_bringup bringup.launch.py'         || true
+)
+
+if [ "${#bringup_pids[@]}" -gt 1 ]; then
+    echo "ERROR: Multiple ROS2 bringup processes detected."
+    printf 'ERROR: Bringup PID(s): %s\n' "${bringup_pids[*]}"
+    echo "ERROR: Refusing to start or adopt a ROS2 bringup."
+    exit 1
+elif [ "${#bringup_pids[@]}" -eq 1 ]; then
+    echo "${bringup_pids[0]}" > "$RUN_DIR/ros2_bringup.pid"
+    echo "ADOPT: ROS2 bringup PID=${bringup_pids[0]}"
     echo "SKIP: ROS2 bringup already running"
 else
     nohup bash -lc '

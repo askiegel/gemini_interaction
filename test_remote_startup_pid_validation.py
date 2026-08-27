@@ -55,12 +55,42 @@ def main():
         '"mini_pupper_bringup"',
         '"python3 app.py"',
         '"camera_relay.py"',
+        "mapfile -t bringup_pids",
+        "pgrep -f",
+        "'[r]os2 launch mini_pupper_bringup bringup.launch.py'",
+        '"${#bringup_pids[@]}" -gt 1',
+        '"${#bringup_pids[@]}" -eq 1',
+        (
+            'echo "${bringup_pids[0]}" '
+            '> "$RUN_DIR/ros2_bringup.pid"'
+        ),
+        'echo "ADOPT: ROS2 bringup PID=${bringup_pids[0]}"',
+        'ERROR: Multiple ROS2 bringup processes detected.',
+        'Refusing to start or adopt a ROS2 bringup.',
     ]
 
     for marker in required_markers:
         assert marker in remote_script, (
             f"Missing PID validation marker: {marker}"
         )
+
+    discovery_index = remote_script.index(
+        "mapfile -t bringup_pids"
+    )
+    duplicate_guard_index = remote_script.index(
+        '"${#bringup_pids[@]}" -gt 1'
+    )
+    adopt_index = remote_script.index(
+        'echo "${bringup_pids[0]}" '
+        '> "$RUN_DIR/ros2_bringup.pid"'
+    )
+    launch_index = remote_script.index(
+        "exec ros2 launch mini_pupper_bringup bringup.launch.py"
+    )
+
+    assert discovery_index < duplicate_guard_index
+    assert duplicate_guard_index < adopt_index
+    assert adopt_index < launch_index
 
     with tempfile.TemporaryDirectory() as directory:
         script_path = Path(directory) / "remote_startup.sh"
@@ -89,6 +119,9 @@ def main():
     print("PASS: Stopped PIDs are rejected.")
     print("PASS: Reused PIDs are rejected by command identity.")
     print("PASS: Stale PID files are removed automatically.")
+    print("PASS: Existing ROS bringup processes are discovered.")
+    print("PASS: One existing ROS bringup is adopted.")
+    print("PASS: Multiple ROS bringups fail closed.")
 
 
 if __name__ == "__main__":
