@@ -4,6 +4,7 @@
 
 import hashlib
 import json
+import math
 import os
 import signal
 import subprocess
@@ -15,8 +16,10 @@ class Tony2NavigationRuntime:
     """
     Own the headless guarded Nav2 process group.
 
-    This first feature intentionally does not expose
-    any method that can submit a NavigateToPose goal.
+    Own one bounded NavigateToPose goal at a time.
+
+    Goal execution remains deterministic, map-frame
+    only, distance bounded, and timeout bounded.
     """
 
     MAXIMUM_GOAL_DISTANCE_METERS = 0.50
@@ -28,6 +31,10 @@ class Tony2NavigationRuntime:
 
     PROBE_MARKER = (
         "tony2_navigation_probe.py"
+    )
+
+    GOAL_MARKER = (
+        "tony2_navigation_goal.py"
     )
 
     ASSET_HASHES = {
@@ -92,6 +99,11 @@ class Tony2NavigationRuntime:
             / "tony2_navigation_probe.py"
         )
 
+        self.goal_script = (
+            module_dir
+            / "tony2_navigation_goal.py"
+        )
+
         self.supervisor_pid_file = (
             self.runtime_dir
             / "tony2_navigation_supervisor.pid"
@@ -115,6 +127,21 @@ class Tony2NavigationRuntime:
         self.probe_log = (
             self.runtime_dir
             / "tony2_navigation_probe.log"
+        )
+
+        self.goal_pid_file = (
+            self.runtime_dir
+            / "tony2_navigation_goal.pid"
+        )
+
+        self.goal_result_file = (
+            self.runtime_dir
+            / "tony2_navigation_goal_result.json"
+        )
+
+        self.goal_log = (
+            self.runtime_dir
+            / "tony2_navigation_goal.log"
         )
 
         self.cartographer_pid_file = (
@@ -300,6 +327,10 @@ class Tony2NavigationRuntime:
             self.probe_pid_file
         )
 
+        goal = self._read_pid(
+            self.goal_pid_file
+        )
+
         return {
             "supervisor": (
                 supervisor
@@ -314,6 +345,14 @@ class Tony2NavigationRuntime:
                 if self._pid_matches(
                     probe,
                     self.PROBE_MARKER,
+                )
+                else None
+            ),
+            "goal": (
+                goal
+                if self._pid_matches(
+                    goal,
+                    self.GOAL_MARKER,
                 )
                 else None
             ),
@@ -424,6 +463,11 @@ class Tony2NavigationRuntime:
             and probe_running
         )
 
+        goal_active = (
+            pids.get("goal")
+            is not None
+        )
+
         partial = (
             supervisor_running
             != probe_running
@@ -519,12 +563,15 @@ class Tony2NavigationRuntime:
             "transform_ready":
                 transform_ready,
 
-            # Intentionally false in this feature.
-            "goal_submission_enabled":
-                False,
+            "goal_submission_enabled": (
+                runtime_ready
+                and not goal_active
+            ),
 
             "goal_execution_implemented":
-                False,
+                True,
+            "goal_active":
+                goal_active,
             "maximum_goal_distance_meters":
                 self.MAXIMUM_GOAL_DISTANCE_METERS,
             "execution_timeout_seconds":
@@ -743,6 +790,11 @@ class Tony2NavigationRuntime:
         pids = self._runtime_pids()
 
         self._terminate_group(
+            pids.get("goal"),
+            self.GOAL_MARKER,
+        )
+
+        self._terminate_group(
             pids["probe"],
             self.PROBE_MARKER,
         )
@@ -753,6 +805,8 @@ class Tony2NavigationRuntime:
         )
 
         for path in (
+            self.goal_pid_file,
+            self.goal_result_file,
             self.probe_pid_file,
             self.supervisor_pid_file,
             self.snapshot_file,
@@ -769,10 +823,188 @@ class Tony2NavigationRuntime:
 
     def submit_goal(
         self,
-        *_args,
-        **_kwargs,
+        x,
+        y,
+        yaw,
     ):
-        raise RuntimeError(
-            "Goal execution is intentionally "
-            "disabled in this runtime feature."
+        """
+        Execute one guarded map-frame goal.
+
+        The ROS helper verifies the current
+        map-to-base_link pose and rejects a goal
+        farther than MAXIMUM_GOAL_DISTANCE_METERS
+        before sending it to NavigateToPose.
+        """
+        values = {
+            "x": x,
+            "y": y,
+            "yaw": yaw,
+        }
+
+        normalized = {}
+
+        for name, value in values.items():
+            try:
+                numeric = float(value)
+            except (
+                TypeError,
+                ValueError,
+            ) as exc:
+                raise ValueError(
+                    f"{name} must be numeric."
+                ) from exc
+
+            if not math.isfinite(numeric):
+                raise ValueError(
+                    f"{name} must be finite."
+                )
+
+            normalized[name] = numeric
+
+        status = self.status()
+
+        if status.get("state") != "READY":
+            raise RuntimeError(
+                "Tony2 guarded navigation must "
+                "be READY before goal submission."
+            )
+
+        if not status.get(
+            "goal_submission_enabled"
+        ):
+            raise RuntimeError(
+                "Tony2 guarded goal submission "
+                "is not currently enabled."
+            )
+
+        if status.get("goal_active"):
+            raise RuntimeError(
+                "A Tony2 navigation goal "
+                "is already active."
+            )
+
+        if not self.goal_script.is_file():
+            raise RuntimeError(
+                "Tony2 guarded goal helper "
+                "is missing."
+            )
+
+        self._safe_unlink(
+            self.goal_result_file
         )
+
+        command = [
+            "/usr/bin/python3",
+            "-u",
+            str(self.goal_script),
+            "--x",
+            str(normalized["x"]),
+            "--y",
+            str(normalized["y"]),
+            "--yaw",
+            str(normalized["yaw"]),
+            "--max-distance",
+            str(
+                self.MAXIMUM_GOAL_DISTANCE_METERS
+            ),
+            "--timeout",
+            str(
+                self.EXECUTION_TIMEOUT_SECONDS
+            ),
+            "--result-file",
+            str(self.goal_result_file),
+        ]
+
+        log_handle = open(
+            self.goal_log,
+            "ab",
+            buffering=0,
+        )
+
+        try:
+            process = subprocess.Popen(
+                command,
+                stdin=subprocess.DEVNULL,
+                stdout=log_handle,
+                stderr=subprocess.STDOUT,
+                env=self.child_environment(),
+                start_new_session=True,
+            )
+        finally:
+            log_handle.close()
+
+        self._write_pid(
+            self.goal_pid_file,
+            process.pid,
+        )
+
+        try:
+            return_code = process.wait(
+                timeout=(
+                    self.EXECUTION_TIMEOUT_SECONDS
+                    + 15.0
+                )
+            )
+
+        except subprocess.TimeoutExpired as exc:
+            self._terminate_group(
+                process.pid,
+                self.GOAL_MARKER,
+            )
+
+            try:
+                process.wait(
+                    timeout=1.0
+                )
+            except subprocess.TimeoutExpired:
+                pass
+
+            raise RuntimeError(
+                "Tony2 guarded goal helper "
+                "exceeded its outer deadline."
+            ) from exc
+
+        finally:
+            self._safe_unlink(
+                self.goal_pid_file
+            )
+
+        try:
+            payload = json.loads(
+                self.goal_result_file.read_text(
+                    encoding="utf-8"
+                )
+            )
+        except (
+            FileNotFoundError,
+            OSError,
+            json.JSONDecodeError,
+        ) as exc:
+            raise RuntimeError(
+                "Tony2 guarded goal helper "
+                "did not produce a valid result."
+            ) from exc
+        finally:
+            self._safe_unlink(
+                self.goal_result_file
+            )
+
+        if (
+            return_code != 0
+            or payload.get("ok") is not True
+        ):
+            raise RuntimeError(
+                payload.get(
+                    "error",
+                    (
+                        "Tony2 guarded navigation "
+                        f"failed with code {return_code}."
+                    ),
+                )
+            )
+
+        return {
+            "action": "SUCCEEDED",
+            "goal": payload,
+            "navigation": self.status(),
+        }

@@ -4,6 +4,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import Mock
 from unittest.mock import patch
 
 
@@ -121,7 +122,7 @@ class Tony2NavigationRuntimeTests(
                 ]
             )
 
-            self.assertFalse(
+            self.assertTrue(
                 status[
                     "goal_execution_implemented"
                 ]
@@ -182,7 +183,7 @@ class Tony2NavigationRuntimeTests(
                 ]
             )
 
-    def test_submit_goal_is_not_implemented(
+    def test_ready_runtime_enables_one_goal(
         self,
     ):
         with tempfile.TemporaryDirectory() as directory:
@@ -190,14 +191,196 @@ class Tony2NavigationRuntimeTests(
                 Path(directory)
             )
 
-            with self.assertRaises(
-                RuntimeError
+            with patch.object(
+                runtime,
+                "_runtime_pids",
+                return_value={
+                    "supervisor": 100,
+                    "probe": 101,
+                    "goal": None,
+                },
+            ), patch.object(
+                runtime,
+                "_read_snapshot",
+                return_value={
+                    "planner_enabled": True,
+                    "controller_enabled": True,
+                    "navigator_enabled": True,
+                    "action_server_ready": True,
+                    "transform_ready": True,
+                },
+            ), patch.object(
+                runtime,
+                "mapping_status",
+                return_value={
+                    "running": True,
+                    "cartographer": 200,
+                    "occupancy_grid": 201,
+                },
+            ):
+                status = runtime.status()
+
+            self.assertEqual(
+                status["state"],
+                "READY",
+            )
+
+            self.assertTrue(
+                status[
+                    "goal_submission_enabled"
+                ]
+            )
+
+            self.assertTrue(
+                status[
+                    "goal_execution_implemented"
+                ]
+            )
+
+            self.assertFalse(
+                status["goal_active"]
+            )
+
+    def test_submit_goal_requires_ready_runtime(
+        self,
+    ):
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = self.make_runtime(
+                Path(directory)
+            )
+
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "must be READY",
             ):
                 runtime.submit_goal(
                     0.1,
                     0.0,
                     0.0,
                 )
+
+    def test_submit_goal_rejects_nonfinite_input(
+        self,
+    ):
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = self.make_runtime(
+                Path(directory)
+            )
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "finite",
+            ):
+                runtime.submit_goal(
+                    float("nan"),
+                    0.0,
+                    0.0,
+                )
+
+    def test_submit_goal_uses_guarded_helper(
+        self,
+    ):
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = self.make_runtime(
+                Path(directory)
+            )
+
+            process = Mock()
+            process.pid = 321
+            process.wait.return_value = 0
+
+            ready = {
+                "state": "READY",
+                "goal_submission_enabled": True,
+                "goal_active": False,
+            }
+
+            def fake_popen(
+                command,
+                **_kwargs,
+            ):
+                runtime.goal_result_file.write_text(
+                    (
+                        '{"ok":true,'
+                        '"distance_meters":0.1}'
+                    ),
+                    encoding="utf-8",
+                )
+
+                process.command = command
+
+                return process
+
+            with patch.object(
+                runtime,
+                "status",
+                return_value=ready,
+            ), patch(
+                "tony2_navigation_runtime."
+                "subprocess.Popen",
+                side_effect=fake_popen,
+            ):
+                result = runtime.submit_goal(
+                    0.1,
+                    0.0,
+                    0.0,
+                )
+
+            self.assertEqual(
+                result["action"],
+                "SUCCEEDED",
+            )
+
+            command = process.command
+
+            self.assertIn(
+                "tony2_navigation_goal.py",
+                " ".join(command),
+            )
+
+            self.assertEqual(
+                command[
+                    command.index(
+                        "--max-distance"
+                    )
+                    + 1
+                ],
+                "0.5",
+            )
+
+            self.assertEqual(
+                command[
+                    command.index(
+                        "--timeout"
+                    )
+                    + 1
+                ],
+                "25.0",
+            )
+
+    def test_goal_helper_guards_before_submission(
+        self,
+    ):
+        source = (
+            VOICE_RELAY
+            / "tony2_navigation_goal.py"
+        ).read_text(
+            encoding="utf-8"
+        )
+
+        for required in (
+            '"map",',
+            '"base_link",',
+            "math.hypot(",
+            "distance > max_distance",
+            "send_goal_async(",
+            "cancel_goal_async()",
+            "STATUS_SUCCEEDED",
+        ):
+            self.assertIn(
+                required,
+                source,
+            )
 
     def test_supervisor_is_navigation_only(
         self,
