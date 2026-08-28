@@ -240,6 +240,31 @@ class Tony2NavigationRuntimeTests(
                 source,
             )
 
+    def test_probe_does_not_shadow_rclpy_clients(
+        self,
+    ):
+        source = (
+            VOICE_RELAY
+            / "tony2_navigation_probe.py"
+        ).read_text(
+            encoding="utf-8"
+        )
+
+        self.assertNotIn(
+            "self._clients =",
+            source,
+        )
+
+        self.assertIn(
+            "self._state_clients =",
+            source,
+        )
+
+        self.assertIn(
+            "for name, client in self._state_clients.items():",
+            source,
+        )
+
     def test_guarded_config_keeps_motion_limits(
         self,
     ):

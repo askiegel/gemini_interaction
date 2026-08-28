@@ -52,7 +52,9 @@ class NavigationProbe(Node):
 
         self._pending = {}
 
-        self._clients = {
+        # Do not use Node._clients here. rclpy.Node owns
+        # that private attribute internally.
+        self._state_clients = {
             name: self.create_client(
                 GetState,
                 f"/{name}/get_state",
@@ -109,7 +111,7 @@ class NavigationProbe(Node):
             self._states[name] = None
 
     def _request_states(self):
-        for name, client in self._clients.items():
+        for name, client in self._state_clients.items():
             pending = self._pending.get(name)
 
             if (
