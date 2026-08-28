@@ -272,6 +272,26 @@ def request_json(
         }
 
 
+_TONY2_MAPPING_RUNTIME = None
+
+
+def get_tony2_mapping_runtime():
+    """Return the single local Tony2 mapping owner."""
+
+    global _TONY2_MAPPING_RUNTIME
+
+    if _TONY2_MAPPING_RUNTIME is None:
+        from tony2_mapping_runtime import (
+            Tony2MappingRuntime,
+        )
+
+        _TONY2_MAPPING_RUNTIME = (
+            Tony2MappingRuntime()
+        )
+
+    return _TONY2_MAPPING_RUNTIME
+
+
 class VoiceRelayHandler(BaseHTTPRequestHandler):
     server_version = "MiniPupperOperatorDashboard/1.0"
 
@@ -514,6 +534,299 @@ class VoiceRelayHandler(BaseHTTPRequestHandler):
                 ),
             },
         )
+
+    def mayday_mapping_navigation_active(self):
+        """
+        Fail closed if legacy mapping-navigation state
+        cannot be verified before changing live mapping.
+        """
+
+        response = request_json(
+            "GET",
+            (
+                f"{ROBOT_BRIDGE_URL}"
+                "/mapping-navigation/status"
+            ),
+            timeout=5.0,
+        )
+
+        data = response.get("data")
+
+        if (
+            not response.get("ok")
+            or not isinstance(data, dict)
+        ):
+            return (
+                True,
+                "Mayday mapping-navigation state "
+                "is unavailable.",
+            )
+
+        navigation = data.get(
+            "mapping_navigation",
+            data,
+        )
+
+        if not isinstance(navigation, dict):
+            return (
+                True,
+                "Mayday mapping-navigation state "
+                "is invalid.",
+            )
+
+        active = any(
+            navigation.get(field) is True
+            for field in (
+                "running",
+                "execution_enabled",
+                "navigation_enabled",
+                "controller_enabled",
+                "navigator_enabled",
+                "goal_submission_enabled",
+            )
+        )
+
+        return active, None
+
+    def ensure_mayday_stationary(self):
+        """
+        Publish safety zero and verify Mayday reports
+        zero commanded motion before a mapping action.
+        """
+
+        stop_response = request_json(
+            "POST",
+            f"{ROBOT_BRIDGE_URL}/stop",
+            timeout=10.0,
+        )
+
+        stop_data = stop_response.get("data")
+
+        if (
+            not stop_response.get("ok")
+            or not isinstance(stop_data, dict)
+            or stop_data.get("ok") is False
+        ):
+            return (
+                "Mayday safety STOP could not "
+                "be confirmed."
+            )
+
+        status_response = request_json(
+            "GET",
+            f"{ROBOT_BRIDGE_URL}/status",
+            timeout=5.0,
+        )
+
+        status = status_response.get("data")
+
+        if (
+            not status_response.get("ok")
+            or not isinstance(status, dict)
+        ):
+            return (
+                "Mayday stationary state "
+                "could not be verified."
+            )
+
+        motion = status.get("motion")
+
+        if not isinstance(motion, dict):
+            return (
+                "Mayday motion telemetry "
+                "is unavailable."
+            )
+
+        try:
+            linear_x = float(
+                motion.get("linear_x")
+            )
+            angular_z = float(
+                motion.get("angular_z")
+            )
+        except (
+            TypeError,
+            ValueError,
+        ):
+            return (
+                "Mayday motion telemetry "
+                "is invalid."
+            )
+
+        if (
+            linear_x != 0.0
+            or angular_z != 0.0
+            or motion.get("streaming") is not False
+        ):
+            return (
+                "Mayday is not in a verified "
+                "stopped state."
+            )
+
+        return None
+
+    def tony2_mapping_control_status(self):
+        """Return Tony2 local Cartographer ownership."""
+
+        runtime = get_tony2_mapping_runtime()
+
+        try:
+            runtime.ensure_probe()
+            mapping = runtime.status()
+        except Exception as exc:
+            return 503, {
+                "ok": False,
+                "service": (
+                    "mini_pupper_operator_dashboard"
+                ),
+                "error": str(exc),
+            }
+
+        navigation_active, navigation_error = (
+            self.mayday_mapping_navigation_active()
+        )
+
+        mapping["navigation_active"] = (
+            navigation_active
+        )
+
+        mapping[
+            "navigation_status_available"
+        ] = navigation_error is None
+
+        if navigation_error is not None:
+            mapping[
+                "navigation_status_error"
+            ] = navigation_error
+
+        healthy = (
+            mapping.get("state") != "ERROR"
+        )
+
+        return (
+            200 if healthy else 503,
+            {
+                "ok": healthy,
+                "service": (
+                    "mini_pupper_operator_dashboard"
+                ),
+                "mapping": mapping,
+            },
+        )
+
+    def tony2_mapping_control_action(self, action):
+        """
+        Start, stop, or reset Tony2 mapping only.
+
+        Browser requests cannot supply a ROS command,
+        launch path, map path, velocity, or parameter.
+        """
+
+        if action not in {
+            "start",
+            "stop",
+            "reset",
+        }:
+            return 400, {
+                "ok": False,
+                "error": (
+                    "Unsupported Tony2 "
+                    "mapping action."
+                ),
+            }
+
+        navigation_active, navigation_error = (
+            self.mayday_mapping_navigation_active()
+        )
+
+        if navigation_error is not None:
+            return 503, {
+                "ok": False,
+                "error": navigation_error,
+            }
+
+        if navigation_active:
+            return 409, {
+                "ok": False,
+                "error": (
+                    "Stop guarded navigation before "
+                    "changing the live mapping session."
+                ),
+            }
+
+        stationary_error = (
+            self.ensure_mayday_stationary()
+        )
+
+        if stationary_error is not None:
+            return 503, {
+                "ok": False,
+                "error": stationary_error,
+            }
+
+        runtime = get_tony2_mapping_runtime()
+
+        try:
+            if action == "start":
+                result = runtime.start()
+            elif action == "stop":
+                result = runtime.stop()
+            else:
+                result = runtime.reset()
+
+        except Exception as exc:
+            return 503, {
+                "ok": False,
+                "error": str(exc),
+                "mapping": runtime.status(),
+            }
+
+        mapping = result.get(
+            "mapping",
+            runtime.status(),
+        )
+
+        mapping["navigation_active"] = False
+        mapping[
+            "navigation_status_available"
+        ] = True
+
+        return 200, {
+            "ok": True,
+            "action": result.get(
+                "action",
+                action.upper(),
+            ),
+            "mapping": mapping,
+        }
+
+    def tony2_live_mapping_map_status(self):
+        """Return Tony2's current live /map snapshot."""
+
+        runtime = get_tony2_mapping_runtime()
+
+        try:
+            runtime.ensure_probe()
+            return runtime.live_map_status()
+
+        except Exception as exc:
+            return 503, {
+                "ok": False,
+                "runtime_active": False,
+                "read_only": True,
+                "authoritative": False,
+                "service": (
+                    "mini_pupper_operator_dashboard"
+                ),
+                "telemetry": {
+                    "available": False,
+                    "status": (
+                        "MAPPING_MAP_UNAVAILABLE"
+                    ),
+                    "map": None,
+                },
+                "error": str(exc),
+            }
 
     def planning_control_status(self):
         """Proxy guarded planning ownership and safety state."""
@@ -1627,14 +1940,14 @@ class VoiceRelayHandler(BaseHTTPRequestHandler):
 
         if path == "/dashboard/mapping-map":
             status_code, payload = (
-                self.live_mapping_map_status()
+                self.tony2_live_mapping_map_status()
             )
             self.send_json(status_code, payload)
             return
 
         if path == "/dashboard/mapping-control":
             status_code, payload = (
-                self.mapping_control_status()
+                self.tony2_mapping_control_status()
             )
             self.send_json(status_code, payload)
             return
@@ -1964,18 +2277,25 @@ class VoiceRelayHandler(BaseHTTPRequestHandler):
             self.send_json(status_code, payload)
             return
 
-        mapping_actions = {
+        tony2_mapping_actions = {
             "/dashboard/mapping-start": "start",
             "/dashboard/mapping-stop": "stop",
-            "/dashboard/mapping-save-candidate": (
-                "save-candidate"
-            ),
+            "/dashboard/mapping-reset": "reset",
         }
 
-        if path in mapping_actions:
+        if path in tony2_mapping_actions:
+            status_code, payload = (
+                self.tony2_mapping_control_action(
+                    tony2_mapping_actions[path]
+                )
+            )
+            self.send_json(status_code, payload)
+            return
+
+        if path == "/dashboard/mapping-save-candidate":
             status_code, payload = (
                 self.mapping_control_action(
-                    mapping_actions[path]
+                    "save-candidate"
                 )
             )
             self.send_json(status_code, payload)

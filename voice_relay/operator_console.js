@@ -2774,6 +2774,8 @@
         "/dashboard/mapping-start";
     const STOP_ENDPOINT =
         "/dashboard/mapping-stop";
+    const RESET_ENDPOINT =
+        "/dashboard/mapping-reset";
     const SAVE_ENDPOINT =
         "/dashboard/mapping-save-candidate";
     const REFRESH_MS = 1000;
@@ -2782,6 +2784,8 @@
     let requestInFlight = false;
     let actionInFlight = false;
     let latestReadinessReady = false;
+    let latestMapSaveEnabled = false;
+    let latestNavigationActive = true;
 
     function byId(id) {
         return document.getElementById(id);
@@ -2822,18 +2826,50 @@
     function updateButtons(running) {
         const start = byId("startMappingButton");
         const stop = byId("stopMappingButton");
+        const reset = byId("resetLiveMappingButton");
         const save = byId("saveCandidateButton");
 
         if (start) {
-            start.disabled = actionInFlight || running;
+            start.disabled = (
+                actionInFlight
+                || running
+                || latestNavigationActive
+            );
         }
 
         if (stop) {
             stop.disabled = actionInFlight || !running;
         }
 
+        if (reset) {
+            reset.disabled = (
+                actionInFlight
+                || !running
+                || latestNavigationActive
+            );
+
+            reset.title = (
+                latestNavigationActive
+                ? (
+                    "Stop guarded navigation before "
+                    + "resetting the live map."
+                )
+                : (
+                    "Discard only the current unsaved "
+                    + "live mapping session."
+                )
+            );
+        }
+
         if (save) {
             save.disabled = actionInFlight || !running;
+
+            if (
+                !save.disabled
+                && !latestMapSaveEnabled
+            ) {
+                save.disabled = true;
+            }
 
             if (
                 !save.disabled
@@ -2843,9 +2879,16 @@
             }
 
             save.title = (
-                latestReadinessReady
-                ? "Mapping is mature and ready to save."
-                : "Wait for the live readiness requirements."
+                !latestMapSaveEnabled
+                ? (
+                    "Candidate saving remains disabled while "
+                    + "Tony2 owns live mapping."
+                )
+                : (
+                    latestReadinessReady
+                    ? "Mapping is mature and ready to save."
+                    : "Wait for the live readiness requirements."
+                )
             );
         }
     }
@@ -3032,6 +3075,15 @@
             );
         }
 
+        latestMapSaveEnabled = (
+            mapping.map_save_enabled === true
+        );
+
+        latestNavigationActive = (
+            mapping.navigation_active === true
+            || mapping.navigation_status_available !== true
+        );
+
         const running = (
             mapping.running === true
             && mapping.owned === true
@@ -3215,6 +3267,35 @@
         );
     }
 
+    function resetMapping() {
+        if (latestNavigationActive) {
+            setMessage(
+                "Stop guarded navigation before "
+                + "resetting the live map.",
+                true
+            );
+            return;
+        }
+
+        if (
+            !window.confirm(
+                "Reset the current unsaved live map? "
+                + "This discards only the current "
+                + "unsaved mapping session. "
+                + "Saved maps will not be deleted."
+            )
+        ) {
+            return;
+        }
+
+        performAction(
+            RESET_ENDPOINT,
+            "Resetting...",
+            "Discarding the current unsaved live map "
+            + "and starting a fresh mapping session..."
+        );
+    }
+
     function saveCandidate() {
         if (!latestReadinessReady) {
             setMessage(
@@ -3244,12 +3325,19 @@
     function initialize() {
         const start = byId("startMappingButton");
         const stop = byId("stopMappingButton");
+        const reset = byId("resetLiveMappingButton");
         const save = byId("saveCandidateButton");
 
-        if (!start || !stop || !save) return;
+        if (
+            !start
+            || !stop
+            || !reset
+            || !save
+        ) return;
 
         start.addEventListener("click", startMapping);
         stop.addEventListener("click", stopMapping);
+        reset.addEventListener("click", resetMapping);
         save.addEventListener("click", saveCandidate);
 
         refresh();
