@@ -296,7 +296,7 @@ def test_voice_relay_exposes_mapping_pose_proxy():
     )
 
 
-def test_mapping_goal_proxy_outlives_backend_execution_guard():
+def test_mapping_goal_routes_through_tony2_execution_guard():
     start = SERVER.index(
         "def mapping_navigation_goal(self, payload):"
     )
@@ -308,18 +308,23 @@ def test_mapping_goal_proxy_outlives_backend_execution_guard():
 
     proxy = SERVER[start:end]
 
+    assert "runtime.submit_goal(" in proxy
+
     assert (
         'f"{ROBOT_BRIDGE_URL}/mapping-navigation/goal"'
+        not in proxy
+    )
+
+    assert (
+        '"status": "NAVIGATION_SUCCEEDED"'
         in proxy
     )
 
-    # Robot Bridge owns the 25-second motion limit.
-    # Voice Relay only allows enough HTTP response margin
-    # for Robot Bridge to finish or cancel authoritatively.
-    assert "timeout=35.0" in proxy
+    assert '"executed": True' in proxy
+    assert '"bounded": bounded' in proxy
 
     assert (
-        "25-second execution limit"
+        '"requested_distance_meters": distance'
         in proxy
     )
 
@@ -329,6 +334,13 @@ def test_voice_relay_exposes_mapping_navigation_proxies():
         "def mapping_navigation_status(self):"
         in SERVER
     )
+
+    assert (
+        "def get_tony2_navigation_runtime():"
+        in SERVER
+    )
+
+    assert "Tony2NavigationRuntime" in SERVER
 
     assert (
         "def mapping_navigation_control_action("
@@ -341,18 +353,16 @@ def test_voice_relay_exposes_mapping_navigation_proxies():
         in SERVER
     )
 
+    assert "runtime.start()" in SERVER
+    assert "runtime.stop()" in SERVER
+
     assert (
-        'f"/mapping-navigation/{action}"'
+        "runtime.submit_goal("
         in SERVER
     )
 
     assert (
-        'f"{ROBOT_BRIDGE_URL}/mapping-navigation/goal"'
-        in SERVER
-    )
-
-    assert (
-        '"/mapping-navigation/status"'
+        '"mapping_navigation": navigation'
         in SERVER
     )
 

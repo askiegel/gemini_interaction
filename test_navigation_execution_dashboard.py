@@ -126,7 +126,7 @@ def test_navigation_routes_have_fixed_methods():
 def test_proxy_does_not_expand_navigation_limits():
     source = SERVER[
         SERVER.index("    def navigation_control_status("):
-        SERVER.index("    def localization_status(")
+        SERVER.index("    def mapping_pose_status(")
     ]
 
     for marker in (

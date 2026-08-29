@@ -292,6 +292,26 @@ def get_tony2_mapping_runtime():
     return _TONY2_MAPPING_RUNTIME
 
 
+_TONY2_NAVIGATION_RUNTIME = None
+
+
+def get_tony2_navigation_runtime():
+    """Return the single local Tony2 guarded navigation owner."""
+
+    global _TONY2_NAVIGATION_RUNTIME
+
+    if _TONY2_NAVIGATION_RUNTIME is None:
+        from tony2_navigation_runtime import (
+            Tony2NavigationRuntime,
+        )
+
+        _TONY2_NAVIGATION_RUNTIME = (
+            Tony2NavigationRuntime()
+        )
+
+    return _TONY2_NAVIGATION_RUNTIME
+
+
 class VoiceRelayHandler(BaseHTTPRequestHandler):
     server_version = "MiniPupperOperatorDashboard/1.0"
 
@@ -1193,79 +1213,107 @@ class VoiceRelayHandler(BaseHTTPRequestHandler):
         )
 
     def mapping_navigation_status(self):
-        """
-        Return Robot Bridge's guarded mapping-navigation status.
+        """Return Tony2 guarded live-map navigation status."""
 
-        Robot Bridge remains authoritative for navigation ownership,
-        controller state, navigator state, and goal-submission readiness.
-        """
-        response = request_json(
-            "GET",
-            (
-                f"{ROBOT_BRIDGE_URL}"
-                "/mapping-navigation/status"
-            ),
-            timeout=5.0,
-        )
+        runtime = get_tony2_navigation_runtime()
+
+        try:
+            navigation = runtime.status()
+        except Exception as exc:
+            return 503, {
+                "ok": False,
+                "service": "mini_pupper_operator_dashboard",
+                "error": str(exc),
+            }
+
+        healthy = navigation.get("state") != "ERROR"
 
         return (
-            response["status_code"] or 503,
-            response["data"] or {
-                "ok": False,
-                "error": (
-                    response["error"]
-                    or (
-                        "Guarded live-mapping navigation "
-                        "status is unavailable."
-                    )
-                ),
+            200 if healthy else 503,
+            {
+                "ok": healthy,
+                "service": "mini_pupper_operator_dashboard",
+                "mapping_navigation": navigation,
             },
         )
 
     def mapping_navigation_control_action(self, action):
         """
-        Start or stop only Robot Bridge's guarded mapping-navigation mode.
+        Start or stop only Tony2 guarded live-map navigation.
 
-        The browser cannot select a launch file, ROS node, controller,
-        velocity, topic, frame, behavior tree, timeout, or distance limit.
+        Browser requests cannot select a launch file, ROS node,
+        controller, velocity, behavior tree, timeout, or distance.
         """
+
         if action not in {"start", "stop"}:
             return 400, {
                 "ok": False,
                 "error": "Unsupported mapping-navigation action.",
             }
 
-        response = request_json(
-            "POST",
-            (
-                f"{ROBOT_BRIDGE_URL}"
-                f"/mapping-navigation/{action}"
-            ),
-            timeout=35.0,
+        runtime = get_tony2_navigation_runtime()
+
+        if action == "start":
+            stationary_error = self.ensure_mayday_stationary()
+
+            if stationary_error is not None:
+                return 503, {
+                    "ok": False,
+                    "error": stationary_error,
+                    "mapping_navigation": runtime.status(),
+                }
+
+        try:
+            if action == "start":
+                result = runtime.start()
+            else:
+                result = runtime.stop()
+
+                request_json(
+                    "POST",
+                    f"{ROBOT_BRIDGE_URL}/stop",
+                    timeout=5.0,
+                )
+
+        except Exception as exc:
+            request_json(
+                "POST",
+                f"{ROBOT_BRIDGE_URL}/stop",
+                timeout=5.0,
+            )
+
+            return 503, {
+                "ok": False,
+                "error": str(exc),
+                "mapping_navigation": runtime.status(),
+            }
+
+        navigation = result.get(
+            "navigation",
+            runtime.status(),
         )
 
-        return (
-            response["status_code"] or 503,
-            response["data"] or {
-                "ok": False,
-                "error": (
-                    response["error"]
-                    or (
-                        "Guarded live-mapping navigation "
-                        f"{action} failed."
-                    )
-                ),
-            },
-        )
+        return 200, {
+            "ok": True,
+            "action": f"mapping_navigation_{action}",
+            "mapping_navigation": navigation,
+            "message": (
+                "Tony2 guarded live-map navigation started "
+                "without submitting a goal."
+                if action == "start"
+                else "Tony2 guarded live-map navigation stopped."
+            ),
+        }
 
     def mapping_navigation_goal(self, payload):
         """
-        Forward one finite map-frame goal to mapping-navigation only.
+        Execute one finite guarded goal through Tony2 Nav2.
 
-        Robot Bridge remains authoritative for current pose validation,
-        the 0.50-meter maximum, 25-second execution limit, cancellation,
-        behavior tree selection, controller ownership, and safety STOP.
+        Tony2NavigationRuntime owns readiness, the 0.50-meter
+        bound, the 25-second timeout, cancellation, and goal
+        execution. Robot Bridge remains the final motion STOP.
         """
+
         if not isinstance(payload, dict):
             return 400, {
                 "ok": False,
@@ -1311,23 +1359,76 @@ class VoiceRelayHandler(BaseHTTPRequestHandler):
 
             normalized[key] = value
 
-        response = request_json(
-            "POST",
-            f"{ROBOT_BRIDGE_URL}/mapping-navigation/goal",
-            payload=normalized,
-            timeout=35.0,
+        runtime = get_tony2_navigation_runtime()
+
+        stationary_error = self.ensure_mayday_stationary()
+
+        if stationary_error is not None:
+            return 503, {
+                "ok": False,
+                "error": stationary_error,
+                "mapping_navigation": runtime.status(),
+            }
+
+        try:
+            result = runtime.submit_goal(
+                normalized["goal_x"],
+                normalized["goal_y"],
+                normalized["goal_yaw"],
+            )
+        except Exception as exc:
+            request_json(
+                "POST",
+                f"{ROBOT_BRIDGE_URL}/stop",
+                timeout=5.0,
+            )
+
+            return 503, {
+                "ok": False,
+                "error": str(exc),
+                "mapping_navigation": runtime.status(),
+            }
+
+        goal = result.get("goal", {})
+        distance = goal.get("distance_meters")
+        maximum = goal.get(
+            "maximum_distance_meters",
+            runtime.MAXIMUM_GOAL_DISTANCE_METERS,
         )
 
-        return (
-            response["status_code"] or 503,
-            response["data"] or {
-                "ok": False,
-                "error": (
-                    response["error"]
-                    or "Guarded live-mapping goal failed."
-                ),
-            },
+        bounded = (
+            isinstance(distance, (int, float))
+            and isinstance(maximum, (int, float))
+            and math.isfinite(float(distance))
+            and math.isfinite(float(maximum))
+            and float(distance) <= float(maximum)
         )
+
+        browser_result = {
+            "status": "NAVIGATION_SUCCEEDED",
+            "executed": True,
+            "bounded": bounded,
+            "requested_distance_meters": distance,
+            "maximum_goal_distance_meters": maximum,
+            "maximum_execution_seconds": goal.get(
+                "timeout_seconds",
+                runtime.EXECUTION_TIMEOUT_SECONDS,
+            ),
+            "frame": goal.get("frame", "map"),
+            "requested": goal.get("requested"),
+            "start": goal.get("start"),
+        }
+
+        return 200, {
+            "ok": True,
+            "action": "mapping_navigation_goal",
+            "result": browser_result,
+            "goal": goal,
+            "mapping_navigation": result.get(
+                "navigation",
+                runtime.status(),
+            ),
+        }
 
     def localization_status(self):
         """
