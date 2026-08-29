@@ -1177,40 +1177,35 @@ class VoiceRelayHandler(BaseHTTPRequestHandler):
 
     def mapping_pose_status(self):
         """
-        Proxy Mayday's current Cartographer map-frame base_link pose.
+        Return Tony2's current Cartographer map-frame
+        base_link pose.
 
-        This endpoint is read-only and cannot initialize localization,
-        publish transforms, start navigation, or command motion.
+        This endpoint is read-only and cannot initialize
+        localization, publish transforms, start navigation,
+        or command motion.
         """
-        response = request_json(
-            "GET",
-            f"{ROBOT_BRIDGE_URL}/telemetry/mapping-pose",
-            timeout=5.0,
-        )
 
-        if isinstance(response["data"], dict):
-            return (
-                response["status_code"] or 503,
-                response["data"],
-            )
+        runtime = get_tony2_mapping_runtime()
 
-        return (
-            response["status_code"] or 503,
-            {
+        try:
+            runtime.ensure_probe()
+            return runtime.live_pose_status()
+
+        except Exception as exc:
+            return 503, {
                 "ok": False,
                 "runtime_active": False,
-                "service": "mini_pupper_operator_dashboard",
+                "service": (
+                    "mini_pupper_operator_dashboard"
+                ),
                 "telemetry": {
                     "available": False,
-                    "status": "MAPPING_POSE_UNAVAILABLE",
+                    "status":
+                        "MAPPING_POSE_UNAVAILABLE",
                     "pose": None,
                 },
-                "error": (
-                    response["error"]
-                    or "Mayday live mapping pose is unavailable."
-                ),
-            },
-        )
+                "error": str(exc),
+            }
 
     def mapping_navigation_status(self):
         """Return Tony2 guarded live-map navigation status."""

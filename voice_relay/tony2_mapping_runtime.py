@@ -457,6 +457,86 @@ class Tony2MappingRuntime:
             },
         )
 
+    def live_pose_status(self):
+        """Return Tony2's current map-to-base_link pose."""
+
+        mapping = self.status()
+
+        if not mapping["running"]:
+            return 503, {
+                "ok": False,
+                "service": (
+                    "mini_pupper_operator_dashboard"
+                ),
+                "runtime_active": False,
+                "mapping": mapping,
+                "telemetry": {
+                    "available": False,
+                    "status": "MAPPING_STOPPED",
+                    "received_at": None,
+                    "age_seconds": None,
+                    "error": None,
+                    "pose": None,
+                },
+                "source": "live_cartographer_tf",
+                "read_only": True,
+                "authoritative": False,
+            }
+
+        snapshot = self._read_snapshot()
+
+        if not isinstance(snapshot, dict):
+            return 503, {
+                "ok": False,
+                "service": (
+                    "mini_pupper_operator_dashboard"
+                ),
+                "runtime_active": True,
+                "mapping": mapping,
+                "telemetry": {
+                    "available": False,
+                    "status": "WAITING_FOR_POSE",
+                    "received_at": None,
+                    "age_seconds": None,
+                    "error": None,
+                    "pose": None,
+                },
+                "source": "live_cartographer_tf",
+                "read_only": True,
+                "authoritative": False,
+            }
+
+        telemetry = snapshot.get(
+            "pose_telemetry",
+            {},
+        )
+
+        available = bool(
+            isinstance(telemetry, dict)
+            and telemetry.get("available")
+            and telemetry.get("status") == "READY"
+            and isinstance(
+                telemetry.get("pose"),
+                dict,
+            )
+        )
+
+        return (
+            200 if available else 503,
+            {
+                "ok": available,
+                "service": (
+                    "mini_pupper_operator_dashboard"
+                ),
+                "runtime_active": True,
+                "mapping": mapping,
+                "telemetry": telemetry,
+                "source": "live_cartographer_tf",
+                "read_only": True,
+                "authoritative": False,
+            },
+        )
+
     def _spawn(
         self,
         command,

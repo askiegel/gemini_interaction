@@ -282,20 +282,33 @@ def test_go_has_no_retry_loop():
     ) == 1
 
 
-def test_voice_relay_exposes_mapping_pose_proxy():
+def test_voice_relay_exposes_tony2_mapping_pose():
     assert "def mapping_pose_status(self):" in SERVER
+
+    start = SERVER.index(
+        "    def mapping_pose_status(self):"
+    )
+
+    end = SERVER.index(
+        "    def mapping_navigation_status(self):",
+        start,
+    )
+
+    proxy = SERVER[start:end]
+
+    assert "get_tony2_mapping_runtime()" in proxy
+    assert "runtime.ensure_probe()" in proxy
+    assert "runtime.live_pose_status()" in proxy
 
     assert (
         'f"{ROBOT_BRIDGE_URL}/telemetry/mapping-pose"'
-        in SERVER
+        not in proxy
     )
 
     assert (
         'if path == "/dashboard/mapping-pose":'
         in SERVER
     )
-
-
 def test_mapping_goal_routes_through_tony2_execution_guard():
     start = SERVER.index(
         "def mapping_navigation_goal(self, payload):"

@@ -18,6 +18,10 @@ from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy
 from rclpy.qos import QoSProfile
 from rclpy.qos import ReliabilityPolicy
+from rclpy.time import Time
+from tf2_ros import Buffer
+from tf2_ros import TransformException
+from tf2_ros import TransformListener
 
 
 SNAPSHOT_PATH = Path(
@@ -60,6 +64,17 @@ class Tony2MappingProbe(Node):
         self._submaps = []
         self._submap_seen = False
         self._last_error = None
+
+        self._pose = None
+        self._pose_received_at = None
+        self._pose_received_monotonic = None
+        self._pose_error = None
+
+        self._tf_buffer = Buffer()
+        self._tf_listener = TransformListener(
+            self._tf_buffer,
+            self,
+        )
 
         map_qos = QoSProfile(depth=1)
         map_qos.reliability = ReliabilityPolicy.RELIABLE
@@ -176,6 +191,97 @@ class Tony2MappingProbe(Node):
             for item in message.submap
         ]
 
+    def _refresh_pose(self):
+        """
+        Read the latest map-to-base_link transform only.
+
+        This is telemetry. It does not publish transforms,
+        initialize localization, or command robot motion.
+        """
+
+        try:
+            transform = self._tf_buffer.lookup_transform(
+                "map",
+                "base_link",
+                Time(),
+            )
+        except TransformException as exc:
+            self._pose_error = str(exc)
+            return
+
+        stamp = transform.header.stamp
+
+        stamp_seconds = (
+            float(stamp.sec)
+            + float(stamp.nanosec)
+            / 1_000_000_000.0
+        )
+
+        translation = transform.transform.translation
+        rotation = transform.transform.rotation
+
+        self._pose = {
+            "frame_id": str(
+                transform.header.frame_id
+                or "map"
+            ),
+            "orientation": {
+                "x": float(rotation.x),
+                "y": float(rotation.y),
+                "z": float(rotation.z),
+                "w": float(rotation.w),
+            },
+            "position": {
+                "x": float(translation.x),
+                "y": float(translation.y),
+                "z": float(translation.z),
+            },
+            "source_frame_id": str(
+                transform.child_frame_id
+                or "base_link"
+            ),
+            "stamp_seconds": stamp_seconds,
+        }
+
+        self._pose_received_at = utc_now()
+        self._pose_received_monotonic = (
+            time.monotonic()
+        )
+        self._pose_error = None
+
+    def _pose_telemetry(self):
+        if self._pose is None:
+            return {
+                "available": False,
+                "status": "WAITING_FOR_POSE",
+                "received_at": None,
+                "age_seconds": None,
+                "error": self._pose_error,
+                "pose": None,
+            }
+
+        age = None
+
+        if (
+            self._pose_received_monotonic
+            is not None
+        ):
+            age = max(
+                0.0,
+                time.monotonic()
+                - self._pose_received_monotonic,
+            )
+
+        return {
+            "available": True,
+            "status": "READY",
+            "received_at": self._pose_received_at,
+            "age_seconds": age,
+            "error": self._pose_error,
+            "pose": self._pose,
+            "source": "cartographer_tf",
+        }
+
     def _readiness(self):
         count = len(self._submaps)
 
@@ -255,6 +361,8 @@ class Tony2MappingProbe(Node):
         }
 
     def _write_snapshot(self):
+        self._refresh_pose()
+
         payload = {
             "ok": True,
             "service": "tony2_mapping_dashboard_probe",
@@ -265,6 +373,7 @@ class Tony2MappingProbe(Node):
             "read_only": True,
             "authoritative": False,
             "telemetry": self._telemetry(),
+            "pose_telemetry": self._pose_telemetry(),
             "readiness": self._readiness(),
         }
 
