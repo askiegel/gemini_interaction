@@ -25,6 +25,15 @@ class Tony2NavigationRuntime:
     MAXIMUM_GOAL_DISTANCE_METERS = 0.50
     EXECUTION_TIMEOUT_SECONDS = 25.0
 
+    MOTION_OUTPUT_CONNECTED = False
+
+    ZENOH_SESSION_OVERRIDE = (
+        'connect/endpoints=["tcp/127.0.0.1:7447"];'
+        'listen/endpoints=["tcp/127.0.0.1:0"];'
+        'scouting/multicast/enabled=false;'
+        'transport/shared_memory/enabled=false'
+    )
+
     SUPERVISOR_MARKER = (
         "tony2_navigation_supervisor.py"
     )
@@ -162,11 +171,11 @@ class Tony2NavigationRuntime:
 
     def child_environment(self):
         """
-        Use the established Tony2 DDS environment.
+        Use isolated Tony2 Nav2 middleware.
 
-        UDPv4-only mode is deliberately removed because
-        our live Cartographer A/B test demonstrated that
-        forcing it breaks large local DDS responses.
+        Nav2 runs on ROS domain 43 through a localhost-only
+        Zenoh router. The supervisor owns the separate
+        domain-42 Fast DDS ingress process.
         """
 
         environment = dict(
@@ -175,20 +184,33 @@ class Tony2NavigationRuntime:
 
         environment[
             "ROS_DOMAIN_ID"
-        ] = "42"
+        ] = "43"
 
-        environment[
-            "ROS_LOCALHOST_ONLY"
-        ] = "0"
+        environment.pop(
+            "ROS_LOCALHOST_ONLY",
+            None,
+        )
 
         environment[
             "RMW_IMPLEMENTATION"
-        ] = "rmw_fastrtps_cpp"
+        ] = "rmw_zenoh_cpp"
 
-        environment.pop(
+        for name in (
             "FASTDDS_BUILTIN_TRANSPORTS",
-            None,
-        )
+            "FASTRTPS_DEFAULT_PROFILES_FILE",
+            "FASTDDS_DEFAULT_PROFILES_FILE",
+            "ROS_DISCOVERY_SERVER",
+            "ROS_SUPER_CLIENT",
+            "CYCLONEDDS_URI",
+        ):
+            environment.pop(
+                name,
+                None,
+            )
+
+        environment[
+            "ZENOH_CONFIG_OVERRIDE"
+        ] = self.ZENOH_SESSION_OVERRIDE
 
         environment[
             "TONY2_NAVIGATION_SNAPSHOT"
@@ -566,7 +588,12 @@ class Tony2NavigationRuntime:
             "goal_submission_enabled": (
                 runtime_ready
                 and not goal_active
+                and self.MOTION_OUTPUT_CONNECTED
             ),
+            "motion_output_connected":
+                self.MOTION_OUTPUT_CONNECTED,
+            "isolation_transport":
+                "zenoh_localhost",
 
             "goal_execution_implemented":
                 True,
@@ -680,6 +707,8 @@ class Tony2NavigationRuntime:
                 self.supervisor_pid_file,
             )
         )
+
+        time.sleep(1.5)
 
         try:
             probe_pid = self._spawn(

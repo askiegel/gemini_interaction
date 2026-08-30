@@ -54,7 +54,7 @@ class Tony2NavigationRuntimeTests(
                 runtime.validate_assets()
             )
 
-    def test_child_environment_preserves_default_fastdds(
+    def test_child_environment_uses_isolated_zenoh(
         self,
     ):
         with tempfile.TemporaryDirectory() as directory:
@@ -70,32 +70,40 @@ class Tony2NavigationRuntimeTests(
                 environment[
                     "ROS_DOMAIN_ID"
                 ],
-                "42",
-            )
-
-            self.assertEqual(
-                environment[
-                    "ROS_LOCALHOST_ONLY"
-                ],
-                "0",
+                "43",
             )
 
             self.assertEqual(
                 environment[
                     "RMW_IMPLEMENTATION"
                 ],
-                "rmw_fastrtps_cpp",
-            )
-
-            self.assertNotIn(
-                "FASTDDS_BUILTIN_TRANSPORTS",
-                environment,
+                "rmw_zenoh_cpp",
             )
 
             self.assertEqual(
-                environment["KEEP_ME"],
-                "yes",
+                environment[
+                    "ZENOH_CONFIG_OVERRIDE"
+                ],
+                runtime.ZENOH_SESSION_OVERRIDE,
             )
+
+            self.assertNotIn(
+                "ROS_LOCALHOST_ONLY",
+                environment,
+            )
+
+            for removed in (
+                "FASTDDS_BUILTIN_TRANSPORTS",
+                "FASTRTPS_DEFAULT_PROFILES_FILE",
+                "FASTDDS_DEFAULT_PROFILES_FILE",
+                "ROS_DISCOVERY_SERVER",
+                "ROS_SUPER_CLIENT",
+                "CYCLONEDDS_URI",
+            ):
+                self.assertNotIn(
+                    removed,
+                    environment,
+                )
 
     def test_stopped_runtime_has_no_goal_permission(
         self,
@@ -183,7 +191,7 @@ class Tony2NavigationRuntimeTests(
                 ]
             )
 
-    def test_ready_runtime_enables_one_goal(
+    def test_ready_runtime_keeps_goal_disabled_while_motion_blocked(
         self,
     ):
         with tempfile.TemporaryDirectory() as directory:
@@ -225,20 +233,20 @@ class Tony2NavigationRuntimeTests(
                 "READY",
             )
 
-            self.assertTrue(
+            self.assertFalse(
                 status[
                     "goal_submission_enabled"
                 ]
             )
 
-            self.assertTrue(
+            self.assertFalse(
                 status[
-                    "goal_execution_implemented"
+                    "motion_output_connected"
                 ]
             )
 
             self.assertFalse(
-                status["goal_active"]
+                runtime.MOTION_OUTPUT_CONNECTED
             )
 
     def test_submit_goal_requires_ready_runtime(
@@ -382,7 +390,7 @@ class Tony2NavigationRuntimeTests(
                 source,
             )
 
-    def test_supervisor_is_navigation_only(
+    def test_supervisor_is_isolated_navigation_only(
         self,
     ):
         source = (
@@ -398,30 +406,27 @@ class Tony2NavigationRuntimeTests(
             'package="nav2_bt_navigator"',
             'package="nav2_lifecycle_manager"',
             '"cmd_vel",',
-            '"/cmd_vel",',
+            '"cmd_vel_blocked"',
             '"/nav_tf",',
             '"autostart": True',
             (
                 '"attempt_respawn_reconnection":'
             ),
+            "rmw_zenoh_cpp/rmw_zenohd",
+            "tony2_navigation_isolation_source.py",
+            "tony2_navigation_isolation_sink.py",
+            '"ROS_DOMAIN_ID=42"',
+            '"ROS_DOMAIN_ID": "43"',
         ):
             self.assertIn(
                 required,
                 source,
             )
 
-        for forbidden in (
-            'package="nav2_amcl"',
-            'package="nav2_map_server"',
-            'package="nav2_behaviors"',
-            'package="nav2_waypoint_follower"',
-            'package="nav2_velocity_smoother"',
-            'package="rviz2"',
-        ):
-            self.assertNotIn(
-                forbidden,
-                source,
-            )
+        self.assertNotIn(
+            '"/cmd_vel",',
+            source,
+        )
 
     def test_probe_does_not_shadow_rclpy_clients(
         self,

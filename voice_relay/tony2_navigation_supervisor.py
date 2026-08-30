@@ -1,8 +1,19 @@
 #!/usr/bin/env python3
 
-"""Headless guarded Nav2 composition for Tony2."""
+"""
+Headless guarded Nav2 composition on isolated Zenoh.
+
+The navigation graph is domain 43 / rmw_zenoh_cpp.
+
+Exactly one domain-42 Fast DDS source reads the five
+navigation inputs and transfers them through localhost TCP.
+
+Controller output is deliberately disconnected from
+Mayday during this validation feature.
+"""
 
 import argparse
+
 from pathlib import Path
 
 from launch import LaunchDescription
@@ -12,14 +23,37 @@ from launch.actions import TimerAction
 from launch_ros.actions import Node
 
 
-def build_launch_description(asset_dir):
-    asset_dir = Path(asset_dir).resolve()
+ROUTER_BINARY = (
+    "/opt/ros/humble/lib/"
+    "rmw_zenoh_cpp/rmw_zenohd"
+)
 
-    module_dir = Path(__file__).resolve().parent
+ROUTER_OVERRIDE = (
+    'listen/endpoints=["tcp/127.0.0.1:7447"];'
+    'scouting/multicast/enabled=false;'
+    'transport/shared_memory/enabled=false'
+)
 
-    sensor_relay = (
+
+def build_launch_description(
+    asset_dir,
+):
+    asset_dir = Path(
+        asset_dir
+    ).resolve()
+
+    module_dir = Path(
+        __file__
+    ).resolve().parent
+
+    isolation_source = (
         module_dir
-        / "tony2_navigation_sensor_relay.py"
+        / "tony2_navigation_isolation_source.py"
+    )
+
+    isolation_sink = (
+        module_dir
+        / "tony2_navigation_isolation_sink.py"
     )
 
     params = (
@@ -37,20 +71,18 @@ def build_launch_description(asset_dir):
         / "mayday_disabled_navigate_through_poses.xml"
     )
 
-    tf_relay = (
-        asset_dir
-        / "latest_tf_relay.py"
-    )
-
     for path in (
+        isolation_source,
+        isolation_sink,
         params,
         navigate_tree,
         disabled_through_tree,
-        tf_relay,
+        Path(ROUTER_BINARY),
     ):
         if not path.is_file():
             raise RuntimeError(
-                f"Required guarded asset is missing: {path}"
+                "Required isolated navigation "
+                f"asset is missing: {path}"
             )
 
     navigation_remap = [
@@ -68,35 +100,63 @@ def build_launch_description(asset_dir):
         ),
     ]
 
-    relay = ExecuteProcess(
+    router = ExecuteProcess(
         cmd=[
-            "/usr/bin/python3",
-            "-u",
-            str(tf_relay),
-            "--ros-args",
-            "-r",
-            "__node:=mapping_navigation_tf_relay",
-            "-p",
-            "input_topic:=/mayday_navigation_tf",
-            "-p",
-            "output_topic:=/nav_tf",
-            "-p",
-            "publish_frequency:=10.0",
+            ROUTER_BINARY,
         ],
+        additional_env={
+            "ROS_DOMAIN_ID": "43",
+            "ZENOH_CONFIG_OVERRIDE":
+                ROUTER_OVERRIDE,
+        },
         output="screen",
     )
 
-    sensor_ingress = ExecuteProcess(
-        cmd=[
-            "/usr/bin/python3",
-            "-u",
-            str(sensor_relay),
+    isolation_ingress = TimerAction(
+        period=1.0,
+        actions=[
+            ExecuteProcess(
+                cmd=[
+                    "/usr/bin/python3",
+                    "-u",
+                    str(isolation_sink),
+                ],
+                output="screen",
+            ),
+            ExecuteProcess(
+                cmd=[
+                    "/usr/bin/env",
+                    "-u",
+                    "ZENOH_CONFIG_OVERRIDE",
+                    "-u",
+                    "CYCLONEDDS_URI",
+                    "-u",
+                    "ROS_DISCOVERY_SERVER",
+                    "-u",
+                    "ROS_SUPER_CLIENT",
+                    "-u",
+                    "FASTRTPS_DEFAULT_PROFILES_FILE",
+                    "-u",
+                    "FASTDDS_DEFAULT_PROFILES_FILE",
+                    "-u",
+                    "FASTDDS_BUILTIN_TRANSPORTS",
+                    "ROS_DOMAIN_ID=42",
+                    "ROS_LOCALHOST_ONLY=0",
+                    (
+                        "RMW_IMPLEMENTATION="
+                        "rmw_fastrtps_cpp"
+                    ),
+                    "/usr/bin/python3",
+                    "-u",
+                    str(isolation_source),
+                ],
+                output="screen",
+            ),
         ],
-        output="screen",
     )
 
     delayed_navigation = TimerAction(
-        period=3.0,
+        period=4.0,
         actions=[
             Node(
                 package="nav2_planner",
@@ -127,7 +187,10 @@ def build_launch_description(asset_dir):
                     + [
                         (
                             "cmd_vel",
-                            "/cmd_vel",
+                            (
+                                "/tony2_nav_"
+                                "cmd_vel_blocked"
+                            ),
                         ),
                     ]
                 ),
@@ -144,7 +207,9 @@ def build_launch_description(asset_dir):
                         "default_nav_to_pose_bt_xml":
                             str(navigate_tree),
                         "default_nav_through_poses_bt_xml":
-                            str(disabled_through_tree),
+                            str(
+                                disabled_through_tree
+                            ),
                     },
                 ],
                 remappings=navigation_remap,
@@ -177,8 +242,8 @@ def build_launch_description(asset_dir):
 
     return LaunchDescription(
         [
-            relay,
-            sensor_ingress,
+            router,
+            isolation_ingress,
             delayed_navigation,
         ]
     )

@@ -9,6 +9,18 @@ SUPERVISOR = (
     / "tony2_navigation_supervisor.py"
 )
 
+SOURCE = (
+    ROOT
+    / "voice_relay"
+    / "tony2_navigation_isolation_source.py"
+)
+
+SINK = (
+    ROOT
+    / "voice_relay"
+    / "tony2_navigation_isolation_sink.py"
+)
+
 RUNTIME = (
     ROOT
     / "voice_relay"
@@ -16,24 +28,30 @@ RUNTIME = (
 )
 
 
-def test_navigation_relay_consumes_filtered_mapping_tree():
-    source = SUPERVISOR.read_text(
+def test_isolation_source_consumes_filtered_mapping_tree():
+    source = SOURCE.read_text(
         encoding="utf-8"
     )
 
     assert (
-        '"input_topic:=/mayday_navigation_tf"'
+        'TF_INPUT = "/mayday_navigation_tf"'
         in source
     )
 
     assert (
-        '"output_topic:=/nav_tf"'
-        in source
-    )
-
-    assert (
-        '"input_topic:=/tf"'
+        'TF_INPUT = "/tf"'
         not in source
+    )
+
+
+def test_isolation_sink_publishes_local_nav_tf():
+    sink = SINK.read_text(
+        encoding="utf-8"
+    )
+
+    assert (
+        'TF_OUTPUT = "/nav_tf"'
+        in sink
     )
 
 
@@ -75,7 +93,9 @@ def test_goal_helper_uses_nav_tf():
 
     start = source.index(
         "command = [",
-        source.index("def submit_goal("),
+        source.index(
+            "def submit_goal("
+        ),
     )
 
     end = source.index(
@@ -88,12 +108,17 @@ def test_goal_helper_uses_nav_tf():
     assert '"/tf:=/nav_tf"' in command
 
 
-def test_navigation_tf_change_does_not_add_motion():
-    supervisor = SUPERVISOR.read_text(
-        encoding="utf-8"
-    )
+def test_filtered_tf_change_does_not_add_motion():
+    for path in (
+        SOURCE,
+        SINK,
+    ):
+        source = path.read_text(
+            encoding="utf-8"
+        )
 
-    # Existing controller cmd_vel routing is allowed.
-    # This feature must not add direct Twist publication.
-    assert "geometry_msgs.msg import Twist" not in supervisor
-    assert "create_publisher(Twist" not in supervisor
+        assert "geometry_msgs.msg import Twist" not in source
+        assert "create_publisher(Twist" not in source
+        assert "NavigateToPose" not in source
+        assert "ActionClient" not in source
+        assert "cmd_vel" not in source
