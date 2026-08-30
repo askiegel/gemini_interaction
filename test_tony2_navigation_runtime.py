@@ -902,6 +902,112 @@ class Tony2NavigationRuntimeTests(
                 )
             )
 
+    def test_goal_command_preserves_negative_scientific_values(
+        self,
+    ):
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = self.make_runtime(
+                Path(directory)
+            )
+
+            process = Mock()
+            process.pid = 321
+            process.wait.return_value = 0
+
+            ready = {
+                "state": "READY",
+                "goal_submission_enabled": True,
+                "goal_active": False,
+                "motion_output_connected": True,
+            }
+
+            def fake_popen(
+                command,
+                **_kwargs,
+            ):
+                runtime.goal_result_file.write_text(
+                    (
+                        '{"ok":true,'
+                        '"distance_meters":0.1}'
+                    ),
+                    encoding="utf-8",
+                )
+
+                process.command = command
+                return process
+
+            with patch.object(
+                runtime,
+                "status",
+                return_value=ready,
+            ), patch.object(
+                runtime,
+                "_begin_motion_lease",
+            ) as begin, patch.object(
+                runtime,
+                "_wait_for_motion_arm_ack",
+                return_value=True,
+            ), patch.object(
+                runtime,
+                "_release_motion_lease",
+                return_value=True,
+            ), patch.object(
+                runtime,
+                "_wait_for_motion_disarm",
+                return_value=True,
+            ), patch(
+                "tony2_navigation_runtime.subprocess.Popen",
+                side_effect=fake_popen,
+            ):
+                lease = Mock()
+                token = "a" * 48
+
+                begin.return_value = (
+                    lease,
+                    token,
+                    runtime._stop_generation,
+                )
+
+                # _begin_motion_lease is mocked above, so
+                # reproduce only its authorization ownership
+                # side effects. The runtime's real
+                # _motion_lease_is_current() guard remains live.
+                runtime._active_motion_lease = lease
+                runtime._active_motion_token = token
+
+                result = runtime.submit_goal(
+                    -7.0e-05,
+                    -8.0e-06,
+                    -7.669196149371214e-05,
+                )
+
+            self.assertEqual(
+                result["action"],
+                "SUCCEEDED",
+            )
+
+            command = process.command
+
+            self.assertIn(
+                "--x=-7e-05",
+                command,
+            )
+
+            self.assertIn(
+                "--y=-8e-06",
+                command,
+            )
+
+            self.assertIn(
+                "--yaw=-7.669196149371214e-05",
+                command,
+            )
+
+            self.assertNotIn(
+                "--yaw",
+                command,
+            )
+
     def test_goal_helper_guards_before_submission(
         self,
     ):

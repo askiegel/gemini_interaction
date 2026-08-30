@@ -1366,12 +1366,18 @@ class Tony2NavigationRuntime:
             "/usr/bin/python3",
             "-u",
             str(self.goal_script),
-            "--x",
-            str(normalized["x"]),
-            "--y",
-            str(normalized["y"]),
-            "--yaw",
-            str(normalized["yaw"]),
+            (
+                "--x="
+                + str(normalized["x"])
+            ),
+            (
+                "--y="
+                + str(normalized["y"])
+            ),
+            (
+                "--yaw="
+                + str(normalized["yaw"])
+            ),
             "--max-distance",
             str(
                 self.MAXIMUM_GOAL_DISTANCE_METERS
