@@ -293,6 +293,7 @@ def get_tony2_mapping_runtime():
 
 
 _TONY2_NAVIGATION_RUNTIME = None
+_TONY2_NAVIGATION_RUNTIME_LOCK = Lock()
 
 
 def get_tony2_navigation_runtime():
@@ -300,14 +301,20 @@ def get_tony2_navigation_runtime():
 
     global _TONY2_NAVIGATION_RUNTIME
 
-    if _TONY2_NAVIGATION_RUNTIME is None:
-        from tony2_navigation_runtime import (
-            Tony2NavigationRuntime,
-        )
+    if _TONY2_NAVIGATION_RUNTIME is not None:
+        return _TONY2_NAVIGATION_RUNTIME
 
-        _TONY2_NAVIGATION_RUNTIME = (
-            Tony2NavigationRuntime()
-        )
+    with _TONY2_NAVIGATION_RUNTIME_LOCK:
+        if _TONY2_NAVIGATION_RUNTIME is None:
+            from tony2_navigation_runtime import (
+                Tony2NavigationRuntime,
+            )
+
+            _TONY2_NAVIGATION_RUNTIME = (
+                Tony2NavigationRuntime(
+                    robot_bridge_url=ROBOT_BRIDGE_URL,
+                )
+            )
 
     return _TONY2_NAVIGATION_RUNTIME
 

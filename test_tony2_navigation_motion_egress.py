@@ -405,7 +405,7 @@ def test_adapter_has_no_ros_motion_publisher():
     )
 
 
-def test_adapter_is_integrated_but_disabled():
+def test_adapter_is_integrated_with_transient_authorization():
     supervisor = SUPERVISOR.read_text(
         encoding="utf-8"
     )
@@ -439,7 +439,7 @@ def test_adapter_is_integrated_but_disabled():
     )
 
     assert (
-        "MOTION_OUTPUT_CONNECTED = False"
+        "MOTION_ARM_ACK_TIMEOUT_SECONDS"
         in runtime
     )
 
@@ -545,7 +545,7 @@ def test_supervisor_still_has_no_static_motion_enable_flag():
     )
 
     assert (
-        "MOTION_OUTPUT_CONNECTED = False"
+        "MOTION_ARM_ACK_TIMEOUT_SECONDS"
         in runtime
     )
 

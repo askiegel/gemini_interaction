@@ -160,22 +160,42 @@ def test_nav2_controller_output_is_disconnected():
     )
 
 
-def test_goal_submission_is_forced_closed():
+def test_goal_submission_requires_idle_transient_egress():
     runtime = read(RUNTIME)
 
     assert (
-        "MOTION_OUTPUT_CONNECTED = False"
+        "MOTION_ARM_ACK_TIMEOUT_SECONDS"
+        in runtime
+    )
+
+    assert (
+        '"motion_egress_idle":'
+        in runtime
+    )
+
+    assert (
+        "and motion_egress_idle"
+        in runtime
+    )
+
+    assert (
+        "and active_token is None"
         in runtime
     )
 
     assert (
         "and self.MOTION_OUTPUT_CONNECTED"
-        in runtime
+        not in runtime
     )
 
     assert (
-        '"motion_output_connected":'
-        in runtime
+        "MOTION_OUTPUT_CONNECTED = False"
+        not in runtime
+    )
+
+    assert (
+        "MOTION_OUTPUT_CONNECTED = True"
+        not in runtime
     )
 
 

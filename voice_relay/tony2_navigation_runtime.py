@@ -8,8 +8,21 @@ import math
 import os
 import signal
 import subprocess
+import threading
 import time
 from pathlib import Path
+
+
+try:
+    from .tony2_navigation_motion_arm import (
+        MotionArmLease,
+        read_json_file,
+    )
+except ImportError:
+    from tony2_navigation_motion_arm import (
+        MotionArmLease,
+        read_json_file,
+    )
 
 
 class Tony2NavigationRuntime:
@@ -25,7 +38,9 @@ class Tony2NavigationRuntime:
     MAXIMUM_GOAL_DISTANCE_METERS = 0.50
     EXECUTION_TIMEOUT_SECONDS = 25.0
 
-    MOTION_OUTPUT_CONNECTED = False
+    MOTION_ARM_ACK_TIMEOUT_SECONDS = 2.0
+    MOTION_DISARM_TIMEOUT_SECONDS = 1.0
+    MOTION_STATE_POLL_SECONDS = 0.05
 
     ZENOH_SESSION_OVERRIDE = (
         'connect/endpoints=["tcp/127.0.0.1:7447"];'
@@ -78,6 +93,7 @@ class Tony2NavigationRuntime:
         runtime_dir=None,
         asset_dir=None,
         base_environment=None,
+        robot_bridge_url=None,
     ):
         module_dir = Path(
             __file__
@@ -181,6 +197,37 @@ class Tony2NavigationRuntime:
             if base_environment is not None
             else os.environ
         )
+
+        resolved_robot_bridge_url = (
+            robot_bridge_url
+            if robot_bridge_url is not None
+            else self.base_environment.get(
+                "ROBOT_BRIDGE_URL"
+            )
+        )
+
+        self.robot_bridge_url = (
+            str(resolved_robot_bridge_url)
+            .rstrip("/")
+            if resolved_robot_bridge_url
+            else None
+        )
+
+        # Voice Relay uses ThreadingHTTPServer. GO and STOP
+        # can therefore execute concurrently against this
+        # single runtime object.
+        self._motion_lock = threading.RLock()
+
+        # Set immediately when STOP begins. Unlike this event,
+        # the generation counter is never cleared and therefore
+        # records that a STOP occurred even after STOP finishes.
+        self._stop_requested = threading.Event()
+        self._stop_generation = 0
+        self._stopping = False
+
+        self._active_motion_lease = None
+        self._active_motion_token = None
+        self._goal_process = None
 
     def child_environment(self):
         """
@@ -492,6 +539,248 @@ class Tony2NavigationRuntime:
         ):
             return None
 
+    def _read_motion_egress_status(self):
+        payload = read_json_file(
+            self.motion_egress_status_file
+        )
+
+        if not isinstance(payload, dict):
+            return {}
+
+        return payload
+
+    @staticmethod
+    def _motion_egress_running_from(
+        payload,
+    ):
+        return bool(
+            isinstance(payload, dict)
+            and payload.get("running") is True
+        )
+
+    @staticmethod
+    def _motion_egress_idle_from(
+        payload,
+    ):
+        return bool(
+            isinstance(payload, dict)
+            and payload.get("running") is True
+            and payload.get("armed") is False
+            and payload.get("token") is None
+        )
+
+    @staticmethod
+    def _egress_acknowledges_token_from(
+        payload,
+        token,
+    ):
+        return bool(
+            isinstance(payload, dict)
+            and payload.get("running") is True
+            and payload.get("armed") is True
+            and payload.get("token") == token
+        )
+
+    def _egress_acknowledges_token(
+        self,
+        token,
+    ):
+        return (
+            self._egress_acknowledges_token_from(
+                self._read_motion_egress_status(),
+                token,
+            )
+        )
+
+    def _motion_lease_is_current(
+        self,
+        lease,
+        token,
+        generation,
+    ):
+        with self._motion_lock:
+            return bool(
+                not self._stopping
+                and not self._stop_requested.is_set()
+                and self._stop_generation
+                    == generation
+                and self._active_motion_lease
+                    is lease
+                and self._active_motion_token
+                    == token
+            )
+
+    def _begin_motion_lease(self):
+        with self._motion_lock:
+            if (
+                self._stopping
+                or self._stop_requested.is_set()
+            ):
+                raise RuntimeError(
+                    "Tony2 navigation STOP is in progress."
+                )
+
+            if self._active_motion_lease is not None:
+                raise RuntimeError(
+                    "Tony2 motion authorization "
+                    "is already active."
+                )
+
+            status = self.status()
+
+            if (
+                status.get("state") != "READY"
+                or status.get(
+                    "goal_submission_enabled"
+                ) is not True
+            ):
+                raise RuntimeError(
+                    "Tony2 guarded navigation is no "
+                    "longer available for GO."
+                )
+
+            if not self.robot_bridge_url:
+                raise RuntimeError(
+                    "Robot Bridge URL is unavailable "
+                    "for guarded motion authorization."
+                )
+
+            generation = self._stop_generation
+
+            lease = MotionArmLease(
+                self.motion_arm_file,
+                self.robot_bridge_url,
+            )
+
+            try:
+                token = lease.start()
+
+                # STOP can set its event without waiting for
+                # this lock. If that happened during start(),
+                # destroy the lease before publishing ownership.
+                if self._stop_requested.is_set():
+                    lease.stop()
+
+                    self._safe_unlink(
+                        self.motion_arm_file
+                    )
+
+                    raise RuntimeError(
+                        "Tony2 guarded GO was cancelled "
+                        "while motion authorization started."
+                    )
+
+            except Exception:
+                # MotionArmLease.stop() is idempotent enough
+                # for cleanup after a partially completed start.
+                try:
+                    lease.stop()
+                except Exception:
+                    pass
+
+                self._safe_unlink(
+                    self.motion_arm_file
+                )
+
+                raise
+
+            self._active_motion_lease = lease
+            self._active_motion_token = token
+
+            return (
+                lease,
+                token,
+                generation,
+            )
+
+    def _release_motion_lease(
+        self,
+        lease,
+    ):
+        if lease is None:
+            return False
+
+        with self._motion_lock:
+            if self._active_motion_lease is not lease:
+                return False
+
+            # CRITICAL ORDER:
+            # Keep ownership while the refresher is stopped.
+            # STOP cannot observe "no lease" while the lease
+            # thread is still capable of rewriting the file.
+            try:
+                lease.stop()
+            finally:
+                # Runtime STOP/goal completion is globally
+                # fail-closed: no authorization file may remain.
+                self._safe_unlink(
+                    self.motion_arm_file
+                )
+
+                if self._active_motion_lease is lease:
+                    self._active_motion_lease = None
+                    self._active_motion_token = None
+
+        return True
+
+    def _wait_for_motion_arm_ack(
+        self,
+        lease,
+        token,
+        generation,
+    ):
+        deadline = (
+            time.monotonic()
+            + self.MOTION_ARM_ACK_TIMEOUT_SECONDS
+        )
+
+        while time.monotonic() < deadline:
+            if not self._motion_lease_is_current(
+                lease,
+                token,
+                generation,
+            ):
+                raise RuntimeError(
+                    "Tony2 guarded GO was cancelled "
+                    "before motion egress armed."
+                )
+
+            if self._egress_acknowledges_token(
+                token
+            ):
+                return True
+
+            time.sleep(
+                self.MOTION_STATE_POLL_SECONDS
+            )
+
+        raise RuntimeError(
+            "Tony2 motion egress did not acknowledge "
+            "the transient GO lease."
+        )
+
+    def _wait_for_motion_disarm(self):
+        deadline = (
+            time.monotonic()
+            + self.MOTION_DISARM_TIMEOUT_SECONDS
+        )
+
+        while time.monotonic() < deadline:
+            payload = (
+                self._read_motion_egress_status()
+            )
+
+            if self._motion_egress_idle_from(
+                payload
+            ):
+                return True
+
+            time.sleep(
+                self.MOTION_STATE_POLL_SECONDS
+            )
+
+        return False
+
     def status(self):
         pids = self._runtime_pids()
 
@@ -576,6 +865,41 @@ class Tony2NavigationRuntime:
             self.mapping_status()
         )
 
+        with self._motion_lock:
+            active_token = (
+                self._active_motion_token
+            )
+
+            stopping = bool(
+                self._stopping
+                or self._stop_requested.is_set()
+            )
+
+        egress_status = (
+            self._read_motion_egress_status()
+        )
+
+        motion_egress_ready = (
+            self._motion_egress_running_from(
+                egress_status
+            )
+        )
+
+        motion_egress_idle = (
+            self._motion_egress_idle_from(
+                egress_status
+            )
+        )
+
+        motion_output_connected = bool(
+            not stopping
+            and active_token is not None
+            and self._egress_acknowledges_token_from(
+                egress_status,
+                active_token,
+            )
+        )
+
         return {
             "state": (
                 "ERROR"
@@ -610,13 +934,19 @@ class Tony2NavigationRuntime:
             "transform_ready":
                 transform_ready,
 
+            "motion_egress_ready":
+                motion_egress_ready,
+            "motion_egress_idle":
+                motion_egress_idle,
             "goal_submission_enabled": (
                 runtime_ready
+                and motion_egress_idle
                 and not goal_active
-                and self.MOTION_OUTPUT_CONNECTED
+                and not stopping
+                and active_token is None
             ),
             "motion_output_connected":
-                self.MOTION_OUTPUT_CONNECTED,
+                motion_output_connected,
             "isolation_transport":
                 "zenoh_localhost",
 
@@ -848,52 +1178,118 @@ class Tony2NavigationRuntime:
 
     def stop(self):
         """
-        Stop the probe and the complete Nav2
-        supervisor process group.
+        Stop motion authorization before navigation processes.
+
+        The lease refresher is stopped while ownership remains
+        protected by _motion_lock. Only after that can the goal,
+        probe, and Nav2 supervisor be terminated.
         """
+        # Make STOP visible immediately to a GO thread that
+        # currently owns _motion_lock.
+        self._stop_requested.set()
 
-        pids = self._runtime_pids()
+        lease_was_active = False
+        lease_stop_error = None
 
-        # Fail closed before stopping any navigation
-        # processes. No current runtime path creates this
-        # lease yet.
-        self._safe_unlink(
-            self.motion_arm_file
-        )
+        with self._motion_lock:
+            self._stop_generation += 1
+            self._stopping = True
 
-        self._terminate_group(
-            pids.get("goal"),
-            self.GOAL_MARKER,
-        )
+            lease = self._active_motion_lease
 
-        self._terminate_group(
-            pids["probe"],
-            self.PROBE_MARKER,
-        )
+            if lease is not None:
+                lease_was_active = True
 
-        self._terminate_group(
-            pids["supervisor"],
-            self.SUPERVISOR_MARKER,
-        )
+                # CRITICAL: do not detach ownership before
+                # the refresher thread has stopped.
+                try:
+                    lease.stop()
+                except Exception as exc:
+                    lease_stop_error = exc
+                finally:
+                    self._safe_unlink(
+                        self.motion_arm_file
+                    )
 
-        for path in (
-            self.goal_pid_file,
-            self.goal_result_file,
-            self.probe_pid_file,
-            self.supervisor_pid_file,
-            self.snapshot_file,
-            self.motion_arm_file,
-            self.motion_egress_status_file,
-        ):
-            self._safe_unlink(
-                path
+                    if self._active_motion_lease is lease:
+                        self._active_motion_lease = None
+                        self._active_motion_token = None
+
+            else:
+                self._safe_unlink(
+                    self.motion_arm_file
+                )
+
+            goal_process = self._goal_process
+            self._goal_process = None
+
+        try:
+            # If egress had actually been armed, removing the
+            # lease makes it call Robot Bridge STOP. Give that
+            # fail-safe transition a bounded opportunity before
+            # killing Nav2.
+            if lease_was_active:
+                self._wait_for_motion_disarm()
+
+            pids = self._runtime_pids()
+
+            goal_pid = (
+                getattr(
+                    goal_process,
+                    "pid",
+                    None,
+                )
+                if goal_process is not None
+                else pids.get("goal")
             )
+
+            self._terminate_group(
+                goal_pid,
+                self.GOAL_MARKER,
+            )
+
+            self._terminate_group(
+                pids["probe"],
+                self.PROBE_MARKER,
+            )
+
+            self._terminate_group(
+                pids["supervisor"],
+                self.SUPERVISOR_MARKER,
+            )
+
+            for path in (
+                self.goal_pid_file,
+                self.goal_result_file,
+                self.probe_pid_file,
+                self.supervisor_pid_file,
+                self.snapshot_file,
+                self.motion_arm_file,
+                self.motion_egress_status_file,
+            ):
+                self._safe_unlink(
+                    path
+                )
+
+        finally:
+            with self._motion_lock:
+                self._goal_process = None
+                self._stopping = False
+
+            self._stop_requested.clear()
+
+        if lease_stop_error is not None:
+            raise RuntimeError(
+                "Tony2 motion lease refresher "
+                "did not stop cleanly."
+            ) from lease_stop_error
 
         return {
             "action": "STOPPED",
             "navigation":
                 self.status(),
         }
+
 
     def submit_goal(
         self,
@@ -902,12 +1298,11 @@ class Tony2NavigationRuntime:
         yaw,
     ):
         """
-        Execute one guarded map-frame goal.
+        Execute one explicitly authorized guarded map goal.
 
-        The ROS helper verifies the current
-        map-to-base_link pose and rejects a goal
-        farther than MAXIMUM_GOAL_DISTANCE_METERS
-        before sending it to NavigateToPose.
+        GO creates one short-lived lease, requires the egress
+        to acknowledge the exact token, launches one bounded
+        NavigateToPose helper, then destroys authorization.
         """
         values = {
             "x": x,
@@ -992,59 +1387,216 @@ class Tony2NavigationRuntime:
             "/tf:=/nav_tf",
         ]
 
-        log_handle = open(
-            self.goal_log,
-            "ab",
-            buffering=0,
-        )
+        lease = None
+        token = None
+        generation = None
+        process = None
+        return_code = None
+        disarm_confirmed = True
 
         try:
-            process = subprocess.Popen(
-                command,
-                stdin=subprocess.DEVNULL,
-                stdout=log_handle,
-                stderr=subprocess.STDOUT,
-                env=self.child_environment(),
-                start_new_session=True,
-            )
-        finally:
-            log_handle.close()
+            (
+                lease,
+                token,
+                generation,
+            ) = self._begin_motion_lease()
 
-        self._write_pid(
-            self.goal_pid_file,
-            process.pid,
-        )
-
-        try:
-            return_code = process.wait(
-                timeout=(
-                    self.EXECUTION_TIMEOUT_SECONDS
-                    + 15.0
-                )
+            # No NavigateToPose process exists yet.
+            self._wait_for_motion_arm_ack(
+                lease,
+                token,
+                generation,
             )
 
-        except subprocess.TimeoutExpired as exc:
-            self._terminate_group(
-                process.pid,
-                self.GOAL_MARKER,
+            log_handle = open(
+                self.goal_log,
+                "ab",
+                buffering=0,
             )
 
             try:
-                process.wait(
-                    timeout=1.0
-                )
-            except subprocess.TimeoutExpired:
-                pass
+                # Atomic with STOP:
+                # validate authorization, spawn, register the
+                # Popen object, and persist its PID before this
+                # lock can be acquired by STOP.
+                with self._motion_lock:
+                    if not self._motion_lease_is_current(
+                        lease,
+                        token,
+                        generation,
+                    ):
+                        raise RuntimeError(
+                            "Tony2 guarded GO was "
+                            "cancelled before goal launch."
+                        )
 
-            raise RuntimeError(
-                "Tony2 guarded goal helper "
-                "exceeded its outer deadline."
-            ) from exc
+                    locked_status = self.status()
+
+                    if (
+                        locked_status.get("state")
+                        != "READY"
+                    ):
+                        raise RuntimeError(
+                            "Tony2 guarded navigation "
+                            "stopped before goal launch."
+                        )
+
+                    if locked_status.get(
+                        "goal_active"
+                    ):
+                        raise RuntimeError(
+                            "A Tony2 navigation goal "
+                            "became active concurrently."
+                        )
+
+                    if locked_status.get(
+                        "motion_output_connected"
+                    ) is not True:
+                        raise RuntimeError(
+                            "Tony2 motion egress lost "
+                            "the transient GO authorization."
+                        )
+
+                    if (
+                        self._stop_requested.is_set()
+                        or self._stop_generation
+                            != generation
+                    ):
+                        raise RuntimeError(
+                            "Tony2 guarded GO was "
+                            "cancelled by STOP."
+                        )
+
+                    process = subprocess.Popen(
+                        command,
+                        stdin=subprocess.DEVNULL,
+                        stdout=log_handle,
+                        stderr=subprocess.STDOUT,
+                        env=self.child_environment(),
+                        start_new_session=True,
+                    )
+
+                    self._goal_process = process
+
+                    self._write_pid(
+                        self.goal_pid_file,
+                        process.pid,
+                    )
+
+                    # STOP sets its event before waiting for
+                    # this lock. Detect a STOP that arrived
+                    # during the actual Popen call.
+                    if (
+                        self._stop_requested.is_set()
+                        or self._stop_generation
+                            != generation
+                    ):
+                        raise RuntimeError(
+                            "Tony2 guarded GO was "
+                            "cancelled during goal launch."
+                        )
+
+            finally:
+                log_handle.close()
+
+            try:
+                return_code = process.wait(
+                    timeout=(
+                        self.EXECUTION_TIMEOUT_SECONDS
+                        + 15.0
+                    )
+                )
+
+            except subprocess.TimeoutExpired as exc:
+                self._terminate_group(
+                    process.pid,
+                    self.GOAL_MARKER,
+                )
+
+                try:
+                    process.wait(
+                        timeout=1.0
+                    )
+                except subprocess.TimeoutExpired:
+                    pass
+
+                raise RuntimeError(
+                    "Tony2 guarded goal helper "
+                    "exceeded its outer deadline."
+                ) from exc
+
+            with self._motion_lock:
+                if (
+                    self._stop_requested.is_set()
+                    or self._stop_generation
+                        != generation
+                ):
+                    raise RuntimeError(
+                        "Tony2 guarded GO was "
+                        "cancelled by STOP."
+                    )
+
+        except Exception:
+            if process is not None:
+                try:
+                    running = (
+                        process.poll()
+                        is None
+                    )
+                except Exception:
+                    running = True
+
+                if running:
+                    self._terminate_group(
+                        process.pid,
+                        self.GOAL_MARKER,
+                    )
+
+            raise
 
         finally:
+            with self._motion_lock:
+                if self._goal_process is process:
+                    self._goal_process = None
+
             self._safe_unlink(
                 self.goal_pid_file
             )
+
+            if lease is not None:
+                released = (
+                    self._release_motion_lease(
+                        lease
+                    )
+                )
+
+                if released:
+                    # Egress reports idle only after it has
+                    # disarmed its controller. Controller
+                    # disarm requests Robot Bridge STOP.
+                    disarm_confirmed = (
+                        self._wait_for_motion_disarm()
+                    )
+
+        if not disarm_confirmed:
+            raise RuntimeError(
+                "Tony2 motion egress did not confirm "
+                "disarm after guarded goal execution."
+            )
+
+        # A STOP that completed while this GO was active
+        # permanently changes the generation, even though
+        # _stop_requested has since been cleared.
+        with self._motion_lock:
+            if (
+                generation is not None
+                and self._stop_generation
+                    != generation
+            ):
+                raise RuntimeError(
+                    "Tony2 guarded GO was "
+                    "cancelled by STOP."
+                )
 
         try:
             payload = json.loads(
@@ -1052,6 +1604,7 @@ class Tony2NavigationRuntime:
                     encoding="utf-8"
                 )
             )
+
         except (
             FileNotFoundError,
             OSError,
@@ -1061,6 +1614,7 @@ class Tony2NavigationRuntime:
                 "Tony2 guarded goal helper "
                 "did not produce a valid result."
             ) from exc
+
         finally:
             self._safe_unlink(
                 self.goal_result_file

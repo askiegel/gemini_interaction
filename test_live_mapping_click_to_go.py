@@ -443,3 +443,21 @@ def test_manual_live_map_refresh_updates_map_and_pose_only():
         "refreshLiveMappingState,"
         in CLICK_TO_GO
     )
+
+
+
+def test_live_navigation_singleton_is_thread_safe():
+    assert (
+        "_TONY2_NAVIGATION_RUNTIME_LOCK = Lock()"
+        in SERVER
+    )
+
+    assert (
+        "with _TONY2_NAVIGATION_RUNTIME_LOCK:"
+        in SERVER
+    )
+
+    assert (
+        "robot_bridge_url=ROBOT_BRIDGE_URL"
+        in SERVER
+    )

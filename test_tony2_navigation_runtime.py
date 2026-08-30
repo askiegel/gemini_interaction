@@ -40,6 +40,9 @@ class Tony2NavigationRuntimeTests(
                     "UDPv4",
                 "KEEP_ME": "yes",
             },
+            robot_bridge_url=(
+                "http://robot.invalid:8090"
+            ),
         )
 
     def test_guarded_assets_match_expected_hashes(
@@ -191,7 +194,78 @@ class Tony2NavigationRuntimeTests(
                 ]
             )
 
-    def test_ready_runtime_keeps_goal_disabled_while_motion_blocked(
+    def test_ready_runtime_allows_go_only_when_egress_idle(
+        self,
+    ):
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = self.make_runtime(
+                Path(directory)
+            )
+
+            runtime.motion_egress_status_file.write_text(
+                (
+                    '{"running":true,'
+                    '"armed":false,'
+                    '"token":null}'
+                ),
+                encoding="utf-8",
+            )
+
+            with patch.object(
+                runtime,
+                "_runtime_pids",
+                return_value={
+                    "supervisor": 100,
+                    "probe": 101,
+                    "goal": None,
+                },
+            ), patch.object(
+                runtime,
+                "_read_snapshot",
+                return_value={
+                    "planner_enabled": True,
+                    "controller_enabled": True,
+                    "navigator_enabled": True,
+                    "action_server_ready": True,
+                    "transform_ready": True,
+                },
+            ), patch.object(
+                runtime,
+                "mapping_status",
+                return_value={
+                    "running": True,
+                    "cartographer": 200,
+                    "occupancy_grid": 201,
+                },
+            ):
+                status = runtime.status()
+
+            self.assertEqual(
+                status["state"],
+                "READY",
+            )
+
+            self.assertTrue(
+                status["motion_egress_ready"]
+            )
+
+            self.assertTrue(
+                status["motion_egress_idle"]
+            )
+
+            self.assertTrue(
+                status[
+                    "goal_submission_enabled"
+                ]
+            )
+
+            self.assertFalse(
+                status[
+                    "motion_output_connected"
+                ]
+            )
+
+    def test_ready_runtime_blocks_go_without_idle_egress(
         self,
     ):
         with tempfile.TemporaryDirectory() as directory:
@@ -234,6 +308,14 @@ class Tony2NavigationRuntimeTests(
             )
 
             self.assertFalse(
+                status["motion_egress_ready"]
+            )
+
+            self.assertFalse(
+                status["motion_egress_idle"]
+            )
+
+            self.assertFalse(
                 status[
                     "goal_submission_enabled"
                 ]
@@ -245,8 +327,135 @@ class Tony2NavigationRuntimeTests(
                 ]
             )
 
+    def test_armed_unknown_token_blocks_new_go(
+        self,
+    ):
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = self.make_runtime(
+                Path(directory)
+            )
+
+            runtime.motion_egress_status_file.write_text(
+                (
+                    '{"running":true,'
+                    '"armed":true,'
+                    '"token":"unexpected-token"}'
+                ),
+                encoding="utf-8",
+            )
+
+            with patch.object(
+                runtime,
+                "_runtime_pids",
+                return_value={
+                    "supervisor": 100,
+                    "probe": 101,
+                    "goal": None,
+                },
+            ), patch.object(
+                runtime,
+                "_read_snapshot",
+                return_value={
+                    "planner_enabled": True,
+                    "controller_enabled": True,
+                    "navigator_enabled": True,
+                    "action_server_ready": True,
+                    "transform_ready": True,
+                },
+            ), patch.object(
+                runtime,
+                "mapping_status",
+                return_value={
+                    "running": True,
+                    "cartographer": 200,
+                    "occupancy_grid": 201,
+                },
+            ):
+                status = runtime.status()
+
+            self.assertTrue(
+                status["motion_egress_ready"]
+            )
+
             self.assertFalse(
-                runtime.MOTION_OUTPUT_CONNECTED
+                status["motion_egress_idle"]
+            )
+
+            self.assertFalse(
+                status[
+                    "goal_submission_enabled"
+                ]
+            )
+
+            self.assertFalse(
+                status[
+                    "motion_output_connected"
+                ]
+            )
+
+    def test_motion_output_requires_matching_owned_token(
+        self,
+    ):
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = self.make_runtime(
+                Path(directory)
+            )
+
+            token = "a" * 48
+
+            with runtime._motion_lock:
+                runtime._active_motion_lease = object()
+                runtime._active_motion_token = token
+
+            runtime.motion_egress_status_file.write_text(
+                (
+                    '{"running":true,'
+                    '"armed":true,'
+                    f'"token":"{token}"'
+                    '}'
+                ),
+                encoding="utf-8",
+            )
+
+            with patch.object(
+                runtime,
+                "_runtime_pids",
+                return_value={
+                    "supervisor": 100,
+                    "probe": 101,
+                    "goal": None,
+                },
+            ), patch.object(
+                runtime,
+                "_read_snapshot",
+                return_value={
+                    "planner_enabled": True,
+                    "controller_enabled": True,
+                    "navigator_enabled": True,
+                    "action_server_ready": True,
+                    "transform_ready": True,
+                },
+            ), patch.object(
+                runtime,
+                "mapping_status",
+                return_value={
+                    "running": True,
+                    "cartographer": 200,
+                    "occupancy_grid": 201,
+                },
+            ):
+                status = runtime.status()
+
+            self.assertTrue(
+                status[
+                    "motion_output_connected"
+                ]
+            )
+
+            self.assertFalse(
+                status[
+                    "goal_submission_enabled"
+                ]
             )
 
     def test_submit_goal_requires_ready_runtime(
@@ -296,11 +505,31 @@ class Tony2NavigationRuntimeTests(
             process = Mock()
             process.pid = 321
             process.wait.return_value = 0
+            process.poll.return_value = 0
+
+            lease = Mock()
+            token = "b" * 48
+            generation = 0
 
             ready = {
                 "state": "READY",
                 "goal_submission_enabled": True,
                 "goal_active": False,
+                "motion_output_connected": False,
+            }
+
+            armed = {
+                "state": "READY",
+                "goal_submission_enabled": False,
+                "goal_active": False,
+                "motion_output_connected": True,
+            }
+
+            final = {
+                "state": "READY",
+                "goal_submission_enabled": True,
+                "goal_active": False,
+                "motion_output_connected": False,
             }
 
             def fake_popen(
@@ -322,7 +551,35 @@ class Tony2NavigationRuntimeTests(
             with patch.object(
                 runtime,
                 "status",
-                return_value=ready,
+                side_effect=[
+                    ready,
+                    armed,
+                    final,
+                ],
+            ), patch.object(
+                runtime,
+                "_begin_motion_lease",
+                return_value=(
+                    lease,
+                    token,
+                    generation,
+                ),
+            ), patch.object(
+                runtime,
+                "_wait_for_motion_arm_ack",
+                return_value=True,
+            ), patch.object(
+                runtime,
+                "_motion_lease_is_current",
+                return_value=True,
+            ), patch.object(
+                runtime,
+                "_release_motion_lease",
+                return_value=True,
+            ), patch.object(
+                runtime,
+                "_wait_for_motion_disarm",
+                return_value=True,
             ), patch(
                 "tony2_navigation_runtime."
                 "subprocess.Popen",
@@ -364,6 +621,285 @@ class Tony2NavigationRuntimeTests(
                     + 1
                 ],
                 "25.0",
+            )
+
+    def test_begin_and_release_motion_lease_keeps_ownership_until_stop(
+        self,
+    ):
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = self.make_runtime(
+                Path(directory)
+            )
+
+            lease = Mock()
+            token = "c" * 48
+
+            lease.start.return_value = token
+
+            ready = {
+                "state": "READY",
+                "goal_submission_enabled": True,
+            }
+
+            with patch.object(
+                runtime,
+                "status",
+                return_value=ready,
+            ), patch(
+                "tony2_navigation_runtime."
+                "MotionArmLease",
+                return_value=lease,
+            ):
+                (
+                    returned_lease,
+                    returned_token,
+                    generation,
+                ) = runtime._begin_motion_lease()
+
+            self.assertIs(
+                returned_lease,
+                lease,
+            )
+
+            self.assertEqual(
+                returned_token,
+                token,
+            )
+
+            self.assertEqual(
+                generation,
+                0,
+            )
+
+            self.assertIs(
+                runtime._active_motion_lease,
+                lease,
+            )
+
+            self.assertEqual(
+                runtime._active_motion_token,
+                token,
+            )
+
+            ownership_during_stop = []
+
+            def lease_stop():
+                ownership_during_stop.append(
+                    runtime._active_motion_lease
+                    is lease
+                )
+
+            lease.stop.side_effect = lease_stop
+
+            self.assertTrue(
+                runtime._release_motion_lease(
+                    lease
+                )
+            )
+
+            self.assertEqual(
+                ownership_during_stop,
+                [True],
+            )
+
+            self.assertIsNone(
+                runtime._active_motion_lease
+            )
+
+            self.assertIsNone(
+                runtime._active_motion_token
+            )
+
+    def test_stop_stops_lease_before_goal_process(
+        self,
+    ):
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = self.make_runtime(
+                Path(directory)
+            )
+
+            lease = Mock()
+
+            goal_process = Mock()
+            goal_process.pid = 333
+
+            ordering = []
+
+            def lease_stop():
+                self.assertIs(
+                    runtime._active_motion_lease,
+                    lease,
+                )
+
+                ordering.append(
+                    "lease_stop"
+                )
+
+            lease.stop.side_effect = lease_stop
+
+            def fake_terminate(
+                pid,
+                marker,
+            ):
+                ordering.append(
+                    (
+                        "terminate",
+                        pid,
+                        marker,
+                    )
+                )
+
+                return True
+
+            with runtime._motion_lock:
+                runtime._active_motion_lease = lease
+                runtime._active_motion_token = (
+                    "d" * 48
+                )
+                runtime._goal_process = goal_process
+
+            with patch.object(
+                runtime,
+                "_wait_for_motion_disarm",
+                return_value=True,
+            ), patch.object(
+                runtime,
+                "_runtime_pids",
+                return_value={
+                    "supervisor": 100,
+                    "probe": 101,
+                    "goal": 333,
+                },
+            ), patch.object(
+                runtime,
+                "_terminate_group",
+                side_effect=fake_terminate,
+            ), patch.object(
+                runtime,
+                "status",
+                return_value={
+                    "state": "STOPPED",
+                },
+            ):
+                runtime.stop()
+
+            self.assertEqual(
+                ordering[0],
+                "lease_stop",
+            )
+
+            self.assertEqual(
+                ordering[1][0],
+                "terminate",
+            )
+
+            self.assertEqual(
+                ordering[1][1],
+                333,
+            )
+
+            self.assertEqual(
+                runtime._stop_generation,
+                1,
+            )
+
+            self.assertIsNone(
+                runtime._active_motion_lease
+            )
+
+            self.assertIsNone(
+                runtime._goal_process
+            )
+
+    def test_lost_lease_prevents_goal_popen(
+        self,
+    ):
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = self.make_runtime(
+                Path(directory)
+            )
+
+            lease = Mock()
+
+            ready = {
+                "state": "READY",
+                "goal_submission_enabled": True,
+                "goal_active": False,
+                "motion_output_connected": False,
+            }
+
+            with patch.object(
+                runtime,
+                "status",
+                return_value=ready,
+            ), patch.object(
+                runtime,
+                "_begin_motion_lease",
+                return_value=(
+                    lease,
+                    "e" * 48,
+                    0,
+                ),
+            ), patch.object(
+                runtime,
+                "_wait_for_motion_arm_ack",
+                return_value=True,
+            ), patch.object(
+                runtime,
+                "_motion_lease_is_current",
+                return_value=False,
+            ), patch.object(
+                runtime,
+                "_release_motion_lease",
+                return_value=False,
+            ), patch(
+                "tony2_navigation_runtime."
+                "subprocess.Popen",
+            ) as popen:
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    "cancelled before goal launch",
+                ):
+                    runtime.submit_goal(
+                        0.1,
+                        0.0,
+                        0.0,
+                    )
+
+            popen.assert_not_called()
+
+    def test_stop_generation_invalidates_prior_go(
+        self,
+    ):
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = self.make_runtime(
+                Path(directory)
+            )
+
+            lease = object()
+            token = "f" * 48
+
+            with runtime._motion_lock:
+                runtime._active_motion_lease = lease
+                runtime._active_motion_token = token
+
+            self.assertTrue(
+                runtime._motion_lease_is_current(
+                    lease,
+                    token,
+                    0,
+                )
+            )
+
+            with runtime._motion_lock:
+                runtime._stop_generation += 1
+
+            self.assertFalse(
+                runtime._motion_lease_is_current(
+                    lease,
+                    token,
+                    0,
+                )
             )
 
     def test_goal_helper_guards_before_submission(
