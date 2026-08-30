@@ -99,7 +99,7 @@ class IsolationSink(Node):
             "tony2_navigation_isolation_sink"
         )
 
-        self.publishers = {
+        self._channel_publishers = {
             CHANNEL_SCAN:
                 self.create_publisher(
                     LaserScan,
@@ -283,7 +283,9 @@ class IsolationSink(Node):
             )
 
             publisher = (
-                self.publishers[channel]
+                self._channel_publishers[
+                    channel
+                ]
             )
 
             for payload in payloads:

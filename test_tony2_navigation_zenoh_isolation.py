@@ -202,3 +202,14 @@ def test_old_same_domain_sensor_relay_is_not_owned():
         "tony2_navigation_sensor_relay.py"
         not in supervisor
     )
+
+
+def test_sink_does_not_shadow_rclpy_node_publishers_property():
+    sink = read(SINK)
+
+    assert "self.publishers" not in sink
+
+    assert (
+        "self._channel_publishers"
+        in sink
+    )
