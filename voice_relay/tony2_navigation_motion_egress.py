@@ -260,6 +260,32 @@ class MotionEgressController:
                 "ANGULAR_LIMIT_EXCEEDED"
             )
 
+        zero_command = (
+            abs(linear_x) <= ZERO_EPSILON
+            and abs(angular_z) <= ZERO_EPSILON
+        )
+
+        if zero_command:
+            # Arming alone must never create a Robot Bridge
+            # streaming-motion request. Nav2 can publish idle
+            # zero Twist messages before a goal begins.
+            if not self._active:
+                return {
+                    "ok": True,
+                    "forwarded": False,
+                    "action": "IDLE_ZERO",
+                    "linear_x": linear_x,
+                    "angular_z": angular_z,
+                }
+
+            # Once real motion has started, the first zero
+            # command is an explicit fail-safe stop. Because
+            # _safe_stop clears _active, subsequent idle zeros
+            # are consumed locally instead of repeating STOP.
+            return self._safe_stop(
+                "NAV2_ZERO_COMMAND"
+            )
+
         try:
             result = self.robot.streaming_motion(
                 linear_x=linear_x,

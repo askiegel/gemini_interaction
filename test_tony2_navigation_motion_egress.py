@@ -512,7 +512,10 @@ def test_controller_can_arm_then_disarm_without_ros_publish():
     )
 
     assert result["ok"] is True
-    assert len(robot.stream_calls) == 1
+    assert result["forwarded"] is False
+    assert result["action"] == "IDLE_ZERO"
+    assert robot.stream_calls == []
+    assert controller.active is False
 
     disarmed = controller.disarm(
         "TEST_DISARM"
@@ -580,3 +583,103 @@ def test_egress_shutdown_removes_runtime_status_file():
         "self.motion_egress_status_file,"
         in runtime
     )
+
+
+def test_armed_idle_zero_never_contacts_robot_bridge():
+    robot = FakeRobot()
+
+    controller = MotionEgressController(
+        robot,
+        enabled=True,
+    )
+
+    result = controller.accept(
+        0.0,
+        0.0,
+        now=10.0,
+    )
+
+    assert result == {
+        "ok": True,
+        "forwarded": False,
+        "action": "IDLE_ZERO",
+        "linear_x": 0.0,
+        "angular_z": 0.0,
+    }
+
+    assert controller.active is False
+    assert robot.stream_calls == []
+    assert robot.stop_calls == 0
+
+    idle = controller.tick(
+        now=20.0,
+    )
+
+    assert idle["action"] == "IDLE"
+    assert robot.stream_calls == []
+    assert robot.stop_calls == 0
+
+
+def test_first_zero_after_motion_stops_once():
+    robot = FakeRobot()
+
+    controller = MotionEgressController(
+        robot,
+        enabled=True,
+    )
+
+    moving = controller.accept(
+        0.08,
+        0.10,
+        now=10.0,
+    )
+
+    assert moving["ok"] is True
+    assert moving["forwarded"] is True
+    assert controller.active is True
+    assert len(robot.stream_calls) == 1
+    assert robot.stop_calls == 0
+
+    stopped = controller.accept(
+        0.0,
+        0.0,
+        now=10.1,
+    )
+
+    assert (
+        stopped["reason"]
+        == "NAV2_ZERO_COMMAND"
+    )
+
+    assert stopped["forwarded"] is False
+    assert stopped["stopped"] is True
+    assert controller.active is False
+    assert len(robot.stream_calls) == 1
+    assert robot.stop_calls == 1
+
+    second_zero = controller.accept(
+        0.0,
+        0.0,
+        now=10.2,
+    )
+
+    assert (
+        second_zero["action"]
+        == "IDLE_ZERO"
+    )
+
+    assert second_zero["forwarded"] is False
+    assert len(robot.stream_calls) == 1
+    assert robot.stop_calls == 1
+
+    resumed = controller.accept(
+        0.05,
+        0.0,
+        now=10.3,
+    )
+
+    assert resumed["ok"] is True
+    assert resumed["forwarded"] is True
+    assert controller.active is True
+    assert len(robot.stream_calls) == 2
+    assert robot.stop_calls == 1
