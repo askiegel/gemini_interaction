@@ -15,7 +15,27 @@ Default state is DISABLED.
 
 import argparse
 import math
+import os
+import sys
 import time
+from pathlib import Path
+
+
+# The supervisor executes this file directly rather than
+# with ``python -m``. In direct-script mode Python places
+# voice_relay/ on sys.path, not the Cognitive repository
+# root. Add the repository root before importing sibling
+# packages such as voice_relay and robot_bridge.
+if __package__ in (None, ""):
+    sys.path.insert(
+        0,
+        str(
+            Path(__file__)
+            .resolve()
+            .parents[1]
+        ),
+    )
+
 
 import rclpy
 
@@ -25,6 +45,12 @@ from rclpy.qos import DurabilityPolicy
 from rclpy.qos import HistoryPolicy
 from rclpy.qos import QoSProfile
 from rclpy.qos import ReliabilityPolicy
+
+from voice_relay.tony2_navigation_motion_arm import (
+    atomic_write_json,
+    read_json_file,
+    validate_arm_payload,
+)
 
 
 
@@ -127,6 +153,51 @@ class MotionEgressController:
             "reason": str(reason),
             "stop_result": result,
         }
+
+    def arm(
+        self,
+        robot_client,
+    ):
+        if self.enabled:
+            return {
+                "ok": True,
+                "action": "ALREADY_ARMED",
+            }
+
+        self.robot = robot_client
+        self.enabled = True
+        self._active = False
+        self._last_input_at = None
+        self._last_stop_reason = None
+
+        return {
+            "ok": True,
+            "action": "ARMED",
+        }
+
+    def disarm(
+        self,
+        reason="MOTION_DISARMED",
+    ):
+        if not self.enabled:
+            self._active = False
+            self._last_input_at = None
+            self._last_stop_reason = str(reason)
+
+            return {
+                "ok": True,
+                "forwarded": False,
+                "stopped": False,
+                "reason": str(reason),
+            }
+
+        result = self._safe_stop(
+            reason
+        )
+
+        self.enabled = False
+
+        return result
 
     def accept(
         self,
@@ -286,7 +357,7 @@ class MotionEgressController:
                 "action": "DISABLED",
             }
 
-        return self._safe_stop(
+        return self.disarm(
             "EGRESS_SHUTDOWN"
         )
 
@@ -307,12 +378,32 @@ class MotionEgressNode(Node):
     def __init__(
         self,
         controller,
+        *,
+        arm_file,
+        status_file,
     ):
         super().__init__(
             "tony2_navigation_motion_egress"
         )
 
         self.controller = controller
+
+        self.arm_file = Path(
+            arm_file
+        )
+
+        self.status_file = Path(
+            status_file
+        )
+
+        self._armed_token = None
+        self._last_status = None
+
+        self._write_status(
+            running=True,
+            armed=False,
+            reason="WAITING_FOR_ARM_LEASE",
+        )
 
         self.subscription = (
             self.create_subscription(
@@ -327,6 +418,122 @@ class MotionEgressNode(Node):
             TIMER_PERIOD_SECONDS,
             self._on_timer,
         )
+
+    def _write_status(
+        self,
+        *,
+        running,
+        armed,
+        reason,
+        token=None,
+        error=None,
+    ):
+        payload = {
+            "running": bool(running),
+            "armed": bool(armed),
+            "reason": str(reason),
+            "token": token,
+            "timestamp": time.time(),
+        }
+
+        if error is not None:
+            payload["error"] = str(error)
+
+        atomic_write_json(
+            self.status_file,
+            payload,
+        )
+
+        self._last_status = payload
+
+    def _disarm(
+        self,
+        reason,
+    ):
+        result = self.controller.disarm(
+            reason
+        )
+
+        self._armed_token = None
+
+        self._write_status(
+            running=True,
+            armed=False,
+            reason=reason,
+        )
+
+        return result
+
+    def _sync_arm_state(self):
+        raw = read_json_file(
+            self.arm_file
+        )
+
+        lease = validate_arm_payload(
+            raw
+        )
+
+        if lease is None:
+            if self.controller.enabled:
+                self._disarm(
+                    "ARM_LEASE_MISSING_OR_EXPIRED"
+                )
+
+            return
+
+        token = lease["token"]
+
+        if (
+            self.controller.enabled
+            and token == self._armed_token
+        ):
+            return
+
+        if self.controller.enabled:
+            self._disarm(
+                "ARM_TOKEN_REPLACED"
+            )
+
+        try:
+            from robot_bridge.client import (
+                RobotBridgeClient,
+            )
+
+            robot = RobotBridgeClient(
+                base_url=lease[
+                    "robot_bridge_url"
+                ],
+                timeout=CLIENT_TIMEOUT_SECONDS,
+            )
+
+            result = self.controller.arm(
+                robot
+            )
+
+            if result.get("ok") is not True:
+                raise RuntimeError(
+                    str(result)
+                )
+
+            self._armed_token = token
+
+            self._write_status(
+                running=True,
+                armed=True,
+                reason="ARM_LEASE_VALID",
+                token=token,
+            )
+
+        except Exception as exc:
+            self.controller.enabled = False
+            self._armed_token = None
+
+            self._write_status(
+                running=True,
+                armed=False,
+                reason="ARM_FAILED",
+                error=exc,
+            )
 
     def _on_twist(
         self,
@@ -359,6 +566,8 @@ class MotionEgressNode(Node):
             )
 
     def _on_timer(self):
+        self._sync_arm_state()
+
         result = self.controller.tick()
 
         if (
@@ -376,57 +585,55 @@ def main():
     parser = argparse.ArgumentParser()
 
     parser.add_argument(
-        "--enable-motion",
-        action="store_true",
-        help=(
-            "Permit Robot Bridge streaming motion. "
-            "Default is disabled."
+        "--arm-file",
+        default=os.environ.get(
+            "TONY2_NAVIGATION_MOTION_ARM",
+            "/tmp/tony2_navigation_motion_arm.json",
         ),
     )
 
     parser.add_argument(
-        "--robot-bridge-url",
-        default=None,
-    )
-
-    parser.add_argument(
-        "--watchdog-timeout",
-        type=float,
-        default=ROBOT_WATCHDOG_SECONDS,
+        "--status-file",
+        default=os.environ.get(
+            "TONY2_NAVIGATION_EGRESS_STATUS",
+            (
+                "/tmp/"
+                "tony2_navigation_motion_egress_status.json"
+            ),
+        ),
     )
 
     args = parser.parse_args()
 
-    if args.enable_motion:
-        from robot_bridge.client import RobotBridgeClient
-
-        robot = RobotBridgeClient(
-            base_url=args.robot_bridge_url,
-            timeout=CLIENT_TIMEOUT_SECONDS,
-        )
-    else:
-        # Disabled integration must not require the
-        # Robot Bridge client or its application
-        # dependencies. The controller never contacts
-        # this placeholder while disabled.
-        robot = object()
-
+    # Always starts disabled. A currently valid transient
+    # lease is the only mechanism that can arm this process.
     controller = MotionEgressController(
-        robot_client=robot,
-        enabled=args.enable_motion,
-        watchdog_timeout=args.watchdog_timeout,
+        robot_client=object(),
+        enabled=False,
+        watchdog_timeout=ROBOT_WATCHDOG_SECONDS,
     )
 
     rclpy.init()
 
     node = MotionEgressNode(
-        controller
+        controller,
+        arm_file=args.arm_file,
+        status_file=args.status_file,
     )
 
     try:
         rclpy.spin(node)
     finally:
         controller.shutdown()
+
+        try:
+            node._write_status(
+                running=False,
+                armed=False,
+                reason="EGRESS_SHUTDOWN",
+            )
+        except Exception:
+            pass
 
         node.destroy_node()
 

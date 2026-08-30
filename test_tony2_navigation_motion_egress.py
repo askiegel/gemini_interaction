@@ -455,6 +455,93 @@ def test_adapter_is_integrated_but_disabled():
     )
 
     assert (
-        "if args.enable_motion:"
+        "--enable-motion"
+        not in egress
+    )
+
+    assert (
+        "--arm-file"
         in egress
+    )
+
+    assert (
+        "validate_arm_payload("
+        in egress
+    )
+
+    assert (
+        "enabled=False"
+        in egress
+    )
+
+    assert (
+        "ARM_LEASE_MISSING_OR_EXPIRED"
+        in egress
+    )
+
+    assert (
+        "Path(__file__)"
+        in egress
+    )
+
+    assert (
+        ".parents[1]"
+        in egress
+    )
+
+
+def test_controller_can_arm_then_disarm_without_ros_publish():
+    robot = FakeRobot()
+
+    controller = MotionEgressController(
+        object(),
+        enabled=False,
+    )
+
+    armed = controller.arm(
+        robot
+    )
+
+    assert armed["ok"] is True
+    assert controller.enabled is True
+
+    result = controller.accept(
+        0.0,
+        0.0,
+        now=1.0,
+    )
+
+    assert result["ok"] is True
+    assert len(robot.stream_calls) == 1
+
+    disarmed = controller.disarm(
+        "TEST_DISARM"
+    )
+
+    assert controller.enabled is False
+    assert robot.stop_calls == 1
+
+    assert (
+        disarmed["reason"]
+        == "TEST_DISARM"
+    )
+
+
+def test_supervisor_still_has_no_static_motion_enable_flag():
+    supervisor = SUPERVISOR.read_text(
+        encoding="utf-8"
+    )
+
+    assert (
+        "--enable-motion"
+        not in supervisor
+    )
+
+    runtime = RUNTIME.read_text(
+        encoding="utf-8"
+    )
+
+    assert (
+        "MOTION_OUTPUT_CONNECTED = False"
+        in runtime
     )

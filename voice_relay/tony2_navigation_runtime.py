@@ -128,6 +128,19 @@ class Tony2NavigationRuntime:
             / "tony2_navigation_snapshot.json"
         )
 
+        self.motion_arm_file = (
+            self.runtime_dir
+            / "tony2_navigation_motion_arm.json"
+        )
+
+        self.motion_egress_status_file = (
+            self.runtime_dir
+            / (
+                "tony2_navigation_"
+                "motion_egress_status.json"
+            )
+        )
+
         self.supervisor_log = (
             self.runtime_dir
             / "tony2_navigation_supervisor.log"
@@ -216,6 +229,18 @@ class Tony2NavigationRuntime:
             "TONY2_NAVIGATION_SNAPSHOT"
         ] = str(
             self.snapshot_file
+        )
+
+        environment[
+            "TONY2_NAVIGATION_MOTION_ARM"
+        ] = str(
+            self.motion_arm_file
+        )
+
+        environment[
+            "TONY2_NAVIGATION_EGRESS_STATUS"
+        ] = str(
+            self.motion_egress_status_file
         )
 
         return environment
@@ -690,6 +715,14 @@ class Tony2NavigationRuntime:
             self.snapshot_file
         )
 
+        self._safe_unlink(
+            self.motion_arm_file
+        )
+
+        self._safe_unlink(
+            self.motion_egress_status_file
+        )
+
         supervisor_pid = (
             self._spawn(
                 [
@@ -821,6 +854,13 @@ class Tony2NavigationRuntime:
 
         pids = self._runtime_pids()
 
+        # Fail closed before stopping any navigation
+        # processes. No current runtime path creates this
+        # lease yet.
+        self._safe_unlink(
+            self.motion_arm_file
+        )
+
         self._terminate_group(
             pids.get("goal"),
             self.GOAL_MARKER,
@@ -842,6 +882,8 @@ class Tony2NavigationRuntime:
             self.probe_pid_file,
             self.supervisor_pid_file,
             self.snapshot_file,
+            self.motion_arm_file,
+            self.motion_egress_status_file,
         ):
             self._safe_unlink(
                 path

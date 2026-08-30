@@ -2,7 +2,6 @@ import json
 import urllib.request
 import urllib.error
 
-from config.config_manager import ConfigurationManager
 
 
 
@@ -14,12 +13,23 @@ class RobotBridgeClient:
         timeout=3.0,
         config_manager=None,
     ):
-        self.config_manager = (
-            config_manager or ConfigurationManager()
-        )
-        resolved_url = (
-            base_url or self.config_manager.robot_bridge_url
-        )
+        if base_url is not None:
+            self.config_manager = config_manager
+            resolved_url = base_url
+        else:
+            if config_manager is None:
+                from config.config_manager import (
+                    ConfigurationManager,
+                )
+
+                config_manager = (
+                    ConfigurationManager()
+                )
+
+            self.config_manager = config_manager
+            resolved_url = (
+                self.config_manager.robot_bridge_url
+            )
         self.base_url = resolved_url.rstrip("/")
         self.timeout = timeout
 
