@@ -1558,6 +1558,13 @@ class Tony2NavigationRuntime:
                         self.GOAL_MARKER,
                     )
 
+            # A helper may already have written its result
+            # before another guarded execution step failed.
+            # Failed GO paths must not strand that artifact.
+            self._safe_unlink(
+                self.goal_result_file
+            )
+
             raise
 
         finally:
@@ -1570,21 +1577,36 @@ class Tony2NavigationRuntime:
             )
 
             if lease is not None:
-                released = (
-                    self._release_motion_lease(
-                        lease
+                try:
+                    released = (
+                        self._release_motion_lease(
+                            lease
+                        )
                     )
-                )
 
-                if released:
-                    # Egress reports idle only after it has
-                    # disarmed its controller. Controller
-                    # disarm requests Robot Bridge STOP.
-                    disarm_confirmed = (
-                        self._wait_for_motion_disarm()
+                    if released:
+                        # Egress reports idle only after it has
+                        # disarmed its controller. Controller
+                        # disarm requests Robot Bridge STOP.
+                        disarm_confirmed = (
+                            self._wait_for_motion_disarm()
+                        )
+
+                except Exception:
+                    # Release/disarm happens inside this
+                    # finally block, so clean the result here
+                    # before propagating its failure.
+                    self._safe_unlink(
+                        self.goal_result_file
                     )
+
+                    raise
 
         if not disarm_confirmed:
+            self._safe_unlink(
+                self.goal_result_file
+            )
+
             raise RuntimeError(
                 "Tony2 motion egress did not confirm "
                 "disarm after guarded goal execution."
@@ -1599,6 +1621,10 @@ class Tony2NavigationRuntime:
                 and self._stop_generation
                     != generation
             ):
+                self._safe_unlink(
+                    self.goal_result_file
+                )
+
                 raise RuntimeError(
                     "Tony2 guarded GO was "
                     "cancelled by STOP."

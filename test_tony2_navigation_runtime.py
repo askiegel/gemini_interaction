@@ -902,6 +902,115 @@ class Tony2NavigationRuntimeTests(
                 )
             )
 
+    def test_goal_result_removed_on_release_or_disarm_failure(
+        self,
+    ):
+        cases = (
+            (
+                "release_exception",
+                True,
+                True,
+            ),
+            (
+                "disarm_unconfirmed",
+                False,
+                False,
+            ),
+        )
+
+        for (
+            name,
+            release_raises,
+            disarm_result,
+        ) in cases:
+            with self.subTest(name=name):
+                with tempfile.TemporaryDirectory() as directory:
+                    runtime = self.make_runtime(
+                        Path(directory)
+                    )
+
+                    process = Mock()
+                    process.pid = 321
+                    process.wait.return_value = 0
+
+                    ready = {
+                        "state": "READY",
+                        "goal_submission_enabled": True,
+                        "goal_active": False,
+                        "motion_output_connected": True,
+                    }
+
+                    def fake_popen(
+                        command,
+                        **_kwargs,
+                    ):
+                        runtime.goal_result_file.write_text(
+                            (
+                                '{"ok":true,'
+                                '"distance_meters":0.1}'
+                            ),
+                            encoding="utf-8",
+                        )
+
+                        process.command = command
+                        return process
+
+                    with patch.object(
+                        runtime,
+                        "status",
+                        return_value=ready,
+                    ), patch.object(
+                        runtime,
+                        "_begin_motion_lease",
+                    ) as begin, patch.object(
+                        runtime,
+                        "_wait_for_motion_arm_ack",
+                        return_value=True,
+                    ), patch.object(
+                        runtime,
+                        "_release_motion_lease",
+                    ) as release, patch.object(
+                        runtime,
+                        "_wait_for_motion_disarm",
+                        return_value=disarm_result,
+                    ), patch(
+                        "tony2_navigation_runtime.subprocess.Popen",
+                        side_effect=fake_popen,
+                    ):
+                        lease = Mock()
+                        token = "b" * 48
+
+                        begin.return_value = (
+                            lease,
+                            token,
+                            runtime._stop_generation,
+                        )
+
+                        # _begin_motion_lease is mocked, so
+                        # reproduce its ownership side effects.
+                        runtime._active_motion_lease = lease
+                        runtime._active_motion_token = token
+
+                        if release_raises:
+                            release.side_effect = RuntimeError(
+                                "release failed"
+                            )
+                        else:
+                            release.return_value = True
+
+                        with self.assertRaises(
+                            RuntimeError
+                        ):
+                            runtime.submit_goal(
+                                0.10,
+                                0.0,
+                                0.0,
+                            )
+
+                        self.assertFalse(
+                            runtime.goal_result_file.exists()
+                        )
+
     def test_goal_command_preserves_negative_scientific_values(
         self,
     ):
