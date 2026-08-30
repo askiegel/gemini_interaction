@@ -34,7 +34,7 @@ def read(path):
     )
 
 
-def test_domain42_source_has_exact_five_inputs():
+def test_domain42_source_has_exact_four_inputs():
     source = read(SOURCE)
 
     for expected in (
@@ -42,7 +42,6 @@ def test_domain42_source_has_exact_five_inputs():
         'ODOM_INPUT = "/odom"',
         'TF_INPUT = "/mayday_navigation_tf"',
         'TF_STATIC_INPUT = "/tf_static"',
-        'MAP_INPUT = "/map"',
     ):
         assert expected in source
 
@@ -55,7 +54,6 @@ def test_domain43_sink_has_nav2_outputs():
         'ODOM_OUTPUT = "/tony2_nav_odom"',
         'TF_OUTPUT = "/nav_tf"',
         'TF_STATIC_OUTPUT = "/tf_static"',
-        'MAP_OUTPUT = "/map"',
     ):
         assert expected in sink
 

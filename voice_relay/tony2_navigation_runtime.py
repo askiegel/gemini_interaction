@@ -67,6 +67,16 @@ class Tony2NavigationRuntime:
                 "f750054c85b04ded45407053674c6e9cf"
                 "7269379828360b179ec82451c144704"
             ),
+        "mayday_supervised_route_03.yaml":
+            (
+                "8b9d9b9aae7875a30b0611b0d88496c"
+                "caafbf54c75be1d808eea61f90aeedf1f"
+            ),
+        "mayday_supervised_route_03.pgm":
+            (
+                "e2cf598840f8fe65475205ba08d99106"
+                "d4c48bcc91deff3e2df15ca138a84f51"
+            ),
         "mayday_guarded_navigate_to_pose.xml":
             (
                 "2c6e6a7d2308340d27f435e80a5fb1b"
@@ -815,6 +825,20 @@ class Tony2NavigationRuntime:
             else None
         )
 
+        map_server_enabled = bool(
+            isinstance(snapshot, dict)
+            and snapshot.get(
+                "map_server_enabled"
+            ) is True
+        )
+
+        localization_enabled = bool(
+            isinstance(snapshot, dict)
+            and snapshot.get(
+                "localization_enabled"
+            ) is True
+        )
+
         planner_enabled = bool(
             isinstance(snapshot, dict)
             and snapshot.get(
@@ -853,6 +877,8 @@ class Tony2NavigationRuntime:
         runtime_ready = all(
             (
                 running,
+                map_server_enabled,
+                localization_enabled,
                 planner_enabled,
                 controller_enabled,
                 navigator_enabled,
@@ -864,6 +890,11 @@ class Tony2NavigationRuntime:
         mapping = (
             self.mapping_status()
         )
+        runtime_ready = (
+            runtime_ready
+            and not mapping["running"]
+        )
+
 
         with self._motion_lock:
             active_token = (
@@ -920,9 +951,22 @@ class Tony2NavigationRuntime:
             "source":
                 "tony2_guarded_navigation",
             "headless": True,
-            "mapping_required": True,
+            "mapping_required": False,
             "mapping_running":
                 mapping["running"],
+            "mapping_conflict":
+                mapping["running"],
+            "fixed_map_required": True,
+            "fixed_map":
+                "mayday_supervised_route_03.yaml",
+            "map_source":
+                "local_map_server",
+            "localization_mode":
+                "amcl",
+            "map_server_enabled":
+                map_server_enabled,
+            "localization_enabled":
+                localization_enabled,
             "planner_enabled":
                 planner_enabled,
             "controller_enabled":
@@ -1013,10 +1057,10 @@ class Tony2NavigationRuntime:
 
         mapping = self.mapping_status()
 
-        if not mapping["running"]:
+        if mapping["running"]:
             raise RuntimeError(
                 "Tony2 Cartographer mapping must "
-                "be running before guarded Nav2."
+                "be stopped before fixed-map navigation."
             )
 
         current = self._runtime_pids()

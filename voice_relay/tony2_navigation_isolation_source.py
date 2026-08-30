@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 
 """
-Read the five navigation inputs from ROS domain 42 and
+Read the four robot-state inputs from ROS domain 42 and
 send their serialized ROS messages over one localhost TCP
 connection.
 
@@ -15,7 +15,6 @@ import time
 
 import rclpy
 
-from nav_msgs.msg import OccupancyGrid
 from nav_msgs.msg import Odometry
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy
@@ -40,13 +39,11 @@ CHANNEL_SCAN = 1
 CHANNEL_ODOM = 2
 CHANNEL_TF = 3
 CHANNEL_TF_STATIC = 4
-CHANNEL_MAP = 5
 
 SCAN_INPUT = "/scan"
 ODOM_INPUT = "/odom"
 TF_INPUT = "/mayday_navigation_tf"
 TF_STATIC_INPUT = "/tf_static"
-MAP_INPUT = "/map"
 
 
 def best_effort_qos(depth):
@@ -108,7 +105,6 @@ class IsolationSource(Node):
             CHANNEL_ODOM: 0,
             CHANNEL_TF: 0,
             CHANNEL_TF_STATIC: 0,
-            CHANNEL_MAP: 0,
         }
 
         self.create_subscription(
@@ -155,16 +151,6 @@ class IsolationSource(Node):
             transient_qos(1),
         )
 
-        self.create_subscription(
-            OccupancyGrid,
-            MAP_INPUT,
-            lambda message:
-                self.forward(
-                    CHANNEL_MAP,
-                    message,
-                ),
-            transient_qos(1),
-        )
 
         self.get_logger().info(
             "Navigation isolation domain-42 source ready."
@@ -198,7 +184,6 @@ class IsolationSource(Node):
         if (
             channel in (
                 CHANNEL_TF_STATIC,
-                CHANNEL_MAP,
             )
             or count % 50 == 0
         ):

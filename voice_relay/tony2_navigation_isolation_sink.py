@@ -16,7 +16,6 @@ from collections import deque
 
 import rclpy
 
-from nav_msgs.msg import OccupancyGrid
 from nav_msgs.msg import Odometry
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy
@@ -41,13 +40,11 @@ CHANNEL_SCAN = 1
 CHANNEL_ODOM = 2
 CHANNEL_TF = 3
 CHANNEL_TF_STATIC = 4
-CHANNEL_MAP = 5
 
 SCAN_OUTPUT = "/tony2_nav_scan"
 ODOM_OUTPUT = "/tony2_nav_odom"
 TF_OUTPUT = "/nav_tf"
 TF_STATIC_OUTPUT = "/tf_static"
-MAP_OUTPUT = "/map"
 
 MAX_PAYLOAD_BYTES = 32 * 1024 * 1024
 
@@ -124,12 +121,6 @@ class IsolationSink(Node):
                     TF_STATIC_OUTPUT,
                     transient_qos(1),
                 ),
-            CHANNEL_MAP:
-                self.create_publisher(
-                    OccupancyGrid,
-                    MAP_OUTPUT,
-                    transient_qos(1),
-                ),
         }
 
         self.types = {
@@ -137,7 +128,6 @@ class IsolationSink(Node):
             CHANNEL_ODOM: Odometry,
             CHANNEL_TF: TFMessage,
             CHANNEL_TF_STATIC: TFMessage,
-            CHANNEL_MAP: OccupancyGrid,
         }
 
         self.pending = {
@@ -148,8 +138,6 @@ class IsolationSink(Node):
             CHANNEL_TF:
                 deque(maxlen=200),
             CHANNEL_TF_STATIC:
-                deque(maxlen=2),
-            CHANNEL_MAP:
                 deque(maxlen=2),
         }
 
@@ -305,7 +293,6 @@ class IsolationSink(Node):
             if (
                 channel in (
                     CHANNEL_TF_STATIC,
-                    CHANNEL_MAP,
                 )
                 or count % 50 == 0
             ):

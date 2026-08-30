@@ -223,6 +223,8 @@ class Tony2NavigationRuntimeTests(
                 runtime,
                 "_read_snapshot",
                 return_value={
+                    "map_server_enabled": True,
+                    "localization_enabled": True,
                     "planner_enabled": True,
                     "controller_enabled": True,
                     "navigator_enabled": True,
@@ -233,9 +235,9 @@ class Tony2NavigationRuntimeTests(
                 runtime,
                 "mapping_status",
                 return_value={
-                    "running": True,
-                    "cartographer": 200,
-                    "occupancy_grid": 201,
+                    "running": False,
+                    "cartographer": None,
+                    "occupancy_grid": None,
                 },
             ):
                 status = runtime.status()
@@ -285,6 +287,8 @@ class Tony2NavigationRuntimeTests(
                 runtime,
                 "_read_snapshot",
                 return_value={
+                    "map_server_enabled": True,
+                    "localization_enabled": True,
                     "planner_enabled": True,
                     "controller_enabled": True,
                     "navigator_enabled": True,
@@ -295,9 +299,9 @@ class Tony2NavigationRuntimeTests(
                 runtime,
                 "mapping_status",
                 return_value={
-                    "running": True,
-                    "cartographer": 200,
-                    "occupancy_grid": 201,
+                    "running": False,
+                    "cartographer": None,
+                    "occupancy_grid": None,
                 },
             ):
                 status = runtime.status()
@@ -356,6 +360,8 @@ class Tony2NavigationRuntimeTests(
                 runtime,
                 "_read_snapshot",
                 return_value={
+                    "map_server_enabled": True,
+                    "localization_enabled": True,
                     "planner_enabled": True,
                     "controller_enabled": True,
                     "navigator_enabled": True,
@@ -366,9 +372,9 @@ class Tony2NavigationRuntimeTests(
                 runtime,
                 "mapping_status",
                 return_value={
-                    "running": True,
-                    "cartographer": 200,
-                    "occupancy_grid": 201,
+                    "running": False,
+                    "cartographer": None,
+                    "occupancy_grid": None,
                 },
             ):
                 status = runtime.status()
@@ -429,6 +435,8 @@ class Tony2NavigationRuntimeTests(
                 runtime,
                 "_read_snapshot",
                 return_value={
+                    "map_server_enabled": True,
+                    "localization_enabled": True,
                     "planner_enabled": True,
                     "controller_enabled": True,
                     "navigator_enabled": True,
@@ -439,9 +447,9 @@ class Tony2NavigationRuntimeTests(
                 runtime,
                 "mapping_status",
                 return_value={
-                    "running": True,
-                    "cartographer": 200,
-                    "occupancy_grid": 201,
+                    "running": False,
+                    "cartographer": None,
+                    "occupancy_grid": None,
                 },
             ):
                 status = runtime.status()

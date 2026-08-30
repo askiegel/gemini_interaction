@@ -45,6 +45,8 @@ class NavigationProbe(Node):
         )
 
         self._states = {
+            "map_server": None,
+            "amcl": None,
             "planner_server": None,
             "controller_server": None,
             "bt_navigator": None,
@@ -164,6 +166,14 @@ class NavigationProbe(Node):
             return False
 
     def _write_snapshot(self):
+        map_server_active = self._is_active(
+            "map_server"
+        )
+
+        localization_active = self._is_active(
+            "amcl"
+        )
+
         planner_active = self._is_active(
             "planner_server"
         )
@@ -186,6 +196,8 @@ class NavigationProbe(Node):
 
         ready = all(
             (
+                map_server_active,
+                localization_active,
                 planner_active,
                 controller_active,
                 navigator_active,
@@ -202,6 +214,10 @@ class NavigationProbe(Node):
             "timestamp": utc_now(),
             "read_only": True,
             "goal_sent": False,
+            "map_server_enabled":
+                map_server_active,
+            "localization_enabled":
+                localization_active,
             "planner_enabled":
                 planner_active,
             "controller_enabled":

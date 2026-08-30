@@ -61,6 +61,11 @@ def build_launch_description(
         / "mayday_guarded_navigation.yaml"
     )
 
+    fixed_map = (
+        asset_dir
+        / "mayday_supervised_route_03.yaml"
+    )
+
     navigate_tree = (
         asset_dir
         / "mayday_guarded_navigate_to_pose.xml"
@@ -75,6 +80,7 @@ def build_launch_description(
         isolation_source,
         isolation_sink,
         params,
+        fixed_map,
         navigate_tree,
         disabled_through_tree,
         Path(ROUTER_BINARY),
@@ -188,6 +194,45 @@ def build_launch_description(
                 output="screen",
             ),
             Node(
+                package="nav2_map_server",
+                executable="map_server",
+                name="map_server",
+                output="screen",
+                parameters=[
+                    {
+                        "use_sim_time": False,
+                        "yaml_filename":
+                            str(fixed_map),
+                    },
+                ],
+            ),
+            Node(
+                package="nav2_amcl",
+                executable="amcl",
+                name="amcl",
+                output="screen",
+                parameters=[
+                    {
+                        "use_sim_time": False,
+                        "base_frame_id":
+                            "base_footprint",
+                        "global_frame_id":
+                            "map",
+                        "odom_frame_id":
+                            "odom",
+                        "scan_topic":
+                            "scan",
+                        "tf_broadcast":
+                            True,
+                        "transform_tolerance":
+                            1.0,
+                        "set_initial_pose":
+                            False,
+                    },
+                ],
+                remappings=navigation_remap,
+            ),
+            Node(
                 package="nav2_planner",
                 executable="planner_server",
                 name="planner_server",
@@ -248,7 +293,7 @@ def build_launch_description(
                 executable="lifecycle_manager",
                 name=(
                     "lifecycle_manager_"
-                    "mapping_navigation"
+                    "fixed_navigation"
                 ),
                 output="screen",
                 parameters=[
@@ -259,6 +304,8 @@ def build_launch_description(
                         "attempt_respawn_reconnection":
                             False,
                         "node_names": [
+                            "map_server",
+                            "amcl",
                             "planner_server",
                             "controller_server",
                             "bt_navigator",
