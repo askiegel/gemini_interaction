@@ -62,7 +62,7 @@ def build_launch_description(asset_dir):
             "-r",
             "__node:=mapping_navigation_tf_relay",
             "-p",
-            "input_topic:=/tf",
+            "input_topic:=/mayday_navigation_tf",
             "-p",
             "output_topic:=/nav_tf",
             "-p",

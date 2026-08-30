@@ -689,6 +689,9 @@ class Tony2NavigationRuntime:
                     str(
                         self.probe_script
                     ),
+                    "--ros-args",
+                    "-r",
+                    "/tf:=/nav_tf",
                 ],
                 self.probe_log,
                 self.probe_pid_file,
@@ -913,6 +916,9 @@ class Tony2NavigationRuntime:
             ),
             "--result-file",
             str(self.goal_result_file),
+            "--ros-args",
+            "-r",
+            "/tf:=/nav_tf",
         ]
 
         log_handle = open(
