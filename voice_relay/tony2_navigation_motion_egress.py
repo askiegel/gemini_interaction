@@ -626,13 +626,15 @@ def main():
     finally:
         controller.shutdown()
 
+        # Runtime status is valid only while this process
+        # owns the egress. Remove it on graceful shutdown.
+        # Tony2NavigationRuntime.stop() also unlinks this
+        # file, covering supervisor-side cleanup.
         try:
-            node._write_status(
-                running=False,
-                armed=False,
-                reason="EGRESS_SHUTDOWN",
-            )
-        except Exception:
+            node.status_file.unlink()
+        except FileNotFoundError:
+            pass
+        except OSError:
             pass
 
         node.destroy_node()

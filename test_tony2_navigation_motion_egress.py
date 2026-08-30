@@ -545,3 +545,38 @@ def test_supervisor_still_has_no_static_motion_enable_flag():
         "MOTION_OUTPUT_CONNECTED = False"
         in runtime
     )
+
+
+def test_egress_shutdown_removes_runtime_status_file():
+    egress = EGRESS.read_text(
+        encoding="utf-8"
+    )
+
+    main = egress.split(
+        "def main():",
+        1,
+    )[1]
+
+    assert (
+        "node.status_file.unlink()"
+        in main
+    )
+
+    assert (
+        "except FileNotFoundError:"
+        in main
+    )
+
+    assert (
+        'reason="EGRESS_SHUTDOWN"'
+        not in main
+    )
+
+    runtime = RUNTIME.read_text(
+        encoding="utf-8"
+    )
+
+    assert (
+        "self.motion_egress_status_file,"
+        in runtime
+    )
