@@ -15,6 +15,13 @@ from launch_ros.actions import Node
 def build_launch_description(asset_dir):
     asset_dir = Path(asset_dir).resolve()
 
+    module_dir = Path(__file__).resolve().parent
+
+    sensor_relay = (
+        module_dir
+        / "tony2_navigation_sensor_relay.py"
+    )
+
     params = (
         asset_dir
         / "mayday_guarded_navigation.yaml"
@@ -46,10 +53,18 @@ def build_launch_description(asset_dir):
                 f"Required guarded asset is missing: {path}"
             )
 
-    navigation_tf_remap = [
+    navigation_remap = [
         (
             "/tf",
             "/nav_tf",
+        ),
+        (
+            "/scan",
+            "/tony2_nav_scan",
+        ),
+        (
+            "/odom",
+            "/tony2_nav_odom",
         ),
     ]
 
@@ -71,6 +86,15 @@ def build_launch_description(asset_dir):
         output="screen",
     )
 
+    sensor_ingress = ExecuteProcess(
+        cmd=[
+            "/usr/bin/python3",
+            "-u",
+            str(sensor_relay),
+        ],
+        output="screen",
+    )
+
     delayed_navigation = TimerAction(
         period=3.0,
         actions=[
@@ -85,7 +109,7 @@ def build_launch_description(asset_dir):
                         "use_sim_time": False,
                     },
                 ],
-                remappings=navigation_tf_remap,
+                remappings=navigation_remap,
             ),
             Node(
                 package="nav2_controller",
@@ -99,7 +123,7 @@ def build_launch_description(asset_dir):
                     },
                 ],
                 remappings=(
-                    navigation_tf_remap
+                    navigation_remap
                     + [
                         (
                             "cmd_vel",
@@ -123,7 +147,7 @@ def build_launch_description(asset_dir):
                             str(disabled_through_tree),
                     },
                 ],
-                remappings=navigation_tf_remap,
+                remappings=navigation_remap,
             ),
             Node(
                 package="nav2_lifecycle_manager",
@@ -154,6 +178,7 @@ def build_launch_description(asset_dir):
     return LaunchDescription(
         [
             relay,
+            sensor_ingress,
             delayed_navigation,
         ]
     )
