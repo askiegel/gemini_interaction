@@ -7,6 +7,7 @@ import json
 import math
 import os
 import signal
+import sys
 import time
 from pathlib import Path
 
@@ -17,6 +18,7 @@ from rclpy.action import ActionClient
 from rclpy.duration import Duration
 from rclpy.node import Node
 from rclpy.time import Time
+from rclpy.utilities import remove_ros_args
 from tf2_ros import Buffer
 from tf2_ros import TransformListener
 
@@ -348,7 +350,18 @@ def main():
         required=True,
     )
 
-    args = parser.parse_args()
+    # Parse only application arguments here.
+    #
+    # The runtime intentionally appends ROS arguments such as
+    # --ros-args -r /tf:=/nav_tf. Those must remain in sys.argv
+    # for the later rclpy.init(), but argparse must not see them.
+    application_args = remove_ros_args(
+        sys.argv
+    )[1:]
+
+    args = parser.parse_args(
+        application_args
+    )
 
     for value in (
         args.x,
