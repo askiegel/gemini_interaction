@@ -406,7 +406,7 @@ class Tony2NavigationRuntimeTests(
             'package="nav2_bt_navigator"',
             'package="nav2_lifecycle_manager"',
             '"cmd_vel",',
-            '"cmd_vel_blocked"',
+            '"cmd_vel_egress"',
             '"/nav_tf",',
             '"autostart": True',
             (

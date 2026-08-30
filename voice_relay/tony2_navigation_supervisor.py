@@ -158,6 +158,35 @@ def build_launch_description(
     delayed_navigation = TimerAction(
         period=4.0,
         actions=[
+            ExecuteProcess(
+                cmd=[
+                    "/usr/bin/env",
+                    "-u",
+                    "ROS_LOCALHOST_ONLY",
+                    "-u",
+                    "ROS_DISCOVERY_SERVER",
+                    "-u",
+                    "ROS_SUPER_CLIENT",
+                    "-u",
+                    "FASTRTPS_DEFAULT_PROFILES_FILE",
+                    "-u",
+                    "FASTDDS_DEFAULT_PROFILES_FILE",
+                    "-u",
+                    "FASTDDS_BUILTIN_TRANSPORTS",
+                    "-u",
+                    "CYCLONEDDS_URI",
+                    "ROS_DOMAIN_ID=43",
+                    "RMW_IMPLEMENTATION=rmw_zenoh_cpp",
+                    'ZENOH_CONFIG_OVERRIDE=connect/endpoints=["tcp/127.0.0.1:7447"];listen/endpoints=["tcp/127.0.0.1:0"];scouting/multicast/enabled=false;transport/shared_memory/enabled=false',
+                    "/usr/bin/python3",
+                    "-u",
+                    str(
+                        Path(__file__).resolve().parent
+                        / "tony2_navigation_motion_egress.py"
+                    ),
+                ],
+                output="screen",
+            ),
             Node(
                 package="nav2_planner",
                 executable="planner_server",
@@ -189,7 +218,7 @@ def build_launch_description(
                             "cmd_vel",
                             (
                                 "/tony2_nav_"
-                                "cmd_vel_blocked"
+                                "cmd_vel_egress"
                             ),
                         ),
                     ]

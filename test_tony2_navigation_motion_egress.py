@@ -405,7 +405,7 @@ def test_adapter_has_no_ros_motion_publisher():
     )
 
 
-def test_adapter_is_not_connected_yet():
+def test_adapter_is_integrated_but_disabled():
     supervisor = SUPERVISOR.read_text(
         encoding="utf-8"
     )
@@ -414,17 +414,47 @@ def test_adapter_is_not_connected_yet():
         encoding="utf-8"
     )
 
+    egress = EGRESS.read_text(
+        encoding="utf-8"
+    )
+
     assert (
         "tony2_navigation_motion_egress.py"
-        not in supervisor
+        in supervisor
+    )
+
+    assert (
+        "cmd_vel_egress"
+        in supervisor
     )
 
     assert (
         "cmd_vel_blocked"
-        in supervisor
+        not in supervisor
+    )
+
+    assert (
+        "--enable-motion"
+        not in supervisor
     )
 
     assert (
         "MOTION_OUTPUT_CONNECTED = False"
         in runtime
+    )
+
+    before_main = egress.split(
+        "def main():",
+        1,
+    )[0]
+
+    assert (
+        "from robot_bridge.client "
+        "import RobotBridgeClient"
+        not in before_main
+    )
+
+    assert (
+        "if args.enable_motion:"
+        in egress
     )

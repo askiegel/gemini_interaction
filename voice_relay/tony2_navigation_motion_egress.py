@@ -26,7 +26,6 @@ from rclpy.qos import HistoryPolicy
 from rclpy.qos import QoSProfile
 from rclpy.qos import ReliabilityPolicy
 
-from robot_bridge.client import RobotBridgeClient
 
 
 INPUT_TOPIC = "/tony2_nav_cmd_vel_egress"
@@ -398,10 +397,19 @@ def main():
 
     args = parser.parse_args()
 
-    robot = RobotBridgeClient(
-        base_url=args.robot_bridge_url,
-        timeout=CLIENT_TIMEOUT_SECONDS,
-    )
+    if args.enable_motion:
+        from robot_bridge.client import RobotBridgeClient
+
+        robot = RobotBridgeClient(
+            base_url=args.robot_bridge_url,
+            timeout=CLIENT_TIMEOUT_SECONDS,
+        )
+    else:
+        # Disabled integration must not require the
+        # Robot Bridge client or its application
+        # dependencies. The controller never contacts
+        # this placeholder while disabled.
+        robot = object()
 
     controller = MotionEgressController(
         robot_client=robot,

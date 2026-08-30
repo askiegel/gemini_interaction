@@ -150,7 +150,7 @@ def test_nav2_controller_output_is_disconnected():
     )
 
     assert (
-        "cmd_vel_blocked"
+        "cmd_vel_egress"
         in supervisor
     )
 
