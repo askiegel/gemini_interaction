@@ -1166,6 +1166,43 @@ class Tony2NavigationRuntime:
                 self.status(),
         }
 
+    @staticmethod
+    def _process_group_exists(
+        pgid,
+    ):
+        if pgid is None:
+            return False
+
+        try:
+            pgid = int(pgid)
+        except (
+            TypeError,
+            ValueError,
+        ):
+            return False
+
+        if pgid <= 0:
+            return False
+
+        try:
+            os.killpg(
+                pgid,
+                0,
+            )
+
+        except ProcessLookupError:
+            return False
+
+        except PermissionError:
+            return True
+
+        except OSError:
+            # Fail closed for unexpected signal-zero
+            # errors: do not assume the group vanished.
+            return True
+
+        return True
+
     def _terminate_group(
         self,
         pid,
@@ -1178,14 +1215,28 @@ class Tony2NavigationRuntime:
             return False
 
         try:
-            os.killpg(
-                pid,
-                signal.SIGTERM,
+            pgid = os.getpgid(
+                pid
             )
 
         except OSError:
             return False
 
+        try:
+            os.killpg(
+                pgid,
+                signal.SIGTERM,
+            )
+
+        except ProcessLookupError:
+            return True
+
+        except OSError:
+            return False
+
+        # The session leader may exit before its launch
+        # children. Watch the whole process group rather
+        # than only the leader PID.
         deadline = (
             time.monotonic()
             + 3.0
@@ -1195,9 +1246,8 @@ class Tony2NavigationRuntime:
             time.monotonic()
             < deadline
         ):
-            if not self._pid_matches(
-                pid,
-                marker,
+            if not self._process_group_exists(
+                pgid
             ):
                 return True
 
@@ -1205,20 +1255,42 @@ class Tony2NavigationRuntime:
                 0.1
             )
 
-        if self._pid_matches(
-            pid,
-            marker,
+        if self._process_group_exists(
+            pgid
         ):
             try:
                 os.killpg(
-                    pid,
+                    pgid,
                     signal.SIGKILL,
                 )
 
-            except OSError:
-                pass
+            except ProcessLookupError:
+                return True
 
-        return True
+            except OSError:
+                return False
+
+        kill_deadline = (
+            time.monotonic()
+            + 1.0
+        )
+
+        while (
+            time.monotonic()
+            < kill_deadline
+        ):
+            if not self._process_group_exists(
+                pgid
+            ):
+                return True
+
+            time.sleep(
+                0.05
+            )
+
+        return not self._process_group_exists(
+            pgid
+        )
 
     def stop(self):
         """

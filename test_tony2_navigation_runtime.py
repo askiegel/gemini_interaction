@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 
 import sys
+import signal
 import tempfile
 import unittest
+import unittest.mock
 from pathlib import Path
 from unittest.mock import Mock
 from unittest.mock import patch
@@ -716,6 +718,115 @@ class Tony2NavigationRuntimeTests(
 
             self.assertIsNone(
                 runtime._active_motion_token
+            )
+
+    def test_terminate_group_waits_for_entire_process_group(
+        self,
+    ):
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = self.make_runtime(
+                Path(directory)
+            )
+
+            with patch.object(
+                runtime,
+                "_pid_matches",
+                return_value=True,
+            ) as pid_matches, patch(
+                "tony2_navigation_runtime.os.getpgid",
+                return_value=4321,
+            ), patch(
+                "tony2_navigation_runtime.os.killpg",
+            ) as killpg, patch.object(
+                runtime,
+                "_process_group_exists",
+                side_effect=[
+                    True,
+                    False,
+                ],
+            ) as group_exists, patch(
+                "tony2_navigation_runtime.time.sleep",
+            ):
+                result = runtime._terminate_group(
+                    100,
+                    runtime.SUPERVISOR_MARKER,
+                )
+
+            self.assertTrue(
+                result
+            )
+
+            pid_matches.assert_called_once_with(
+                100,
+                runtime.SUPERVISOR_MARKER,
+            )
+
+            killpg.assert_called_once_with(
+                4321,
+                signal.SIGTERM,
+            )
+
+            self.assertEqual(
+                group_exists.call_count,
+                2,
+            )
+
+    def test_terminate_group_escalates_if_children_survive_term(
+        self,
+    ):
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = self.make_runtime(
+                Path(directory)
+            )
+
+            with patch.object(
+                runtime,
+                "_pid_matches",
+                return_value=True,
+            ), patch(
+                "tony2_navigation_runtime.os.getpgid",
+                return_value=4321,
+            ), patch(
+                "tony2_navigation_runtime.os.killpg",
+            ) as killpg, patch.object(
+                runtime,
+                "_process_group_exists",
+                side_effect=[
+                    True,
+                    False,
+                ],
+            ), patch(
+                "tony2_navigation_runtime.time.monotonic",
+                side_effect=[
+                    0.0,
+                    4.0,
+                    5.0,
+                    5.1,
+                ],
+            ), patch(
+                "tony2_navigation_runtime.time.sleep",
+            ):
+                result = runtime._terminate_group(
+                    100,
+                    runtime.SUPERVISOR_MARKER,
+                )
+
+            self.assertTrue(
+                result
+            )
+
+            self.assertEqual(
+                killpg.call_args_list,
+                [
+                    unittest.mock.call(
+                        4321,
+                        signal.SIGTERM,
+                    ),
+                    unittest.mock.call(
+                        4321,
+                        signal.SIGKILL,
+                    ),
+                ],
             )
 
     def test_stop_stops_lease_before_goal_process(
