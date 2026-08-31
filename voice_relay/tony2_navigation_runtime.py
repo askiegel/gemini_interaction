@@ -38,6 +38,11 @@ class Tony2NavigationRuntime:
     MAXIMUM_GOAL_DISTANCE_METERS = 0.50
     EXECUTION_TIMEOUT_SECONDS = 25.0
 
+    FIXED_MAP_MIN_X = -2.60
+    FIXED_MAP_MAX_X = 4.00
+    FIXED_MAP_MIN_Y = -2.55
+    FIXED_MAP_MAX_Y = 2.75
+
     MOTION_ARM_ACK_TIMEOUT_SECONDS = 2.0
     MOTION_DISARM_TIMEOUT_SECONDS = 1.0
     MOTION_STATE_POLL_SECONDS = 0.05
@@ -137,6 +142,11 @@ class Tony2NavigationRuntime:
         self.goal_script = (
             module_dir
             / "tony2_navigation_goal.py"
+        )
+
+        self.initial_pose_script = (
+            module_dir
+            / "tony2_navigation_initial_pose.py"
         )
 
         self.supervisor_pid_file = (
@@ -1406,6 +1416,318 @@ class Tony2NavigationRuntime:
                 self.status(),
         }
 
+
+    def initialize_operator_pose(
+        self,
+        x,
+        y,
+        yaw,
+    ):
+        """
+        Set and validate one stationary operator AMCL pose.
+
+        This path never creates a motion lease and never
+        submits a navigation goal. Any failed localization
+        validation stops the navigation runtime fail closed.
+        """
+
+        values = {
+            "x": x,
+            "y": y,
+            "yaw": yaw,
+        }
+
+        normalized = {}
+
+        for name, value in values.items():
+            try:
+                numeric = float(
+                    value
+                )
+
+            except (
+                TypeError,
+                ValueError,
+            ) as exc:
+                raise ValueError(
+                    f"{name} must be numeric."
+                ) from exc
+
+            if not math.isfinite(
+                numeric
+            ):
+                raise ValueError(
+                    f"{name} must be finite."
+                )
+
+            normalized[name] = numeric
+
+        if not (
+            self.FIXED_MAP_MIN_X
+            <= normalized["x"]
+            <= self.FIXED_MAP_MAX_X
+        ):
+            raise ValueError(
+                "Operator pose x lies outside "
+                "the fixed navigation map."
+            )
+
+        if not (
+            self.FIXED_MAP_MIN_Y
+            <= normalized["y"]
+            <= self.FIXED_MAP_MAX_Y
+        ):
+            raise ValueError(
+                "Operator pose y lies outside "
+                "the fixed navigation map."
+            )
+
+        normalized["yaw"] = math.atan2(
+            math.sin(
+                normalized["yaw"]
+            ),
+            math.cos(
+                normalized["yaw"]
+            ),
+        )
+
+        status = self.status()
+
+        if status.get("running") is not True:
+            raise RuntimeError(
+                "Tony2 fixed navigation must be "
+                "running before operator localization."
+            )
+
+        if (
+            status.get(
+                "map_server_enabled"
+            ) is not True
+            or status.get(
+                "localization_enabled"
+            ) is not True
+        ):
+            raise RuntimeError(
+                "Tony2 fixed map and AMCL must be "
+                "active before operator localization."
+            )
+
+        if status.get(
+            "transform_ready"
+        ) is True:
+            raise RuntimeError(
+                "Tony2 localization is already initialized; "
+                "stop and restart before setting a new "
+                "operator pose."
+            )
+
+        if status.get(
+            "goal_submission_enabled"
+        ) is True:
+            raise RuntimeError(
+                "GO must remain disabled while the "
+                "operator pose is initialized."
+            )
+
+        if status.get(
+            "goal_active"
+        ) is True:
+            raise RuntimeError(
+                "A navigation goal is active."
+            )
+
+        if status.get(
+            "motion_output_connected"
+        ) is True:
+            raise RuntimeError(
+                "Motion output must be disconnected "
+                "during operator localization."
+            )
+
+        if (
+            status.get(
+                "motion_egress_ready"
+            ) is not True
+            or status.get(
+                "motion_egress_idle"
+            ) is not True
+        ):
+            raise RuntimeError(
+                "Motion egress must be running and "
+                "disarmed during operator localization."
+            )
+
+        if not self.initial_pose_script.is_file():
+            raise RuntimeError(
+                "Tony2 operator initial-pose helper "
+                "is missing."
+            )
+
+        command = [
+            "/usr/bin/python3",
+            "-u",
+            str(
+                self.initial_pose_script
+            ),
+            (
+                "--x="
+                + str(
+                    normalized["x"]
+                )
+            ),
+            (
+                "--y="
+                + str(
+                    normalized["y"]
+                )
+            ),
+            (
+                "--yaw="
+                + str(
+                    normalized["yaw"]
+                )
+            ),
+            "--ros-args",
+            "-r",
+            "/tf:=/nav_tf",
+        ]
+
+        try:
+            completed = subprocess.run(
+                command,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                env=self.child_environment(),
+                timeout=35.0,
+                check=False,
+            )
+
+        except Exception:
+            self.stop()
+            raise
+
+        payload = None
+
+        for line in reversed(
+            completed.stdout.splitlines()
+        ):
+            line = line.strip()
+
+            if not line:
+                continue
+
+            try:
+                candidate = json.loads(
+                    line
+                )
+
+            except json.JSONDecodeError:
+                continue
+
+            if isinstance(
+                candidate,
+                dict,
+            ):
+                payload = candidate
+                break
+
+        if (
+            completed.returncode != 0
+            or not isinstance(
+                payload,
+                dict,
+            )
+            or payload.get("ok") is not True
+        ):
+            stopped = self.stop()
+
+            error = (
+                payload.get(
+                    "error"
+                )
+                if isinstance(
+                    payload,
+                    dict,
+                )
+                else None
+            )
+
+            raise RuntimeError(
+                error
+                or (
+                    "Tony2 operator localization "
+                    "helper failed."
+                )
+            )
+
+        if payload.get(
+            "trusted"
+        ) is not True:
+            stopped = self.stop()
+
+            return {
+                "action":
+                    "OPERATOR_POSE_REJECTED",
+                "localization":
+                    payload,
+                "navigation":
+                    stopped["navigation"],
+            }
+
+        deadline = (
+            time.monotonic()
+            + 10.0
+        )
+
+        final_status = self.status()
+
+        while (
+            final_status.get(
+                "state"
+            ) != "READY"
+            and time.monotonic()
+                < deadline
+        ):
+            time.sleep(
+                0.2
+            )
+
+            final_status = (
+                self.status()
+            )
+
+        if final_status.get(
+            "state"
+        ) != "READY":
+            stopped = self.stop()
+
+            return {
+                "action":
+                    "OPERATOR_POSE_REJECTED",
+                "localization":
+                    {
+                        **payload,
+                        "trusted": False,
+                        "error": (
+                            "Localization passed its "
+                            "pose checks but Nav2 did not "
+                            "reach READY."
+                        ),
+                    },
+                "navigation":
+                    stopped["navigation"],
+            }
+
+        return {
+            "action":
+                "OPERATOR_POSE_VALIDATED",
+            "localization":
+                payload,
+            "navigation":
+                final_status,
+        }
 
     def submit_goal(
         self,
