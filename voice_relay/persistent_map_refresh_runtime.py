@@ -1471,6 +1471,14 @@ class PersistentMapRefreshRuntime:
     def active_map_payload(
         self,
     ):
+        """
+        Present a dashboard-promoted map through the exact
+        read-only telemetry contract already consumed by the
+        persistent-map renderer and planning overlay.
+
+        Candidate review continues to use its own candidate
+        payload. This adapter exists only for the active map.
+        """
         yaml_path = (
             self.active_map_yaml()
         )
@@ -1478,7 +1486,7 @@ class PersistentMapRefreshRuntime:
         if not yaml_path.is_file():
             return None
 
-        payload = _map_payload(
+        parsed = _map_payload(
             yaml_path,
             name=ACTIVE_MAP_BASENAME,
             source_type=(
@@ -1487,13 +1495,96 @@ class PersistentMapRefreshRuntime:
             ),
         )
 
-        payload[
-            "persistent_map_source"
-        ] = (
-            "dashboard_promoted"
+        raw_map = (
+            parsed.get("map")
         )
 
-        return payload
+        if not isinstance(
+            raw_map,
+            dict,
+        ):
+            raise RuntimeError(
+                "Promoted persistent map payload "
+                "contains no occupancy grid."
+            )
+
+        data = (
+            raw_map.get("data")
+        )
+
+        width = int(
+            raw_map.get(
+                "width",
+                0,
+            )
+        )
+
+        height = int(
+            raw_map.get(
+                "height",
+                0,
+            )
+        )
+
+        if (
+            not isinstance(
+                data,
+                list,
+            )
+            or width <= 0
+            or height <= 0
+            or len(data)
+                != width * height
+        ):
+            raise RuntimeError(
+                "Promoted persistent map occupancy "
+                "grid is invalid."
+            )
+
+        dashboard_map = (
+            copy.deepcopy(
+                raw_map
+            )
+        )
+
+        # Existing dashboard map and planning code use
+        # occupancyMap.cells. Keep data as well so the
+        # promoted-map representation remains compatible with
+        # candidate/review readers.
+        dashboard_map[
+            "cells"
+        ] = list(
+            data
+        )
+
+        return {
+            "ok":
+                True,
+            "status":
+                "READY",
+            "source":
+                "dashboard_promoted_persistent_map",
+            "read_only":
+                True,
+            "authoritative":
+                True,
+            "persistent_map_source":
+                "dashboard_promoted",
+            "telemetry": {
+                "available":
+                    True,
+                "status":
+                    "MAP_READY",
+                "map":
+                    dashboard_map,
+            },
+
+            # Preserve the generic map object for review code
+            # that recursively accepts either data or cells.
+            "map":
+                raw_map,
+        }
+
 
     def promote(
         self,

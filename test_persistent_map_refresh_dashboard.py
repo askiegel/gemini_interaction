@@ -302,3 +302,108 @@ def test_webpage_requires_confirmation():
         "Use this candidate as the new"
         in HTML
     )
+
+
+
+def test_promoted_map_matches_existing_dashboard_schema(
+    tmp_path,
+):
+    state_root = (
+        tmp_path
+        / "persistent_map"
+    )
+
+    active = (
+        state_root
+        / "active"
+    )
+
+    active.mkdir(
+        parents=True,
+    )
+
+    pgm = (
+        active
+        / "mayday_supervised_route_03.pgm"
+    )
+
+    pgm.write_text(
+        (
+            "P2\n"
+            "2 2\n"
+            "255\n"
+            "254 0\n"
+            "205 254\n"
+        ),
+        encoding="ascii",
+    )
+
+    yaml = (
+        active
+        / "mayday_supervised_route_03.yaml"
+    )
+
+    yaml.write_text(
+        (
+            "image: mayday_supervised_route_03.pgm\n"
+            "mode: trinary\n"
+            "resolution: 0.050000\n"
+            "origin: [0.000000, 0.000000, 0.000000]\n"
+            "negate: 0\n"
+            "occupied_thresh: 0.65\n"
+            "free_thresh: 0.196\n"
+        ),
+        encoding="utf-8",
+    )
+
+    runtime = (
+        PersistentMapRefreshRuntime(
+            state_root=state_root,
+        )
+    )
+
+    payload = (
+        runtime.active_map_payload()
+    )
+
+    assert payload["ok"] is True
+
+    assert (
+        payload[
+            "persistent_map_source"
+        ]
+        == "dashboard_promoted"
+    )
+
+    telemetry = (
+        payload["telemetry"]
+    )
+
+    assert (
+        telemetry["available"]
+        is True
+    )
+
+    map_payload = (
+        telemetry["map"]
+    )
+
+    assert map_payload["width"] == 2
+    assert map_payload["height"] == 2
+
+    assert (
+        len(
+            map_payload["cells"]
+        )
+        == 4
+    )
+
+    assert (
+        map_payload["cells"]
+        == map_payload["data"]
+    )
+
+    assert (
+        payload["map"]["data"]
+        == map_payload["cells"]
+    )
