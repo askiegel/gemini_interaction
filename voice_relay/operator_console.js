@@ -6833,3 +6833,487 @@
         initialize();
     }
 })();
+
+/* Dual environment comparison */
+(function () {
+    "use strict";
+
+    const LOCALIZATION_ENDPOINT = "/dashboard/localization";
+    const POSE_REFRESH_MS = 1000;
+
+    let poseTimer = null;
+    let poseRequestInFlight = false;
+
+    function byId(id) {
+        return document.getElementById(id);
+    }
+
+    function makeElement(tagName, className, text) {
+        const element = document.createElement(tagName);
+
+        if (className) {
+            element.className = className;
+        }
+
+        if (text !== undefined && text !== null) {
+            element.textContent = text;
+        }
+
+        return element;
+    }
+
+    function insertPoseReadout(card, stage, id) {
+        let readout = byId(id);
+
+        if (readout) {
+            return readout;
+        }
+
+        readout = makeElement(
+            "div",
+            "dual-environment-pose waiting",
+            "Mayday: map pose unavailable"
+        );
+
+        readout.id = id;
+
+        card.insertBefore(
+            readout,
+            stage
+        );
+
+        return readout;
+    }
+
+    function setPoseReadout(
+        id,
+        text,
+        state
+    ) {
+        const element = byId(id);
+
+        if (!element) {
+            return;
+        }
+
+        element.textContent = text;
+        element.className = (
+            "dual-environment-pose "
+            + state
+        );
+    }
+
+    function setBothPoseReadouts(
+        persistentText,
+        liveText,
+        state
+    ) {
+        setPoseReadout(
+            "persistentMaydayPose",
+            persistentText,
+            state
+        );
+
+        setPoseReadout(
+            "liveMaydayPose",
+            liveText,
+            state
+        );
+    }
+
+    function formatNumber(value, digits) {
+        const number = Number(value);
+
+        return Number.isFinite(number)
+            ? number.toFixed(digits)
+            : "—";
+    }
+
+    function poseSummary(pose) {
+        if (
+            !pose
+            || !pose.position
+            || pose.frame_id !== "map"
+        ) {
+            return null;
+        }
+
+        const x = Number(pose.position.x);
+        const y = Number(pose.position.y);
+        const yawDegrees = Number(
+            pose.yaw_degrees
+        );
+
+        if (
+            !Number.isFinite(x)
+            || !Number.isFinite(y)
+            || !Number.isFinite(yawDegrees)
+        ) {
+            return null;
+        }
+
+        return (
+            "Mayday: x "
+            + formatNumber(x, 2)
+            + " m, y "
+            + formatNumber(y, 2)
+            + " m, "
+            + formatNumber(yawDegrees, 1)
+            + "°"
+        );
+    }
+
+    async function refreshPoseReadouts() {
+        if (poseRequestInFlight) {
+            return;
+        }
+
+        poseRequestInFlight = true;
+
+        try {
+            const response = await fetch(
+                LOCALIZATION_ENDPOINT,
+                {
+                    cache: "no-store",
+                }
+            );
+
+            const payload = await response.json();
+
+            const telemetry = (
+                payload
+                && payload.telemetry
+            );
+
+            const age = Number(
+                telemetry
+                && telemetry.age_seconds
+            );
+
+            const summary = poseSummary(
+                telemetry
+                && telemetry.pose
+            );
+
+            if (
+                !response.ok
+                || !payload
+                || payload.ok !== true
+                || payload.runtime_active !== true
+                || !telemetry
+                || telemetry.available !== true
+                || !Number.isFinite(age)
+                || age < 0
+                || age >= 3
+                || !summary
+            ) {
+                throw new Error(
+                    "Fresh map pose unavailable."
+                );
+            }
+
+            setBothPoseReadouts(
+                summary,
+                summary + " · LiDAR centered on robot",
+                "ready"
+            );
+        } catch (_error) {
+            setBothPoseReadouts(
+                "Mayday: waiting for map localization",
+                "Mayday: local LiDAR origin · forward up",
+                "waiting"
+            );
+        } finally {
+            poseRequestInFlight = false;
+        }
+    }
+
+    function addRoleDescription(
+        card,
+        stage,
+        title,
+        detail
+    ) {
+        const role = makeElement(
+            "div",
+            "dual-environment-role"
+        );
+
+        role.appendChild(
+            makeElement(
+                "strong",
+                "",
+                title
+            )
+        );
+
+        role.appendChild(
+            makeElement(
+                "span",
+                "",
+                detail
+            )
+        );
+
+        card.insertBefore(
+            role,
+            stage
+        );
+    }
+
+    function createSummaryStrip() {
+        const summary = makeElement(
+            "div",
+            "dual-environment-summary"
+        );
+
+        const persistent = makeElement("div");
+        persistent.appendChild(
+            makeElement(
+                "small",
+                "",
+                "Persistent map"
+            )
+        );
+        persistent.appendChild(
+            makeElement(
+                "strong",
+                "",
+                "Stable learned structure"
+            )
+        );
+
+        const live = makeElement("div");
+        live.appendChild(
+            makeElement(
+                "small",
+                "",
+                "Live LiDAR"
+            )
+        );
+        live.appendChild(
+            makeElement(
+                "strong",
+                "",
+                "Current sensed geometry"
+            )
+        );
+
+        const comparison = makeElement("div");
+        comparison.appendChild(
+            makeElement(
+                "small",
+                "",
+                "Map comparison"
+            )
+        );
+        comparison.appendChild(
+            makeElement(
+                "strong",
+                "",
+                "Visualization only — change detector next"
+            )
+        );
+
+        summary.appendChild(persistent);
+        summary.appendChild(live);
+        summary.appendChild(comparison);
+
+        return summary;
+    }
+
+    function initializeLayout() {
+        if (byId("dualEnvironmentWorkspace")) {
+            return;
+        }
+
+        const perceptionPage = byId(
+            "perceptionPage"
+        );
+
+        const lidarCanvas = byId(
+            "lidarCanvas"
+        );
+
+        const mapCanvas = byId(
+            "mapCanvas"
+        );
+
+        if (
+            !perceptionPage
+            || !lidarCanvas
+            || !mapCanvas
+        ) {
+            return;
+        }
+
+        const lidarStage = lidarCanvas.closest(
+            ".lidar-stage"
+        );
+
+        const mapStage = mapCanvas.closest(
+            ".map-stage"
+        );
+
+        const lidarCard = lidarCanvas.closest(
+            "article"
+        );
+
+        const mapCard = mapCanvas.closest(
+            "article"
+        );
+
+        if (
+            !lidarStage
+            || !mapStage
+            || !lidarCard
+            || !mapCard
+            || lidarCard === mapCard
+        ) {
+            return;
+        }
+
+        const lidarLayout = lidarCard.closest(
+            ".lidar-layout"
+        );
+
+        const mapLayout = mapCard.closest(
+            ".map-layout"
+        );
+
+        const anchor = (
+            lidarLayout
+            || lidarCard
+        );
+
+        if (
+            !anchor.parentNode
+            || !perceptionPage.contains(anchor)
+        ) {
+            return;
+        }
+
+        const workspace = makeElement(
+            "section",
+            "dual-environment-workspace"
+        );
+
+        workspace.id = "dualEnvironmentWorkspace";
+        workspace.setAttribute(
+            "aria-label",
+            "Mayday persistent map and live LiDAR"
+        );
+
+        anchor.parentNode.insertBefore(
+            workspace,
+            anchor
+        );
+
+        mapCard.classList.add(
+            "dual-environment-persistent"
+        );
+
+        lidarCard.classList.add(
+            "dual-environment-live"
+        );
+
+        const mapHeading = mapCard.querySelector(
+            "h2"
+        );
+
+        if (mapHeading) {
+            mapHeading.textContent = (
+                "Stationary / Persistent Map"
+            );
+        }
+
+        const lidarHeading = lidarCard.querySelector(
+            "h2"
+        );
+
+        if (lidarHeading) {
+            lidarHeading.textContent = "Live LiDAR";
+        }
+
+        addRoleDescription(
+            mapCard,
+            mapStage,
+            "Remembered environment",
+            "Stable geometry used for localization and navigation"
+        );
+
+        addRoleDescription(
+            lidarCard,
+            lidarStage,
+            "Current environment",
+            "Raw LD06 geometry centered on Mayday"
+        );
+
+        insertPoseReadout(
+            mapCard,
+            mapStage,
+            "persistentMaydayPose"
+        );
+
+        insertPoseReadout(
+            lidarCard,
+            lidarStage,
+            "liveMaydayPose"
+        );
+
+        /*
+         * Move the EXISTING cards. Do not duplicate either
+         * visualization. Their existing renderers, canvases,
+         * event listeners, safety guards, and telemetry remain
+         * authoritative.
+         */
+        workspace.appendChild(mapCard);
+        workspace.appendChild(lidarCard);
+        workspace.appendChild(
+            createSummaryStrip()
+        );
+
+        if (lidarLayout) {
+            lidarLayout.classList.add(
+                "dual-environment-metrics-only"
+            );
+        }
+
+        if (mapLayout) {
+            mapLayout.classList.add(
+                "dual-environment-map-details-only"
+            );
+        }
+
+        refreshPoseReadouts();
+
+        poseTimer = window.setInterval(
+            refreshPoseReadouts,
+            POSE_REFRESH_MS
+        );
+
+        window.addEventListener(
+            "beforeunload",
+            function () {
+                if (poseTimer !== null) {
+                    window.clearInterval(
+                        poseTimer
+                    );
+
+                    poseTimer = null;
+                }
+            },
+            {once: true}
+        );
+    }
+
+    if (document.readyState === "loading") {
+        document.addEventListener(
+            "DOMContentLoaded",
+            initializeLayout,
+            {once: true}
+        );
+    } else {
+        initializeLayout();
+    }
+})();
