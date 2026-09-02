@@ -68,7 +68,10 @@ def test_map_javascript_is_read_only():
     map_source = JS.split(
         '/* Read-only saved occupancy-map visualization */',
         1,
-    )[1]
+    )[1].split(
+        '/* Read-only localization pose overlay */',
+        1,
+    )[0]
 
     forbidden = (
         '"/motion"',

@@ -1417,6 +1417,22 @@ class Tony2NavigationRuntime:
         }
 
 
+    def initialize_global_localization(self):
+        """
+        Run stationary map-wide AMCL localization.
+
+        The existing localization process owner is reused so
+        lifecycle, fail-closed STOP behavior, egress checks,
+        and trust handling remain unchanged. Its historical
+        x/y/yaw compatibility arguments are not used by the
+        helper to seed AMCL.
+        """
+        return self.initialize_operator_pose(
+            0.0,
+            0.0,
+            0.0,
+        )
+
     def initialize_operator_pose(
         self,
         x,

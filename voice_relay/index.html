@@ -4595,6 +4595,7 @@
     }
 
 
+
     function navigationWasStarted(result) {
         const navigation = (
             result
@@ -4611,17 +4612,29 @@
             && navigation
             && navigation.running === true
             && navigation.owned === true
-            && navigation.goal_submission_enabled === true
-            && navigation.controller_enabled === true
-            && navigation.navigator_enabled === true
+            && navigation.host === "Tony2"
+            && navigation.source
+                === "tony2_guarded_navigation"
+            && navigation.fixed_map_required === true
+            && navigation.isolation_transport
+                === "zenoh_localhost"
+            && navigation.motion_output_connected
+                === false
         );
     }
+
 
     function navigationInitializationSucceeded(result) {
         const initialization = (
             result
             && result.payload
             && result.payload.initialization
+        );
+
+        const navigation = (
+            result
+            && result.payload
+            && result.payload.navigation
         );
 
         return Boolean(
@@ -4631,22 +4644,33 @@
             && result.payload
             && result.payload.ok
             && initialization
+            && initialization.trusted === true
             && initialization
                 .global_localization_requested === true
             && initialization
-                .nomotion_updates_requested === 20
+                .initial_pose_supplied === false
+            && Number(
+                initialization
+                    .nomotion_updates_requested
+            ) >= 1
             && initialization
                 .stationary_required === true
             && initialization
-                .initial_pose_supplied === false
-            && initialization
-                .pose_published === false
-            && initialization
-                .path_computed === false
-            && initialization
-                .path_executed === false
-            && initialization
                 .navigation_goal_executed === false
+            && initialization
+                .motion_enabled === false
+            && navigation
+            && navigation.state === "READY"
+            && navigation.host === "Tony2"
+            && navigation.source
+                === "tony2_guarded_navigation"
+            && navigation.action_server_ready === true
+            && navigation.transform_ready === true
+            && navigation.goal_submission_enabled === true
+            && navigation.motion_output_connected
+                === false
+            && navigation.isolation_transport
+                === "zenoh_localhost"
         );
     }
 

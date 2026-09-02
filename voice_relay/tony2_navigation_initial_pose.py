@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 
-"""Stationary validation of an operator-supplied AMCL pose."""
+"""Stationary map-wide AMCL localization and trust validation."""
 
 import argparse
 import json
@@ -11,7 +11,6 @@ import time
 import rclpy
 
 from geometry_msgs.msg import PoseWithCovarianceStamped
-from nav2_msgs.srv import SetInitialPose
 from nav_msgs.msg import OccupancyGrid
 from rclpy.duration import Duration
 from rclpy.node import Node
@@ -22,6 +21,7 @@ from rclpy.qos import (
     ReliabilityPolicy,
 )
 from rclpy.time import Time
+from rclpy.utilities import remove_ros_args
 from sensor_msgs.msg import LaserScan
 from std_srvs.srv import Empty
 from tf2_ros import (
@@ -34,7 +34,7 @@ from tf2_ros import (
 POSITION_SIGMA_METERS = 0.35
 YAW_SIGMA_RADIANS = math.radians(30.0)
 
-NO_MOTION_UPDATES = 12
+NO_MOTION_UPDATES = 20
 
 MAX_POSITION_SIGMA_METERS = 0.25
 MAX_YAW_SIGMA_RADIANS = 0.50
@@ -47,6 +47,10 @@ MAX_MEAN_ENDPOINT_ERROR_METERS = 0.18
 MIN_WITHIN_10CM_RATIO = 0.35
 MIN_KNOWN_RATIO = 0.55
 MIN_INSIDE_RATIO = 0.75
+
+SCAN_CONFIRMATION_SAMPLES = 5
+SCAN_CONFIRMATION_REQUIRED_PASSES = 3
+SCAN_CONFIRMATION_SPACING_SECONDS = 0.35
 
 
 def clean_frame(value):
@@ -156,8 +160,26 @@ def main():
         required=True,
     )
 
-    args = parser.parse_args()
+    # argparse must see only application arguments.
+    #
+    # The runtime intentionally appends ROS arguments such as:
+    #
+    #   --ros-args -r /tf:=/nav_tf
+    #
+    # Keep those arguments in sys.argv for rclpy.init(), but
+    # remove them from the argv passed to argparse.
+    application_args = remove_ros_args(
+        args=sys.argv
+    )
 
+    args = parser.parse_args(
+        application_args[1:]
+    )
+
+    # Compatibility only: the runtime historically passes
+    # --x/--y/--yaw. Start-anywhere localization intentionally
+    # does not use those values to seed AMCL.
+    #
     for name, value in (
         ("x", args.x),
         ("y", args.y),
@@ -241,9 +263,9 @@ def main():
         spin_thread=False,
     )
 
-    set_pose_client = node.create_client(
-        SetInitialPose,
-        "/set_initial_pose",
+    global_localization_client = node.create_client(
+        Empty,
+        "/reinitialize_global_localization",
     )
 
     nomotion_client = node.create_client(
@@ -284,11 +306,11 @@ def main():
                 "Live LiDAR unavailable."
             )
 
-        if not set_pose_client.wait_for_service(
+        if not global_localization_client.wait_for_service(
             timeout_sec=4.0
         ):
             raise RuntimeError(
-                "AMCL set_initial_pose service unavailable."
+                "AMCL reinitialize_global_localization service unavailable."
             )
 
         if not nomotion_client.wait_for_service(
@@ -300,82 +322,24 @@ def main():
             )
 
         # ----------------------------------------------------
-        # Operator-supplied local pose estimate.
+        # Map-wide AMCL localization.
+        #
+        # Do not publish or supply an initial pose. Ask AMCL to
+        # distribute particles across the saved map, then let
+        # stationary LiDAR updates converge the distribution.
+        #
+        # Clear any transient-local pose received before this
+        # request so it cannot count as evidence of convergence.
         # ----------------------------------------------------
 
-        request = SetInitialPose.Request()
-
-        request.pose.header.frame_id = "map"
-
-        request.pose.header.stamp = (
-            node.get_clock()
-            .now()
-            .to_msg()
-        )
-
-        request.pose.pose.pose.position.x = (
-            args.x
-        )
-
-        request.pose.pose.pose.position.y = (
-            args.y
-        )
-
-        request.pose.pose.pose.position.z = 0.0
-
-        half_yaw = (
-            args.yaw
-            / 2.0
-        )
-
-        request.pose.pose.pose.orientation.x = 0.0
-        request.pose.pose.pose.orientation.y = 0.0
-
-        request.pose.pose.pose.orientation.z = (
-            math.sin(
-                half_yaw
-            )
-        )
-
-        request.pose.pose.pose.orientation.w = (
-            math.cos(
-                half_yaw
-            )
-        )
-
-        covariance = [
-            0.0
-        ] * 36
-
-        covariance[0] = (
-            POSITION_SIGMA_METERS
-            ** 2
-        )
-
-        covariance[7] = (
-            POSITION_SIGMA_METERS
-            ** 2
-        )
-
-        covariance[35] = (
-            YAW_SIGMA_RADIANS
-            ** 2
-        )
-
-        request.pose.pose.covariance = (
-            covariance
-        )
+        state["pose"] = None
 
         call_service(
             node,
-            set_pose_client,
-            request,
-            "set_initial_pose",
+            global_localization_client,
+            Empty.Request(),
+            "global_localization",
         )
-
-        # Do not accept a transient-local pose left over
-        # from before this service call as evidence.
-        state["pose"] = None
 
         # ----------------------------------------------------
         # Force repeated stationary laser updates.
@@ -479,399 +443,745 @@ def main():
             )
         )
 
-        seed_position_change = math.hypot(
-            final_x - args.x,
-            final_y - args.y,
+        covariance_tight = (
+            sigma_x <= MAX_POSITION_SIGMA_METERS
+            and sigma_y <= MAX_POSITION_SIGMA_METERS
+            and sigma_yaw <= MAX_YAW_SIGMA_RADIANS
         )
 
-        seed_yaw_change = abs(
-            yaw_difference(
-                final_yaw,
-                args.yaw,
+        # ----------------------------------------------------
+        # Score fresh stationary LiDAR scans independently.
+        #
+        # Every scan uses the exact same geometric and coverage
+        # thresholds. Trust is based on repeatable alignment,
+        # rather than one noisy LiDAR frame.
+        # ----------------------------------------------------
+
+        def score_scan_alignment(scan):
+            scan_frame = clean_frame(
+                scan.header.frame_id
+            )
+
+            transform = None
+
+            transform_deadline = (
+                time.monotonic()
+                + 4.0
+            )
+
+            while (
+                time.monotonic()
+                < transform_deadline
+            ):
+                try:
+                    transform = (
+                        tf_buffer.lookup_transform(
+                            "map",
+                            scan_frame,
+                            Time(),
+                            timeout=Duration(
+                                seconds=0.5
+                            ),
+                        )
+                    )
+
+                    break
+
+                except TransformException:
+                    rclpy.spin_once(
+                        node,
+                        timeout_sec=0.1,
+                    )
+
+            if transform is None:
+                raise RuntimeError(
+                    "AMCL did not produce map-to-LiDAR TF."
+                )
+
+            translation = (
+                transform.transform.translation
+            )
+
+            rotation = (
+                transform.transform.rotation
+            )
+
+            tf_yaw = (
+                yaw_from_quaternion(
+                    rotation
+                )
+            )
+
+            tf_cos = math.cos(
+                tf_yaw
+            )
+
+            tf_sin = math.sin(
+                tf_yaw
+            )
+
+            # ----------------------------------------------------
+            # Score the globally localized pose against the
+            # fixed occupancy map. AMCL global localization has already searched the saved map.
+            # ----------------------------------------------------
+
+            grid = state["map"]
+
+            width = int(
+                grid.info.width
+            )
+
+            height = int(
+                grid.info.height
+            )
+
+            resolution = float(
+                grid.info.resolution
+            )
+
+            map_data = list(
+                grid.data
+            )
+
+            origin = (
+                grid.info.origin
+            )
+
+            origin_yaw = (
+                yaw_from_quaternion(
+                    origin.orientation
+                )
+            )
+
+            origin_cos = math.cos(
+                origin_yaw
+            )
+
+            origin_sin = math.sin(
+                origin_yaw
+            )
+
+            occupied_cells = []
+
+            for row in range(height):
+                offset = (
+                    row
+                    * width
+                )
+
+                for column in range(width):
+                    value = (
+                        map_data[
+                            offset + column
+                        ]
+                    )
+
+                    if value >= 65:
+                        occupied_cells.append(
+                            (
+                                row,
+                                column,
+                            )
+                        )
+
+            if not occupied_cells:
+                raise RuntimeError(
+                    "Fixed map has no occupied cells."
+                )
+
+            valid_returns = []
+
+            angle = float(
+                scan.angle_min
+            )
+
+            for raw_range in scan.ranges:
+                distance = float(
+                    raw_range
+                )
+
+                if (
+                    math.isfinite(
+                        distance
+                    )
+                    and distance
+                        >= float(
+                            scan.range_min
+                        )
+                    and distance
+                        <= (
+                            float(
+                                scan.range_max
+                            )
+                            * 0.98
+                        )
+                ):
+                    valid_returns.append(
+                        (
+                            distance,
+                            angle,
+                        )
+                    )
+
+                angle += float(
+                    scan.angle_increment
+                )
+
+            # Coverage is inexpensive and should use every
+            # valid LiDAR return. Only the expensive nearest-wall
+            # geometry calculation is reduced to 120 samples.
+            coverage_returns = list(
+                valid_returns
+            )
+
+            coverage_sample_count = len(
+                coverage_returns
+            )
+
+            valid_returns = evenly_sample(
+                valid_returns,
+                120,
+            )
+
+            if len(valid_returns) < 40:
+                raise RuntimeError(
+                    "Too few live LiDAR obstacle returns."
+                )
+
+            coverage_inside_count = 0
+            coverage_known_count = 0
+
+            for (
+                distance,
+                beam_angle,
+            ) in coverage_returns:
+                lidar_x = (
+                    distance
+                    * math.cos(
+                        beam_angle
+                    )
+                )
+
+                lidar_y = (
+                    distance
+                    * math.sin(
+                        beam_angle
+                    )
+                )
+
+                map_x = (
+                    float(
+                        translation.x
+                    )
+                    + tf_cos
+                    * lidar_x
+                    - tf_sin
+                    * lidar_y
+                )
+
+                map_y = (
+                    float(
+                        translation.y
+                    )
+                    + tf_sin
+                    * lidar_x
+                    + tf_cos
+                    * lidar_y
+                )
+
+                dx = (
+                    map_x
+                    - float(
+                        origin.position.x
+                    )
+                )
+
+                dy = (
+                    map_y
+                    - float(
+                        origin.position.y
+                    )
+                )
+
+                local_x = (
+                    origin_cos
+                    * dx
+                    + origin_sin
+                    * dy
+                )
+
+                local_y = (
+                    -origin_sin
+                    * dx
+                    + origin_cos
+                    * dy
+                )
+
+                column = math.floor(
+                    local_x
+                    / resolution
+                )
+
+                row = math.floor(
+                    local_y
+                    / resolution
+                )
+
+                if (
+                    row < 0
+                    or row >= height
+                    or column < 0
+                    or column >= width
+                ):
+                    continue
+
+                coverage_inside_count += 1
+
+                cell_value = (
+                    map_data[
+                        row
+                        * width
+                        + column
+                    ]
+                )
+
+                if cell_value >= 0:
+                    coverage_known_count += 1
+
+            endpoint_errors = []
+
+            within_10cm_count = 0
+
+            for distance, beam_angle in valid_returns:
+                lidar_x = (
+                    distance
+                    * math.cos(
+                        beam_angle
+                    )
+                )
+
+                lidar_y = (
+                    distance
+                    * math.sin(
+                        beam_angle
+                    )
+                )
+
+                map_x = (
+                    float(
+                        translation.x
+                    )
+                    + tf_cos
+                    * lidar_x
+                    - tf_sin
+                    * lidar_y
+                )
+
+                map_y = (
+                    float(
+                        translation.y
+                    )
+                    + tf_sin
+                    * lidar_x
+                    + tf_cos
+                    * lidar_y
+                )
+
+                dx = (
+                    map_x
+                    - float(
+                        origin.position.x
+                    )
+                )
+
+                dy = (
+                    map_y
+                    - float(
+                        origin.position.y
+                    )
+                )
+
+                local_x = (
+                    origin_cos
+                    * dx
+                    + origin_sin
+                    * dy
+                )
+
+                local_y = (
+                    -origin_sin
+                    * dx
+                    + origin_cos
+                    * dy
+                )
+
+                column = math.floor(
+                    local_x
+                    / resolution
+                )
+
+                row = math.floor(
+                    local_y
+                    / resolution
+                )
+
+                if (
+                    row < 0
+                    or row >= height
+                    or column < 0
+                    or column >= width
+                ):
+                    # Coverage is validated separately by
+                    # inside_ratio. Do not convert an
+                    # out-of-map return into an artificial
+                    # obstacle-distance error.
+                    continue
+
+                cell_value = (
+                    map_data[
+                        row
+                        * width
+                        + column
+                    ]
+                )
+
+                if cell_value < 0:
+                    # Unknown-space coverage is validated
+                    # separately by known_ratio. It is not
+                    # an observed obstacle and must not add
+                    # a synthetic endpoint-distance penalty.
+                    continue
+
+                nearest = min(
+                    math.hypot(
+                        row - occupied_row,
+                        column - occupied_column,
+                    )
+                    * resolution
+                    for (
+                        occupied_row,
+                        occupied_column,
+                    )
+                    in occupied_cells
+                )
+
+                nearest = min(
+                    nearest,
+                    MAX_ENDPOINT_ERROR_METERS,
+                )
+
+                endpoint_errors.append(
+                    nearest
+                )
+
+                if nearest <= 0.10:
+                    within_10cm_count += 1
+
+            if not endpoint_errors:
+                raise RuntimeError(
+                    "No LiDAR endpoints were scored."
+                )
+
+            # Coverage ratios use every selected LiDAR
+            # return. Geometric mean error uses only returns
+            # that land in known map space.
+            #
+            # This prevents unknown/out-of-map coverage from
+            # being penalized twice: once by known/inside
+            # ratios and again as a synthetic 0.40 m error.
+            sample_count = len(
+                valid_returns
+            )
+
+            mean_endpoint_error = (
+                sum(
+                    endpoint_errors
+                )
+                / len(
+                    endpoint_errors
+                )
+            )
+
+            # Obstacle-distance quality applies only to
+            # endpoints that land in known map space.
+            #
+            # Unknown/out-of-map coverage is already guarded
+            # independently by known_ratio and inside_ratio.
+            geometric_sample_count = len(
+                endpoint_errors
+            )
+
+            within_10cm_ratio = (
+                within_10cm_count
+                / geometric_sample_count
+            )
+
+            if coverage_sample_count <= 0:
+                raise RuntimeError(
+                    "No valid LiDAR returns available "
+                    "for map coverage."
+                )
+
+            known_ratio = (
+                coverage_known_count
+                / coverage_sample_count
+            )
+
+            inside_ratio = (
+                coverage_inside_count
+                / coverage_sample_count
+            )
+
+            alignment_good = (
+                mean_endpoint_error
+                    <= MAX_MEAN_ENDPOINT_ERROR_METERS
+                and within_10cm_ratio
+                    >= MIN_WITHIN_10CM_RATIO
+                and known_ratio
+                    >= MIN_KNOWN_RATIO
+                and inside_ratio
+                    >= MIN_INSIDE_RATIO
+            )
+
+
+            return {
+                "sample_count":
+                    sample_count,
+                "geometric_sample_count":
+                    geometric_sample_count,
+                "coverage_sample_count":
+                    coverage_sample_count,
+                "coverage_known_count":
+                    coverage_known_count,
+                "coverage_inside_count":
+                    coverage_inside_count,
+                "mean_endpoint_error_m":
+                    mean_endpoint_error,
+                "within_0_10m_ratio":
+                    within_10cm_ratio,
+                "known_ratio":
+                    known_ratio,
+                "inside_ratio":
+                    inside_ratio,
+                "passed":
+                    alignment_good,
+            }
+
+
+        def scan_stamp(message):
+            return (
+                int(
+                    message.header.stamp.sec
+                ),
+                int(
+                    message.header.stamp.nanosec
+                ),
+            )
+
+
+        # The scan already present after AMCL convergence is
+        # deliberately not counted. Require a fresh frame for
+        # every confirmation sample.
+        current_scan = state["scan"]
+
+        if current_scan is None:
+            raise RuntimeError(
+                "Live LiDAR disappeared before "
+                "scan confirmation."
+            )
+
+        previous_scan_stamp = (
+            scan_stamp(
+                current_scan
             )
         )
 
-        covariance_tight = (
-            sigma_x
-                <= MAX_POSITION_SIGMA_METERS
-            and sigma_y
-                <= MAX_POSITION_SIGMA_METERS
-            and sigma_yaw
-                <= MAX_YAW_SIGMA_RADIANS
-        )
+        confirmation_scans = []
 
-        seed_consistent = (
-            seed_position_change
-                <= MAX_SEED_POSITION_CHANGE_METERS
-            and seed_yaw_change
-                <= MAX_SEED_YAW_CHANGE_RADIANS
-        )
 
-        # ----------------------------------------------------
-        # Obtain map <- lidar_link from AMCL + odom + robot TF.
-        # ----------------------------------------------------
-
-        scan = state["scan"]
-
-        scan_frame = clean_frame(
-            scan.header.frame_id
-        )
-
-        transform = None
-
-        transform_deadline = (
-            time.monotonic()
-            + 4.0
-        )
-
-        while (
-            time.monotonic()
-            < transform_deadline
+        for confirmation_index in range(
+            SCAN_CONFIRMATION_SAMPLES
         ):
-            try:
-                transform = (
-                    tf_buffer.lookup_transform(
-                        "map",
-                        scan_frame,
-                        Time(),
-                        timeout=Duration(
-                            seconds=0.5
-                        ),
+            fresh_scan = None
+
+            fresh_scan_deadline = (
+                time.monotonic()
+                + 3.0
+            )
+
+            while (
+                time.monotonic()
+                < fresh_scan_deadline
+            ):
+                rclpy.spin_once(
+                    node,
+                    timeout_sec=0.05,
+                )
+
+                candidate_scan = (
+                    state["scan"]
+                )
+
+                if candidate_scan is None:
+                    continue
+
+                candidate_stamp = (
+                    scan_stamp(
+                        candidate_scan
                     )
+                )
+
+                if (
+                    candidate_stamp
+                    == previous_scan_stamp
+                ):
+                    continue
+
+                fresh_scan = (
+                    candidate_scan
+                )
+
+                previous_scan_stamp = (
+                    candidate_stamp
                 )
 
                 break
 
-            except TransformException:
-                rclpy.spin_once(
-                    node,
-                    timeout_sec=0.1,
+
+            if fresh_scan is None:
+                raise RuntimeError(
+                    "No fresh LiDAR scan for "
+                    "stationary confirmation "
+                    f"{confirmation_index + 1}."
                 )
 
-        if transform is None:
-            raise RuntimeError(
-                "AMCL did not produce map-to-LiDAR TF."
+
+            confirmation_scans.append(
+                fresh_scan
             )
 
-        translation = (
-            transform.transform.translation
-        )
-
-        rotation = (
-            transform.transform.rotation
-        )
-
-        tf_yaw = (
-            yaw_from_quaternion(
-                rotation
-            )
-        )
-
-        tf_cos = math.cos(
-            tf_yaw
-        )
-
-        tf_sin = math.sin(
-            tf_yaw
-        )
-
-        # ----------------------------------------------------
-        # Score this one operator-seeded pose against the
-        # fixed occupancy map. No global pose search occurs.
-        # ----------------------------------------------------
-
-        grid = state["map"]
-
-        width = int(
-            grid.info.width
-        )
-
-        height = int(
-            grid.info.height
-        )
-
-        resolution = float(
-            grid.info.resolution
-        )
-
-        map_data = list(
-            grid.data
-        )
-
-        origin = (
-            grid.info.origin
-        )
-
-        origin_yaw = (
-            yaw_from_quaternion(
-                origin.orientation
-            )
-        )
-
-        origin_cos = math.cos(
-            origin_yaw
-        )
-
-        origin_sin = math.sin(
-            origin_yaw
-        )
-
-        occupied_cells = []
-
-        for row in range(height):
-            offset = (
-                row
-                * width
-            )
-
-            for column in range(width):
-                value = (
-                    map_data[
-                        offset + column
-                    ]
-                )
-
-                if value >= 65:
-                    occupied_cells.append(
-                        (
-                            row,
-                            column,
-                        )
-                    )
-
-        if not occupied_cells:
-            raise RuntimeError(
-                "Fixed map has no occupied cells."
-            )
-
-        valid_returns = []
-
-        angle = float(
-            scan.angle_min
-        )
-
-        for raw_range in scan.ranges:
-            distance = float(
-                raw_range
-            )
 
             if (
-                math.isfinite(
-                    distance
-                )
-                and distance
-                    >= float(
-                        scan.range_min
-                    )
-                and distance
-                    <= (
-                        float(
-                            scan.range_max
-                        )
-                        * 0.98
-                    )
+                confirmation_index
+                + 1
+                < SCAN_CONFIRMATION_SAMPLES
             ):
-                valid_returns.append(
-                    (
-                        distance,
-                        angle,
-                    )
+                spacing_deadline = (
+                    time.monotonic()
+                    + SCAN_CONFIRMATION_SPACING_SECONDS
                 )
 
-            angle += float(
-                scan.angle_increment
-            )
+                while (
+                    time.monotonic()
+                    < spacing_deadline
+                ):
+                    rclpy.spin_once(
+                        node,
+                        timeout_sec=0.05,
+                    )
 
-        valid_returns = evenly_sample(
-            valid_returns,
-            120,
+
+        scan_confirmation_samples = [
+            score_scan_alignment(
+                confirmation_scan
+            )
+            for confirmation_scan
+            in confirmation_scans
+        ]
+
+
+        confirmation_pass_count = sum(
+            1
+            for confirmation_sample
+            in scan_confirmation_samples
+            if confirmation_sample[
+                "passed"
+            ]
         )
 
-        if len(valid_returns) < 40:
-            raise RuntimeError(
-                "Too few live LiDAR obstacle returns."
-            )
 
-        endpoint_errors = []
+        alignment_good = (
+            confirmation_pass_count
+            >= SCAN_CONFIRMATION_REQUIRED_PASSES
+        )
 
-        inside_count = 0
-        known_count = 0
-        within_10cm_count = 0
 
-        for distance, beam_angle in valid_returns:
-            lidar_x = (
-                distance
-                * math.cos(
-                    beam_angle
-                )
-            )
-
-            lidar_y = (
-                distance
-                * math.sin(
-                    beam_angle
-                )
-            )
-
-            map_x = (
-                float(
-                    translation.x
-                )
-                + tf_cos
-                * lidar_x
-                - tf_sin
-                * lidar_y
-            )
-
-            map_y = (
-                float(
-                    translation.y
-                )
-                + tf_sin
-                * lidar_x
-                + tf_cos
-                * lidar_y
-            )
-
-            dx = (
-                map_x
-                - float(
-                    origin.position.x
-                )
-            )
-
-            dy = (
-                map_y
-                - float(
-                    origin.position.y
-                )
-            )
-
-            local_x = (
-                origin_cos
-                * dx
-                + origin_sin
-                * dy
-            )
-
-            local_y = (
-                -origin_sin
-                * dx
-                + origin_cos
-                * dy
-            )
-
-            column = math.floor(
-                local_x
-                / resolution
-            )
-
-            row = math.floor(
-                local_y
-                / resolution
-            )
-
-            if (
-                row < 0
-                or row >= height
-                or column < 0
-                or column >= width
-            ):
-                endpoint_errors.append(
-                    MAX_ENDPOINT_ERROR_METERS
-                )
-
-                continue
-
-            inside_count += 1
-
-            cell_value = (
-                map_data[
-                    row
-                    * width
-                    + column
+        # Preserve the existing scan_alignment result shape.
+        #
+        # With five samples, the median is a real observed
+        # middle value for each metric. If >= 3 complete scans
+        # pass, the median values also lie on the passing side
+        # of every unchanged threshold.
+        def median_value(name):
+            values = sorted(
+                confirmation_sample[
+                    name
                 ]
+                for confirmation_sample
+                in scan_confirmation_samples
             )
 
-            if cell_value < 0:
-                endpoint_errors.append(
-                    MAX_ENDPOINT_ERROR_METERS
-                )
+            return values[
+                len(values) // 2
+            ]
 
-                continue
 
-            known_count += 1
-
-            nearest = min(
-                math.hypot(
-                    row - occupied_row,
-                    column - occupied_column,
-                )
-                * resolution
-                for (
-                    occupied_row,
-                    occupied_column,
-                )
-                in occupied_cells
+        sample_count = int(
+            median_value(
+                "sample_count"
             )
+        )
 
-            nearest = min(
-                nearest,
-                MAX_ENDPOINT_ERROR_METERS,
+        geometric_sample_count = int(
+            median_value(
+                "geometric_sample_count"
             )
+        )
 
-            endpoint_errors.append(
-                nearest
+        coverage_sample_count = int(
+            median_value(
+                "coverage_sample_count"
             )
+        )
 
-            if nearest <= 0.10:
-                within_10cm_count += 1
-
-        if not endpoint_errors:
-            raise RuntimeError(
-                "No LiDAR endpoints were scored."
+        coverage_known_count = int(
+            median_value(
+                "coverage_known_count"
             )
+        )
 
-        sample_count = len(
-            endpoint_errors
+        coverage_inside_count = int(
+            median_value(
+                "coverage_inside_count"
+            )
         )
 
         mean_endpoint_error = (
-            sum(
-                endpoint_errors
+            median_value(
+                "mean_endpoint_error_m"
             )
-            / sample_count
         )
 
         within_10cm_ratio = (
-            within_10cm_count
-            / sample_count
+            median_value(
+                "within_0_10m_ratio"
+            )
         )
 
         known_ratio = (
-            known_count
-            / sample_count
+            median_value(
+                "known_ratio"
+            )
         )
 
         inside_ratio = (
-            inside_count
-            / sample_count
-        )
-
-        alignment_good = (
-            mean_endpoint_error
-                <= MAX_MEAN_ENDPOINT_ERROR_METERS
-            and within_10cm_ratio
-                >= MIN_WITHIN_10CM_RATIO
-            and known_ratio
-                >= MIN_KNOWN_RATIO
-            and inside_ratio
-                >= MIN_INSIDE_RATIO
+            median_value(
+                "inside_ratio"
+            )
         )
 
         trusted = (
             covariance_tight
-            and seed_consistent
             and alignment_good
         )
 
@@ -879,21 +1189,12 @@ def main():
             "ok": True,
             "trusted": trusted,
             "frame_id": "map",
-            "seed": {
-                "x": args.x,
-                "y": args.y,
-                "yaw_rad": args.yaw,
-                "yaw_deg":
-                    math.degrees(
-                        args.yaw
-                    ),
-                "sigma_position_m":
-                    POSITION_SIGMA_METERS,
-                "sigma_yaw_deg":
-                    math.degrees(
-                        YAW_SIGMA_RADIANS
-                    ),
-            },
+            "localization_method":
+                "amcl_global",
+            "search_scope":
+                "full_saved_map",
+            "seed_pose_used":
+                False,
             "final_pose": {
                 "x": final_x,
                 "y": final_y,
@@ -913,19 +1214,23 @@ def main():
                         sigma_yaw
                     ),
             },
-            "seed_consistency": {
-                "position_change_m":
-                    seed_position_change,
-                "yaw_change_rad":
-                    seed_yaw_change,
-                "yaw_change_deg":
-                    math.degrees(
-                        seed_yaw_change
-                    ),
+            "localization_search": {
+                "method":
+                    "global_localization",
+                "seed_pose_used":
+                    False,
             },
             "scan_alignment": {
                 "sample_count":
                     sample_count,
+                "geometric_sample_count":
+                    geometric_sample_count,
+                "coverage_sample_count":
+                    coverage_sample_count,
+                "coverage_known_count":
+                    coverage_known_count,
+                "coverage_inside_count":
+                    coverage_inside_count,
                 "mean_endpoint_error_m":
                     mean_endpoint_error,
                 "within_0_10m_ratio":
@@ -934,21 +1239,35 @@ def main():
                     known_ratio,
                 "inside_ratio":
                     inside_ratio,
+                "aggregation":
+                    "median_of_confirmation_scans",
+            },
+            "scan_confirmation": {
+                "sample_count":
+                    SCAN_CONFIRMATION_SAMPLES,
+                "pass_count":
+                    confirmation_pass_count,
+                "required_pass_count":
+                    SCAN_CONFIRMATION_REQUIRED_PASSES,
+                "spacing_seconds":
+                    SCAN_CONFIRMATION_SPACING_SECONDS,
+                "samples":
+                    scan_confirmation_samples,
             },
             "diagnostic": {
                 "covariance_tight":
                     covariance_tight,
-                "seed_consistent":
-                    seed_consistent,
+                "global_search_completed":
+                    True,
                 "alignment_good":
                     alignment_good,
                 "trusted":
                     trusted,
             },
             "global_localization_requested":
-                False,
-            "initial_pose_supplied":
                 True,
+            "initial_pose_supplied":
+                False,
             "nomotion_updates_requested":
                 NO_MOTION_UPDATES,
             "stationary_required":

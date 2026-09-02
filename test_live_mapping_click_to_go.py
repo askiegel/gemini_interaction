@@ -404,7 +404,17 @@ def test_browser_cannot_override_backend_safety_parameters():
         assert marker not in CLICK_TO_GO
 
     assert (
-        "Robot Bridge remains authoritative"
+        "Tony2NavigationRuntime owns readiness"
+        in SERVER
+    )
+
+    assert (
+        "Robot Bridge remains the final"
+        in SERVER
+    )
+
+    assert (
+        "physical motion egress and STOP authority"
         in SERVER
     )
 

@@ -1036,150 +1036,217 @@ class VoiceRelayHandler(BaseHTTPRequestHandler):
             },
         )
 
+
     def navigation_control_status(self):
-        """Proxy guarded navigation ownership and limits."""
-        response = request_json(
-            "GET",
-            f"{ROBOT_BRIDGE_URL}/navigation/status",
-            timeout=5.0,
+        """
+        Return isolated Tony2 fixed-map navigation status.
+
+        The normal navigation dashboard uses Tony2's domain-43
+        Zenoh Nav2 graph. Mayday's domain-42 Robot Bridge Nav2
+        runtime is not started by this path.
+        """
+        status_code, payload = self.mapping_navigation_status()
+
+        response = dict(payload)
+
+        navigation = response.pop(
+            "mapping_navigation",
+            None,
         )
 
-        return (
-            response["status_code"] or 503,
-            response["data"] or {
-                "ok": False,
-                "error": (
-                    response["error"]
-                    or "Navigation control is unavailable."
-                ),
-            },
-        )
+        if isinstance(navigation, dict):
+            response["navigation"] = navigation
+
+        return status_code, response
+
+
 
     def navigation_control_action(self, action):
-        """Forward only fixed navigation start or stop actions."""
+        """
+        Start or stop isolated Tony2 fixed-map navigation.
+
+        Nav2 runs on Tony2 using domain 43 / rmw_zenoh_cpp.
+        Mayday remains on domain 42 / Fast DDS. Physical motion
+        remains behind Tony2's guarded motion-egress lease.
+        """
         if action not in ("start", "stop"):
             return 400, {
                 "ok": False,
                 "error": "Unsupported navigation action.",
             }
 
-        response = request_json(
-            "POST",
-            f"{ROBOT_BRIDGE_URL}/navigation/{action}",
-            timeout=30.0,
+        status_code, payload = (
+            self.mapping_navigation_control_action(
+                action
+            )
         )
 
-        return (
-            response["status_code"] or 503,
-            response["data"] or {
-                "ok": False,
-                "error": (
-                    response["error"]
-                    or f"Navigation {action} failed."
-                ),
-            },
+        response = dict(payload)
+
+        navigation = response.pop(
+            "mapping_navigation",
+            None,
         )
+
+        if isinstance(navigation, dict):
+            response["navigation"] = navigation
+
+        response["action"] = (
+            f"navigation_{action}"
+        )
+
+        if status_code == 200:
+            response["message"] = (
+                "Tony2 isolated fixed-map navigation "
+                "started without submitting a goal."
+                if action == "start"
+                else (
+                    "Tony2 isolated fixed-map "
+                    "navigation stopped."
+                )
+            )
+
+        return status_code, response
+
+
 
     def navigation_initialize_localization(self):
         """
-        Request Robot Bridge's fixed navigation AMCL sequence.
+        Globally localize Mayday on the isolated Tony2 saved map.
 
-        No browser-selected service, topic, pose, frame, launch
-        parameter, controller, velocity, or motion value is accepted.
+        No pose, service, topic, frame, velocity, controller,
+        or other ROS parameter is accepted from the browser.
+        AMCL searches the complete saved map using stationary
+        Live LiDAR observations.
+
+        This path does not create a motion lease and does not
+        submit a navigation goal.
         """
-        response = request_json(
-            "POST",
-            (
-                f"{ROBOT_BRIDGE_URL}"
-                "/navigation/initialize-localization"
-            ),
-            payload={},
-            timeout=75.0,
+        runtime = get_tony2_navigation_runtime()
+
+        stationary_error = self.ensure_mayday_stationary()
+
+        if stationary_error is not None:
+            return 503, {
+                "ok": False,
+                "error": stationary_error,
+                "navigation": runtime.status(),
+            }
+
+        try:
+            result = (
+                runtime.initialize_global_localization()
+            )
+
+        except Exception as exc:
+            request_json(
+                "POST",
+                f"{ROBOT_BRIDGE_URL}/stop",
+                timeout=5.0,
+            )
+
+            return 503, {
+                "ok": False,
+                "error": str(exc),
+                "navigation": runtime.status(),
+            }
+
+        localization = result.get(
+            "localization",
+            {},
         )
 
-        return (
-            response["status_code"] or 503,
-            response["data"] or {
-                "ok": False,
-                "error": (
-                    response["error"]
-                    or (
-                        "Navigation localization "
-                        "initialization failed."
-                    )
-                ),
-            },
+        navigation = result.get(
+            "navigation",
+            runtime.status(),
         )
+
+        trusted = (
+            result.get("action")
+            == "OPERATOR_POSE_VALIDATED"
+            and isinstance(localization, dict)
+            and localization.get("trusted") is True
+            and localization.get(
+                "initial_pose_supplied"
+            ) is False
+            and localization.get(
+                "global_localization_requested"
+            ) is True
+            and localization.get(
+                "stationary_required"
+            ) is True
+            and localization.get(
+                "navigation_goal_executed"
+            ) is False
+            and localization.get(
+                "motion_enabled"
+            ) is False
+        )
+
+        if not trusted:
+            request_json(
+                "POST",
+                f"{ROBOT_BRIDGE_URL}/stop",
+                timeout=5.0,
+            )
+
+            return 503, {
+                "ok": False,
+                "action":
+                    "navigation_initialize_localization",
+                "error": (
+                    localization.get("error")
+                    if isinstance(localization, dict)
+                    else None
+                ) or (
+                    "Tony2 global localization "
+                    "was not trusted."
+                ),
+                "initialization": localization,
+                "navigation": navigation,
+            }
+
+        return 200, {
+            "ok": True,
+            "action":
+                "navigation_initialize_localization",
+            "message": (
+                "Tony2 AMCL globally localized Mayday "
+                "on the saved map."
+            ),
+            "initialization": localization,
+            "navigation": navigation,
+        }
+
+
 
     def navigation_goal(self, payload):
         """
-        Forward one exact finite map-frame goal.
+        Execute one guarded goal through isolated Tony2 Nav2.
 
-        Robot Bridge remains authoritative for the live pose,
-        fixed distance bound, execution timeout, cancellation, and STOP.
+        Tony2NavigationRuntime owns readiness, localization,
+        the fixed 0.50-meter bound, the execution timeout,
+        transient motion authorization, cancellation, and
+        goal execution. Robot Bridge remains the final
+        physical motion egress and STOP authority.
         """
-        if not isinstance(payload, dict):
-            return 400, {
-                "ok": False,
-                "error": "A JSON request body is required.",
-            }
-
-        required = {
-            "goal_x",
-            "goal_y",
-            "goal_yaw",
-        }
-
-        if set(payload) != required:
-            return 400, {
-                "ok": False,
-                "error": (
-                    "Exactly goal_x, goal_y, and goal_yaw "
-                    "must be supplied."
-                ),
-            }
-
-        normalized = {}
-
-        for key in sorted(required):
-            value = payload.get(key)
-
-            if (
-                isinstance(value, bool)
-                or not isinstance(value, (int, float))
-            ):
-                return 400, {
-                    "ok": False,
-                    "error": f"{key} must be a finite number.",
-                }
-
-            value = float(value)
-
-            if not math.isfinite(value):
-                return 400, {
-                    "ok": False,
-                    "error": f"{key} must be finite.",
-                }
-
-            normalized[key] = value
-
-        response = request_json(
-            "POST",
-            f"{ROBOT_BRIDGE_URL}/navigation/goal",
-            payload=normalized,
-            timeout=25.0,
+        status_code, payload = (
+            self.mapping_navigation_goal(payload)
         )
 
-        return (
-            response["status_code"] or 503,
-            response["data"] or {
-                "ok": False,
-                "error": (
-                    response["error"]
-                    or "Guarded navigation goal failed."
-                ),
-            },
+        response = dict(payload)
+
+        navigation = response.pop(
+            "mapping_navigation",
+            None,
         )
+
+        if isinstance(navigation, dict):
+            response["navigation"] = navigation
+
+        response["action"] = "navigation_goal"
+
+        return status_code, response
 
 
     def mapping_pose_status(self):

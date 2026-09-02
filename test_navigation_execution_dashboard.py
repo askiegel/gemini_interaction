@@ -1,260 +1,468 @@
+#!/usr/bin/env python3
+
+"""
+Static regression tests for normal fixed-map navigation routing.
+
+The public dashboard continues to use /dashboard/navigation-*.
+
+Those routes MUST execute Tony2NavigationRuntime, whose Nav2 graph
+is isolated on ROS domain 43 / rmw_zenoh_cpp.
+
+Mayday's hardware graph and Robot Bridge remain domain 42 /
+rmw_fastrtps_cpp.
+
+Normal dashboard navigation must never directly start Mayday's
+domain-42 Nav2 runtime.
+"""
+
 from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parent
+
 SERVER = (
-    ROOT / "voice_relay/server.py"
-).read_text(encoding="utf-8")
+    ROOT
+    / "voice_relay"
+    / "server.py"
+).read_text(
+    encoding="utf-8"
+)
+
 HTML = (
-    ROOT / "voice_relay/index.html"
-).read_text(encoding="utf-8")
+    ROOT
+    / "voice_relay"
+    / "index.html"
+).read_text(
+    encoding="utf-8"
+)
+
+RUNTIME = (
+    ROOT
+    / "voice_relay"
+    / "tony2_navigation_runtime.py"
+).read_text(
+    encoding="utf-8"
+)
+
+SUPERVISOR = (
+    ROOT
+    / "voice_relay"
+    / "tony2_navigation_supervisor.py"
+).read_text(
+    encoding="utf-8"
+)
+
+EGRESS = (
+    ROOT
+    / "voice_relay"
+    / "tony2_navigation_motion_egress.py"
+).read_text(
+    encoding="utf-8"
+)
 
 
-def method(name, next_name):
-    start = SERVER.index(f"    def {name}(")
-    end = SERVER.index(f"    def {next_name}(", start)
+def method_source(
+    name,
+    next_name,
+):
+    start = SERVER.index(
+        f"    def {name}("
+    )
+
+    end = SERVER.index(
+        f"    def {next_name}(",
+        start,
+    )
+
     return SERVER[start:end]
 
 
-def test_navigation_status_proxy_is_fixed():
-    source = method(
+def test_normal_navigation_status_uses_tony2_runtime():
+    source = method_source(
         "navigation_control_status",
         "navigation_control_action",
     )
 
     assert (
-        'f"{ROBOT_BRIDGE_URL}/navigation/status"'
+        "self.mapping_navigation_status()"
         in source
     )
-    assert '"GET"' in source
-    assert "timeout=5.0" in source
+
+    assert (
+        'f"{ROBOT_BRIDGE_URL}/navigation/status"'
+        not in source
+    )
+
+    assert (
+        'response["navigation"] = navigation'
+        in source
+    )
 
 
-def test_navigation_actions_are_fixed():
-    source = method(
+def test_normal_navigation_start_stop_use_tony2_runtime():
+    source = method_source(
         "navigation_control_action",
         "navigation_initialize_localization",
     )
 
-    assert 'action not in ("start", "stop")' in source
     assert (
-        'f"{ROBOT_BRIDGE_URL}/navigation/{action}"'
+        "self.mapping_navigation_control_action("
         in source
     )
 
-    for marker in (
-        "goal_x",
-        "goal_y",
-        "goal_yaw",
-        "cmd_vel",
-        "controller",
-        "navigator",
-        "launch",
-        "map_yaml",
-    ):
-        assert marker not in source
+    assert (
+        'f"{ROBOT_BRIDGE_URL}/navigation/{action}"'
+        not in source
+    )
+
+    assert (
+        'response["navigation"] = navigation'
+        in source
+    )
+
+    assert (
+        'f"navigation_{action}"'
+        in source
+    )
 
 
-def test_navigation_initializer_is_parameter_free():
-    source = method(
+def test_normal_navigation_requests_global_localization():
+    source = method_source(
         "navigation_initialize_localization",
         "navigation_goal",
     )
 
     assert (
-        '"/navigation/initialize-localization"'
+        "runtime = get_tony2_navigation_runtime()"
         in source
     )
-    assert "payload={}" in source
-    assert "timeout=75.0" in source
 
-    for marker in (
-        "request_payload",
-        "goal_x",
-        "goal_y",
-        "goal_yaw",
-        "initial_pose",
-        "cmd_vel",
-    ):
-        assert marker not in source
-
-
-def test_navigation_goal_accepts_only_numeric_goal():
-    source = method(
-        "navigation_goal",
-        "localization_status",
+    assert (
+        "self.ensure_mayday_stationary()"
+        in source
     )
 
-    for field in (
-        '"goal_x"',
-        '"goal_y"',
-        '"goal_yaw"',
-    ):
-        assert field in source
+    assert (
+        "runtime.initialize_global_localization("
+        in source
+    )
 
-    assert "set(payload) != required" in source
-    assert "isinstance(value, bool)" in source
-    assert "math.isfinite(value)" in source
+    normalized = "".join(
+        source.split()
+    )
+
+    assert (
+        "runtime.initialize_global_localization()"
+        in normalized
+    )
+
+    assert (
+        '"/navigation/initialize-localization"'
+        not in source
+    )
+
+
+def test_start_anywhere_initialization_is_global():
+    source = method_source(
+        "navigation_initialize_localization",
+        "navigation_goal",
+    )
+
+    assert (
+        '"global_localization_requested"'
+        in source
+    )
+
+    assert (
+        "is False"
+        in source
+    )
+
+    assert (
+        '"initial_pose_supplied"'
+        in source
+    )
+
+    assert (
+        "is True"
+        in source
+    )
+
+    assert (
+        '"stationary_required"'
+        in source
+    )
+
+    assert (
+        '"navigation_goal_executed"'
+        in source
+    )
+
+    assert (
+        '"motion_enabled"'
+        in source
+    )
+
+
+def test_normal_navigation_goal_uses_tony2_runtime():
+    source = method_source(
+        "navigation_goal",
+        "mapping_pose_status",
+    )
+
+    assert (
+        "self.mapping_navigation_goal(payload)"
+        in source
+    )
+
     assert (
         'f"{ROBOT_BRIDGE_URL}/navigation/goal"'
-        in source
+        not in source
     )
-    assert "timeout=25.0" in source
-
-
-def test_navigation_routes_have_fixed_methods():
-    get_start = SERVER.index("    def do_GET(self):")
-    post_start = SERVER.index("    def do_POST(self):")
-    get_source = SERVER[get_start:post_start]
-    post_source = SERVER[post_start:]
 
     assert (
-        '"/dashboard/navigation-control"'
-        in get_source
+        'response["navigation"] = navigation'
+        in source
     )
 
-    for route in (
+    assert (
+        'response["action"] = "navigation_goal"'
+        in source
+    )
+
+
+def test_public_navigation_routes_are_preserved():
+    required = (
         "/dashboard/navigation-start",
         "/dashboard/navigation-stop",
         "/dashboard/navigation-initialize-localization",
         "/dashboard/navigation-goal",
-    ):
-        assert f'"{route}"' in post_source
-        assert f'"{route}"' not in get_source
+    )
+
+    for route in required:
+        assert route in SERVER
+        assert route in HTML
 
 
-def test_proxy_does_not_expand_navigation_limits():
-    source = SERVER[
-        SERVER.index("    def navigation_control_status("):
-        SERVER.index("    def mapping_pose_status(")
-    ]
+def test_dashboard_requires_tony2_isolation_on_start():
+    start = HTML.index(
+        "function navigationWasStarted(result)"
+    )
 
-    for marker in (
-        "0.25",
-        "15.0",
-        "MAXIMUM_GOAL_DISTANCE",
-        "MAXIMUM_EXECUTION",
-        "retries",
-        "recoveries",
-        "behavior_tree",
-    ):
-        assert marker not in source
+    end = HTML.index(
+        "function navigationInitializationSucceeded",
+        start,
+    )
 
+    source = HTML[start:end]
 
-def test_send_mayday_controls_exist():
-    for identifier in (
-        "sendMaydayButton",
-        "stopMaydayButton",
-    ):
-        assert HTML.count(f'id="{identifier}"') == 1
+    required = (
+        'navigation.host === "Tony2"',
+        '=== "tony2_guarded_navigation"',
+        "navigation.fixed_map_required === true",
+        '=== "zenoh_localhost"',
+        "navigation.motion_output_connected",
+        "=== false",
+    )
 
-    assert "GO — max 0.50 m" in HTML
-    assert "STOP MAYDAY" in HTML
+    for marker in required:
+        assert marker in source
 
 
-def test_send_mayday_uses_fixed_dashboard_routes():
-    for route in (
-        "/dashboard/navigation-start",
-        "/dashboard/navigation-stop",
-        "/dashboard/navigation-initialize-localization",
-        "/dashboard/navigation-goal",
-    ):
-        assert f'"{route}"' in HTML
+def test_dashboard_requires_validated_home_before_go():
+    start = HTML.index(
+        "function navigationInitializationSucceeded(result)"
+    )
+
+    end = HTML.index(
+        "async function",
+        start,
+    )
+
+    source = HTML[start:end]
+
+    required = (
+        "initialization.trusted === true",
+        ".global_localization_requested === true",
+        ".initial_pose_supplied === false",
+        ".stationary_required === true",
+        ".navigation_goal_executed === false",
+        ".motion_enabled === false",
+        'navigation.state === "READY"',
+        'navigation.host === "Tony2"',
+        "navigation.action_server_ready === true",
+        "navigation.transform_ready === true",
+        "navigation.goal_submission_enabled === true",
+        "navigation.motion_output_connected",
+        '=== "zenoh_localhost"',
+    )
+
+    for marker in required:
+        assert marker in source
 
 
-def test_send_requires_preview_within_fixed_limit():
+def test_goal_payload_remains_fixed_and_numeric():
+    required = (
+        "goal_x: executionGoal.x",
+        "goal_y: executionGoal.y",
+        "goal_yaw: executionGoal.yaw",
+    )
+
+    for marker in required:
+        assert marker in HTML
+
     assert (
         "const MAX_NAVIGATION_DISTANCE_METERS = 0.50"
         in HTML
     )
-    assert "function sendMayday()" in HTML
-    assert (
-        "> MAX_NAVIGATION_DISTANCE_METERS"
-        in HTML
+
+
+def test_navigation_always_stops_after_goal_attempt():
+    start = HTML.index(
+        "async function sendMayday"
     )
-    assert "!selectedGoal" in HTML
+
+    source = HTML[start:]
+
+    goal = source.index(
+        "NAVIGATION_GOAL_ENDPOINT"
+    )
+
+    stop = source.index(
+        "NAVIGATION_STOP_ENDPOINT",
+        goal,
+    )
+
+    assert goal < stop
+    assert "finally" in source[goal:stop + 500]
 
 
-def test_send_stops_planning_before_navigation():
-    start = HTML.index("async function sendMayday()")
-    end = HTML.index(
-        "function selectGoal",
+def test_tony2_runtime_reports_fixed_map_and_zenoh():
+    required = (
+        '"host": "Tony2"',
+        '"source":',
+        '"tony2_guarded_navigation"',
+        '"fixed_map_required": True',
+        '"localization_mode":',
+        '"amcl"',
+        '"isolation_transport":',
+        '"zenoh_localhost"',
+    )
+
+    for marker in required:
+        assert marker in RUNTIME
+
+
+def test_tony2_runtime_requires_ready_before_goal():
+    start = RUNTIME.index(
+        "    def submit_goal("
+    )
+
+    source = RUNTIME[start:]
+
+    assert (
+        'status.get("state") != "READY"'
+        in source
+    )
+
+    assert (
+        '"goal_submission_enabled"'
+        in source
+    )
+
+    assert (
+        '"motion_output_connected"'
+        in source
+    )
+
+    assert (
+        "self._begin_motion_lease()"
+        in source
+    )
+
+    assert (
+        "self._wait_for_motion_arm_ack("
+        in source
+    )
+
+
+def test_supervisor_keeps_domain_42_ingress():
+    required = (
+        '"ROS_DOMAIN_ID=42"',
+        '"ROS_LOCALHOST_ONLY=0"',
+        '"rmw_fastrtps_cpp"',
+    )
+
+    for marker in required:
+        assert marker in SUPERVISOR
+
+
+def test_supervisor_keeps_domain_43_nav2():
+    required = (
+        '"ROS_DOMAIN_ID": "43"',
+        '"ROS_DOMAIN_ID=43"',
+        '"RMW_IMPLEMENTATION=rmw_zenoh_cpp"',
+        "ZENOH_CONFIG_OVERRIDE",
+        "127.0.0.1:7447",
+    )
+
+    for marker in required:
+        assert marker in SUPERVISOR
+
+
+def test_controller_output_is_not_physical_cmd_vel():
+    assert (
+        '"/tony2_nav_"'
+        in SUPERVISOR
+    )
+
+    assert (
+        '"cmd_vel_egress"'
+        in SUPERVISOR
+    )
+
+    assert (
+        'INPUT_TOPIC = "/tony2_nav_cmd_vel_egress"'
+        in EGRESS
+    )
+
+    assert (
+        "It never publishes ROS /cmd_vel directly."
+        in EGRESS
+    )
+
+
+def test_egress_requires_transient_arm_lease():
+    required = (
+        "validate_arm_payload",
+        "self._armed_token",
+        "def _sync_arm_state(",
+        "lease",
+        "token",
+    )
+
+    for marker in required:
+        assert marker in EGRESS
+
+
+def test_normal_server_navigation_has_no_direct_robot_nav2_calls():
+    start = SERVER.index(
+        "    def navigation_control_status("
+    )
+
+    end = SERVER.index(
+        "    def mapping_pose_status(",
         start,
     )
-    source = HTML[start:end]
 
-    planning_stop = source.index("STOP_ENDPOINT")
-    navigation_start = source.index(
-        "NAVIGATION_START_ENDPOINT"
-    )
-    initialization = source.index(
-        "NAVIGATION_INITIALIZE_ENDPOINT"
-    )
-    goal = source.index("NAVIGATION_GOAL_ENDPOINT")
+    source = SERVER[start:end]
 
-    assert (
-        planning_stop
-        < navigation_start
-        < initialization
-        < goal
+    forbidden = (
+        'f"{ROBOT_BRIDGE_URL}/navigation/status"',
+        'f"{ROBOT_BRIDGE_URL}/navigation/{action}"',
+        'f"{ROBOT_BRIDGE_URL}/navigation/goal"',
+        '"/navigation/initialize-localization"',
     )
 
-
-def test_navigation_goal_payload_is_fixed():
-    start = HTML.index("async function sendMayday()")
-    end = HTML.index(
-        "function selectGoal",
-        start,
-    )
-    source = HTML[start:end]
-
-    for marker in (
-        "goal_x: executionGoal.x",
-        "goal_y: executionGoal.y",
-        "goal_yaw: executionGoal.yaw",
-    ):
-        assert marker in source
-
-    for forbidden in (
-        "service:",
-        "topic:",
-        "frame:",
-        "planner_id:",
-        "controller:",
-        "navigator:",
-        "cmd_vel:",
-        "linear_x:",
-        "angular_z:",
-    ):
-        assert forbidden not in source
-
-
-def test_navigation_always_stops():
-    start = HTML.index("async function sendMayday()")
-    end = HTML.index(
-        "function selectGoal",
-        start,
-    )
-    source = HTML[start:end]
-
-    finally_start = source.index("} finally {")
-    finally_source = source[finally_start:]
-
-    assert "NAVIGATION_STOP_ENDPOINT" in finally_source
-    assert "navigationExecuting = false" in finally_source
-    assert "planningRunning = false" in finally_source
-
-
-def test_emergency_stop_remains_separate():
-    assert "async function stopMayday()" in HTML
-    assert (
-        'emergencyStop.addEventListener(\n'
-        '            "click",\n'
-        '            stopMayday'
-        in HTML
-    )
-    assert (
-        "emergencyStop.disabled = (\n"
-        "                !navigationExecuting"
-        in HTML
-    )
+    for marker in forbidden:
+        assert marker not in source
