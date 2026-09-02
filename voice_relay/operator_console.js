@@ -7317,3 +7317,2307 @@
         initializeLayout();
     }
 })();
+
+/* MAYDAY_PERSISTENT_MAP_CANDIDATE_REVIEW */
+
+(() => {
+    "use strict";
+
+    /*
+     * Candidate and Live LiDAR are both robot-local observations.
+     * They may therefore be compared directly.
+     *
+     * The old persistent map is NOT registered to the robot while
+     * localization is untrusted. It is displayed only as reference.
+     */
+
+    const STATUS_ENDPOINT =
+        "/dashboard/persistent-map/refresh-status";
+
+    const CANDIDATE_ENDPOINT =
+        "/dashboard/persistent-map/refresh-candidate";
+
+    const PERSISTENT_ENDPOINT =
+        "/dashboard/map";
+
+    const LIDAR_ENDPOINT =
+        "/dashboard/lidar";
+
+    const REVIEW_RADIUS_METERS = 4.0;
+
+    const MATCH_DISTANCE_METERS = 0.15;
+
+    const MIN_MATCH_RATIO = 0.55;
+
+    const MAX_MEAN_ERROR_METERS = 0.15;
+
+    const MIN_INSIDE_RATIO = 0.80;
+
+    const MIN_LIVE_RETURNS = 80;
+
+    const MIN_CAPTURE_SCANS = 100;
+
+    const MIN_STABLE_BINS = 100;
+
+    const REVIEW_WINDOW = 5;
+
+    const REQUIRED_PASSES = 3;
+
+    let candidatePayload = null;
+
+    let persistentPayload = null;
+
+    let livePayload = null;
+
+    let candidateSignature = null;
+
+    let comparisonHistory = [];
+
+    let promotionAllowed = false;
+
+    let modalOpen = false;
+
+
+    function byId(id) {
+        return document.getElementById(id);
+    }
+
+
+    async function getJson(url) {
+        const response = await fetch(
+            url,
+            {
+                cache: "no-store",
+            }
+        );
+
+        let payload;
+
+        try {
+            payload = await response.json();
+
+        } catch (_error) {
+            throw new Error(
+                "Dashboard returned invalid JSON."
+            );
+        }
+
+        if (!response.ok) {
+            throw new Error(
+                payload.error
+                || (
+                    "Dashboard request failed: "
+                    + response.status
+                )
+            );
+        }
+
+        return payload;
+    }
+
+
+    function recursiveObjects(
+        value,
+        depth = 0
+    ) {
+        if (
+            depth > 8
+            || value === null
+            || value === undefined
+        ) {
+            return [];
+        }
+
+        if (Array.isArray(value)) {
+            let result = [];
+
+            value.slice(
+                0,
+                20
+            ).forEach(
+                (item) => {
+                    if (
+                        item
+                        && typeof item === "object"
+                    ) {
+                        result = result.concat(
+                            recursiveObjects(
+                                item,
+                                depth + 1
+                            )
+                        );
+                    }
+                }
+            );
+
+            return result;
+        }
+
+        if (typeof value !== "object") {
+            return [];
+        }
+
+        let result = [
+            value,
+        ];
+
+        const preferred = [
+            "map",
+            "scan",
+            "telemetry",
+            "lidar",
+            "data",
+        ];
+
+        preferred.forEach(
+            (key) => {
+                if (
+                    value[key]
+                    && typeof value[key]
+                        === "object"
+                ) {
+                    result = result.concat(
+                        recursiveObjects(
+                            value[key],
+                            depth + 1
+                        )
+                    );
+                }
+            }
+        );
+
+        Object.entries(
+            value
+        ).forEach(
+            ([key, child]) => {
+                if (
+                    preferred.includes(key)
+                ) {
+                    return;
+                }
+
+                if (
+                    child
+                    && typeof child === "object"
+                ) {
+                    result = result.concat(
+                        recursiveObjects(
+                            child,
+                            depth + 1
+                        )
+                    );
+                }
+            }
+        );
+
+        return result;
+    }
+
+
+    function extractMap(payload) {
+        const candidates =
+            recursiveObjects(
+                payload
+            );
+
+        for (
+            const candidate
+            of candidates
+        ) {
+            const width =
+                Number(
+                    candidate.width
+                );
+
+            const height =
+                Number(
+                    candidate.height
+                );
+
+            const resolution =
+                Number(
+                    candidate.resolution
+                );
+
+            const cells =
+                (
+                    Array.isArray(
+                        candidate.data
+                    )
+                    ? candidate.data
+                    : (
+                        Array.isArray(
+                            candidate.cells
+                        )
+                        ? candidate.cells
+                        : null
+                    )
+                );
+
+            if (
+                Number.isFinite(width)
+                && width > 0
+                && Number.isFinite(height)
+                && height > 0
+                && Number.isFinite(
+                    resolution
+                )
+                && resolution > 0
+                && cells
+                && cells.length
+                    >= width * height
+            ) {
+                return {
+                    ...candidate,
+                    width,
+                    height,
+                    resolution,
+                    cells,
+                };
+            }
+        }
+
+        return null;
+    }
+
+
+    function originParts(map) {
+        const origin =
+            map.origin;
+
+        if (Array.isArray(origin)) {
+            return {
+                x:
+                    Number(
+                        origin[0]
+                        || 0
+                    ),
+                y:
+                    Number(
+                        origin[1]
+                        || 0
+                    ),
+                yaw:
+                    Number(
+                        origin[2]
+                        || 0
+                    ),
+            };
+        }
+
+        if (
+            origin
+            && typeof origin
+                === "object"
+        ) {
+            return {
+                x:
+                    Number(
+                        origin.x
+                        || 0
+                    ),
+                y:
+                    Number(
+                        origin.y
+                        || 0
+                    ),
+                yaw:
+                    Number(
+                        origin.yaw
+                        || origin.theta
+                        || 0
+                    ),
+            };
+        }
+
+        return {
+            x: 0,
+            y: 0,
+            yaw: 0,
+        };
+    }
+
+
+    function candidateMetadata(
+        payload
+    ) {
+        return (
+            payload
+            && payload.candidate
+            && typeof payload.candidate
+                === "object"
+        )
+            ? payload.candidate
+            : {};
+    }
+
+
+    function mapCellWorld(
+        map,
+        row,
+        column
+    ) {
+        const origin =
+            originParts(
+                map
+            );
+
+        const localX =
+            (
+                column
+                + 0.5
+            )
+            * map.resolution;
+
+        const localY =
+            (
+                row
+                + 0.5
+            )
+            * map.resolution;
+
+        const cosYaw =
+            Math.cos(
+                origin.yaw
+            );
+
+        const sinYaw =
+            Math.sin(
+                origin.yaw
+            );
+
+        return {
+            x:
+                origin.x
+                + cosYaw * localX
+                - sinYaw * localY,
+            y:
+                origin.y
+                + sinYaw * localX
+                + cosYaw * localY,
+        };
+    }
+
+
+    function candidateOccupiedPoints(
+        map
+    ) {
+        const result = [];
+
+        for (
+            let row = 0;
+            row < map.height;
+            row += 1
+        ) {
+            const offset =
+                row
+                * map.width;
+
+            for (
+                let column = 0;
+                column < map.width;
+                column += 1
+            ) {
+                const value =
+                    Number(
+                        map.cells[
+                            offset + column
+                        ]
+                    );
+
+                if (
+                    !Number.isFinite(value)
+                    || value < 65
+                ) {
+                    continue;
+                }
+
+                const point =
+                    mapCellWorld(
+                        map,
+                        row,
+                        column
+                    );
+
+                if (
+                    Math.hypot(
+                        point.x,
+                        point.y
+                    )
+                    <= (
+                        REVIEW_RADIUS_METERS
+                        + 0.25
+                    )
+                ) {
+                    result.push(
+                        point
+                    );
+                }
+            }
+        }
+
+        return result;
+    }
+
+
+    function candidatePointInside(
+        map,
+        point
+    ) {
+        const origin =
+            originParts(
+                map
+            );
+
+        const dx =
+            point.x
+            - origin.x;
+
+        const dy =
+            point.y
+            - origin.y;
+
+        const cosYaw =
+            Math.cos(
+                origin.yaw
+            );
+
+        const sinYaw =
+            Math.sin(
+                origin.yaw
+            );
+
+        const localX =
+            cosYaw * dx
+            + sinYaw * dy;
+
+        const localY =
+            -sinYaw * dx
+            + cosYaw * dy;
+
+        const column =
+            Math.floor(
+                localX
+                / map.resolution
+            );
+
+        const row =
+            Math.floor(
+                localY
+                / map.resolution
+            );
+
+        return (
+            row >= 0
+            && row < map.height
+            && column >= 0
+            && column < map.width
+        );
+    }
+
+
+    function extractScanObject(
+        payload
+    ) {
+        const candidates =
+            recursiveObjects(
+                payload
+            );
+
+        for (
+            const candidate
+            of candidates
+        ) {
+            if (
+                Array.isArray(
+                    candidate.ranges
+                )
+            ) {
+                const angleMin =
+                    candidate.angle_min
+                    ?? candidate.angleMin;
+
+                const angleIncrement =
+                    candidate.angle_increment
+                    ?? candidate.angleIncrement;
+
+                if (
+                    Number.isFinite(
+                        Number(angleMin)
+                    )
+                    && Number.isFinite(
+                        Number(
+                            angleIncrement
+                        )
+                    )
+                ) {
+                    return candidate;
+                }
+            }
+
+            if (
+                Array.isArray(
+                    candidate.points
+                )
+                && candidate.points.length
+                    > 0
+            ) {
+                return candidate;
+            }
+        }
+
+        return null;
+    }
+
+
+    function scanPoints(
+        payload
+    ) {
+        const scan =
+            extractScanObject(
+                payload
+            );
+
+        if (!scan) {
+            return [];
+        }
+
+        const result = [];
+
+        if (
+            Array.isArray(
+                scan.ranges
+            )
+        ) {
+            const angleMin =
+                Number(
+                    scan.angle_min
+                    ?? scan.angleMin
+                );
+
+            const angleIncrement =
+                Number(
+                    scan.angle_increment
+                    ?? scan.angleIncrement
+                );
+
+            const rangeMin =
+                Number(
+                    scan.range_min
+                    ?? scan.rangeMin
+                    ?? 0.02
+                );
+
+            const rawRangeMax =
+                Number(
+                    scan.range_max
+                    ?? scan.rangeMax
+                    ?? REVIEW_RADIUS_METERS
+                );
+
+            const rangeMax =
+                Math.min(
+                    (
+                        Number.isFinite(
+                            rawRangeMax
+                        )
+                        ? rawRangeMax
+                        : REVIEW_RADIUS_METERS
+                    ),
+                    REVIEW_RADIUS_METERS
+                );
+
+            scan.ranges.forEach(
+                (rawRange, index) => {
+                    const distance =
+                        Number(
+                            rawRange
+                        );
+
+                    if (
+                        !Number.isFinite(
+                            distance
+                        )
+                        || distance
+                            < rangeMin
+                        || distance
+                            > rangeMax
+                    ) {
+                        return;
+                    }
+
+                    const angle =
+                        angleMin
+                        + (
+                            index
+                            * angleIncrement
+                        );
+
+                    result.push(
+                        {
+                            x:
+                                distance
+                                * Math.cos(
+                                    angle
+                                ),
+                            y:
+                                distance
+                                * Math.sin(
+                                    angle
+                                ),
+                        }
+                    );
+                }
+            );
+
+            return result;
+        }
+
+        scan.points.forEach(
+            (rawPoint) => {
+                let x;
+                let y;
+
+                if (
+                    Array.isArray(
+                        rawPoint
+                    )
+                ) {
+                    x =
+                        Number(
+                            rawPoint[0]
+                        );
+
+                    y =
+                        Number(
+                            rawPoint[1]
+                        );
+
+                } else if (
+                    rawPoint
+                    && typeof rawPoint
+                        === "object"
+                ) {
+                    x =
+                        Number(
+                            rawPoint.x
+                        );
+
+                    y =
+                        Number(
+                            rawPoint.y
+                        );
+                }
+
+                if (
+                    !Number.isFinite(x)
+                    || !Number.isFinite(y)
+                ) {
+                    return;
+                }
+
+                if (
+                    Math.hypot(
+                        x,
+                        y
+                    )
+                    > REVIEW_RADIUS_METERS
+                ) {
+                    return;
+                }
+
+                result.push({
+                    x,
+                    y,
+                });
+            }
+        );
+
+        return result;
+    }
+
+
+    function compareCandidateToLive(
+        candidateMap,
+        candidate,
+        livePoints
+    ) {
+        const occupied =
+            candidateOccupiedPoints(
+                candidateMap
+            );
+
+        let insideCount = 0;
+
+        let matchedCount = 0;
+
+        let errorSum = 0;
+
+        let scoredCount = 0;
+
+        livePoints.forEach(
+            (point) => {
+                if (
+                    !candidatePointInside(
+                        candidateMap,
+                        point
+                    )
+                ) {
+                    return;
+                }
+
+                insideCount += 1;
+
+                let best =
+                    Infinity;
+
+                occupied.forEach(
+                    (occupiedPoint) => {
+                        const distance =
+                            Math.hypot(
+                                point.x
+                                    - occupiedPoint.x,
+                                point.y
+                                    - occupiedPoint.y
+                            );
+
+                        if (
+                            distance
+                            < best
+                        ) {
+                            best =
+                                distance;
+                        }
+                    }
+                );
+
+                if (
+                    Number.isFinite(best)
+                ) {
+                    scoredCount += 1;
+
+                    errorSum +=
+                        Math.min(
+                            best,
+                            0.50
+                        );
+
+                    if (
+                        best
+                        <= MATCH_DISTANCE_METERS
+                    ) {
+                        matchedCount += 1;
+                    }
+                }
+            }
+        );
+
+        const liveCount =
+            livePoints.length;
+
+        const insideRatio =
+            (
+                liveCount > 0
+                ? (
+                    insideCount
+                    / liveCount
+                )
+                : 0
+            );
+
+        const matchRatio =
+            (
+                liveCount > 0
+                ? (
+                    matchedCount
+                    / liveCount
+                )
+                : 0
+            );
+
+        const meanError =
+            (
+                scoredCount > 0
+                ? (
+                    errorSum
+                    / scoredCount
+                )
+                : Infinity
+            );
+
+        const acceptedScans =
+            Number(
+                candidate.accepted_scans
+                ?? candidate.scan_count
+                ?? 0
+            );
+
+        const stableBins =
+            Number(
+                candidate.stable_bin_count
+                ?? 0
+            );
+
+        const singlePass =
+            (
+                liveCount
+                    >= MIN_LIVE_RETURNS
+                && acceptedScans
+                    >= MIN_CAPTURE_SCANS
+                && stableBins
+                    >= MIN_STABLE_BINS
+                && insideRatio
+                    >= MIN_INSIDE_RATIO
+                && matchRatio
+                    >= MIN_MATCH_RATIO
+                && meanError
+                    <= MAX_MEAN_ERROR_METERS
+            );
+
+        return {
+            liveCount,
+            occupiedCount:
+                occupied.length,
+            insideCount,
+            matchedCount,
+            scoredCount,
+            insideRatio,
+            matchRatio,
+            meanError,
+            acceptedScans,
+            stableBins,
+            singlePass,
+        };
+    }
+
+
+    function setupRobotCanvas(
+        canvas
+    ) {
+        const size =
+            Math.max(
+                320,
+                Math.floor(
+                    canvas.clientWidth
+                    || 500
+                )
+            );
+
+        canvas.width =
+            size;
+
+        canvas.height =
+            size;
+
+        const context =
+            canvas.getContext(
+                "2d"
+            );
+
+        context.clearRect(
+            0,
+            0,
+            size,
+            size
+        );
+
+        context.fillStyle =
+            "#020817";
+
+        context.fillRect(
+            0,
+            0,
+            size,
+            size
+        );
+
+        const center =
+            size / 2;
+
+        const scale =
+            (
+                size * 0.44
+            )
+            / REVIEW_RADIUS_METERS;
+
+        context.strokeStyle =
+            "rgba(100, 116, 139, 0.35)";
+
+        context.lineWidth =
+            1;
+
+        for (
+            let radius = 1;
+            radius
+                <= REVIEW_RADIUS_METERS;
+            radius += 1
+        ) {
+            context.beginPath();
+
+            context.arc(
+                center,
+                center,
+                radius * scale,
+                0,
+                Math.PI * 2
+            );
+
+            context.stroke();
+
+            context.fillStyle =
+                "rgba(203, 213, 225, 0.75)";
+
+            context.font =
+                "11px sans-serif";
+
+            context.fillText(
+                `${radius} m`,
+                center + 4,
+                center
+                    - radius * scale
+                    + 12
+            );
+        }
+
+        context.strokeStyle =
+            "rgba(100, 116, 139, 0.25)";
+
+        context.beginPath();
+
+        context.moveTo(
+            center,
+            size * 0.04
+        );
+
+        context.lineTo(
+            center,
+            size * 0.96
+        );
+
+        context.moveTo(
+            size * 0.04,
+            center
+        );
+
+        context.lineTo(
+            size * 0.96,
+            center
+        );
+
+        context.stroke();
+
+        context.fillStyle =
+            "#cbd5e1";
+
+        context.font =
+            "bold 11px sans-serif";
+
+        context.textAlign =
+            "center";
+
+        context.fillText(
+            "FORWARD",
+            center,
+            16
+        );
+
+        return {
+            context,
+            size,
+            center,
+            scale,
+        };
+    }
+
+
+    function localToCanvas(
+        frame,
+        point
+    ) {
+        /*
+         * ROS +X = forward.
+         * ROS +Y = left.
+         * Screen up = forward.
+         */
+        return {
+            x:
+                frame.center
+                - point.y
+                    * frame.scale,
+            y:
+                frame.center
+                - point.x
+                    * frame.scale,
+        };
+    }
+
+
+    function drawRobot(
+        frame
+    ) {
+        const context =
+            frame.context;
+
+        const center =
+            frame.center;
+
+        context.save();
+
+        context.translate(
+            center,
+            center
+        );
+
+        context.fillStyle =
+            "#f59e0b";
+
+        context.beginPath();
+
+        context.moveTo(
+            0,
+            -15
+        );
+
+        context.lineTo(
+            -9,
+            11
+        );
+
+        context.lineTo(
+            0,
+            6
+        );
+
+        context.lineTo(
+            9,
+            11
+        );
+
+        context.closePath();
+
+        context.fill();
+
+        context.restore();
+    }
+
+
+    function drawLiveOnly(
+        canvas,
+        points
+    ) {
+        const frame =
+            setupRobotCanvas(
+                canvas
+            );
+
+        const context =
+            frame.context;
+
+        context.fillStyle =
+            "#22b8f0";
+
+        points.forEach(
+            (point) => {
+                const pixel =
+                    localToCanvas(
+                        frame,
+                        point
+                    );
+
+                context.beginPath();
+
+                context.arc(
+                    pixel.x,
+                    pixel.y,
+                    2.2,
+                    0,
+                    Math.PI * 2
+                );
+
+                context.fill();
+            }
+        );
+
+        drawRobot(
+            frame
+        );
+    }
+
+
+    function drawCandidateOverlay(
+        canvas,
+        map,
+        livePoints
+    ) {
+        const frame =
+            setupRobotCanvas(
+                canvas
+            );
+
+        const context =
+            frame.context;
+
+        const cellSize =
+            Math.max(
+                1,
+                map.resolution
+                    * frame.scale
+            );
+
+        for (
+            let row = 0;
+            row < map.height;
+            row += 1
+        ) {
+            const offset =
+                row * map.width;
+
+            for (
+                let column = 0;
+                column < map.width;
+                column += 1
+            ) {
+                const value =
+                    Number(
+                        map.cells[
+                            offset + column
+                        ]
+                    );
+
+                if (
+                    !Number.isFinite(value)
+                    || value < 0
+                ) {
+                    continue;
+                }
+
+                const point =
+                    mapCellWorld(
+                        map,
+                        row,
+                        column
+                    );
+
+                if (
+                    Math.hypot(
+                        point.x,
+                        point.y
+                    )
+                    > (
+                        REVIEW_RADIUS_METERS
+                        + 0.10
+                    )
+                ) {
+                    continue;
+                }
+
+                const pixel =
+                    localToCanvas(
+                        frame,
+                        point
+                    );
+
+                if (value >= 65) {
+                    context.fillStyle =
+                        "#22b8f0";
+
+                } else {
+                    context.fillStyle =
+                        "rgba(241, 245, 249, 0.28)";
+                }
+
+                context.fillRect(
+                    pixel.x
+                        - cellSize / 2,
+                    pixel.y
+                        - cellSize / 2,
+                    cellSize,
+                    cellSize
+                );
+            }
+        }
+
+        /*
+         * Live LiDAR is intentionally a contrasting overlay.
+         */
+        context.fillStyle =
+            "#f59e0b";
+
+        livePoints.forEach(
+            (point) => {
+                const pixel =
+                    localToCanvas(
+                        frame,
+                        point
+                    );
+
+                context.beginPath();
+
+                context.arc(
+                    pixel.x,
+                    pixel.y,
+                    2.4,
+                    0,
+                    Math.PI * 2
+                );
+
+                context.fill();
+            }
+        );
+
+        drawRobot(
+            frame
+        );
+    }
+
+
+    function drawPersistentReference(
+        canvas,
+        map
+    ) {
+        const size =
+            Math.max(
+                300,
+                Math.floor(
+                    canvas.clientWidth
+                    || 450
+                )
+            );
+
+        canvas.width =
+            size;
+
+        canvas.height =
+            size;
+
+        const context =
+            canvas.getContext(
+                "2d"
+            );
+
+        context.fillStyle =
+            "#020817";
+
+        context.fillRect(
+            0,
+            0,
+            size,
+            size
+        );
+
+        if (!map) {
+            context.fillStyle =
+                "#cbd5e1";
+
+            context.textAlign =
+                "center";
+
+            context.fillText(
+                "Persistent map unavailable",
+                size / 2,
+                size / 2
+            );
+
+            return;
+        }
+
+        const scale =
+            Math.min(
+                (
+                    size * 0.90
+                )
+                / map.width,
+                (
+                    size * 0.90
+                )
+                / map.height
+            );
+
+        const drawWidth =
+            map.width
+            * scale;
+
+        const drawHeight =
+            map.height
+            * scale;
+
+        const originX =
+            (
+                size
+                - drawWidth
+            )
+            / 2;
+
+        const originY =
+            (
+                size
+                - drawHeight
+            )
+            / 2;
+
+        for (
+            let row = 0;
+            row < map.height;
+            row += 1
+        ) {
+            for (
+                let column = 0;
+                column < map.width;
+                column += 1
+            ) {
+                const value =
+                    Number(
+                        map.cells[
+                            row * map.width
+                            + column
+                        ]
+                    );
+
+                if (value < 0) {
+                    context.fillStyle =
+                        "#081020";
+
+                } else if (
+                    value >= 65
+                ) {
+                    context.fillStyle =
+                        "#22b8f0";
+
+                } else {
+                    context.fillStyle =
+                        "#f1f5f9";
+                }
+
+                context.fillRect(
+                    originX
+                        + column * scale,
+                    originY
+                        + (
+                            map.height
+                            - 1
+                            - row
+                        )
+                        * scale,
+                    Math.ceil(scale),
+                    Math.ceil(scale)
+                );
+            }
+        }
+    }
+
+
+    function createModal() {
+        if (
+            byId(
+                "persistentMapReviewModal"
+            )
+        ) {
+            return;
+        }
+
+        const modal =
+            document.createElement(
+                "div"
+            );
+
+        modal.id =
+            "persistentMapReviewModal";
+
+        modal.innerHTML = `
+            <div class="persistent-map-review-shell">
+
+                <div class="persistent-map-review-header">
+                    <div>
+                        <h2>Persistent Map Candidate Review</h2>
+                        <div class="persistent-map-review-subtitle">
+                            Candidate and Live LiDAR use the same
+                            robot-centered 4 meter scale.
+                        </div>
+                    </div>
+
+                    <button
+                        id="persistentMapReviewCloseButton"
+                        type="button"
+                    >
+                        Close Review
+                    </button>
+                </div>
+
+                <div class="persistent-map-review-grid">
+
+                    <section class="persistent-map-review-card">
+                        <h3>Current Persistent Map</h3>
+                        <div class="persistent-map-review-note">
+                            Reference only — Mayday is not currently
+                            trusted/localized in this old map, so this
+                            pane is intentionally not registered to
+                            the robot-centered views.
+                        </div>
+
+                        <canvas
+                            id="persistentMapReviewPersistentCanvas"
+                            class="persistent-map-review-canvas"
+                        ></canvas>
+                    </section>
+
+                    <section class="persistent-map-review-card">
+                        <h3>Candidate + Live Overlay</h3>
+                        <div class="persistent-map-review-note">
+                            Cyan = candidate occupied geometry.
+                            Orange = current Live LiDAR.
+                            Forward is up.
+                        </div>
+
+                        <canvas
+                            id="persistentMapReviewOverlayCanvas"
+                            class="persistent-map-review-canvas"
+                        ></canvas>
+                    </section>
+
+                    <section class="persistent-map-review-card">
+                        <h3>Live LiDAR</h3>
+                        <div class="persistent-map-review-note">
+                            Current LD06 obstacle returns.
+                            Same 4 meter robot-centered scale.
+                            Forward is up.
+                        </div>
+
+                        <canvas
+                            id="persistentMapReviewLiveCanvas"
+                            class="persistent-map-review-canvas"
+                        ></canvas>
+                    </section>
+
+                </div>
+
+                <div
+                    id="persistentMapReviewEvidence"
+                    class="fail"
+                >
+                    Waiting for structural evidence…
+
+                    <div
+                        class="persistent-map-review-metrics"
+                    >
+                        <div
+                            id="persistentMapReviewMatch"
+                            class="persistent-map-review-metric"
+                        >
+                            Match: —
+                        </div>
+
+                        <div
+                            id="persistentMapReviewMeanError"
+                            class="persistent-map-review-metric"
+                        >
+                            Mean error: —
+                        </div>
+
+                        <div
+                            id="persistentMapReviewInside"
+                            class="persistent-map-review-metric"
+                        >
+                            Inside: —
+                        </div>
+
+                        <div
+                            id="persistentMapReviewReturns"
+                            class="persistent-map-review-metric"
+                        >
+                            Live returns: —
+                        </div>
+
+                        <div
+                            id="persistentMapReviewPasses"
+                            class="persistent-map-review-metric"
+                        >
+                            Evidence: 0 / 5
+                        </div>
+                    </div>
+                </div>
+
+                <div class="persistent-map-review-actions">
+
+                    <button
+                        id="persistentMapReviewDiscardButton"
+                        type="button"
+                    >
+                        Discard
+                    </button>
+
+                    <button
+                        id="persistentMapReviewPromoteButton"
+                        type="button"
+                        disabled
+                    >
+                        Use New Map
+                    </button>
+
+                </div>
+
+            </div>
+        `;
+
+        document.body.appendChild(
+            modal
+        );
+
+        byId(
+            "persistentMapReviewCloseButton"
+        ).addEventListener(
+            "click",
+            () => {
+                modalOpen =
+                    false;
+
+                modal.classList.remove(
+                    "open"
+                );
+            }
+        );
+
+        byId(
+            "persistentMapReviewDiscardButton"
+        ).addEventListener(
+            "click",
+            () => {
+                const original =
+                    byId(
+                        "persistentMapDiscardButton"
+                    );
+
+                if (original) {
+                    original.click();
+                }
+            }
+        );
+
+        byId(
+            "persistentMapReviewPromoteButton"
+        ).addEventListener(
+            "click",
+            () => {
+                if (
+                    !promotionAllowed
+                ) {
+                    return;
+                }
+
+                const original =
+                    byId(
+                        "persistentMapPromoteButton"
+                    );
+
+                if (original) {
+                    original.click();
+                }
+            }
+        );
+    }
+
+
+    function createInlineReviewElements() {
+        const panel =
+            byId(
+                "persistentMapCandidatePanel"
+            );
+
+        if (!panel) {
+            return;
+        }
+
+        if (
+            !byId(
+                "persistentMapStructuralStatus"
+            )
+        ) {
+            const status =
+                document.createElement(
+                    "div"
+                );
+
+            status.id =
+                "persistentMapStructuralStatus";
+
+            status.className =
+                "review-fail";
+
+            status.textContent =
+                (
+                    "Structural review waiting for "
+                    + "fresh Live LiDAR evidence."
+                );
+
+            const metrics =
+                byId(
+                    "persistentMapCandidateMetrics"
+                );
+
+            if (
+                metrics
+                && metrics.nextSibling
+            ) {
+                metrics.parentNode.insertBefore(
+                    status,
+                    metrics.nextSibling
+                );
+
+            } else {
+                panel.appendChild(
+                    status
+                );
+            }
+        }
+
+        if (
+            !byId(
+                "persistentMapReviewButton"
+            )
+        ) {
+            const button =
+                document.createElement(
+                    "button"
+                );
+
+            button.id =
+                "persistentMapReviewButton";
+
+            button.type =
+                "button";
+
+            button.textContent =
+                "Review Large";
+
+            button.hidden =
+                true;
+
+            button.addEventListener(
+                "click",
+                () => {
+                    modalOpen =
+                        true;
+
+                    byId(
+                        "persistentMapReviewModal"
+                    ).classList.add(
+                        "open"
+                    );
+
+                    redrawReview();
+                }
+            );
+
+            const promote =
+                byId(
+                    "persistentMapPromoteButton"
+                );
+
+            if (
+                promote
+                && promote.parentElement
+            ) {
+                promote.parentElement.insertBefore(
+                    button,
+                    promote
+                );
+            }
+        }
+    }
+
+
+    function remountRefreshControls() {
+        const controls =
+            byId(
+                "persistentMapRefreshControls"
+            );
+
+        const mapCanvas =
+            byId(
+                "mapCanvas"
+            );
+
+        if (
+            !controls
+            || !mapCanvas
+        ) {
+            return;
+        }
+
+        const stage =
+            mapCanvas.closest(
+                ".map-stage"
+            )
+            || mapCanvas.parentElement;
+
+        if (
+            !stage
+            || !stage.parentElement
+        ) {
+            return;
+        }
+
+        if (
+            controls.parentElement
+            !== stage.parentElement
+            || controls.nextElementSibling
+                !== stage
+        ) {
+            stage.parentElement.insertBefore(
+                controls,
+                stage
+            );
+        }
+
+        controls.hidden =
+            false;
+    }
+
+
+    function updateEvidence(
+        comparison
+    ) {
+        comparisonHistory.push(
+            comparison.singlePass
+        );
+
+        if (
+            comparisonHistory.length
+            > REVIEW_WINDOW
+        ) {
+            comparisonHistory.shift();
+        }
+
+        const passCount =
+            comparisonHistory.filter(
+                Boolean
+            ).length;
+
+        promotionAllowed =
+            (
+                comparisonHistory.length
+                    >= REQUIRED_PASSES
+                && passCount
+                    >= REQUIRED_PASSES
+            );
+
+        const promote =
+            byId(
+                "persistentMapPromoteButton"
+            );
+
+        const modalPromote =
+            byId(
+                "persistentMapReviewPromoteButton"
+            );
+
+        if (promote) {
+            promote.disabled =
+                !promotionAllowed;
+
+            promote.title =
+                (
+                    promotionAllowed
+                    ? (
+                        "Candidate/live structural "
+                        + "review passed."
+                    )
+                    : (
+                        "Use New Map remains disabled "
+                        + "until 3 of the last 5 "
+                        + "structural checks pass."
+                    )
+                );
+        }
+
+        if (modalPromote) {
+            modalPromote.disabled =
+                !promotionAllowed;
+        }
+
+        const status =
+            byId(
+                "persistentMapStructuralStatus"
+            );
+
+        if (status) {
+            status.classList.toggle(
+                "review-pass",
+                promotionAllowed
+            );
+
+            status.classList.toggle(
+                "review-fail",
+                !promotionAllowed
+            );
+
+            status.textContent =
+                (
+                    promotionAllowed
+                    ? (
+                        "Structural comparison PASS — "
+                        + `${passCount}/${comparisonHistory.length} `
+                        + "recent checks agree. "
+                        + "Use New Map is enabled."
+                    )
+                    : (
+                        "Structural comparison HOLD — "
+                        + `${passCount}/${comparisonHistory.length} `
+                        + "recent checks passed. "
+                        + "Need 3 of the last 5 before promotion."
+                    )
+                );
+        }
+
+        const evidence =
+            byId(
+                "persistentMapReviewEvidence"
+            );
+
+        if (evidence) {
+            evidence.classList.toggle(
+                "pass",
+                promotionAllowed
+            );
+
+            evidence.classList.toggle(
+                "fail",
+                !promotionAllowed
+            );
+        }
+
+        const match =
+            byId(
+                "persistentMapReviewMatch"
+            );
+
+        const mean =
+            byId(
+                "persistentMapReviewMeanError"
+            );
+
+        const inside =
+            byId(
+                "persistentMapReviewInside"
+            );
+
+        const returns =
+            byId(
+                "persistentMapReviewReturns"
+            );
+
+        const passes =
+            byId(
+                "persistentMapReviewPasses"
+            );
+
+        if (match) {
+            match.textContent =
+                (
+                    "Match ≤15 cm: "
+                    + (
+                        comparison.matchRatio
+                        * 100
+                    ).toFixed(1)
+                    + "%"
+                    + (
+                        comparison.matchRatio
+                            >= MIN_MATCH_RATIO
+                        ? " ✓"
+                        : " ✕"
+                    )
+                );
+        }
+
+        if (mean) {
+            mean.textContent =
+                (
+                    "Mean error: "
+                    + (
+                        Number.isFinite(
+                            comparison.meanError
+                        )
+                        ? (
+                            comparison.meanError
+                            * 100
+                        ).toFixed(1)
+                            + " cm"
+                        : "—"
+                    )
+                    + (
+                        comparison.meanError
+                            <= MAX_MEAN_ERROR_METERS
+                        ? " ✓"
+                        : " ✕"
+                    )
+                );
+        }
+
+        if (inside) {
+            inside.textContent =
+                (
+                    "Inside candidate: "
+                    + (
+                        comparison.insideRatio
+                        * 100
+                    ).toFixed(1)
+                    + "%"
+                    + (
+                        comparison.insideRatio
+                            >= MIN_INSIDE_RATIO
+                        ? " ✓"
+                        : " ✕"
+                    )
+                );
+        }
+
+        if (returns) {
+            returns.textContent =
+                (
+                    "Live returns: "
+                    + comparison.liveCount
+                    + (
+                        comparison.liveCount
+                            >= MIN_LIVE_RETURNS
+                        ? " ✓"
+                        : " ✕"
+                    )
+                );
+        }
+
+        if (passes) {
+            passes.textContent =
+                (
+                    "Evidence: "
+                    + passCount
+                    + " / "
+                    + comparisonHistory.length
+                    + " passes"
+                );
+        }
+    }
+
+
+    function redrawReview() {
+        if (
+            !candidatePayload
+            || !livePayload
+        ) {
+            return;
+        }
+
+        const candidateMap =
+            extractMap(
+                candidatePayload
+            );
+
+        if (!candidateMap) {
+            return;
+        }
+
+        const livePoints =
+            scanPoints(
+                livePayload
+            );
+
+        const persistentMap =
+            extractMap(
+                persistentPayload
+            );
+
+        const persistentCanvas =
+            byId(
+                "persistentMapReviewPersistentCanvas"
+            );
+
+        const overlayCanvas =
+            byId(
+                "persistentMapReviewOverlayCanvas"
+            );
+
+        const liveCanvas =
+            byId(
+                "persistentMapReviewLiveCanvas"
+            );
+
+        if (persistentCanvas) {
+            drawPersistentReference(
+                persistentCanvas,
+                persistentMap
+            );
+        }
+
+        if (overlayCanvas) {
+            drawCandidateOverlay(
+                overlayCanvas,
+                candidateMap,
+                livePoints
+            );
+        }
+
+        if (liveCanvas) {
+            drawLiveOnly(
+                liveCanvas,
+                livePoints
+            );
+        }
+    }
+
+
+    async function sampleReview() {
+        const statusPayload =
+            await getJson(
+                STATUS_ENDPOINT
+            );
+
+        const state =
+            statusPayload
+                .persistent_map_refresh
+            || {};
+
+        const ready =
+            (
+                state.phase
+                    === "CANDIDATE_READY"
+                && state.candidate_ready
+                    === true
+            );
+
+        const reviewButton =
+            byId(
+                "persistentMapReviewButton"
+            );
+
+        const promoteButton =
+            byId(
+                "persistentMapPromoteButton"
+            );
+
+        if (!ready) {
+            candidatePayload =
+                null;
+
+            livePayload =
+                null;
+
+            candidateSignature =
+                null;
+
+            comparisonHistory =
+                [];
+
+            promotionAllowed =
+                false;
+
+            if (reviewButton) {
+                reviewButton.hidden =
+                    true;
+            }
+
+            if (promoteButton) {
+                promoteButton.disabled =
+                    true;
+            }
+
+            return;
+        }
+
+        if (reviewButton) {
+            reviewButton.hidden =
+                false;
+        }
+
+        const candidate =
+            state.candidate
+            || {};
+
+        const signature =
+            (
+                candidate.name
+                || candidate.directory
+                || "candidate"
+            );
+
+        if (
+            candidateSignature
+            !== signature
+        ) {
+            comparisonHistory =
+                [];
+
+            promotionAllowed =
+                false;
+
+            candidateSignature =
+                signature;
+
+            candidatePayload =
+                await getJson(
+                    CANDIDATE_ENDPOINT
+                );
+
+            try {
+                persistentPayload =
+                    await getJson(
+                        PERSISTENT_ENDPOINT
+                    );
+
+            } catch (_error) {
+                persistentPayload =
+                    null;
+            }
+        }
+
+        livePayload =
+            await getJson(
+                LIDAR_ENDPOINT
+            );
+
+        const candidateMap =
+            extractMap(
+                candidatePayload
+            );
+
+        if (!candidateMap) {
+            throw new Error(
+                "Candidate occupancy grid is unavailable."
+            );
+        }
+
+        const livePoints =
+            scanPoints(
+                livePayload
+            );
+
+        const metadata =
+            candidateMetadata(
+                candidatePayload
+            );
+
+        const comparison =
+            compareCandidateToLive(
+                candidateMap,
+                metadata,
+                livePoints
+            );
+
+        updateEvidence(
+            comparison
+        );
+
+        if (modalOpen) {
+            redrawReview();
+        }
+    }
+
+
+    function initializeReview() {
+        createModal();
+
+        createInlineReviewElements();
+
+        remountRefreshControls();
+
+        const promote =
+            byId(
+                "persistentMapPromoteButton"
+            );
+
+        if (promote) {
+            promote.disabled =
+                true;
+
+            /*
+             * This capture listener prevents accidental promotion
+             * even if another script changes the disabled property.
+             */
+            promote.addEventListener(
+                "click",
+                (event) => {
+                    if (
+                        promotionAllowed
+                    ) {
+                        return;
+                    }
+
+                    event.preventDefault();
+
+                    event.stopImmediatePropagation();
+
+                    window.alert(
+                        "Use New Map is disabled until "
+                        + "the candidate agrees with fresh "
+                        + "Live LiDAR in at least 3 of "
+                        + "the last 5 structural checks."
+                    );
+                },
+                true
+            );
+        }
+
+        const run =
+            async () => {
+                try {
+                    remountRefreshControls();
+
+                    createInlineReviewElements();
+
+                    await sampleReview();
+
+                } catch (error) {
+                    promotionAllowed =
+                        false;
+
+                    if (promote) {
+                        promote.disabled =
+                            true;
+                    }
+
+                    const status =
+                        byId(
+                            "persistentMapStructuralStatus"
+                        );
+
+                    if (status) {
+                        status.className =
+                            "review-fail";
+
+                        status.textContent =
+                            (
+                                "Structural review unavailable: "
+                                + error.message
+                            );
+                    }
+                }
+            };
+
+        run();
+
+        window.setInterval(
+            run,
+            1000
+        );
+
+        window.addEventListener(
+            "resize",
+            () => {
+                if (modalOpen) {
+                    redrawReview();
+                }
+            }
+        );
+    }
+
+
+    if (
+        document.readyState
+        === "loading"
+    ) {
+        document.addEventListener(
+            "DOMContentLoaded",
+            initializeReview
+        );
+
+    } else {
+        initializeReview();
+    }
+})();

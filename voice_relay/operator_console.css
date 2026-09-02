@@ -2671,3 +2671,194 @@ button.candidate-inventory-item:focus-visible {
         height: 56vh;
     }
 }
+
+/* MAYDAY_PERSISTENT_MAP_CANDIDATE_REVIEW */
+
+#persistentMapRefreshControls {
+    box-sizing: border-box !important;
+    width: 100% !important;
+    max-width: none !important;
+    margin: 8px 0 12px 0 !important;
+}
+
+#persistentMapCandidatePanel {
+    width: 100% !important;
+}
+
+#persistentMapCandidateCanvas {
+    width: 100% !important;
+    height: auto !important;
+    min-height: 240px;
+    max-height: 360px !important;
+}
+
+#persistentMapStructuralStatus {
+    box-sizing: border-box;
+    margin: 9px 0;
+    padding: 8px 10px;
+    border: 1px solid rgba(120, 140, 170, 0.40);
+    border-radius: 7px;
+    font-size: 0.84rem;
+    line-height: 1.4;
+}
+
+#persistentMapStructuralStatus.review-pass {
+    border-color: rgba(22, 163, 74, 0.75);
+    background: rgba(22, 163, 74, 0.10);
+}
+
+#persistentMapStructuralStatus.review-fail {
+    border-color: rgba(217, 119, 6, 0.75);
+    background: rgba(217, 119, 6, 0.09);
+}
+
+#persistentMapReviewButton {
+    min-height: 34px;
+}
+
+#persistentMapReviewModal {
+    display: none;
+    position: fixed;
+    inset: 0;
+    z-index: 10000;
+    box-sizing: border-box;
+    padding: 24px;
+    overflow: auto;
+    background: rgba(2, 8, 23, 0.92);
+    backdrop-filter: blur(4px);
+}
+
+#persistentMapReviewModal.open {
+    display: block;
+}
+
+.persistent-map-review-shell {
+    box-sizing: border-box;
+    width: min(1500px, 98vw);
+    margin: 0 auto;
+    padding: 18px;
+    border: 1px solid rgba(120, 140, 170, 0.6);
+    border-radius: 12px;
+    background: #f7f9fc;
+    color: #111827;
+}
+
+.persistent-map-review-header {
+    display: flex;
+    gap: 12px;
+    justify-content: space-between;
+    align-items: flex-start;
+    margin-bottom: 14px;
+}
+
+.persistent-map-review-header h2 {
+    margin: 0;
+}
+
+.persistent-map-review-subtitle {
+    margin-top: 4px;
+    color: #4b5563;
+    font-size: 0.9rem;
+}
+
+.persistent-map-review-grid {
+    display: grid;
+    grid-template-columns:
+        minmax(260px, 0.85fr)
+        minmax(360px, 1.25fr)
+        minmax(360px, 1.25fr);
+    gap: 12px;
+}
+
+.persistent-map-review-card {
+    box-sizing: border-box;
+    min-width: 0;
+    padding: 10px;
+    border: 1px solid #cbd5e1;
+    border-radius: 9px;
+    background: #ffffff;
+}
+
+.persistent-map-review-card h3 {
+    margin: 0 0 4px 0;
+    font-size: 1rem;
+}
+
+.persistent-map-review-note {
+    min-height: 34px;
+    color: #64748b;
+    font-size: 0.78rem;
+    line-height: 1.3;
+}
+
+.persistent-map-review-canvas {
+    display: block;
+    box-sizing: border-box;
+    width: 100%;
+    aspect-ratio: 1 / 1;
+    margin-top: 8px;
+    border: 1px solid #334155;
+    border-radius: 8px;
+    background: #020817;
+}
+
+#persistentMapReviewEvidence {
+    margin-top: 14px;
+    padding: 12px;
+    border: 1px solid #cbd5e1;
+    border-radius: 9px;
+    background: #ffffff;
+}
+
+#persistentMapReviewEvidence.pass {
+    border-color: #16a34a;
+}
+
+#persistentMapReviewEvidence.fail {
+    border-color: #d97706;
+}
+
+.persistent-map-review-metrics {
+    display: grid;
+    grid-template-columns:
+        repeat(5, minmax(120px, 1fr));
+    gap: 8px;
+    margin-top: 8px;
+}
+
+.persistent-map-review-metric {
+    padding: 7px;
+    border-radius: 6px;
+    background: #eef2f7;
+    font-size: 0.8rem;
+}
+
+.persistent-map-review-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    justify-content: flex-end;
+    margin-top: 14px;
+}
+
+.persistent-map-review-actions button {
+    min-height: 36px;
+    padding: 7px 14px;
+}
+
+#persistentMapReviewPromoteButton:disabled,
+#persistentMapPromoteButton:disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
+}
+
+@media (max-width: 1100px) {
+    .persistent-map-review-grid {
+        grid-template-columns: 1fr;
+    }
+
+    .persistent-map-review-metrics {
+        grid-template-columns:
+            repeat(2, minmax(120px, 1fr));
+    }
+}
