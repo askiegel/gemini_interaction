@@ -13,6 +13,7 @@ Mayday during this validation feature.
 """
 
 import argparse
+import os
 
 from pathlib import Path
 
@@ -61,9 +62,19 @@ def build_launch_description(
         / "mayday_guarded_navigation.yaml"
     )
 
+    fixed_map_override = os.environ.get(
+        "MAYDAY_FIXED_MAP_YAML"
+    )
+
     fixed_map = (
-        asset_dir
-        / "mayday_supervised_route_03.yaml"
+        Path(
+            fixed_map_override
+        ).expanduser().resolve()
+        if fixed_map_override
+        else (
+            asset_dir
+            / "mayday_supervised_route_03.yaml"
+        )
     )
 
     navigate_tree = (

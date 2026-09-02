@@ -262,6 +262,28 @@ class Tony2NavigationRuntime:
             self.base_environment
         )
 
+        persistent_map_yaml = (
+            Path.home()
+            / ".local"
+            / "share"
+            / "mayday"
+            / "persistent_map"
+            / "active"
+            / "mayday_supervised_route_03.yaml"
+        )
+
+        if persistent_map_yaml.is_file():
+            environment[
+                "MAYDAY_FIXED_MAP_YAML"
+            ] = str(
+                persistent_map_yaml
+            )
+        else:
+            environment.pop(
+                "MAYDAY_FIXED_MAP_YAML",
+                None,
+            )
+
         environment[
             "ROS_DOMAIN_ID"
         ] = "43"

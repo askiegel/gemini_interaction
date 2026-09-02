@@ -5120,5 +5120,932 @@
 })();
 </script>
 
+
+<!-- MAYDAY_PERSISTENT_MAP_REFRESH_UI -->
+
+<style>
+#persistentMapRefreshControls {
+    margin: 10px 0;
+    padding: 10px;
+    border: 1px solid rgba(120, 140, 170, 0.45);
+    border-radius: 8px;
+}
+
+#persistentMapRefreshControls .pmr-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    align-items: center;
+}
+
+#persistentMapRefreshControls button {
+    padding: 7px 12px;
+    min-height: 34px;
+    border-radius: 6px;
+    cursor: pointer;
+}
+
+#persistentMapRefreshControls button:disabled {
+    opacity: 0.55;
+    cursor: not-allowed;
+}
+
+#persistentMapRefreshStatus {
+    margin-top: 8px;
+    font-size: 0.9rem;
+}
+
+#persistentMapRefreshProgressOuter {
+    display: none;
+    margin-top: 8px;
+    height: 8px;
+    border-radius: 999px;
+    overflow: hidden;
+    background: rgba(100, 110, 130, 0.25);
+}
+
+#persistentMapRefreshProgress {
+    width: 0%;
+    height: 100%;
+    background: #28aeea;
+    transition: width 0.2s linear;
+}
+
+#persistentMapCandidatePanel {
+    display: none;
+    margin-top: 12px;
+    padding-top: 10px;
+    border-top: 1px solid rgba(120, 140, 170, 0.35);
+}
+
+#persistentMapCandidateCanvas {
+    display: block;
+    width: 100%;
+    max-height: 300px;
+    margin-top: 8px;
+    background: #020817;
+    border-radius: 6px;
+    image-rendering: pixelated;
+}
+
+#persistentMapCandidateMetrics {
+    margin: 8px 0;
+    font-size: 0.82rem;
+}
+</style>
+
+<div
+    id="persistentMapRefreshControls"
+    hidden
+>
+    <div class="pmr-row">
+
+        <button
+            id="persistentMapRefreshButton"
+            type="button"
+        >
+            Refresh Persistent Map
+        </button>
+
+        <button
+            id="persistentMapCancelButton"
+            type="button"
+            hidden
+        >
+            Cancel Refresh
+        </button>
+
+        <strong
+            id="persistentMapRefreshBadge"
+        >
+            Map refresh idle
+        </strong>
+
+    </div>
+
+    <div
+        id="persistentMapRefreshProgressOuter"
+    >
+        <div
+            id="persistentMapRefreshProgress"
+        ></div>
+    </div>
+
+    <div
+        id="persistentMapRefreshStatus"
+    >
+        Create a new stationary LiDAR candidate without
+        immediately replacing the persistent map.
+    </div>
+
+    <div
+        id="persistentMapCandidatePanel"
+    >
+        <strong>
+            Stationary candidate preview
+        </strong>
+
+        <canvas
+            id="persistentMapCandidateCanvas"
+            width="500"
+            height="320"
+        ></canvas>
+
+        <div
+            id="persistentMapCandidateMetrics"
+        ></div>
+
+        <div class="pmr-row">
+
+            <button
+                id="persistentMapPromoteButton"
+                type="button"
+            >
+                Use New Map
+            </button>
+
+            <button
+                id="persistentMapDiscardButton"
+                type="button"
+            >
+                Discard
+            </button>
+
+        </div>
+    </div>
+</div>
+
+<script>
+(() => {
+    "use strict";
+
+    const STATUS =
+        "/dashboard/persistent-map/refresh-status";
+
+    const REFRESH =
+        "/dashboard/persistent-map/refresh";
+
+    const CANDIDATE =
+        "/dashboard/persistent-map/refresh-candidate";
+
+    const CANCEL =
+        "/dashboard/persistent-map/cancel";
+
+    const PROMOTE =
+        "/dashboard/persistent-map/promote";
+
+    const DISCARD =
+        "/dashboard/persistent-map/discard";
+
+    let candidateSignature = null;
+
+
+    function byId(id) {
+        return document.getElementById(id);
+    }
+
+
+    async function requestJson(
+        url,
+        options = {}
+    ) {
+        const response = await fetch(
+            url,
+            {
+                cache: "no-store",
+                ...options,
+            }
+        );
+
+        let payload;
+
+        try {
+            payload = await response.json();
+
+        } catch (_error) {
+            payload = {
+                ok: false,
+                error:
+                    "Dashboard returned invalid JSON.",
+            };
+        }
+
+        if (!response.ok) {
+            throw new Error(
+                payload.error
+                || (
+                    "Dashboard request failed: "
+                    + response.status
+                )
+            );
+        }
+
+        return payload;
+    }
+
+
+    function mountControls() {
+        const controls =
+            byId(
+                "persistentMapRefreshControls"
+            );
+
+        if (!controls) {
+            return;
+        }
+
+        const heading =
+            Array.from(
+                document.querySelectorAll(
+                    "h1, h2, h3"
+                )
+            ).find(
+                (element) =>
+                    element.textContent
+                        .toLowerCase()
+                        .includes(
+                            "persistent map"
+                        )
+            );
+
+        if (
+            heading
+            && heading.parentElement
+        ) {
+            heading.parentElement
+                .insertAdjacentElement(
+                    "afterend",
+                    controls
+                );
+        }
+
+        controls.hidden = false;
+    }
+
+
+    function phaseLabel(state) {
+        switch (state.phase) {
+
+        case "CAPTURING":
+            return (
+                "Capturing LiDAR "
+                + (
+                    state.progress_percent
+                    || 0
+                )
+                + "%"
+            );
+
+        case "BUILDING":
+            return "Building candidate";
+
+        case "CANDIDATE_READY":
+            return "Candidate ready";
+
+        case "PROMOTING":
+            return "Promoting map";
+
+        case "ACTIVE":
+            return "Persistent map active";
+
+        case "CANCELLED":
+            return "Refresh cancelled";
+
+        case "ERROR":
+            return "Refresh failed";
+
+        default:
+            return "Map refresh idle";
+        }
+    }
+
+
+    function drawCandidate(payload) {
+        const map =
+            payload.map;
+
+        const canvas =
+            byId(
+                "persistentMapCandidateCanvas"
+            );
+
+        if (
+            !map
+            || !canvas
+            || !Array.isArray(
+                map.data
+            )
+        ) {
+            return;
+        }
+
+        const width =
+            Number(
+                map.width
+            );
+
+        const height =
+            Number(
+                map.height
+            );
+
+        if (
+            !Number.isFinite(width)
+            || !Number.isFinite(height)
+            || width <= 0
+            || height <= 0
+        ) {
+            return;
+        }
+
+        const source =
+            document.createElement(
+                "canvas"
+            );
+
+        source.width = width;
+        source.height = height;
+
+        const sourceContext =
+            source.getContext(
+                "2d"
+            );
+
+        const image =
+            sourceContext.createImageData(
+                width,
+                height
+            );
+
+        for (
+            let displayRow = 0;
+            displayRow < height;
+            displayRow += 1
+        ) {
+            const mapRow =
+                height
+                - 1
+                - displayRow;
+
+            for (
+                let column = 0;
+                column < width;
+                column += 1
+            ) {
+                const value =
+                    Number(
+                        map.data[
+                            mapRow
+                            * width
+                            + column
+                        ]
+                    );
+
+                const offset =
+                    (
+                        displayRow
+                        * width
+                        + column
+                    )
+                    * 4;
+
+                if (value < 0) {
+                    image.data[
+                        offset
+                    ] = 8;
+
+                    image.data[
+                        offset + 1
+                    ] = 16;
+
+                    image.data[
+                        offset + 2
+                    ] = 32;
+
+                } else if (
+                    value >= 65
+                ) {
+                    image.data[
+                        offset
+                    ] = 20;
+
+                    image.data[
+                        offset + 1
+                    ] = 180;
+
+                    image.data[
+                        offset + 2
+                    ] = 235;
+
+                } else {
+                    image.data[
+                        offset
+                    ] = 242;
+
+                    image.data[
+                        offset + 1
+                    ] = 245;
+
+                    image.data[
+                        offset + 2
+                    ] = 250;
+                }
+
+                image.data[
+                    offset + 3
+                ] = 255;
+            }
+        }
+
+        sourceContext.putImageData(
+            image,
+            0,
+            0
+        );
+
+        const context =
+            canvas.getContext(
+                "2d"
+            );
+
+        context.clearRect(
+            0,
+            0,
+            canvas.width,
+            canvas.height
+        );
+
+        context.imageSmoothingEnabled =
+            false;
+
+        const scale =
+            Math.min(
+                canvas.width
+                    / width,
+                canvas.height
+                    / height
+            );
+
+        const drawWidth =
+            width * scale;
+
+        const drawHeight =
+            height * scale;
+
+        context.drawImage(
+            source,
+            (
+                canvas.width
+                - drawWidth
+            ) / 2,
+            (
+                canvas.height
+                - drawHeight
+            ) / 2,
+            drawWidth,
+            drawHeight
+        );
+
+        const candidate =
+            payload.candidate
+            || {};
+
+        byId(
+            "persistentMapCandidateMetrics"
+        ).textContent = [
+            (
+                "Scans: "
+                + (
+                    candidate.accepted_scans
+                    ?? "—"
+                )
+            ),
+            (
+                "Stable bins: "
+                + (
+                    candidate.stable_bin_count
+                    ?? "—"
+                )
+            ),
+            (
+                "Occupied: "
+                + (
+                    candidate.occupied_cell_count
+                    ?? "—"
+                )
+            ),
+            (
+                "Free: "
+                + (
+                    candidate.free_cell_count
+                    ?? "—"
+                )
+            ),
+            (
+                "Resolution: "
+                + (
+                    candidate.resolution
+                    ?? "—"
+                )
+                + " m"
+            ),
+        ].join(
+            "  •  "
+        );
+    }
+
+
+    async function loadCandidate(
+        signature
+    ) {
+        if (
+            candidateSignature
+            === signature
+        ) {
+            return;
+        }
+
+        const payload =
+            await requestJson(
+                CANDIDATE
+            );
+
+        candidateSignature =
+            signature;
+
+        drawCandidate(
+            payload
+        );
+    }
+
+
+    async function pollStatus() {
+        const refreshButton =
+            byId(
+                "persistentMapRefreshButton"
+            );
+
+        const cancelButton =
+            byId(
+                "persistentMapCancelButton"
+            );
+
+        const panel =
+            byId(
+                "persistentMapCandidatePanel"
+            );
+
+        const badge =
+            byId(
+                "persistentMapRefreshBadge"
+            );
+
+        const status =
+            byId(
+                "persistentMapRefreshStatus"
+            );
+
+        const progressOuter =
+            byId(
+                "persistentMapRefreshProgressOuter"
+            );
+
+        const progress =
+            byId(
+                "persistentMapRefreshProgress"
+            );
+
+        try {
+            const payload =
+                await requestJson(
+                    STATUS
+                );
+
+            const state =
+                payload.persistent_map_refresh
+                || {};
+
+            const busy =
+                state.busy
+                === true;
+
+            badge.textContent =
+                phaseLabel(
+                    state
+                );
+
+            refreshButton.disabled =
+                (
+                    busy
+                    || state.candidate_ready
+                        === true
+                );
+
+            cancelButton.hidden =
+                !(
+                    state.phase
+                        === "CAPTURING"
+                    || state.phase
+                        === "BUILDING"
+                );
+
+            progressOuter.style.display =
+                busy
+                ? "block"
+                : "none";
+
+            progress.style.width =
+                Math.max(
+                    0,
+                    Math.min(
+                        100,
+                        Number(
+                            state.progress_percent
+                            || 0
+                        )
+                    )
+                )
+                + "%";
+
+            panel.style.display =
+                (
+                    state.candidate_ready
+                    === true
+                )
+                ? "block"
+                : "none";
+
+            if (
+                state.phase
+                === "CANDIDATE_READY"
+            ) {
+                status.textContent =
+                    (
+                        "Candidate ready. "
+                        + "Review it before choosing "
+                        + "Use New Map."
+                    );
+
+                const candidate =
+                    state.candidate
+                    || {};
+
+                await loadCandidate(
+                    candidate.name
+                    || candidate.directory
+                    || "candidate"
+                );
+
+            } else if (
+                state.phase
+                === "CAPTURING"
+            ) {
+                candidateSignature =
+                    null;
+
+                status.textContent =
+                    (
+                        "Mayday must remain stationary. "
+                        + "Collecting approximately "
+                        + "30 seconds of LiDAR data."
+                    );
+
+            } else if (
+                state.phase
+                === "BUILDING"
+            ) {
+                status.textContent =
+                    (
+                        "Capture complete. "
+                        + "Building and validating candidate."
+                    );
+
+            } else if (
+                state.phase
+                === "ERROR"
+            ) {
+                candidateSignature =
+                    null;
+
+                status.textContent =
+                    (
+                        state.error
+                        || "Persistent-map refresh failed."
+                    );
+
+            } else if (
+                state.phase
+                === "ACTIVE"
+            ) {
+                candidateSignature =
+                    null;
+
+                status.textContent =
+                    (
+                        "Dashboard-promoted persistent map "
+                        + "is active for the next "
+                        + "fixed-map navigation start."
+                    );
+
+            } else {
+                candidateSignature =
+                    null;
+
+                status.textContent =
+                    (
+                        "Create a new stationary LiDAR "
+                        + "candidate without immediately "
+                        + "replacing the persistent map."
+                    );
+            }
+
+        } catch (error) {
+            badge.textContent =
+                "Map refresh unavailable";
+
+            status.textContent =
+                error.message;
+        }
+    }
+
+
+    async function startRefresh() {
+        if (
+            !window.confirm(
+                "Refresh the persistent map now?\n\n"
+                + "Navigation and mapping will be stopped. "
+                + "Mayday must remain physically stationary "
+                + "during the 30-second LiDAR capture."
+            )
+        ) {
+            return;
+        }
+
+        await requestJson(
+            REFRESH,
+            {
+                method: "POST",
+            }
+        );
+
+        candidateSignature =
+            null;
+
+        await pollStatus();
+    }
+
+
+    async function cancelRefresh() {
+        await requestJson(
+            CANCEL,
+            {
+                method: "POST",
+            }
+        );
+
+        candidateSignature =
+            null;
+
+        await pollStatus();
+    }
+
+
+    async function discardCandidate() {
+        if (
+            !window.confirm(
+                "Discard this stationary map candidate?"
+            )
+        ) {
+            return;
+        }
+
+        await requestJson(
+            DISCARD,
+            {
+                method: "POST",
+            }
+        );
+
+        candidateSignature =
+            null;
+
+        await pollStatus();
+    }
+
+
+    async function promoteCandidate() {
+        if (
+            !window.confirm(
+                "Use this candidate as the new "
+                + "persistent navigation map?\n\n"
+                + "Navigation will remain stopped. "
+                + "The new map will be used the next "
+                + "time fixed-map navigation starts."
+            )
+        ) {
+            return;
+        }
+
+        await requestJson(
+            PROMOTE,
+            {
+                method: "POST",
+            }
+        );
+
+        candidateSignature =
+            null;
+
+        window.location.reload();
+    }
+
+
+    function wireControls() {
+        mountControls();
+
+        byId(
+            "persistentMapRefreshButton"
+        ).addEventListener(
+            "click",
+            () => {
+                startRefresh().catch(
+                    (error) => {
+                        window.alert(
+                            error.message
+                        );
+                    }
+                );
+            }
+        );
+
+        byId(
+            "persistentMapCancelButton"
+        ).addEventListener(
+            "click",
+            () => {
+                cancelRefresh().catch(
+                    (error) => {
+                        window.alert(
+                            error.message
+                        );
+                    }
+                );
+            }
+        );
+
+        byId(
+            "persistentMapDiscardButton"
+        ).addEventListener(
+            "click",
+            () => {
+                discardCandidate().catch(
+                    (error) => {
+                        window.alert(
+                            error.message
+                        );
+                    }
+                );
+            }
+        );
+
+        byId(
+            "persistentMapPromoteButton"
+        ).addEventListener(
+            "click",
+            () => {
+                promoteCandidate().catch(
+                    (error) => {
+                        window.alert(
+                            error.message
+                        );
+                    }
+                );
+            }
+        );
+
+        pollStatus();
+
+        window.setInterval(
+            pollStatus,
+            1000
+        );
+    }
+
+
+    if (
+        document.readyState
+        === "loading"
+    ) {
+        document.addEventListener(
+            "DOMContentLoaded",
+            wireControls
+        );
+
+    } else {
+        wireControls();
+    }
+})();
+</script>
+
 </body>
 </html>

@@ -1958,6 +1958,258 @@ class VoiceRelayHandler(BaseHTTPRequestHandler):
         self.send_cors_headers()
         self.end_headers()
 
+
+    def persistent_map_runtime(self):
+        try:
+            from persistent_map_refresh_runtime import (
+                get_persistent_map_refresh_runtime,
+            )
+
+        except ImportError:
+            from voice_relay.persistent_map_refresh_runtime import (
+                get_persistent_map_refresh_runtime,
+            )
+
+        return get_persistent_map_refresh_runtime()
+
+
+    def persistent_map_refresh_status(self):
+        runtime = self.persistent_map_runtime()
+
+        return 200, {
+            "ok": True,
+            "persistent_map_refresh":
+                runtime.status(),
+        }
+
+
+    def prepare_persistent_map_refresh(self):
+        """
+        Establish a fail-closed stationary state before
+        persistent-map capture or promotion.
+
+        This never starts navigation, starts mapping, creates a
+        motion lease, submits a goal, or publishes cmd_vel.
+        """
+        stationary_error = (
+            self.ensure_mayday_stationary()
+        )
+
+        if stationary_error is not None:
+            return stationary_error
+
+        navigation_runtime = (
+            get_tony2_navigation_runtime()
+        )
+
+        mapping_runtime = (
+            get_tony2_mapping_runtime()
+        )
+
+        try:
+            navigation_runtime.stop()
+            mapping_runtime.stop()
+
+        except Exception as exc:
+            return (
+                "Unable to establish persistent-map "
+                f"refresh stop state: {exc}"
+            )
+
+        stationary_error = (
+            self.ensure_mayday_stationary()
+        )
+
+        if stationary_error is not None:
+            return stationary_error
+
+        navigation = (
+            navigation_runtime.status()
+        )
+
+        mapping = (
+            mapping_runtime.status()
+        )
+
+        if navigation.get(
+            "running"
+        ) is True:
+            return (
+                "Tony2 navigation must be stopped "
+                "before persistent-map refresh."
+            )
+
+        if navigation.get(
+            "motion_output_connected"
+        ) is True:
+            return (
+                "Motion output must be disconnected "
+                "before persistent-map refresh."
+            )
+
+        if navigation.get(
+            "goal_active"
+        ) is True:
+            return (
+                "A navigation goal is still active."
+            )
+
+        if mapping.get(
+            "running"
+        ) is True:
+            return (
+                "Tony2 mapping must be stopped "
+                "before persistent-map refresh."
+            )
+
+        return None
+
+
+    def persistent_map_refresh_start(self):
+        runtime = (
+            self.persistent_map_runtime()
+        )
+
+        if runtime.busy():
+            return 409, {
+                "ok": False,
+                "error": (
+                    "Persistent map refresh "
+                    "is already running."
+                ),
+                "persistent_map_refresh":
+                    runtime.status(),
+            }
+
+        error = (
+            self.prepare_persistent_map_refresh()
+        )
+
+        if error is not None:
+            return 503, {
+                "ok": False,
+                "error": error,
+                "persistent_map_refresh":
+                    runtime.status(),
+            }
+
+        try:
+            status = runtime.start_refresh()
+
+        except Exception as exc:
+            return 503, {
+                "ok": False,
+                "error": str(exc),
+                "persistent_map_refresh":
+                    runtime.status(),
+            }
+
+        return 202, {
+            "ok": True,
+            "action":
+                "persistent_map_refresh_started",
+            "message": (
+                "Stationary persistent-map "
+                "capture started. "
+                "Mayday must remain stationary."
+            ),
+            "persistent_map_refresh":
+                status,
+        }
+
+
+    def persistent_map_refresh_cancel(self):
+        runtime = (
+            self.persistent_map_runtime()
+        )
+
+        try:
+            status = runtime.cancel()
+
+        except Exception as exc:
+            return 503, {
+                "ok": False,
+                "error": str(exc),
+                "persistent_map_refresh":
+                    runtime.status(),
+            }
+
+        return 200, {
+            "ok": True,
+            "action":
+                "persistent_map_refresh_cancelled",
+            "persistent_map_refresh":
+                status,
+        }
+
+
+    def persistent_map_refresh_discard(self):
+        runtime = (
+            self.persistent_map_runtime()
+        )
+
+        try:
+            status = runtime.discard()
+
+        except Exception as exc:
+            return 503, {
+                "ok": False,
+                "error": str(exc),
+                "persistent_map_refresh":
+                    runtime.status(),
+            }
+
+        return 200, {
+            "ok": True,
+            "action":
+                "persistent_map_candidate_discarded",
+            "persistent_map_refresh":
+                status,
+        }
+
+
+    def persistent_map_refresh_promote(self):
+        runtime = (
+            self.persistent_map_runtime()
+        )
+
+        error = (
+            self.prepare_persistent_map_refresh()
+        )
+
+        if error is not None:
+            return 503, {
+                "ok": False,
+                "error": error,
+                "persistent_map_refresh":
+                    runtime.status(),
+            }
+
+        try:
+            status = runtime.promote()
+
+        except Exception as exc:
+            return 503, {
+                "ok": False,
+                "error": str(exc),
+                "persistent_map_refresh":
+                    runtime.status(),
+            }
+
+        return 200, {
+            "ok": True,
+            "action":
+                "persistent_map_candidate_promoted",
+            "message": (
+                "New stationary persistent map is active. "
+                "Fixed-map navigation will use it "
+                "on its next start."
+            ),
+            "persistent_map_refresh":
+                status,
+        }
+
+
     def do_GET(self):
         path = urlparse(self.path).path
 
@@ -2071,6 +2323,88 @@ class VoiceRelayHandler(BaseHTTPRequestHandler):
             status_code, payload = self.lidar_status()
             self.send_json(status_code, payload)
             return
+
+
+        if path == "/dashboard/persistent-map/refresh-status":
+            status_code, payload = (
+                self.persistent_map_refresh_status()
+            )
+
+            self.send_json(
+                status_code,
+                payload,
+            )
+            return
+
+        if path == "/dashboard/persistent-map/refresh-candidate":
+            runtime = (
+                self.persistent_map_runtime()
+            )
+
+            try:
+                payload = (
+                    runtime.candidate_map_payload()
+                )
+
+            except Exception as exc:
+                self.send_json(
+                    503,
+                    {
+                        "ok": False,
+                        "error": str(exc),
+                    },
+                )
+                return
+
+            if payload is None:
+                self.send_json(
+                    404,
+                    {
+                        "ok": False,
+                        "error": (
+                            "No stationary map "
+                            "candidate is ready."
+                        ),
+                    },
+                )
+                return
+
+            self.send_json(
+                200,
+                payload,
+            )
+            return
+
+        if path == "/dashboard/map":
+            runtime = (
+                self.persistent_map_runtime()
+            )
+
+            try:
+                active_map = (
+                    runtime.active_map_payload()
+                )
+
+            except Exception as exc:
+                self.send_json(
+                    503,
+                    {
+                        "ok": False,
+                        "error": (
+                            "Dashboard-promoted "
+                            "persistent map could "
+                            f"not be loaded: {exc}"
+                        ),
+                    },
+                )
+                return
+
+            if active_map is not None:
+                self.send_json(
+                    200,
+                    active_map,
+                )
+                return
 
         if path == "/dashboard/navigation-control":
             status_code, payload = (
@@ -2287,6 +2621,84 @@ class VoiceRelayHandler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         path = urlparse(self.path).path
+
+
+        if path == "/dashboard/persistent-map/refresh":
+            status_code, payload = (
+                self.persistent_map_refresh_start()
+            )
+
+            self.send_json(
+                status_code,
+                payload,
+            )
+            return
+
+        if path == "/dashboard/persistent-map/cancel":
+            status_code, payload = (
+                self.persistent_map_refresh_cancel()
+            )
+
+            self.send_json(
+                status_code,
+                payload,
+            )
+            return
+
+        if path == "/dashboard/persistent-map/discard":
+            status_code, payload = (
+                self.persistent_map_refresh_discard()
+            )
+
+            self.send_json(
+                status_code,
+                payload,
+            )
+            return
+
+        if path == "/dashboard/persistent-map/promote":
+            status_code, payload = (
+                self.persistent_map_refresh_promote()
+            )
+
+            self.send_json(
+                status_code,
+                payload,
+            )
+            return
+
+        refresh_runtime = (
+            self.persistent_map_runtime()
+        )
+
+        refresh_conflict_paths = {
+            "/dashboard/navigation-start",
+            "/dashboard/navigation-goal",
+            "/dashboard/navigation-initialize-localization",
+            "/dashboard/mapping-navigation-start",
+            "/dashboard/mapping-navigation-goal",
+            "/dashboard/mapping-start",
+        }
+
+        if (
+            path in refresh_conflict_paths
+            and refresh_runtime.busy()
+        ):
+            self.send_json(
+                409,
+                {
+                    "ok": False,
+                    "error": (
+                        "Persistent-map refresh is active. "
+                        "Navigation, localization, and mapping "
+                        "remain blocked until capture finishes "
+                        "or is cancelled."
+                    ),
+                    "persistent_map_refresh":
+                        refresh_runtime.status(),
+                },
+            )
+            return
 
         if path == "/dashboard/map-promote-candidate":
             try:
