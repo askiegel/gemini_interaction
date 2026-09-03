@@ -3270,6 +3270,7 @@
     let latestPoseReceivedAt = null;
     let selectedGoal = null;
     let computedPath = null;
+    let stoppedPlanningCleanupPending = false;
     let uncertaintyBlocked = true;
 
     function byId(id) {
@@ -3698,7 +3699,47 @@
         );
     }
 
+    function clearStoppedPlanningDisplay() {
+        latestPose = null;
+        latestPoseReceivedAt = null;
+        selectedGoal = null;
+        computedPath = null;
+        uncertaintyBlocked = true;
+
+        setText(
+            "planningSelectedGoal",
+            "—"
+        );
+
+        setText(
+            "planningPathSummary",
+            "—"
+        );
+
+        setText(
+            "planningPoseUncertainty",
+            "—"
+        );
+
+        setText(
+            "planningReadiness",
+            "Stopped"
+        );
+
+        setMessage(
+            "Start Planning to localize Mayday "
+            + "and preview a path.",
+            false
+        );
+
+        drawPath();
+    }
+
+
     function renderPlanning(payload) {
+        const wasPlanningRunning =
+            planningRunning;
+
         const navigation = (
             payload
             && payload.navigation
@@ -3756,9 +3797,22 @@
             planningReady = false;
 
             if (!navigationExecuting) {
-                latestPose = null;
-                latestPoseReceivedAt = null;
-                uncertaintyBlocked = true;
+                const shouldClearStoppedDisplay = (
+                    wasPlanningRunning
+                    || stoppedPlanningCleanupPending
+                );
+
+                if (shouldClearStoppedDisplay) {
+                    clearStoppedPlanningDisplay();
+
+                    stoppedPlanningCleanupPending =
+                        false;
+
+                } else {
+                    latestPose = null;
+                    latestPoseReceivedAt = null;
+                    uncertaintyBlocked = true;
+                }
             }
 
             setState(
@@ -4769,6 +4823,10 @@
             planningRunning = false;
             planningReady = false;
             actionInFlight = false;
+
+            stoppedPlanningCleanupPending =
+                true;
+
             updateButtons();
         }
     }

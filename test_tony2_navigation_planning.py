@@ -500,3 +500,96 @@ def test_planning_controls_are_next_to_persistent_map():
         "without execution"
         in planning
     )
+
+def test_confirmed_stopped_state_clears_stale_planning_display():
+    required = (
+        "let stoppedPlanningCleanupPending = false;",
+        "function clearStoppedPlanningDisplay()",
+        "latestPose = null;",
+        "latestPoseReceivedAt = null;",
+        "selectedGoal = null;",
+        "computedPath = null;",
+        '"planningSelectedGoal",',
+        '"planningPathSummary",',
+        '"planningPoseUncertainty",',
+        (
+            '"Start Planning to localize Mayday "'
+        ),
+        "const wasPlanningRunning =",
+        "wasPlanningRunning",
+        "|| stoppedPlanningCleanupPending",
+        "clearStoppedPlanningDisplay();",
+        (
+            "stoppedPlanningCleanupPending =\n"
+            "                        false;"
+        ),
+    )
+
+    for marker in required:
+        assert marker in CONTROL
+
+    # A normal STOPPED refresh must not repeatedly clear a
+    # newly selected goal used by the separate guarded GO flow.
+    stopped = CONTROL.index(
+        "const shouldClearStoppedDisplay"
+    )
+
+    guarded_clear = CONTROL.index(
+        "if (shouldClearStoppedDisplay)",
+        stopped,
+    )
+
+    fallback = CONTROL.index(
+        "} else {",
+        guarded_clear,
+    )
+
+    fallback_end = CONTROL.index(
+        "setState(",
+        fallback,
+    )
+
+    fallback_source = CONTROL[
+        fallback:fallback_end
+    ]
+
+    assert "selectedGoal = null;" not in fallback_source
+    assert "computedPath = null;" not in fallback_source
+
+
+def test_stop_mayday_defers_cleanup_until_backend_reports_stopped():
+    start = CONTROL.index(
+        "async function stopMayday()"
+    )
+
+    boundaries = []
+
+    for marker in (
+        "\n    function ",
+        "\n    async function ",
+    ):
+        found = CONTROL.find(
+            marker,
+            start + 1,
+        )
+
+        if found >= 0:
+            boundaries.append(found)
+
+    assert boundaries
+
+    source = CONTROL[
+        start:min(boundaries)
+    ]
+
+    assert (
+        "stoppedPlanningCleanupPending ="
+        in source
+    )
+
+    # The STOP handler itself must not fabricate a clean
+    # stopped display before navigation-control confirms it.
+    assert (
+        "clearStoppedPlanningDisplay();"
+        not in source
+    )
