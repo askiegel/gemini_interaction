@@ -2862,3 +2862,85 @@ button.candidate-inventory-item:focus-visible {
             repeat(2, minmax(120px, 1fr));
     }
 }
+
+/* MAYDAY_FORWARD_UP_PERSISTENT_MAP_DISPLAY */
+
+/*
+ * Presentation transform only.
+ *
+ * The ROS occupancy grid remains in its original map frame.
+ * All four map-space canvases are visually rotated together.
+ */
+.map-stage.mayday-forward-up-map-stage {
+    --mayday-map-display-rotation: -90deg;
+
+    position: relative !important;
+
+    /*
+     * A square stage makes a 90-degree baseline rotation
+     * lossless instead of cropping a rectangular canvas.
+     */
+    aspect-ratio: 1 / 1 !important;
+    height: auto !important;
+    min-height: 0 !important;
+    overflow: hidden !important;
+}
+
+.map-stage.mayday-forward-up-map-stage #mapCanvas,
+.map-stage.mayday-forward-up-map-stage #localizedLidarCanvas,
+.map-stage.mayday-forward-up-map-stage #localizationPoseCanvas,
+.map-stage.mayday-forward-up-map-stage #planningPathCanvas {
+    width: 100% !important;
+    height: 100% !important;
+
+    transform:
+        rotate(
+            var(
+                --mayday-map-display-rotation
+            )
+        ) !important;
+
+    transform-origin:
+        50% 50% !important;
+}
+
+/*
+ * Status pills remain screen-aligned because only the map-space
+ * canvases rotate.
+ */
+#persistentMapForwardLabel {
+    position: absolute;
+    top: 8px;
+    left: 50%;
+    z-index: 12;
+
+    transform: translateX(-50%);
+
+    box-sizing: border-box;
+    padding: 4px 10px;
+
+    border: 1px solid rgba(148, 163, 184, 0.45);
+    border-radius: 999px;
+
+    background: rgba(15, 23, 42, 0.88);
+    color: #cbd5e1;
+
+    font-size: 0.72rem;
+    font-weight: 700;
+    letter-spacing: 0.03em;
+
+    line-height: 1.2;
+
+    pointer-events: none;
+    user-select: none;
+}
+
+#persistentMapForwardLabel.localized {
+    border-color: rgba(132, 204, 22, 0.60);
+    color: #d9f99d;
+}
+
+#persistentMapForwardLabel.baseline {
+    border-color: rgba(56, 189, 248, 0.55);
+    color: #bae6fd;
+}

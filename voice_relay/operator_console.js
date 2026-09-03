@@ -3555,7 +3555,7 @@
         context.font = "700 13px system-ui";
         context.textAlign = "center";
         context.fillText(
-            "LIVE MAP +Y",
+            "LIVE ",
             drawing.width / 2,
             Math.max(18, drawY - 10)
         );
@@ -4021,7 +4021,7 @@
         context.font = "700 13px system-ui";
         context.textAlign = "center";
         context.fillText(
-            "CANDIDATE — MAP +Y",
+            "CANDIDATE — ",
             drawing.width / 2,
             Math.max(18, drawY - 10)
         );
@@ -4949,7 +4949,7 @@
         context.font = "700 13px system-ui";
         context.textAlign = "center";
         context.fillText(
-            "MAP +Y",
+            "",
             width / 2,
             Math.max(18, drawY - 10)
         );
@@ -9619,5 +9619,589 @@
 
     } else {
         initializeReview();
+    }
+})();
+
+/* MAYDAY_FORWARD_UP_PERSISTENT_MAP_DISPLAY */
+
+(() => {
+    "use strict";
+
+    /*
+     * IMPORTANT:
+     *
+     * This module changes presentation only.
+     *
+     * It does NOT rotate:
+     * - OccupancyGrid data
+     * - map origin
+     * - localization coordinates
+     * - path coordinates
+     * - navigation goals
+     *
+     * The four map-space canvases are rotated together with CSS.
+     *
+     * Before localization:
+     *
+     *     ROS map +X
+     *         ↓
+     *     screen UP
+     *
+     * Once a fresh map-frame Mayday yaw is available:
+     *
+     *     Mayday forward
+     *         ↓
+     *     screen UP
+     */
+
+    const LOCALIZATION_ENDPOINT =
+        "/dashboard/localization";
+
+    const BASELINE_ROTATION_DEGREES =
+        -90.0;
+
+    const MAP_CANVAS_IDS = [
+        "mapCanvas",
+        "localizedLidarCanvas",
+        "localizationPoseCanvas",
+        "planningPathCanvas",
+    ];
+
+    let currentRotationDegrees =
+        BASELINE_ROTATION_DEGREES;
+
+    let clickRemapInstalled =
+        false;
+
+
+    function byId(id) {
+        return document.getElementById(
+            id
+        );
+    }
+
+
+    function normalizeDegrees(
+        degrees
+    ) {
+        let value =
+            Number(
+                degrees
+            );
+
+        if (!Number.isFinite(value)) {
+            return (
+                BASELINE_ROTATION_DEGREES
+            );
+        }
+
+        while (value > 180) {
+            value -= 360;
+        }
+
+        while (value <= -180) {
+            value += 360;
+        }
+
+        return value;
+    }
+
+
+    function mapStage() {
+        const mapCanvas =
+            byId(
+                "mapCanvas"
+            );
+
+        if (!mapCanvas) {
+            return null;
+        }
+
+        return (
+            mapCanvas.closest(
+                ".map-stage"
+            )
+            || mapCanvas.parentElement
+        );
+    }
+
+
+    function ensureForwardLabel(
+        stage
+    ) {
+        let label =
+            byId(
+                "persistentMapForwardLabel"
+            );
+
+        if (label) {
+            return label;
+        }
+
+        label =
+            document.createElement(
+                "div"
+            );
+
+        label.id =
+            "persistentMapForwardLabel";
+
+        label.className =
+            "baseline";
+
+        label.textContent =
+            "FORWARD · +X BASELINE";
+
+        stage.appendChild(
+            label
+        );
+
+        return label;
+    }
+
+
+    function setDisplayRotation(
+        degrees,
+        mode
+    ) {
+        const stage =
+            mapStage();
+
+        if (!stage) {
+            return;
+        }
+
+        currentRotationDegrees =
+            normalizeDegrees(
+                degrees
+            );
+
+        stage.classList.add(
+            "mayday-forward-up-map-stage"
+        );
+
+        stage.style.setProperty(
+            "--mayday-map-display-rotation",
+            (
+                currentRotationDegrees
+                    .toFixed(4)
+                + "deg"
+            )
+        );
+
+        const label =
+            ensureForwardLabel(
+                stage
+            );
+
+        if (
+            mode
+            === "localized"
+        ) {
+            label.className =
+                "localized";
+
+            label.textContent =
+                "FORWARD · MAYDAY-UP";
+
+        } else {
+            label.className =
+                "baseline";
+
+            label.textContent =
+                "FORWARD · +X BASELINE";
+        }
+    }
+
+
+    function poseYawDegrees(
+        pose
+    ) {
+        if (
+            !pose
+            || typeof pose
+                !== "object"
+        ) {
+            return null;
+        }
+
+        const degrees =
+            Number(
+                pose.yaw_degrees
+                ?? pose.yaw_deg
+            );
+
+        if (
+            Number.isFinite(
+                degrees
+            )
+        ) {
+            return degrees;
+        }
+
+        const radians =
+            Number(
+                pose.yaw_radians
+                ?? pose.yaw
+            );
+
+        if (
+            Number.isFinite(
+                radians
+            )
+        ) {
+            return (
+                radians
+                * 180.0
+                / Math.PI
+            );
+        }
+
+        return null;
+    }
+
+
+    async function refreshOrientation() {
+        const stage =
+            mapStage();
+
+        if (!stage) {
+            return;
+        }
+
+        /*
+         * Default for the newly promoted stationary baseline:
+         * Mayday was map yaw 0 when that local map was created.
+         *
+         * Therefore map +X is the baseline forward direction.
+         */
+        let rotation =
+            BASELINE_ROTATION_DEGREES;
+
+        let mode =
+            "baseline";
+
+        try {
+            const response =
+                await fetch(
+                    LOCALIZATION_ENDPOINT,
+                    {
+                        cache:
+                            "no-store",
+                    }
+                );
+
+            if (!response.ok) {
+                setDisplayRotation(
+                    rotation,
+                    mode
+                );
+
+                return;
+            }
+
+            const payload =
+                await response.json();
+
+            const telemetry =
+                payload
+                && payload.telemetry;
+
+            const pose =
+                telemetry
+                && telemetry.pose;
+
+            const age =
+                Number(
+                    telemetry
+                    && telemetry.age_seconds
+                );
+
+            const yaw =
+                poseYawDegrees(
+                    pose
+                );
+
+            const fresh =
+                Boolean(
+                    payload
+                    && payload.runtime_active
+                        === true
+                    && telemetry
+                    && telemetry.available
+                        === true
+                    && pose
+                    && pose.frame_id
+                        === "map"
+                    && Number.isFinite(age)
+                    && age < 3.0
+                    && Number.isFinite(yaw)
+                );
+
+            if (fresh) {
+                /*
+                 * Standard map display:
+                 *
+                 *   +X = screen right
+                 *   +Y = screen up
+                 *
+                 * For robot map yaw θ, the required screen
+                 * rotation is:
+                 *
+                 *   θ - 90 degrees
+                 *
+                 * so Mayday's heading becomes screen UP.
+                 */
+                rotation =
+                    yaw - 90.0;
+
+                mode =
+                    "localized";
+            }
+
+        } catch (_error) {
+            /*
+             * Localization telemetry is optional for presentation.
+             * Remain at the safe +X baseline orientation.
+             */
+        }
+
+        setDisplayRotation(
+            rotation,
+            mode
+        );
+    }
+
+
+    function inverseRotatePoint(
+        x,
+        y,
+        width,
+        height
+    ) {
+        const centerX =
+            width / 2.0;
+
+        const centerY =
+            height / 2.0;
+
+        const dx =
+            x - centerX;
+
+        const dy =
+            y - centerY;
+
+        const angle =
+            (
+                currentRotationDegrees
+                * Math.PI
+                / 180.0
+            );
+
+        /*
+         * CSS applied R(angle).
+         * Goal selection must use R(-angle).
+         */
+        const originalX =
+            centerX
+            + Math.cos(angle) * dx
+            + Math.sin(angle) * dy;
+
+        const originalY =
+            centerY
+            - Math.sin(angle) * dx
+            + Math.cos(angle) * dy;
+
+        return {
+            x:
+                originalX,
+            y:
+                originalY,
+        };
+    }
+
+
+    function installPlanningClickRemap() {
+        if (clickRemapInstalled) {
+            return;
+        }
+
+        const canvas =
+            byId(
+                "planningPathCanvas"
+            );
+
+        if (!canvas) {
+            return;
+        }
+
+        canvas.addEventListener(
+            "click",
+            (event) => {
+                /*
+                 * Synthetic event below is already expressed
+                 * in the original unrotated canvas coordinate
+                 * system. Let the existing planner handler
+                 * consume it normally.
+                 */
+                if (!event.isTrusted) {
+                    return;
+                }
+
+                const rect =
+                    canvas
+                        .getBoundingClientRect();
+
+                if (
+                    rect.width <= 0
+                    || rect.height <= 0
+                ) {
+                    return;
+                }
+
+                const displayedX =
+                    event.clientX
+                    - rect.left;
+
+                const displayedY =
+                    event.clientY
+                    - rect.top;
+
+                const original =
+                    inverseRotatePoint(
+                        displayedX,
+                        displayedY,
+                        rect.width,
+                        rect.height
+                    );
+
+                event.preventDefault();
+
+                event.stopImmediatePropagation();
+
+                const synthetic =
+                    new MouseEvent(
+                        "click",
+                        {
+                            bubbles:
+                                true,
+                            cancelable:
+                                true,
+                            view:
+                                window,
+
+                            clientX:
+                                rect.left
+                                + original.x,
+
+                            clientY:
+                                rect.top
+                                + original.y,
+
+                            button:
+                                event.button,
+
+                            buttons:
+                                event.buttons,
+
+                            ctrlKey:
+                                event.ctrlKey,
+
+                            shiftKey:
+                                event.shiftKey,
+
+                            altKey:
+                                event.altKey,
+
+                            metaKey:
+                                event.metaKey,
+                        }
+                    );
+
+                canvas.dispatchEvent(
+                    synthetic
+                );
+            },
+            true
+        );
+
+        clickRemapInstalled =
+            true;
+    }
+
+
+    function verifyCanvasStack() {
+        return (
+            MAP_CANVAS_IDS.every(
+                (id) =>
+                    Boolean(
+                        byId(id)
+                    )
+            )
+        );
+    }
+
+
+    function initializeForwardUpDisplay() {
+        if (
+            !verifyCanvasStack()
+        ) {
+            return;
+        }
+
+        /*
+         * Apply immediately before waiting for localization.
+         */
+        setDisplayRotation(
+            BASELINE_ROTATION_DEGREES,
+            "baseline"
+        );
+
+        installPlanningClickRemap();
+
+        refreshOrientation();
+
+        window.setInterval(
+            refreshOrientation,
+            1000
+        );
+
+        window.addEventListener(
+            "resize",
+            () => {
+                /*
+                 * Re-assert class and custom property after
+                 * responsive layout changes.
+                 */
+                setDisplayRotation(
+                    currentRotationDegrees,
+                    (
+                        byId(
+                            "persistentMapForwardLabel"
+                        )
+                        ?.classList
+                        .contains(
+                            "localized"
+                        )
+                        ? "localized"
+                        : "baseline"
+                    )
+                );
+            }
+        );
+    }
+
+
+    if (
+        document.readyState
+        === "loading"
+    ) {
+        document.addEventListener(
+            "DOMContentLoaded",
+            initializeForwardUpDisplay
+        );
+
+    } else {
+        initializeForwardUpDisplay();
     }
 })();
