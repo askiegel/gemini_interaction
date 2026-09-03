@@ -210,15 +210,22 @@ def test_existing_saved_map_controller_remains_read_only():
     assert "/planning/" not in saved_map
 
 
-def test_safety_copy_is_visible():
+def test_read_only_planning_copy_is_visible():
     for marker in (
+        "Start Planning performs stationary global localization.",
+        "Then click a free map location",
+        "Compute Selected Path",
+        "Tony2 Nav2's exact map-frame path",
+        "without execution.",
+    ):
+        assert marker in HTML
+
+    for stale in (
         "Click a free map location, then press GO.",
         "Robot Bridge verifies localization",
         "guarded goal within 0.50 m and 25 seconds",
-        "STOP",
-        "MAYDAY immediately cancels the active goal.",
     ):
-        assert marker in HTML
+        assert stale not in HTML
 
 def test_initializer_proxy_is_fixed():
     start = SERVER.index(
@@ -986,63 +993,38 @@ def test_pose_refresh_adds_no_motion_or_navigation_execution():
         assert marker not in CONTROL
 
 
-def test_normal_navigation_is_select_then_go():
-    dashboard = Path("voice_relay/index.html").read_text(
+def test_path_preview_and_guarded_execution_are_distinct():
+    dashboard = Path(
+        "voice_relay/index.html"
+    ).read_text(
         encoding="utf-8"
     )
 
     assert "Guarded Map Navigation" in dashboard
-    assert "GO — max 0.50 m" in dashboard
+
+    # Read-only Tony2 planner controls remain available.
+    assert "Start Planning" in dashboard
+    assert "Compute Selected Path" in dashboard
     assert (
-        "Click a free map location, then press GO."
+        "Tony2 Nav2's exact map-frame path"
         in dashboard
     )
+    assert "without execution." in dashboard
 
-    button_start = dashboard.index(
-        "function updateButtons()"
+    # Guarded execution controls still exist separately.
+    assert "GO — max 0.50 m" in dashboard
+    assert "STOP MAYDAY" in dashboard
+
+    # Do not regress to copy that implies Compute Path
+    # itself executes a Robot Bridge navigation goal.
+    assert (
+        "Click a free map location, then press GO."
+        not in dashboard
     )
-    button_end = dashboard.index(
-        "function renderUncertainty",
-        button_start,
+    assert (
+        "Robot Bridge verifies localization"
+        not in dashboard
     )
-    buttons = dashboard[button_start:button_end]
-
-    assert "|| !occupancyMap" in buttons
-    assert "|| !selectedGoal" in buttons
-
-    send_start = dashboard.index(
-        "async function sendMayday()"
-    )
-    send_end = dashboard.index(
-        "function selectGoal",
-        send_start,
-    )
-    send = dashboard[send_start:send_end]
-
-    for obsolete_guard in (
-        "|| !planningRunning",
-        "|| !computedPath",
-        "pathLength > MAX_NAVIGATION_DISTANCE_METERS",
-    ):
-        assert obsolete_guard not in send
-
-    assert send.index("NAVIGATION_START_ENDPOINT") < send.index(
-        "NAVIGATION_INITIALIZE_ENDPOINT"
-    )
-    assert send.index("NAVIGATION_INITIALIZE_ENDPOINT") < send.index(
-        "NAVIGATION_GOAL_ENDPOINT"
-    )
-
-    select_start = dashboard.index(
-        "function selectGoal"
-    )
-    select = dashboard[
-        select_start:select_start + 1400
-    ]
-
-    assert "!planningRunning" not in select
-    assert "actionInFlight || navigationExecuting" in select
-
 
 def test_direct_go_uses_short_bounded_initialization_waits():
     assert (

@@ -302,7 +302,7 @@
                 flex-direction: column;
             }
         }
-    
+
     .camera-stage {
         position: relative;
         width: 100%;
@@ -1502,6 +1502,92 @@
                     Read-only saved map
                 </span>
             </div>
+
+
+<section class="planning-path-controls">
+                <div class="planning-path-heading">
+                    <h3>Guarded Map Navigation</h3>
+                    <strong
+                        id="planningPathState"
+                        class="planning-path-state stopped"
+                        aria-live="polite"
+                    >
+                        Stopped
+                    </strong>
+                </div>
+
+                <div class="planning-path-buttons">
+                    <button
+                        id="startPlanningButton"
+                        class="planning-path-button start"
+                        type="button"
+                    >
+                        Start Planning
+                    </button>
+                    <button
+                        id="stopPlanningButton"
+                        class="planning-path-button stop"
+                        type="button"
+                        disabled
+                    >
+                        Stop Planning
+                    </button>
+                    <button
+                        id="computePlanningPathButton"
+                        class="planning-path-button compute"
+                        type="button"
+                        disabled
+                    >
+                        Compute Selected Path
+                    </button>
+                    <button
+                        id="sendMaydayButton"
+                        class="planning-path-button start"
+                        type="button"
+                        disabled
+                    >
+                        GO — max 0.50 m
+                    </button>
+                    <button
+                        id="stopMaydayButton"
+                        class="planning-path-button stop"
+                        type="button"
+                        disabled
+                    >
+                        STOP MAYDAY
+                    </button>
+                </div>
+
+                <p
+                    id="planningPathMessage"
+                    class="planning-path-message"
+                    aria-live="polite"
+                >
+                    For a read-only path preview, start planning,
+                    select a free map location, then compute the path.
+                </p>
+
+                <div class="planning-path-detail">
+                    <span>Selected goal</span>
+                    <strong id="planningSelectedGoal">—</strong>
+                </div>
+                <div class="planning-path-detail">
+                    <span>Computed path</span>
+                    <strong id="planningPathSummary">—</strong>
+                </div>
+                <div class="planning-path-detail">
+                    <span>Pose uncertainty</span>
+                    <strong id="planningPoseUncertainty">—</strong>
+                </div>
+                <div class="planning-path-detail">
+                    <span>Planning readiness</span>
+                    <strong id="planningReadiness">Stopped</strong>
+                </div>
+
+                <p class="small-text planning-path-safety">
+                    Start Planning performs stationary global localization. Then click a free map location and use Compute Selected Path to preview Tony2 Nav2's exact map-frame path without execution.
+                </p>
+            </section>
         </article>
 
         <aside class="card map-metrics-card">
@@ -1597,93 +1683,7 @@
                 </p>
             </section>
 
-            <section class="planning-path-controls">
-                <div class="planning-path-heading">
-                    <h3>Guarded Map Navigation</h3>
-                    <strong
-                        id="planningPathState"
-                        class="planning-path-state stopped"
-                        aria-live="polite"
-                    >
-                        Stopped
-                    </strong>
-                </div>
 
-                <div class="planning-path-buttons">
-                    <button
-                        id="startPlanningButton"
-                        class="planning-path-button start"
-                        type="button"
-                    >
-                        Start Planning
-                    </button>
-                    <button
-                        id="stopPlanningButton"
-                        class="planning-path-button stop"
-                        type="button"
-                        disabled
-                    >
-                        Stop Planning
-                    </button>
-                    <button
-                        id="computePlanningPathButton"
-                        class="planning-path-button compute"
-                        type="button"
-                        disabled
-                    >
-                        Compute Selected Path
-                    </button>
-                    <button
-                        id="sendMaydayButton"
-                        class="planning-path-button start"
-                        type="button"
-                        disabled
-                    >
-                        GO — max 0.50 m
-                    </button>
-                    <button
-                        id="stopMaydayButton"
-                        class="planning-path-button stop"
-                        type="button"
-                        disabled
-                    >
-                        STOP MAYDAY
-                    </button>
-                </div>
-
-                <p
-                    id="planningPathMessage"
-                    class="planning-path-message"
-                    aria-live="polite"
-                >
-                    For a read-only path preview, start planning,
-                    select a free map location, then compute the path.
-                </p>
-
-                <div class="planning-path-detail">
-                    <span>Selected goal</span>
-                    <strong id="planningSelectedGoal">—</strong>
-                </div>
-                <div class="planning-path-detail">
-                    <span>Computed path</span>
-                    <strong id="planningPathSummary">—</strong>
-                </div>
-                <div class="planning-path-detail">
-                    <span>Pose uncertainty</span>
-                    <strong id="planningPoseUncertainty">—</strong>
-                </div>
-                <div class="planning-path-detail">
-                    <span>Planning readiness</span>
-                    <strong id="planningReadiness">Stopped</strong>
-                </div>
-
-                <p class="small-text planning-path-safety">
-                    Click a free map location, then press GO.
-                    Robot Bridge verifies localization and executes one
-                    guarded goal within 0.50 m and 25 seconds. STOP
-                    MAYDAY immediately cancels the active goal.
-                </p>
-            </section>
 
             <div class="metric localization-metric">
                 <span class="metric-name">Localization</span>

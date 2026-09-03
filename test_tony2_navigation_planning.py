@@ -454,3 +454,49 @@ def test_tony2_planning_controls_are_visible():
         "then compute the path."
         in html
     )
+
+
+def test_planning_controls_are_next_to_persistent_map():
+    html = (
+        ROOT
+        / "voice_relay"
+        / "index.html"
+    ).read_text(
+        encoding="utf-8"
+    )
+
+    map_index = html.index(
+        'id="mapCanvas"'
+    )
+
+    planning_index = html.index(
+        '<section class="planning-path-controls">'
+    )
+
+    telemetry_index = html.index(
+        "Map Telemetry"
+    )
+
+    assert (
+        map_index
+        < planning_index
+        < telemetry_index
+    )
+
+    planning_end = html.index(
+        "</section>",
+        planning_index,
+    )
+
+    planning = html[
+        planning_index:planning_end
+    ]
+
+    assert "Start Planning" in planning
+    assert "Stop Planning" in planning
+    assert "Compute Selected Path" in planning
+
+    assert (
+        "without execution"
+        in planning
+    )
