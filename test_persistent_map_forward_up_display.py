@@ -224,7 +224,8 @@ def test_html_marks_forward_up_feature():
 
 
 
-def test_raw_persistent_rasters_receive_180_degree_correction():
+
+def test_candidate_preview_keeps_180_degree_correction():
     marker = (
         "/* MAYDAY_180_DEGREE_BASELINE_CORRECTION */"
     )
@@ -242,13 +243,15 @@ def test_raw_persistent_rasters_receive_180_degree_correction():
     )
 
     assert (
-        "#persistentMapReviewPersistentCanvas"
+        "rotate(180deg)"
         in correction
     )
 
+    # Review Large now owns the persistent-reference
+    # orientation inside drawPersistentReference().
     assert (
-        "rotate(180deg)"
-        in correction
+        "#persistentMapReviewPersistentCanvas"
+        not in correction
     )
 
 
@@ -283,4 +286,47 @@ def test_localized_pose_still_controls_true_forward_up():
         "rotation =\n"
         "                    yaw - 90.0;"
         in source
+    )
+
+
+
+
+def test_review_reference_uses_90_ccw_renderer_not_css():
+    start = JS.index(
+        "function drawPersistentReference("
+    )
+
+    end = JS.index(
+        "\n    function ",
+        start + 10,
+    )
+
+    renderer = JS[
+        start:end
+    ]
+
+    assert (
+        "MAYDAY_REVIEW_PERSISTENT_90_CCW"
+        in renderer
+    )
+
+    assert (
+        "-Math.PI / 2"
+        in renderer
+    )
+
+    marker = (
+        "/* MAYDAY_180_DEGREE_BASELINE_CORRECTION */"
+    )
+
+    assert marker in CSS
+
+    correction = CSS.split(
+        marker,
+        1,
+    )[1]
+
+    assert (
+        "#persistentMapReviewPersistentCanvas"
+        not in correction
     )

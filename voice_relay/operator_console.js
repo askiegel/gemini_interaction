@@ -8621,6 +8621,35 @@
             return;
         }
 
+        /*
+         * MAYDAY_REVIEW_PERSISTENT_90_CCW
+         *
+         * Physical visual check established that the raw
+         * persistent-map reference needs a 90-degree
+         * COUNTERCLOCKWISE presentation adjustment.
+         *
+         * Canvas positive angles are clockwise because screen
+         * Y increases downward, so -PI/2 gives visual CCW.
+         *
+         * Candidate + Live Overlay and Live LiDAR are already
+         * robot-local and must remain unchanged.
+         */
+        context.save();
+
+        context.translate(
+            size / 2,
+            size / 2
+        );
+
+        context.rotate(
+            -Math.PI / 2
+        );
+
+        context.translate(
+            -size / 2,
+            -size / 2
+        );
+
         const scale =
             Math.min(
                 (
@@ -8703,6 +8732,8 @@
                 );
             }
         }
+        context.restore();
+
     }
 
 

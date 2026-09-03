@@ -239,3 +239,73 @@ def test_large_review_css_exists():
         "#persistentMapStructuralStatus",
     ):
         assert marker in CSS
+
+
+
+def test_persistent_reference_is_rotated_90_ccw_in_renderer():
+    source = review_source()
+
+    start = source.index(
+        "function drawPersistentReference("
+    )
+
+    end = source.index(
+        "\n    function ",
+        start + 10,
+    )
+
+    renderer = source[
+        start:end
+    ]
+
+    assert (
+        "MAYDAY_REVIEW_PERSISTENT_90_CCW"
+        in renderer
+    )
+
+    assert (
+        "context.rotate("
+        in renderer
+    )
+
+    assert (
+        "-Math.PI / 2"
+        in renderer
+    )
+
+    assert (
+        "context.save();"
+        in renderer
+    )
+
+    assert (
+        "context.restore();"
+        in renderer
+    )
+
+
+def test_candidate_live_overlay_has_no_review_rotation():
+    source = review_source()
+
+    start = source.index(
+        "function drawCandidateOverlay("
+    )
+
+    end = source.index(
+        "\n    function ",
+        start + 10,
+    )
+
+    renderer = source[
+        start:end
+    ]
+
+    assert (
+        "MAYDAY_REVIEW_PERSISTENT_90_CCW"
+        not in renderer
+    )
+
+    assert (
+        "-Math.PI / 2"
+        not in renderer
+    )

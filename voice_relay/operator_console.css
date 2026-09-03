@@ -2957,8 +2957,7 @@ button.candidate-inventory-item:focus-visible {
  * Do NOT apply this to Candidate + Live Overlay because that
  * view is already transformed into the common robot-local frame.
  */
-#persistentMapCandidateCanvas,
-#persistentMapReviewPersistentCanvas {
+#persistentMapCandidateCanvas {
     transform: rotate(180deg);
     transform-origin: 50% 50%;
 }
