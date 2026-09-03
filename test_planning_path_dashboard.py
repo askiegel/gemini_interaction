@@ -106,18 +106,39 @@ def test_controller_uses_read_only_contract():
         assert marker in CONTROL
 
 
-def test_goal_selection_uses_map_metadata():
+
+def test_goal_selection_uses_map_metadata_and_tony2_payload():
     for marker in (
         "canvasToMap",
         "occupancyMap.origin",
         "occupancyMap.resolution",
         "occupancyMap.cells[index] !== 0",
+    ):
+        assert marker in CONTROL
+
+    start = CONTROL.index(
+        "async function computePath()"
+    )
+
+    end = CONTROL.index(
+        "function selectGoal",
+        start,
+    )
+
+    handler = CONTROL[
+        start:end
+    ]
+
+    compact = " ".join(
+        handler.split()
+    )
+
+    for marker in (
         "goal_x: selectedGoal.x",
         "goal_y: selectedGoal.y",
         "goal_yaw: selectedGoal.yaw",
     ):
-        assert marker in CONTROL
-
+        assert marker in compact
 
 def test_high_uncertainty_blocks_compute():
     assert "MAX_POSITION_STD_METERS" in CONTROL
@@ -247,206 +268,219 @@ def test_initializer_route_is_post_only():
     assert route in post_source
 
 
-def test_start_runs_fixed_initializer_sequence():
+
+def test_start_runs_tony2_global_initializer_sequence():
+    assert (
+        'const START_ENDPOINT ='
+        in CONTROL
+    )
+
+    assert (
+        '"/dashboard/navigation-start"'
+        in CONTROL
+    )
+
     assert (
         'const INITIALIZE_ENDPOINT ='
         in CONTROL
     )
+
     assert (
-        '"/dashboard/planning-'
-        'initialize-localization"'
-        in CONTROL
-    )
-    assert (
-        "async function startPlanning()"
-        in CONTROL
-    )
-    assert (
-        "function validInitialization(result)"
+        '"/dashboard/navigation-initialize-localization"'
         in CONTROL
     )
 
     start = CONTROL.index(
         "async function startPlanning()"
     )
+
     end = CONTROL.index(
         "async function performAction(",
         start,
     )
-    handler = CONTROL[start:end]
 
-    start_fetch = handler.index(
-        "START_ENDPOINT"
+    handler = CONTROL[
+        start:end
+    ]
+
+    assert (
+        handler.index("START_ENDPOINT")
+        < handler.index("INITIALIZE_ENDPOINT")
     )
-    initialize_fetch = handler.index(
+
+    assert "navigationWasStarted(" in handler
+    assert "validInitialization(" in handler
+
+
+def test_start_adopts_trusted_tony2_pose_without_refresh():
+    start = CONTROL.index(
+        "async function startPlanning()"
+    )
+
+    end = CONTROL.index(
+        "async function performAction(",
+        start,
+    )
+
+    handler = CONTROL[
+        start:end
+    ]
+
+    compact = " ".join(
+        handler.split()
+    )
+
+    assert (
+        "initialization.final_pose"
+        in compact
+    )
+
+    assert (
+        "initialization.uncertainty"
+        in compact
+    )
+
+    assert "latestPose = {" in handler
+    assert 'frame_id: "map"' in handler
+
+    assert "POSE_REFRESH_ENDPOINT" not in handler
+    assert "LOCALIZATION_ENDPOINT" not in handler
+
+
+def test_startup_global_localization_request_is_parameter_free():
+    start = CONTROL.index(
+        "async function startPlanning()"
+    )
+
+    end = CONTROL.index(
+        "async function performAction(",
+        start,
+    )
+
+    handler = CONTROL[
+        start:end
+    ]
+
+    request_start = handler.index(
         "INITIALIZE_ENDPOINT"
     )
 
-    assert start_fetch < initialize_fetch
-    assert (
-        "validInitialization("
-        in handler
-    )
-    assert (
-        "INITIALIZE_DISCOVERY_DELAY_MS"
-        in handler
-    )
-    assert (
-        "INITIALIZE_MAX_ATTEMPTS"
-        in handler
+    request_end = handler.index(
+        "validInitialization(",
+        request_start,
     )
 
-    validator_start = CONTROL.index(
-        "function validInitialization(result)"
-    )
-    validator_end = CONTROL.index(
-        "async function startPlanning()",
-        validator_start,
-    )
-    validator = CONTROL[
-        validator_start:validator_end
+    request = handler[
+        request_start:request_end
     ]
-
-    required = (
-        "global_localization_requested === true",
-        "nomotion_updates_requested === 20",
-        "stationary_required === true",
-        "initial_pose_supplied === false",
-        "pose_published === false",
-        "path_computed === false",
-        "path_executed === false",
-        "navigation_goal_executed === false",
-        "controller_enabled === false",
-        "navigator_enabled === false",
-        "motion_enabled === false",
-    )
-
-    for value in required:
-        assert value in validator
-
-    assert "STOP_ENDPOINT" in handler
-    assert (
-        handler.index("INITIALIZE_ENDPOINT")
-        < handler.index("STOP_ENDPOINT")
-    )
-
-
-def test_start_refreshes_pose_once_after_initialization():
-    start = CONTROL.index("async function startPlanning()")
-    end = CONTROL.index(
-        "async function performAction(",
-        start,
-    )
-    handler = CONTROL[start:end]
-
-    initialized = handler.index(
-        "if (!initializationComplete)"
-    )
-    refresh = handler.index(
-        "POSE_REFRESH_ENDPOINT",
-        initialized,
-    )
-    localization = handler.index(
-        "LOCALIZATION_ENDPOINT",
-        refresh,
-    )
-    ready = handler.index(
-        'setState("Ready", "running")',
-        localization,
-    )
-
-    assert initialized < refresh < localization < ready
-    assert handler.count("POSE_REFRESH_ENDPOINT") == 1
-    assert "validPoseRefresh(refreshResult)" in handler
-    assert "previousReceivedAt" in handler
-
-
-def test_startup_pose_refresh_is_parameter_free():
-    start = CONTROL.index("async function startPlanning()")
-    end = CONTROL.index(
-        "async function performAction(",
-        start,
-    )
-    handler = CONTROL[start:end]
-
-    refresh_start = handler.index(
-        "POSE_REFRESH_ENDPOINT"
-    )
-    refresh_end = handler.index(
-        "if (!validPoseRefresh",
-        refresh_start,
-    )
-    request = handler[refresh_start:refresh_end]
 
     assert 'body: "{}"' in request
 
     for marker in (
-        "service",
-        "initial_pose",
-        "pose_published",
-        "frame_id",
-        "planner_id",
         "goal_x",
         "goal_y",
         "goal_yaw",
+        "selectedGoal",
+        "planner_id",
         "cmd_vel",
+        "initial_pose",
+        '"service"',
+        '"topic"',
     ):
         assert marker not in request
 
 
-def test_startup_waits_for_bounded_safe_pose():
-    start = CONTROL.index("async function startPlanning()")
+def test_startup_waits_for_trusted_tony2_pose_before_ready():
+    start = CONTROL.index(
+        "async function startPlanning()"
+    )
+
     end = CONTROL.index(
         "async function performAction(",
         start,
     )
-    handler = CONTROL[start:end]
 
-    assert (
-        "attempt <= POSE_REFRESH_MAX_ATTEMPTS"
-        in handler
-    )
-    assert "POSE_REFRESH_RETRY_DELAY_MS" in handler
-    assert "isNewFreshPose(" in handler
-    assert "renderLocalization(" in handler
-    assert "if (!latestPose || uncertaintyBlocked)" in handler
-    assert "A new fresh numeric map pose " in handler
+    handler = CONTROL[
+        start:end
+    ]
 
+    validated = handler.index(
+        "validInitialization("
+    )
 
-def test_startup_ready_requires_verified_refresh():
-    start = CONTROL.index("async function startPlanning()")
-    end = CONTROL.index(
-        "async function performAction(",
-        start,
+    complete = handler.index(
+        "if (!initializationComplete)"
     )
-    handler = CONTROL[start:end]
 
-    refresh_validation = handler.index(
-        "validPoseRefresh(refreshResult)"
+    final_pose = handler.index(
+        "initialization.final_pose"
     )
-    new_pose_validation = handler.rindex(
-        "isNewFreshPose("
-    )
-    uncertainty_validation = handler.index(
-        "if (!latestPose || uncertaintyBlocked)"
-    )
-    readiness_assignment = handler.index(
+
+    ready = handler.index(
         "planningReady = true"
     )
-    ready_state = handler.index(
-        'setState("Ready", "running")'
-    )
 
     assert (
-        refresh_validation
-        < new_pose_validation
-        < uncertainty_validation
-        < readiness_assignment
-        < ready_state
+        validated
+        < complete
+        < final_pose
+        < ready
     )
-    assert "no path has been computed." in handler
-    assert "COMPUTE_ENDPOINT" not in handler
 
+
+def test_startup_ready_requires_trusted_global_localization():
+    start = CONTROL.index(
+        "function validInitialization"
+    )
+
+    end = CONTROL.index(
+        "function validPoseRefresh",
+        start,
+    )
+
+    validator = CONTROL[
+        start:end
+    ]
+
+    compact = " ".join(
+        validator.split()
+    )
+
+    required = (
+        "initialization.trusted === true",
+        (
+            "initialization.localization_method "
+            '=== "amcl_global"'
+        ),
+        (
+            "initialization.search_scope "
+            '=== "full_saved_map"'
+        ),
+        "initialization.seed_pose_used === false",
+        (
+            "initialization.global_localization_requested "
+            "=== true"
+        ),
+        (
+            "initialization.initial_pose_supplied "
+            "=== false"
+        ),
+        (
+            "initialization.nomotion_updates_requested "
+            "=== 20"
+        ),
+        "navigation.state === \"READY\"",
+        "navigation.planner_enabled === true",
+        "navigation.transform_ready === true",
+        (
+            "navigation.motion_output_connected "
+            "=== false"
+        ),
+        "navigation.goal_active === false",
+    )
+
+    for marker in required:
+        assert marker in compact
 
 def test_new_pose_requires_numeric_coordinates():
     start = CONTROL.index("function isNewFreshPose")
@@ -468,127 +502,224 @@ def test_new_pose_requires_numeric_coordinates():
         assert marker in validator
 
 
-def test_startup_refresh_failure_stops_planning():
-    start = CONTROL.index("async function startPlanning()")
-    end = CONTROL.index(
-        "async function performAction(",
-        start,
-    )
-    handler = CONTROL[start:end]
 
-    assert (
-        handler.index("POSE_REFRESH_ENDPOINT")
-        < handler.index("STOP_ENDPOINT")
-    )
-    assert "planningReady = false" in handler
-    assert "planningRunning = false" in handler
-    assert "latestPose = null" in handler
-
-def test_initializer_failure_stops_planning():
+def test_startup_localization_failure_stops_tony2_navigation():
     start = CONTROL.index(
         "async function startPlanning()"
     )
+
     end = CONTROL.index(
         "async function performAction(",
         start,
     )
-    handler = CONTROL[start:end]
 
-    assert "if (planningStarted)" in handler
-    assert "STOP_ENDPOINT" in handler
-    assert "planningRunning = false" in handler
-    assert "latestPose = null" in handler
-    assert "selectedGoal = null" in handler
-    assert "computedPath = null" in handler
+    handler = CONTROL[
+        start:end
+    ]
 
-def test_planning_start_waits_for_amcl_discovery():
+    catch_start = handler.index(
+        "} catch (error) {"
+    )
+
+    failure = handler[
+        catch_start:
+    ]
+
+    assert "if (navigationStarted)" in failure
+    assert "STOP_ENDPOINT" in failure
+
+    assert (
+        failure.index(
+            "if (navigationStarted)"
+        )
+        < failure.index(
+            "STOP_ENDPOINT"
+        )
+    )
+
+
+def test_initializer_failure_clears_planning_ui_state():
+    start = CONTROL.index(
+        "async function startPlanning()"
+    )
+
+    end = CONTROL.index(
+        "async function performAction(",
+        start,
+    )
+
+    handler = CONTROL[
+        start:end
+    ]
+
+    failure = handler[
+        handler.index(
+            "} catch (error) {"
+        ):
+    ]
+
+    for marker in (
+        "planningRunning = false",
+        "planningReady = false",
+        "latestPose = null",
+        "latestPoseReceivedAt = null",
+        "selectedGoal = null",
+        "computedPath = null",
+        "uncertaintyBlocked = true",
+    ):
+        assert marker in failure
+
+    assert "if (navigationStarted)" in failure
+    assert "STOP_ENDPOINT" in failure
+
+
+def test_tony2_start_waits_for_amcl_discovery():
     assert (
         "const INITIALIZE_DISCOVERY_DELAY_MS = 2000"
         in CONTROL
     )
+
     assert (
         "await wait(\n"
         "                INITIALIZE_DISCOVERY_DELAY_MS"
         in CONTROL
     )
+
     assert (
-        "Planning-only Nav2 started. Waiting for "
+        "Mayday must remain stationary while "
         in CONTROL
     )
+
     assert (
-        "AMCL services to become available..."
+        "Tony2 AMCL searches the saved map..."
         in CONTROL
     )
 
 
-def test_planning_initializer_retries_are_bounded():
+def test_tony2_global_initializer_retries_are_bounded():
     assert (
         "const INITIALIZE_MAX_ATTEMPTS = 10"
         in CONTROL
     )
+
     assert (
         "attempt <= INITIALIZE_MAX_ATTEMPTS"
         in CONTROL
     )
+
     assert (
         "INITIALIZE_RETRY_DELAY_MS"
         in CONTROL
     )
+
+    compact = " ".join(
+        CONTROL.split()
+    )
+
     assert (
         "initializationComplete = true"
-        in CONTROL
+        in compact
     )
 
 
-def test_planning_stays_active_between_initializer_retries():
+def test_tony2_navigation_stays_active_between_localization_retries():
     retry_start = CONTROL.index(
         "for (\n"
         "                let attempt = 1;"
     )
+
     retry_end = CONTROL.index(
         "if (!initializationComplete)",
         retry_start,
     )
-    retry = CONTROL[retry_start:retry_end]
+
+    retry = CONTROL[
+        retry_start:retry_end
+    ]
 
     assert "INITIALIZE_ENDPOINT" in retry
     assert "INITIALIZE_RETRY_DELAY_MS" in retry
     assert "STOP_ENDPOINT" not in retry
+
     assert (
-        "Planning remains safely active"
+        "Retrying stationary "
+        in retry
+    )
+
+    assert (
+        "global localization..."
         in retry
     )
 
 
-def test_initializer_validation_preserves_safety_contract():
-    validator_start = CONTROL.index(
+def test_tony2_initializer_validation_preserves_safety_contract():
+    start = CONTROL.index(
         "function validInitialization"
     )
-    validator_end = CONTROL.index(
-        "async function startPlanning",
-        validator_start,
+
+    end = CONTROL.index(
+        "function validPoseRefresh",
+        start,
     )
+
     validator = CONTROL[
-        validator_start:validator_end
+        start:end
     ]
 
-    required = (
-        "global_localization_requested === true",
-        "nomotion_updates_requested === 20",
-        "stationary_required === true",
-        "initial_pose_supplied === false",
-        "pose_published === false",
-        "path_computed === false",
-        "path_executed === false",
-        "navigation_goal_executed === false",
-        "controller_enabled === false",
-        "navigator_enabled === false",
-        "motion_enabled === false",
+    compact = " ".join(
+        validator.split()
     )
 
-    for value in required:
-        assert value in validator
+    required = (
+        "initialization.trusted === true",
+        (
+            "initialization.localization_method "
+            '=== "amcl_global"'
+        ),
+        (
+            "initialization.search_scope "
+            '=== "full_saved_map"'
+        ),
+        (
+            "initialization.seed_pose_used "
+            "=== false"
+        ),
+        (
+            "initialization.global_localization_requested "
+            "=== true"
+        ),
+        (
+            "initialization.nomotion_updates_requested "
+            "=== 20"
+        ),
+        (
+            "initialization.stationary_required "
+            "=== true"
+        ),
+        (
+            "initialization.initial_pose_supplied "
+            "=== false"
+        ),
+        (
+            "initialization.navigation_goal_executed "
+            "=== false"
+        ),
+        (
+            "initialization.motion_enabled "
+            "=== false"
+        ),
+        (
+            "navigation.motion_output_connected "
+            "=== false"
+        ),
+        (
+            "navigation.goal_active "
+            "=== false"
+        ),
+    )
 
+    for marker in required:
+        assert marker in compact
 
 def test_pose_refresh_proxy_is_fixed_and_parameter_free():
     start = SERVER.index(
@@ -632,65 +763,78 @@ def test_pose_refresh_dashboard_route_is_post_only():
 
 
 
-def test_stale_pose_can_reach_guarded_compute_refresh():
-    button_start = CONTROL.index(
-        "function updateButtons()"
-    )
-    button_end = CONTROL.index(
-        "function renderUncertainty",
-        button_start,
-    )
-    buttons = CONTROL[button_start:button_end]
 
-    compute_start = CONTROL.index(
+def test_compute_requires_trusted_cached_tony2_pose():
+    start = CONTROL.index(
         "async function computePath()"
     )
-    compute_end = CONTROL.index(
-        "function selectGoal",
-        compute_start,
-    )
-    handler = CONTROL[compute_start:compute_end]
 
-    assert "|| !occupancyMap" in buttons
-    assert "|| !selectedGoal" in buttons
-    assert "|| !latestPose" not in buttons
-    assert "|| uncertaintyBlocked" not in buttons
+    end = CONTROL.index(
+        "function selectGoal",
+        start,
+    )
+
+    handler = CONTROL[
+        start:end
+    ]
 
     guard_end = handler.index(
         "actionInFlight = true"
     )
-    guard = handler[:guard_end]
 
-    assert "|| !planningRunning" in guard
-    assert "|| !selectedGoal" in guard
-    assert "|| !latestPose" not in guard
-    assert "|| uncertaintyBlocked" not in guard
+    guard = handler[
+        :guard_end
+    ]
 
-    refresh = handler.index("POSE_REFRESH_ENDPOINT")
-    pose_check = handler.index(
-        "if (!latestPose || uncertaintyBlocked)"
+    for marker in (
+        "|| !planningRunning",
+        "|| !planningReady",
+        "|| !selectedGoal",
+        "|| !latestPose",
+        "|| uncertaintyBlocked",
+    ):
+        assert marker in guard
+
+    assert "POSE_REFRESH_ENDPOINT" not in handler
+
+
+def test_compute_uses_tony2_path_without_pose_refresh():
+    start = CONTROL.index(
+        "async function computePath()"
     )
-    compute = handler.index("COMPUTE_ENDPOINT")
 
-    assert refresh < pose_check < compute
+    end = CONTROL.index(
+        "function selectGoal",
+        start,
+    )
 
-def test_compute_refreshes_pose_before_path_submission():
-    start = CONTROL.index("async function computePath()")
-    end = CONTROL.index("function selectGoal", start)
-    handler = CONTROL[start:end]
+    handler = CONTROL[
+        start:end
+    ]
 
-    assert 'const POSE_REFRESH_ENDPOINT =' in CONTROL
+    assert "COMPUTE_ENDPOINT" in handler
+    assert "POSE_REFRESH_ENDPOINT" not in handler
+    assert "LOCALIZATION_ENDPOINT" not in handler
+
     assert (
-        '"/dashboard/planning-refresh-localization"'
-        in CONTROL
+        '"COMPUTE_PATH_TO_POSE_ONLY"'
+        in handler
     )
-    assert handler.index("POSE_REFRESH_ENDPOINT") < handler.index(
-        "COMPUTE_ENDPOINT"
-    )
-    assert "previousReceivedAt" in handler
-    assert "LOCALIZATION_ENDPOINT" in handler
-    assert "isNewFreshPose(" in handler
 
+    assert (
+        "path.read_only !== true"
+        in handler
+    )
+
+    assert (
+        "path.executed !== false"
+        in handler
+    )
+
+    assert (
+        "path.motion_enabled !== false"
+        in handler
+    )
 
 def test_pose_refresh_contract_preserves_safety():
     start = CONTROL.index("function validPoseRefresh")
@@ -735,40 +879,96 @@ def test_refreshed_pose_must_be_new_map_frame_and_fresh():
         assert value in validator
 
 
-def test_pose_refresh_wait_is_bounded():
-    assert "const POSE_REFRESH_RETRY_DELAY_MS = 250" in CONTROL
-    assert "const POSE_REFRESH_MAX_ATTEMPTS = 20" in CONTROL
 
-    start = CONTROL.index("async function computePath()")
-    end = CONTROL.index("function selectGoal", start)
-    handler = CONTROL[start:end]
+def test_compute_has_no_localization_retry_loop():
+    start = CONTROL.index(
+        "async function computePath()"
+    )
 
-    assert "attempt <= POSE_REFRESH_MAX_ATTEMPTS" in handler
-    assert "POSE_REFRESH_RETRY_DELAY_MS" in handler
-    assert "A new fresh map pose was not received." in handler
+    boundaries = []
 
-
-def test_pose_refresh_keeps_browser_parameters_impossible():
-    start = CONTROL.index("async function computePath()")
-    end = CONTROL.index("function selectGoal", start)
-    handler = CONTROL[start:end]
-    refresh_start = handler.index("POSE_REFRESH_ENDPOINT")
-    refresh_end = handler.index("if (!validPoseRefresh", refresh_start)
-    refresh_request = handler[refresh_start:refresh_end]
-
-    assert 'body: "{}"' in refresh_request
     for marker in (
-        "service",
-        "initial_pose",
-        "pose_published",
-        "frame_id",
-        "planner_id",
-        "goal_x",
-        "goal_y",
-        "goal_yaw",
+        "\n    function ",
+        "\n    async function ",
     ):
-        assert marker not in refresh_request
+        found = CONTROL.find(
+            marker,
+            start + 1,
+        )
 
+        if found >= 0:
+            boundaries.append(
+                found
+            )
+
+    assert boundaries
+
+    handler = CONTROL[
+        start:min(boundaries)
+    ]
+
+    assert "COMPUTE_ENDPOINT" in handler
+
+    for obsolete in (
+        "POSE_REFRESH_MAX_ATTEMPTS",
+        "POSE_REFRESH_RETRY_DELAY_MS",
+        "INITIALIZE_ENDPOINT",
+        "POSE_REFRESH_ENDPOINT",
+        "LOCALIZATION_ENDPOINT",
+        "NAVIGATION_INITIALIZE_ENDPOINT",
+        "NAVIGATION_GOAL_ENDPOINT",
+    ):
+        assert obsolete not in handler
+
+def test_compute_request_accepts_only_selected_map_goal():
+    start = CONTROL.index(
+        "async function computePath()"
+    )
+
+    end = CONTROL.index(
+        "function selectGoal",
+        start,
+    )
+
+    handler = CONTROL[
+        start:end
+    ]
+
+    request_start = handler.index(
+        "body: JSON.stringify({"
+    )
+
+    request_end = handler.index(
+        "}),",
+        request_start,
+    )
+
+    request = handler[
+        request_start:request_end
+    ]
+
+    compact = " ".join(
+        request.split()
+    )
+
+    for marker in (
+        "goal_x: selectedGoal.x",
+        "goal_y: selectedGoal.y",
+        "goal_yaw: selectedGoal.yaw",
+    ):
+        assert marker in compact
+
+    for forbidden in (
+        "service:",
+        "topic:",
+        "frame_id:",
+        "planner_id:",
+        "initial_pose",
+        "cmd_vel",
+        "linear_x",
+        "angular_z",
+    ):
+        assert forbidden not in request
 
 def test_pose_refresh_adds_no_motion_or_navigation_execution():
     forbidden = (

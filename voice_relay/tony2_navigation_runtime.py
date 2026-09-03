@@ -1767,6 +1767,273 @@ class Tony2NavigationRuntime:
                 final_status,
         }
 
+    def compute_path(
+        self,
+        x,
+        y,
+        yaw,
+    ):
+        """
+        Compute one map-frame path without execution.
+
+        This method is planning-only. Physical controller output
+        must remain disconnected for the entire operation, and
+        no guarded execution ownership is created here.
+        """
+        normalized = {}
+
+        for key, value in (
+            ("x", x),
+            ("y", y),
+            ("yaw", yaw),
+        ):
+            if isinstance(
+                value,
+                bool,
+            ):
+                raise ValueError(
+                    f"{key} must be numeric."
+                )
+
+            try:
+                value = float(value)
+
+            except (
+                TypeError,
+                ValueError,
+            ) as exc:
+                raise ValueError(
+                    f"{key} must be numeric."
+                ) from exc
+
+            if not math.isfinite(value):
+                raise ValueError(
+                    f"{key} must be finite."
+                )
+
+            normalized[key] = value
+
+        plan_script = (
+            Path(__file__).resolve().parent
+            / "tony2_navigation_plan.py"
+        )
+
+        plan_result_file = (
+            self.runtime_dir
+            / "tony2_navigation_plan_result.json"
+        )
+
+        if not plan_script.is_file():
+            raise RuntimeError(
+                "Tony2 read-only planning helper "
+                "is missing."
+            )
+
+        # Serialize planning against guarded motion ownership.
+        #
+        # _motion_lock is an RLock. Holding it here prevents a
+        # concurrent GO from creating a transient motion lease
+        # while the read-only planner action is in flight.
+        with self._motion_lock:
+            status = self.status()
+
+            if (
+                status.get("state")
+                != "READY"
+                or status.get("running")
+                is not True
+                or status.get("owned")
+                is not True
+                or status.get(
+                    "planner_enabled"
+                )
+                is not True
+                or status.get(
+                    "transform_ready"
+                )
+                is not True
+            ):
+                raise RuntimeError(
+                    "Tony2 isolated Nav2 planner "
+                    "must be READY before path computation."
+                )
+
+            if status.get(
+                "motion_output_connected"
+            ) is not False:
+                raise RuntimeError(
+                    "Physical motion output must remain "
+                    "disconnected during read-only planning."
+                )
+
+            if status.get(
+                "goal_active"
+            ) is not False:
+                raise RuntimeError(
+                    "A navigation execution goal is active."
+                )
+
+            if (
+                self._active_motion_lease
+                is not None
+                or self._active_motion_token
+                is not None
+                or self._goal_process
+                is not None
+            ):
+                raise RuntimeError(
+                    "Guarded motion ownership must be "
+                    "completely idle during read-only planning."
+                )
+
+            try:
+                plan_result_file.unlink()
+
+            except FileNotFoundError:
+                pass
+
+            command = [
+                "/usr/bin/python3",
+                "-u",
+                str(plan_script),
+                (
+                    "--goal-x="
+                    + repr(
+                        normalized["x"]
+                    )
+                ),
+                (
+                    "--goal-y="
+                    + repr(
+                        normalized["y"]
+                    )
+                ),
+                (
+                    "--goal-yaw="
+                    + repr(
+                        normalized["yaw"]
+                    )
+                ),
+                (
+                    "--result-file="
+                    + str(
+                        plan_result_file
+                    )
+                ),
+            ]
+
+            try:
+                completed = subprocess.run(
+                    command,
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    timeout=25.0,
+                    env=self.child_environment(),
+                    check=False,
+                )
+
+            except subprocess.TimeoutExpired as exc:
+                raise RuntimeError(
+                    "Tony2 read-only path computation "
+                    "timed out."
+                ) from exc
+
+            if (
+                completed.returncode != 0
+                or not plan_result_file.is_file()
+            ):
+                output = (
+                    completed.stdout
+                    or ""
+                ).strip()
+
+                if len(output) > 1200:
+                    output = output[-1200:]
+
+                raise RuntimeError(
+                    "Tony2 read-only path computation "
+                    "failed."
+                    + (
+                        f" {output}"
+                        if output
+                        else ""
+                    )
+                )
+
+            try:
+                result = json.loads(
+                    plan_result_file.read_text(
+                        encoding="utf-8"
+                    )
+                )
+
+            except (
+                OSError,
+                json.JSONDecodeError,
+            ) as exc:
+                raise RuntimeError(
+                    "Tony2 planner returned an invalid "
+                    "result file."
+                ) from exc
+
+            if (
+                not isinstance(
+                    result,
+                    dict,
+                )
+                or result.get("ok")
+                is not True
+                or result.get("action")
+                != "COMPUTE_PATH_TO_POSE_ONLY"
+                or result.get("read_only")
+                is not True
+                or result.get("executed")
+                is not False
+                or result.get(
+                    "navigation_goal_executed"
+                )
+                is not False
+                or result.get(
+                    "motion_enabled"
+                )
+                is not False
+                or result.get("frame_id")
+                != "map"
+                or not isinstance(
+                    result.get("poses"),
+                    list,
+                )
+                or len(
+                    result.get("poses")
+                ) < 2
+            ):
+                raise RuntimeError(
+                    "Tony2 planner result violated "
+                    "the read-only path contract."
+                )
+
+            final_status = self.status()
+
+            if (
+                final_status.get(
+                    "motion_output_connected"
+                )
+                is not False
+                or final_status.get(
+                    "goal_active"
+                )
+                is not False
+            ):
+                raise RuntimeError(
+                    "Navigation execution state changed "
+                    "during read-only planning."
+                )
+
+            return result
+
+
     def submit_goal(
         self,
         x,

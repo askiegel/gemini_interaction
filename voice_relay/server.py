@@ -1220,6 +1220,190 @@ class VoiceRelayHandler(BaseHTTPRequestHandler):
 
 
 
+    def navigation_compute_path(
+        self,
+        payload,
+    ):
+        """
+        Compute one read-only Tony2 Nav2 path.
+
+        Browser input is restricted to one finite map-frame
+        goal. Tony2 supplies the authoritative current start
+        pose from its trusted AMCL transform.
+
+        This route is planning-only and cannot create guarded
+        execution ownership or enable physical motion output.
+        """
+        runtime = (
+            get_tony2_navigation_runtime()
+        )
+
+        if not isinstance(
+            payload,
+            dict,
+        ):
+            return 400, {
+                "ok": False,
+                "error":
+                    "A JSON request body is required.",
+                "navigation":
+                    runtime.status(),
+            }
+
+        expected = {
+            "goal_x",
+            "goal_y",
+            "goal_yaw",
+        }
+
+        if set(payload) != expected:
+            return 400, {
+                "ok": False,
+                "error": (
+                    "Read-only planning accepts exactly "
+                    "goal_x, goal_y, and goal_yaw."
+                ),
+                "navigation":
+                    runtime.status(),
+            }
+
+        normalized = {}
+
+        for key in (
+            "goal_x",
+            "goal_y",
+            "goal_yaw",
+        ):
+            value = payload.get(key)
+
+            if isinstance(
+                value,
+                bool,
+            ):
+                return 400, {
+                    "ok": False,
+                    "error":
+                        f"{key} must be numeric.",
+                    "navigation":
+                        runtime.status(),
+                }
+
+            try:
+                value = float(value)
+
+            except (
+                TypeError,
+                ValueError,
+            ):
+                return 400, {
+                    "ok": False,
+                    "error":
+                        f"{key} must be numeric.",
+                    "navigation":
+                        runtime.status(),
+                }
+
+            if not math.isfinite(value):
+                return 400, {
+                    "ok": False,
+                    "error":
+                        f"{key} must be finite.",
+                    "navigation":
+                        runtime.status(),
+                }
+
+            normalized[key] = value
+
+        stationary_error = (
+            self.ensure_mayday_stationary()
+        )
+
+        if stationary_error is not None:
+            return 503, {
+                "ok": False,
+                "error":
+                    stationary_error,
+                "navigation":
+                    runtime.status(),
+            }
+
+        status = runtime.status()
+
+        if (
+            status.get("state")
+            != "READY"
+            or status.get(
+                "planner_enabled"
+            )
+            is not True
+            or status.get(
+                "transform_ready"
+            )
+            is not True
+            or status.get(
+                "motion_output_connected"
+            )
+            is not False
+            or status.get(
+                "goal_active"
+            )
+            is not False
+        ):
+            return 409, {
+                "ok": False,
+                "error": (
+                    "Tony2 isolated Nav2 must be "
+                    "localized, READY, idle, and "
+                    "physically disconnected before "
+                    "read-only path computation."
+                ),
+                "navigation":
+                    status,
+            }
+
+        try:
+            result = runtime.compute_path(
+                normalized[
+                    "goal_x"
+                ],
+                normalized[
+                    "goal_y"
+                ],
+                normalized[
+                    "goal_yaw"
+                ],
+            )
+
+        except (
+            ValueError,
+            RuntimeError,
+        ) as exc:
+            return 422, {
+                "ok": False,
+                "action":
+                    "navigation_compute_path",
+                "error":
+                    str(exc),
+                "navigation":
+                    runtime.status(),
+            }
+
+        return 200, {
+            "ok": True,
+            "action":
+                "navigation_compute_path",
+            "message": (
+                "Tony2 isolated Nav2 computed "
+                "a read-only path. "
+                "The path was not executed."
+            ),
+            "path":
+                result,
+            "navigation":
+                runtime.status(),
+        }
+
+
     def navigation_goal(self, payload):
         """
         Execute one guarded goal through isolated Tony2 Nav2.
@@ -2782,6 +2966,37 @@ class VoiceRelayHandler(BaseHTTPRequestHandler):
                 self.navigation_initialize_localization()
             )
             self.send_json(status_code, payload)
+            return
+
+        if (
+            path
+            == "/dashboard/navigation-compute-path"
+        ):
+            try:
+                request_payload = (
+                    self.read_json_body()
+                )
+
+            except ValueError as exc:
+                self.send_json(
+                    400,
+                    {
+                        "ok": False,
+                        "error": str(exc),
+                    },
+                )
+                return
+
+            status_code, payload = (
+                self.navigation_compute_path(
+                    request_payload
+                )
+            )
+
+            self.send_json(
+                status_code,
+                payload,
+            )
             return
 
         if path == "/dashboard/navigation-goal":

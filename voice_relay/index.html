@@ -3228,17 +3228,17 @@
     "use strict";
 
     const STATUS_ENDPOINT =
-        "/dashboard/planning-control";
+        "/dashboard/navigation-control";
     const START_ENDPOINT =
-        "/dashboard/planning-start";
+        "/dashboard/navigation-start";
     const STOP_ENDPOINT =
-        "/dashboard/planning-stop";
+        "/dashboard/navigation-stop";
     const INITIALIZE_ENDPOINT =
-        "/dashboard/planning-initialize-localization";
+        "/dashboard/navigation-initialize-localization";
     const POSE_REFRESH_ENDPOINT =
         "/dashboard/planning-refresh-localization";
     const COMPUTE_ENDPOINT =
-        "/dashboard/planning-compute-path";
+        "/dashboard/navigation-compute-path";
     const NAVIGATION_START_ENDPOINT =
         "/dashboard/navigation-start";
     const NAVIGATION_STOP_ENDPOINT =
@@ -3702,42 +3702,82 @@
     }
 
     function renderPlanning(payload) {
-        const planning = payload.planning || {};
+        const navigation = (
+            payload
+            && payload.navigation
+                ? payload.navigation
+                : {}
+        );
 
         planningRunning = (
-            planning.running === true
-            && planning.owned === true
+            navigation.running === true
+            && navigation.owned === true
+            && navigation.host === "Tony2"
+            && navigation.source
+                === "tony2_guarded_navigation"
+            && navigation.fixed_map_required === true
+        );
+
+        planningReady = Boolean(
+            planningRunning
+            && navigation.state === "READY"
+            && navigation.planner_enabled === true
+            && navigation.transform_ready === true
+            && navigation.motion_output_connected
+                === false
+            && navigation.goal_active === false
         );
 
         if (planningRunning) {
             setState(
-                planningReady ? "Ready" : "Running",
-                "running"
+                planningReady
+                    ? "Ready"
+                    : "Starting",
+                planningReady
+                    ? "ready"
+                    : "running"
             );
+
             setOverlay(
                 planningReady
-                    ? "Read-only planning ready"
-                    : "Planning startup active",
-                "running"
+                    ? "Tony2 planner ready"
+                    : "Tony2 Nav2 starting",
+                planningReady
+                    ? "ready"
+                    : "running"
             );
+
+            setText(
+                "planningReadiness",
+                planningReady
+                    ? "Ready for Tony2 read-only planning"
+                    : "Waiting for trusted localization"
+            );
+
         } else {
-            setState("Stopped", "stopped");
+            planningRunning = false;
+            planningReady = false;
+
+            if (!navigationExecuting) {
+                latestPose = null;
+                latestPoseReceivedAt = null;
+                uncertaintyBlocked = true;
+            }
+
+            setState(
+                "Stopped",
+                "stopped"
+            );
+
             setOverlay(
                 "Planning stopped",
                 "stopped"
             );
-            planningReady = false;
-            latestPose = null;
-            uncertaintyBlocked = true;
-            setText("planningPoseUncertainty", "—");
+
             setText(
                 "planningReadiness",
-                selectedGoal
-                    ? "Destination selected — press GO"
-                    : "Select a destination"
+                "Stopped"
             );
-            computedPath = null;
-            drawPath();
         }
 
         updateButtons();
@@ -3804,6 +3844,7 @@
             !perceptionIsVisible()
             || requestInFlight
             || actionInFlight
+            || navigationExecuting
         ) {
             return;
         }
@@ -3814,62 +3855,85 @@
             const results = await Promise.all([
                 fetchJson(
                     STATUS_ENDPOINT,
-                    {cache: "no-store"}
+                    {
+                        cache: "no-store",
+                    }
                 ),
+
                 fetchJson(
                     MAP_ENDPOINT,
-                    {cache: "no-store"}
-                ),
-                fetchJson(
-                    LOCALIZATION_ENDPOINT,
-                    {cache: "no-store"}
+                    {
+                        cache: "no-store",
+                    }
                 ),
             ]);
 
-            const statusResult = results[0];
-            const mapResult = results[1];
-            const localizationResult = results[2];
+            const statusResult =
+                results[0];
+
+            const mapResult =
+                results[1];
 
             if (
-                !statusResult.response.ok
-                || !statusResult.payload.ok
-                || !statusResult.payload.planning
+                statusResult.response.ok
+                && statusResult.payload
+                && statusResult.payload.ok
             ) {
-                throw new Error(
-                    statusResult.payload.error
-                    || "Planning status is unavailable."
+                renderPlanning(
+                    statusResult.payload
+                );
+
+            } else {
+                planningRunning = false;
+                planningReady = false;
+
+                setState(
+                    "Unavailable",
+                    "error"
+                );
+
+                setOverlay(
+                    "Tony2 planner unavailable",
+                    "error"
+                );
+
+                setText(
+                    "planningReadiness",
+                    "Navigation status unavailable"
                 );
             }
 
-            renderPlanning(statusResult.payload);
-
             if (
                 mapResult.response.ok
+                && mapResult.payload
                 && mapResult.payload.ok
                 && mapResult.payload.telemetry
-                && mapResult.payload.telemetry.available
+                && mapResult.payload.telemetry
+                    .available === true
                 && mapResult.payload.telemetry.map
             ) {
-                occupancyMap =
-                    mapResult.payload.telemetry.map;
+                occupancyMap = (
+                    mapResult.payload
+                    .telemetry
+                    .map
+                );
+
+            } else {
+                occupancyMap = null;
             }
 
-            renderLocalization(
-                localizationResult.response,
-                localizationResult.payload
+            drawPath();
+
+            updateButtons();
+
+        } catch (error) {
+            setMessage(
+                error.message,
+                true
             );
 
-            drawPath();
-        } catch (error) {
-            setState("Error", "error");
-            setOverlay(
-                "Planning unavailable",
-                "error"
-            );
-            setMessage(error.message, true);
         } finally {
             requestInFlight = false;
-            updateButtons();
         }
     }
 
@@ -3886,35 +3950,89 @@
             && result.payload.initialization
         );
 
+        const navigation = (
+            result
+            && result.payload
+            && result.payload.navigation
+        );
+
+        const finalPose = (
+            initialization
+            && initialization.final_pose
+                ? initialization.final_pose
+                : {}
+        );
+
+        const uncertainty = (
+            initialization
+            && initialization.uncertainty
+                ? initialization.uncertainty
+                : {}
+        );
+
         return Boolean(
             result
             && result.response
             && result.response.ok
             && result.payload
-            && result.payload.ok
+            && result.payload.ok === true
             && initialization
-            && initialization
-                .global_localization_requested === true
-            && initialization
-                .nomotion_updates_requested === 20
-            && initialization
-                .stationary_required === true
-            && initialization
-                .initial_pose_supplied === false
-            && initialization
-                .pose_published === false
-            && initialization
-                .path_computed === false
-            && initialization
-                .path_executed === false
-            && initialization
-                .navigation_goal_executed === false
-            && initialization
-                .controller_enabled === false
-            && initialization
-                .navigator_enabled === false
-            && initialization
-                .motion_enabled === false
+            && initialization.trusted === true
+            && initialization.localization_method
+                === "amcl_global"
+            && initialization.search_scope
+                === "full_saved_map"
+            && initialization.seed_pose_used
+                === false
+            && initialization.global_localization_requested
+                === true
+            && initialization.initial_pose_supplied
+                === false
+            && initialization.nomotion_updates_requested
+                === 20
+            && initialization.stationary_required
+                === true
+            && initialization.navigation_goal_executed
+                === false
+            && initialization.motion_enabled
+                === false
+            && Number.isFinite(
+                Number(finalPose.x)
+            )
+            && Number.isFinite(
+                Number(finalPose.y)
+            )
+            && Number.isFinite(
+                Number(finalPose.yaw_rad)
+            )
+            && Number.isFinite(
+                Number(
+                    uncertainty.sigma_x_m
+                )
+            )
+            && Number.isFinite(
+                Number(
+                    uncertainty.sigma_y_m
+                )
+            )
+            && Number.isFinite(
+                Number(
+                    uncertainty.sigma_yaw_rad
+                )
+            )
+            && navigation
+            && navigation.state === "READY"
+            && navigation.running === true
+            && navigation.owned === true
+            && navigation.host === "Tony2"
+            && navigation.source
+                === "tony2_guarded_navigation"
+            && navigation.fixed_map_required === true
+            && navigation.planner_enabled === true
+            && navigation.transform_ready === true
+            && navigation.motion_output_connected
+                === false
+            && navigation.goal_active === false
         );
     }
 
@@ -4002,14 +4120,26 @@
         if (actionInFlight) return;
 
         actionInFlight = true;
-        let planningStarted = false;
+
+        let navigationStarted = false;
+
         planningReady = false;
 
         updateButtons();
-        setState("Starting", "busy");
-        setOverlay("Starting planning", "busy");
+
+        setState(
+            "Starting",
+            "busy"
+        );
+
+        setOverlay(
+            "Starting Tony2 Nav2",
+            "busy"
+        );
+
         setMessage(
-            "Starting planning-only Nav2...",
+            "Starting isolated fixed-map Nav2 "
+            + "for read-only planning...",
             false
         );
 
@@ -4027,58 +4157,62 @@
             );
 
             if (
-                !startResult.response.ok
-                || !startResult.payload.ok
-                || !startResult.payload.planning
-                || startResult.payload.planning.running
-                    !== true
-                || startResult.payload.planning.owned
-                    !== true
+                !navigationWasStarted(
+                    startResult
+                )
             ) {
                 throw new Error(
                     startResult.payload.error
-                    || "Planning-only Nav2 failed to start."
+                    || (
+                        "Tony2 isolated Nav2 "
+                        + "failed to start."
+                    )
                 );
             }
 
-            planningStarted = true;
+            navigationStarted = true;
             planningRunning = true;
 
-            setState("Localizing", "busy");
-            setOverlay(
-                "Initializing stationary pose",
+            setState(
+                "Localizing",
                 "busy"
             );
+
+            setOverlay(
+                "Global localization",
+                "busy"
+            );
+
             setText(
                 "planningPoseUncertainty",
                 "Initializing"
             );
+
             setText(
                 "planningReadiness",
-                "Initializing stationary localization"
+                "Globally localizing on promoted map"
             );
-            setMessage(
-                "Mayday must remain stationary while "
-                + "AMCL compares LiDAR scans to the map...",
-                false
-            );
-            updateButtons();
 
             setMessage(
-                "Planning-only Nav2 started. Waiting for "
-                + "AMCL services to become available...",
+                "Mayday must remain stationary while "
+                + "Tony2 AMCL searches the saved map...",
                 false
             );
+
+            updateButtons();
 
             await wait(
                 INITIALIZE_DISCOVERY_DELAY_MS
             );
 
             let initializeResult = null;
-            let initializationComplete = false;
+
+            let initializationComplete =
+                false;
+
             let initializationError = (
-                "Stationary localization "
-                + "initialization failed."
+                "Tony2 start-anywhere "
+                + "localization failed."
             );
 
             for (
@@ -4086,21 +4220,6 @@
                 attempt <= INITIALIZE_MAX_ATTEMPTS;
                 attempt += 1
             ) {
-                setState("Localizing", "busy");
-                setOverlay(
-                    "Initializing stationary pose "
-                    + `(${attempt}/`
-                    + `${INITIALIZE_MAX_ATTEMPTS})`,
-                    "busy"
-                );
-                setMessage(
-                    "Requesting guarded stationary "
-                    + "localization. Attempt "
-                    + `${attempt} of `
-                    + `${INITIALIZE_MAX_ATTEMPTS}...`,
-                    false
-                );
-
                 try {
                     initializeResult = await fetchJson(
                         INITIALIZE_ENDPOINT,
@@ -4119,7 +4238,9 @@
                             initializeResult
                         )
                     ) {
-                        initializationComplete = true;
+                        initializationComplete =
+                            true;
+
                         break;
                     }
 
@@ -4127,6 +4248,7 @@
                         initializeResult.payload.error
                         || initializationError
                     );
+
                 } catch (initializeError) {
                     initializationError = (
                         initializeError.message
@@ -4138,18 +4260,15 @@
                     attempt
                     < INITIALIZE_MAX_ATTEMPTS
                 ) {
-                    setState(
-                        "Waiting",
-                        "busy"
-                    );
                     setOverlay(
-                        "Waiting for AMCL services",
+                        "Waiting for Tony2 AMCL",
                         "busy"
                     );
+
                     setMessage(
-                        "AMCL is still starting. "
-                        + "Planning remains safely active; "
-                        + "the initializer will retry.",
+                        "Map server or AMCL is still "
+                        + "starting. Retrying stationary "
+                        + "global localization...",
                         false
                     );
 
@@ -4160,137 +4279,113 @@
             }
 
             if (!initializationComplete) {
-                throw new Error(initializationError);
-            }
-
-            const previousReceivedAt =
-                latestPoseReceivedAt;
-
-            setState("Refreshing", "busy");
-            setOverlay(
-                "Refreshing stationary pose",
-                "busy"
-            );
-            setMessage(
-                "Stationary localization initialized. "
-                + "Requesting one guarded no-motion "
-                + "pose refresh...",
-                false
-            );
-
-            const refreshResult = await fetchJson(
-                POSE_REFRESH_ENDPOINT,
-                {
-                    method: "POST",
-                    headers: {
-                        "Content-Type":
-                            "application/json",
-                    },
-                    body: "{}",
-                }
-            );
-
-            if (!validPoseRefresh(refreshResult)) {
                 throw new Error(
-                    refreshResult.payload.error
-                    || "Stationary pose refresh failed."
+                    initializationError
                 );
             }
 
+            const initialization = (
+                initializeResult
+                .payload
+                .initialization
+            );
+
+            const finalPose = (
+                initialization.final_pose
+            );
+
+            const uncertainty = (
+                initialization.uncertainty
+            );
+
+            latestPose = {
+                frame_id: "map",
+
+                position: {
+                    x:
+                        Number(
+                            finalPose.x
+                        ),
+                    y:
+                        Number(
+                            finalPose.y
+                        ),
+                    z: 0,
+                },
+
+                yaw_radians:
+                    Number(
+                        finalPose.yaw_rad
+                    ),
+
+                yaw_degrees:
+                    Number(
+                        finalPose.yaw_deg
+                    ),
+
+                uncertainty: {
+                    x_standard_deviation:
+                        Number(
+                            uncertainty.sigma_x_m
+                        ),
+
+                    y_standard_deviation:
+                        Number(
+                            uncertainty.sigma_y_m
+                        ),
+
+                    yaw_standard_deviation_radians:
+                        Number(
+                            uncertainty.sigma_yaw_rad
+                        ),
+                },
+            };
+
+            latestPoseReceivedAt = (
+                new Date().toISOString()
+            );
+
+            planningRunning = true;
+            planningReady = true;
+
+            renderUncertainty(
+                latestPose
+            );
+
+            setState(
+                "Ready",
+                "ready"
+            );
+
+            setOverlay(
+                "Tony2 planner ready",
+                "ready"
+            );
+
+            setText(
+                "planningReadiness",
+                "Ready for Tony2 read-only planning"
+            );
+
+            setMessage(
+                "Tony2 AMCL is trusted. "
+                + "Click a free map cell and compute "
+                + "the exact isolated Nav2 path.",
+                false
+            );
+
+            drawPath();
+
+        } catch (error) {
+            planningRunning = false;
+            planningReady = false;
             latestPose = null;
             latestPoseReceivedAt = null;
+            selectedGoal = null;
+            computedPath = null;
             uncertaintyBlocked = true;
 
-            setState("Locating", "busy");
-            setOverlay(
-                "Waiting for verified pose",
-                "busy"
-            );
-            setText(
-                "planningPoseUncertainty",
-                "Waiting for refreshed pose"
-            );
-            setText(
-                "planningReadiness",
-                "Verifying refreshed stationary pose"
-            );
-            setMessage(
-                "Guarded no-motion refresh completed. "
-                + "Waiting for a new verified map pose...",
-                false
-            );
-
-            let freshPoseResult = null;
-
-            for (
-                let attempt = 1;
-                attempt <= POSE_REFRESH_MAX_ATTEMPTS;
-                attempt += 1
-            ) {
-                freshPoseResult = await fetchJson(
-                    LOCALIZATION_ENDPOINT,
-                    {cache: "no-store"}
-                );
-
-                if (
-                    isNewFreshPose(
-                        freshPoseResult,
-                        previousReceivedAt
-                    )
-                ) {
-                    renderLocalization(
-                        freshPoseResult.response,
-                        freshPoseResult.payload
-                    );
-                    break;
-                }
-
-                if (
-                    attempt < POSE_REFRESH_MAX_ATTEMPTS
-                ) {
-                    await wait(
-                        POSE_REFRESH_RETRY_DELAY_MS
-                    );
-                }
-            }
-
-            if (
-                !isNewFreshPose(
-                    freshPoseResult,
-                    previousReceivedAt
-                )
-            ) {
-                throw new Error(
-                    "A new fresh numeric map pose "
-                    + "was not received."
-                );
-            }
-
-            if (!latestPose || uncertaintyBlocked) {
-                throw new Error(
-                    "The refreshed pose is not safe "
-                    + "for read-only planning."
-                );
-            }
-
-            planningReady = true;
-            setState("Ready", "running");
-            setOverlay(
-                "Read-only planning ready",
-                "running"
-            );
-            setText(
-                "planningReadiness",
-                "Ready for read-only planning"
-            );
-            setMessage(
-                "Fresh stationary map pose verified. "
-                + "Read-only planning is ready; "
-                + "no path has been computed.",
-                false
-            );
-        } catch (error) {
-            if (planningStarted) {
+            if (navigationStarted) {
                 try {
                     await fetchJson(
                         STOP_ENDPOINT,
@@ -4303,36 +4398,55 @@
                             body: "{}",
                         }
                     );
-                } catch (stopError) {
-                    // Persistent STOP remains available.
+
+                } catch (_stopError) {
+                    // Fail closed in UI state even if
+                    // the stop request itself reports an error.
                 }
             }
 
-            planningRunning = false;
-            planningReady = false;
-            latestPose = null;
-            latestPoseReceivedAt = null;
-            selectedGoal = null;
-            computedPath = null;
-            uncertaintyBlocked = true;
+            setText(
+                "planningSelectedGoal",
+                "—"
+            );
 
-            setText("planningSelectedGoal", "—");
-            setText("planningPathSummary", "—");
-            setText("planningPoseUncertainty", "—");
+            setText(
+                "planningPathSummary",
+                "—"
+            );
+
+            setText(
+                "planningPoseUncertainty",
+                "—"
+            );
+
             setText(
                 "planningReadiness",
                 "Initialization failed"
             );
-            setState("Error", "error");
+
+            setState(
+                "Error",
+                "error"
+            );
+
             setOverlay(
                 "Localization unavailable",
                 "error"
             );
-            setMessage(error.message, true);
+
+            setMessage(
+                error.message,
+                true
+            );
+
             drawPath();
+
         } finally {
             actionInFlight = false;
+
             updateButtons();
+
             await refresh();
         }
     }
@@ -4413,110 +4527,35 @@
         if (
             actionInFlight
             || !planningRunning
+            || !planningReady
             || !selectedGoal
+            || !latestPose
+            || uncertaintyBlocked
         ) {
             return;
         }
 
         actionInFlight = true;
+
         updateButtons();
-        setState("Computing", "busy");
+
+        setState(
+            "Computing",
+            "busy"
+        );
+
+        setOverlay(
+            "Tony2 computing path",
+            "busy"
+        );
+
         setMessage(
-            "Refreshing Mayday's stationary map pose...",
+            "Requesting the exact isolated "
+            + "Nav2 ComputePathToPose result...",
             false
         );
 
         try {
-            const previousReceivedAt =
-                latestPoseReceivedAt;
-            const refreshResult = await fetchJson(
-                POSE_REFRESH_ENDPOINT,
-                {
-                    method: "POST",
-                    headers: {
-                        "Content-Type":
-                            "application/json",
-                    },
-                    body: "{}",
-                }
-            );
-
-            if (!validPoseRefresh(refreshResult)) {
-                throw new Error(
-                    refreshResult.payload.error
-                    || "Stationary pose refresh failed."
-                );
-            }
-
-            latestPose = null;
-            latestPoseReceivedAt = null;
-            uncertaintyBlocked = true;
-            setText(
-                "planningPoseUncertainty",
-                "Waiting for refreshed pose"
-            );
-            setText(
-                "planningReadiness",
-                "Refreshing stationary pose"
-            );
-
-            let freshPoseResult = null;
-
-            for (
-                let attempt = 1;
-                attempt <= POSE_REFRESH_MAX_ATTEMPTS;
-                attempt += 1
-            ) {
-                freshPoseResult = await fetchJson(
-                    LOCALIZATION_ENDPOINT,
-                    {cache: "no-store"}
-                );
-
-                if (
-                    isNewFreshPose(
-                        freshPoseResult,
-                        previousReceivedAt
-                    )
-                ) {
-                    renderLocalization(
-                        freshPoseResult.response,
-                        freshPoseResult.payload
-                    );
-                    break;
-                }
-
-                if (
-                    attempt < POSE_REFRESH_MAX_ATTEMPTS
-                ) {
-                    await wait(
-                        POSE_REFRESH_RETRY_DELAY_MS
-                    );
-                }
-            }
-
-            if (
-                !isNewFreshPose(
-                    freshPoseResult,
-                    previousReceivedAt
-                )
-            ) {
-                throw new Error(
-                    "A new fresh map pose was not received."
-                );
-            }
-
-            if (!latestPose || uncertaintyBlocked) {
-                throw new Error(
-                    "The refreshed pose is not safe for planning."
-                );
-            }
-
-            setMessage(
-                "Fresh stationary pose received. "
-                + "Calculating a read-only path...",
-                false
-            );
-
             const result = await fetchJson(
                 COMPUTE_ENDPOINT,
                 {
@@ -4526,9 +4565,12 @@
                             "application/json",
                     },
                     body: JSON.stringify({
-                        goal_x: selectedGoal.x,
-                        goal_y: selectedGoal.y,
-                        goal_yaw: selectedGoal.yaw,
+                        goal_x:
+                            selectedGoal.x,
+                        goal_y:
+                            selectedGoal.y,
+                        goal_yaw:
+                            selectedGoal.yaw,
                     }),
                 }
             );
@@ -4540,26 +4582,37 @@
             ) {
                 throw new Error(
                     result.payload.error
-                    || "Path computation failed."
+                    || (
+                        "Tony2 Nav2 could not "
+                        + "compute the selected path."
+                    )
                 );
             }
 
-            const path = result.payload.path;
+            const path = (
+                result.payload.path
+            );
 
             if (
-                path.read_only !== true
+                path.action
+                    !== "COMPUTE_PATH_TO_POSE_ONLY"
+                || path.read_only !== true
                 || path.executed !== false
+                || path.navigation_goal_executed
+                    !== false
                 || path.motion_enabled !== false
                 || path.frame_id !== "map"
                 || !Array.isArray(path.poses)
+                || path.poses.length < 2
             ) {
                 throw new Error(
-                    "Path response violated the "
-                    + "read-only contract."
+                    "Tony2 path response violated "
+                    + "the read-only contract."
                 );
             }
 
             computedPath = path;
+
             drawPath();
 
             setText(
@@ -4569,32 +4622,50 @@
                     path.length_meters
                 ).toFixed(2)} m`
             );
-            setState("Path Ready", "ready");
-            setOverlay(
-                "Read-only path ready",
+
+            setState(
+                "Path Ready",
                 "ready"
             );
+
+            setOverlay(
+                "Tony2 Nav2 path ready",
+                "ready"
+            );
+
             setMessage(
-                "Path calculated for inspection only. "
+                "Exact Tony2 isolated Nav2 path "
+                + "drawn for inspection only. "
                 + "It was not executed.",
                 false
             );
+
         } catch (error) {
             computedPath = null;
+
             drawPath();
-            setState("Error", "error");
+
+            setState(
+                "Error",
+                "error"
+            );
+
             setOverlay(
                 "Path unavailable",
                 "error"
             );
-            setMessage(error.message, true);
+
+            setMessage(
+                error.message,
+                true
+            );
+
         } finally {
             actionInFlight = false;
+
             updateButtons();
         }
     }
-
-
 
     function navigationWasStarted(result) {
         const navigation = (
