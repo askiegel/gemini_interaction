@@ -8335,22 +8335,39 @@
         point
     ) {
         /*
-         * ROS +X = forward.
-         * ROS +Y = left.
-         * Screen up = forward.
+         * MAYDAY_REVIEW_ALL_CCW90
+         *
+         * Rotate the robot-local geometry 90 degrees
+         * COUNTERCLOCKWISE from the previous display.
+         *
+         * Previous screen offset:
+         *
+         *     (-y, -x)
+         *
+         * Visual CCW 90:
+         *
+         *     (dx, dy) -> (dy, -dx)
+         *
+         * Therefore:
+         *
+         *     screen dx = -x
+         *     screen dy = +y
+         *
+         * The grid, FORWARD label, and Mayday arrow remain
+         * upright. Only sensed/candidate geometry rotates.
          */
         return {
             x:
                 frame.center
-                - point.y
+                - point.x
                     * frame.scale,
+
             y:
                 frame.center
-                - point.x
+                + point.y
                     * frame.scale,
         };
     }
-
 
     function drawRobot(
         frame
@@ -8622,7 +8639,7 @@
         }
 
         /*
-         * MAYDAY_REVIEW_PERSISTENT_90_CCW
+         * MAYDAY_REVIEW_PERSISTENT_ALL_CCW90
          *
          * Physical visual check established that the raw
          * persistent-map reference needs a 90-degree
@@ -8641,8 +8658,12 @@
             size / 2
         );
 
+        /*
+         * One additional visual 90° CCW from the current pane.
+         * Total raw-reference presentation rotation = 180°.
+         */
         context.rotate(
-            -Math.PI / 2
+            -Math.PI
         );
 
         context.translate(

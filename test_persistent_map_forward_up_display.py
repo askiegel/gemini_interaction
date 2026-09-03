@@ -306,12 +306,12 @@ def test_review_reference_uses_90_ccw_renderer_not_css():
     ]
 
     assert (
-        "MAYDAY_REVIEW_PERSISTENT_90_CCW"
+        "MAYDAY_REVIEW_PERSISTENT_ALL_CCW90"
         in renderer
     )
 
     assert (
-        "-Math.PI / 2"
+        "-Math.PI"
         in renderer
     )
 

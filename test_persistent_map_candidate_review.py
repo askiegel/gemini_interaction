@@ -45,21 +45,72 @@ def test_review_uses_same_robot_centered_scale():
         in source
     )
 
-    assert (
-        "ROS +X = forward."
-        in source
+    def function_section(name):
+        token = (
+            f"function {name}("
+        )
+
+        start = source.index(
+            token
+        )
+
+        end = source.find(
+            "\n    function ",
+            start + len(token),
+        )
+
+        if end < 0:
+            end = len(source)
+
+        return source[
+            start:end
+        ]
+
+    setup = function_section(
+        "setupRobotCanvas"
+    )
+
+    mapping = function_section(
+        "localToCanvas"
+    )
+
+    candidate = function_section(
+        "drawCandidateOverlay"
+    )
+
+    live = function_section(
+        "drawLiveOnly"
     )
 
     assert (
-        "Screen up = forward."
-        in source
+        "REVIEW_RADIUS_METERS"
+        in setup
     )
 
     assert (
-        "Candidate and Live LiDAR use the same"
-        in source
+        "MAYDAY_REVIEW_ALL_CCW90"
+        in mapping
     )
 
+    assert (
+        "setupRobotCanvas("
+        in candidate
+    )
+
+    assert (
+        "localToCanvas("
+        in candidate
+    )
+
+    assert (
+        "setupRobotCanvas("
+        in live
+    )
+
+    assert (
+        "localToCanvas("
+        in live
+    )
 
 def test_current_persistent_map_is_not_falsely_registered():
     source = review_source()
@@ -259,7 +310,7 @@ def test_persistent_reference_is_rotated_90_ccw_in_renderer():
     ]
 
     assert (
-        "MAYDAY_REVIEW_PERSISTENT_90_CCW"
+        "MAYDAY_REVIEW_PERSISTENT_ALL_CCW90"
         in renderer
     )
 
@@ -269,7 +320,7 @@ def test_persistent_reference_is_rotated_90_ccw_in_renderer():
     )
 
     assert (
-        "-Math.PI / 2"
+        "-Math.PI"
         in renderer
     )
 
@@ -301,11 +352,11 @@ def test_candidate_live_overlay_has_no_review_rotation():
     ]
 
     assert (
-        "MAYDAY_REVIEW_PERSISTENT_90_CCW"
+        "MAYDAY_REVIEW_PERSISTENT_ALL_CCW90"
         not in renderer
     )
 
     assert (
-        "-Math.PI / 2"
+        "-Math.PI"
         not in renderer
     )
