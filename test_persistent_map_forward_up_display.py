@@ -65,7 +65,7 @@ def test_all_map_space_canvases_rotate_together():
     )
 
 
-def test_baseline_map_x_is_forward_up():
+def test_box_verified_negative_x_baseline_is_forward_up():
     source = feature_source()
 
     assert (
@@ -73,10 +73,10 @@ def test_baseline_map_x_is_forward_up():
         in source
     )
 
-    assert "-90.0" in source
+    assert "90.0" in source
 
     assert (
-        "FORWARD · +X BASELINE"
+        "FORWARD · -X BASELINE"
         in source
     )
 
@@ -220,4 +220,67 @@ def test_html_marks_forward_up_feature():
     assert (
         "MAYDAY_FORWARD_UP_PERSISTENT_MAP_DISPLAY"
         in HTML
+    )
+
+
+
+def test_raw_persistent_rasters_receive_180_degree_correction():
+    marker = (
+        "/* MAYDAY_180_DEGREE_BASELINE_CORRECTION */"
+    )
+
+    assert marker in CSS
+
+    correction = CSS.split(
+        marker,
+        1,
+    )[1]
+
+    assert (
+        "#persistentMapCandidateCanvas"
+        in correction
+    )
+
+    assert (
+        "#persistentMapReviewPersistentCanvas"
+        in correction
+    )
+
+    assert (
+        "rotate(180deg)"
+        in correction
+    )
+
+
+def test_robot_local_candidate_live_overlay_is_not_double_rotated():
+    marker = (
+        "/* MAYDAY_180_DEGREE_BASELINE_CORRECTION */"
+    )
+
+    correction = CSS.split(
+        marker,
+        1,
+    )[1]
+
+    assert (
+        "#persistentMapReviewOverlayCanvas"
+        not in correction
+    )
+
+    assert (
+        "#persistentMapReviewLiveCanvas"
+        not in correction
+    )
+
+
+def test_localized_pose_still_controls_true_forward_up():
+    source = feature_source()
+
+    # Once AMCL provides a trusted/fresh map-frame yaw,
+    # use the real robot heading rather than the temporary
+    # unlocalized stationary-map baseline correction.
+    assert (
+        "rotation =\n"
+        "                    yaw - 90.0;"
+        in source
     )

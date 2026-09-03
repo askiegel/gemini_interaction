@@ -9643,7 +9643,7 @@
      *
      * Before localization:
      *
-     *     ROS map +X
+     *     promoted-map -X baseline
      *         ↓
      *     screen UP
      *
@@ -9658,7 +9658,7 @@
         "/dashboard/localization";
 
     const BASELINE_ROTATION_DEGREES =
-        -90.0;
+        90.0;
 
     const MAP_CANVAS_IDS = [
         "mapCanvas",
@@ -9750,7 +9750,7 @@
             "baseline";
 
         label.textContent =
-            "FORWARD · +X BASELINE";
+            "FORWARD · -X BASELINE";
 
         stage.appendChild(
             label
@@ -9809,7 +9809,7 @@
                 "baseline";
 
             label.textContent =
-                "FORWARD · +X BASELINE";
+                "FORWARD · -X BASELINE";
         }
     }
 
@@ -9873,7 +9873,10 @@
          * Default for the newly promoted stationary baseline:
          * Mayday was map yaw 0 when that local map was created.
          *
-         * Therefore map +X is the baseline forward direction.
+         * The physical box test established that the
+         * promoted stationary raster requires an additional
+         * 180-degree presentation correction. Until localization
+         * is trusted, map -X is therefore shown as baseline forward.
          */
         let rotation =
             BASELINE_ROTATION_DEGREES;

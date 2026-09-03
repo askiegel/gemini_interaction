@@ -2872,7 +2872,7 @@ button.candidate-inventory-item:focus-visible {
  * All four map-space canvases are visually rotated together.
  */
 .map-stage.mayday-forward-up-map-stage {
-    --mayday-map-display-rotation: -90deg;
+    --mayday-map-display-rotation: 90deg;
 
     position: relative !important;
 
@@ -2943,4 +2943,22 @@ button.candidate-inventory-item:focus-visible {
 #persistentMapForwardLabel.baseline {
     border-color: rgba(56, 189, 248, 0.55);
     color: #bae6fd;
+}
+
+
+/* MAYDAY_180_DEGREE_BASELINE_CORRECTION */
+
+/*
+ * Physical box test:
+ *
+ * Raw stationary occupancy rasters require a 180-degree
+ * presentation correction relative to Mayday's Live LiDAR.
+ *
+ * Do NOT apply this to Candidate + Live Overlay because that
+ * view is already transformed into the common robot-local frame.
+ */
+#persistentMapCandidateCanvas,
+#persistentMapReviewPersistentCanvas {
+    transform: rotate(180deg);
+    transform-origin: 50% 50%;
 }
