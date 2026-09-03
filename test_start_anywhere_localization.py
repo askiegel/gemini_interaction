@@ -52,7 +52,7 @@ def test_helper_uses_global_localization():
 
 
 def test_global_search_uses_twenty_stationary_updates():
-    assert "NO_MOTION_UPDATES = 20" in HELPER
+    assert "NO_MOTION_UPDATES = 40" in HELPER
 
     assert (
         '"global_localization_requested":\n'
