@@ -1059,16 +1059,46 @@ def test_direct_go_uses_short_bounded_initialization_waits():
     )
 
 
-def test_planning_buttons_are_hidden_diagnostics():
-    dashboard = Path("voice_relay/index.html").read_text(
+def test_planning_buttons_are_visible_with_guarded_defaults():
+    dashboard = Path(
+        "voice_relay/index.html"
+    ).read_text(
         encoding="utf-8"
     )
 
-    for button_id in (
-        "startPlanningButton",
-        "stopPlanningButton",
-        "computePlanningPathButton",
-    ):
-        start = dashboard.index(f'id="{button_id}"')
-        end = dashboard.index(">", start)
-        assert "hidden" in dashboard[start:end]
+    expected = {
+        "startPlanningButton": False,
+        "stopPlanningButton": True,
+        "computePlanningPathButton": True,
+    }
+
+    for button_id, should_be_disabled in expected.items():
+        marker = (
+            f'id="{button_id}"'
+        )
+
+        marker_index = dashboard.index(
+            marker
+        )
+
+        start = dashboard.rfind(
+            "<button",
+            0,
+            marker_index,
+        )
+
+        end = dashboard.index(
+            ">",
+            marker_index,
+        )
+
+        opening = dashboard[
+            start:end
+        ]
+
+        assert " hidden" not in opening
+
+        if should_be_disabled:
+            assert " disabled" in opening
+        else:
+            assert " disabled" not in opening

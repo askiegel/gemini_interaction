@@ -398,3 +398,59 @@ def test_planning_refresh_uses_navigation_status_not_robot_amcl():
 
     assert "LOCALIZATION_ENDPOINT" not in source
     assert "POSE_REFRESH_ENDPOINT" not in source
+
+def test_tony2_planning_controls_are_visible():
+    html = (
+        ROOT
+        / "voice_relay"
+        / "index.html"
+    ).read_text(
+        encoding="utf-8"
+    )
+
+    expected = {
+        "startPlanningButton": False,
+        "stopPlanningButton": True,
+        "computePlanningPathButton": True,
+    }
+
+    for identifier, should_be_disabled in expected.items():
+        marker = (
+            f'id="{identifier}"'
+        )
+
+        start = html.index(
+            marker
+        )
+
+        button_start = html.rfind(
+            "<button",
+            0,
+            start,
+        )
+
+        button_end = html.index(
+            ">",
+            start,
+        )
+
+        opening = html[
+            button_start:button_end
+        ]
+
+        assert " hidden" not in opening
+
+        if should_be_disabled:
+            assert " disabled" in opening
+        else:
+            assert " disabled" not in opening
+
+    assert (
+        "For a read-only path preview, start planning,"
+        in html
+    )
+
+    assert (
+        "then compute the path."
+        in html
+    )
