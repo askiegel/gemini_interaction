@@ -65,7 +65,7 @@ def test_all_map_space_canvases_rotate_together():
     )
 
 
-def test_box_verified_negative_x_baseline_is_forward_up():
+def test_box_verified_baseline_orientation_is_forward_up():
     source = feature_source()
 
     assert (
@@ -73,13 +73,20 @@ def test_box_verified_negative_x_baseline_is_forward_up():
         in source
     )
 
-    assert "90.0" in source
-
     assert (
-        "FORWARD · -X BASELINE"
+        "180.0"
         in source
     )
 
+    assert (
+        "FORWARD BASELINE"
+        in source
+    )
+
+    assert (
+        "FORWARD · -X BASELINE"
+        not in source
+    )
 
 def test_localized_display_tracks_mayday_heading():
     source = feature_source()

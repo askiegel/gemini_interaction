@@ -9710,7 +9710,7 @@
         "/dashboard/localization";
 
     const BASELINE_ROTATION_DEGREES =
-        90.0;
+        180.0;
 
     const MAP_CANVAS_IDS = [
         "mapCanvas",
@@ -9802,7 +9802,7 @@
             "baseline";
 
         label.textContent =
-            "FORWARD · -X BASELINE";
+            "FORWARD BASELINE";
 
         stage.appendChild(
             label
@@ -9861,7 +9861,7 @@
                 "baseline";
 
             label.textContent =
-                "FORWARD · -X BASELINE";
+                "FORWARD BASELINE";
         }
     }
 
