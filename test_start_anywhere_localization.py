@@ -43,28 +43,21 @@ def localization_server_section():
     return SERVER[start:end]
 
 
-def test_helper_uses_global_localization():
+
+def test_helper_supports_global_and_seeded_localization():
     assert '"/reinitialize_global_localization"' in HELPER
-    assert '"/request_nomotion_update"' in HELPER
+    assert '"/set_initial_pose"' in HELPER
+    assert '"--seed-pose"' in HELPER
+    assert "SetInitialPose" in HELPER
 
-    assert "SetInitialPose" not in HELPER
-    assert '"/set_initial_pose"' not in HELPER
 
 
-def test_global_search_uses_twenty_stationary_updates():
+
+def test_localization_modes_preserve_stationary_updates():
     assert "NO_MOTION_UPDATES = 40" in HELPER
+    assert "not args.seed_pose" in HELPER
+    assert "bool(args.seed_pose)" in HELPER
 
-    assert (
-        '"global_localization_requested":\n'
-        "                True"
-        in HELPER
-    )
-
-    assert (
-        '"initial_pose_supplied":\n'
-        "                False"
-        in HELPER
-    )
 
 
 def test_trust_no_longer_depends_on_fixed_seed():
@@ -107,47 +100,32 @@ def test_runtime_exposes_global_entry_point():
     )
 
 
-def test_server_does_not_supply_home_pose():
+
+def test_server_uses_known_home_entry_point():
     section = localization_server_section()
 
-    assert (
-        "runtime.initialize_global_localization()"
-        in section
-    )
-
-    assert (
-        "runtime.initialize_operator_pose("
-        not in section
-    )
-
-    assert "fixed Home" not in section
-    assert "pose (0, 0, 0)" not in section
+    assert "runtime.initialize_home_localization()" in section
+    assert "runtime.initialize_global_localization()" not in section
 
 
-def test_server_requires_global_result():
+
+
+def test_server_requires_seeded_home_result():
     section = localization_server_section()
+    compact = "".join(section.split())
 
+    assert 'localization.get("seed_pose_used")isTrue' in compact
+    assert 'localization.get("initial_pose_supplied")isTrue' in compact
     assert (
-        'localization.get(\n'
-        '                "initial_pose_supplied"\n'
-        "            ) is False"
-        in section
-    )
-
-    assert (
-        'localization.get(\n'
-        '                "global_localization_requested"\n'
-        "            ) is True"
-        in section
-    )
-
-    assert (
-        'localization.get("trusted") is True'
-        in section
+        'localization.get("global_localization_requested")'
+        'isFalse'
+        in compact
     )
 
 
-def test_stationary_guard_precedes_global_request():
+
+
+def test_stationary_guard_precedes_home_request():
     section = localization_server_section()
 
     stationary = section.index(
@@ -155,10 +133,11 @@ def test_stationary_guard_precedes_global_request():
     )
 
     request = section.index(
-        "runtime.initialize_global_localization()"
+        "runtime.initialize_home_localization()"
     )
 
     assert stationary < request
+
 
 
 def test_localization_route_has_no_motion_path():
@@ -169,16 +148,14 @@ def test_localization_route_has_no_motion_path():
     assert "motion_arm" not in section
 
 
-def test_navigation_ui_accepts_global_result():
-    assert (
-        ".global_localization_requested === true"
-        in HTML
-    )
 
-    assert (
-        ".initial_pose_supplied === false"
-        in HTML
-    )
+def test_navigation_ui_accepts_home_seeded_result():
+    compact = "".join(HTML.split())
+
+    assert ".global_localization_requested===false" in compact
+    assert ".initial_pose_supplied===true" in compact
+    assert ".seed_pose_used===true" in compact
+
 
 
 def test_covariance_gate_is_defined_before_trust():

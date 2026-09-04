@@ -24,6 +24,7 @@ from rclpy.time import Time
 from rclpy.utilities import remove_ros_args
 from sensor_msgs.msg import LaserScan
 from std_srvs.srv import Empty
+from nav2_msgs.srv import SetInitialPose
 from tf2_ros import (
     Buffer,
     TransformException,
@@ -160,6 +161,11 @@ def main():
         required=True,
     )
 
+    parser.add_argument(
+        "--seed-pose",
+        action="store_true",
+    )
+
     # argparse must see only application arguments.
     #
     # The runtime intentionally appends ROS arguments such as:
@@ -268,6 +274,11 @@ def main():
         "/reinitialize_global_localization",
     )
 
+    initial_pose_client = node.create_client(
+        SetInitialPose,
+        "/set_initial_pose",
+    )
+
     nomotion_client = node.create_client(
         Empty,
         "/request_nomotion_update",
@@ -306,12 +317,21 @@ def main():
                 "Live LiDAR unavailable."
             )
 
-        if not global_localization_client.wait_for_service(
-            timeout_sec=4.0
-        ):
-            raise RuntimeError(
-                "AMCL reinitialize_global_localization service unavailable."
-            )
+        if args.seed_pose:
+            if not initial_pose_client.wait_for_service(
+                timeout_sec=4.0
+            ):
+                raise RuntimeError(
+                    "AMCL set_initial_pose service unavailable."
+                )
+        else:
+            if not global_localization_client.wait_for_service(
+                timeout_sec=4.0
+            ):
+                raise RuntimeError(
+                    "AMCL reinitialize_global_localization "
+                    "service unavailable."
+                )
 
         if not nomotion_client.wait_for_service(
             timeout_sec=4.0
@@ -334,12 +354,51 @@ def main():
 
         state["pose"] = None
 
-        call_service(
-            node,
-            global_localization_client,
-            Empty.Request(),
-            "global_localization",
-        )
+        if args.seed_pose:
+            request = SetInitialPose.Request()
+
+            request.pose.header.frame_id = "map"
+            request.pose.header.stamp = (
+                node.get_clock().now().to_msg()
+            )
+
+            request.pose.pose.pose.position.x = args.x
+            request.pose.pose.pose.position.y = args.y
+            request.pose.pose.pose.position.z = 0.0
+
+            half_yaw = args.yaw / 2.0
+
+            request.pose.pose.pose.orientation.x = 0.0
+            request.pose.pose.pose.orientation.y = 0.0
+            request.pose.pose.pose.orientation.z = (
+                math.sin(half_yaw)
+            )
+            request.pose.pose.pose.orientation.w = (
+                math.cos(half_yaw)
+            )
+
+            covariance = request.pose.pose.covariance
+
+            covariance[0] = 0.05 ** 2
+            covariance[7] = 0.05 ** 2
+            covariance[35] = (
+                math.radians(10.0) ** 2
+            )
+
+            call_service(
+                node,
+                initial_pose_client,
+                request,
+                "set_initial_pose",
+            )
+
+        else:
+            call_service(
+                node,
+                global_localization_client,
+                Empty.Request(),
+                "global_localization",
+            )
 
         # ----------------------------------------------------
         # Force repeated stationary laser updates.
@@ -1190,11 +1249,19 @@ def main():
             "trusted": trusted,
             "frame_id": "map",
             "localization_method":
-                "amcl_global",
+                (
+                    "amcl_seeded"
+                    if args.seed_pose
+                    else "amcl_global"
+                ),
             "search_scope":
-                "full_saved_map",
+                (
+                    "known_home_pose"
+                    if args.seed_pose
+                    else "full_saved_map"
+                ),
             "seed_pose_used":
-                False,
+                bool(args.seed_pose),
             "final_pose": {
                 "x": final_x,
                 "y": final_y,
@@ -1216,9 +1283,13 @@ def main():
             },
             "localization_search": {
                 "method":
-                    "global_localization",
+                    (
+                        "set_initial_pose"
+                        if args.seed_pose
+                        else "global_localization"
+                    ),
                 "seed_pose_used":
-                    False,
+                    bool(args.seed_pose),
             },
             "scan_alignment": {
                 "sample_count":
@@ -1258,16 +1329,18 @@ def main():
                 "covariance_tight":
                     covariance_tight,
                 "global_search_completed":
-                    True,
+                    not args.seed_pose,
+                "seed_pose_applied":
+                    bool(args.seed_pose),
                 "alignment_good":
                     alignment_good,
                 "trusted":
                     trusted,
             },
             "global_localization_requested":
-                True,
+                not args.seed_pose,
             "initial_pose_supplied":
-                False,
+                bool(args.seed_pose),
             "nomotion_updates_requested":
                 NO_MOTION_UPDATES,
             "stationary_required":
@@ -1311,7 +1384,9 @@ if __name__ == "__main__":
                     "trusted": False,
                     "error": str(exc),
                     "initial_pose_supplied":
-                        False,
+                        bool(args.seed_pose),
+                    "global_localization_requested":
+                        not args.seed_pose,
                     "navigation_goal_executed":
                         False,
                     "motion_enabled":

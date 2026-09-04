@@ -276,54 +276,31 @@ def test_planning_start_uses_global_tony2_localization():
     assert "LOCALIZATION_ENDPOINT" not in source
 
 
-def test_planning_initialization_requires_trusted_start_anywhere():
+
+def test_planning_initialization_requires_trusted_home():
     source = function_source(
         "validInitialization",
         "validPoseRefresh",
     )
 
+    compact = "".join(source.split())
+
     required = (
-        "initialization.trusted === true",
-        (
-            'initialization.localization_method\n'
-            '                === "amcl_global"'
-        ),
-        (
-            'initialization.search_scope\n'
-            '                === "full_saved_map"'
-        ),
-        (
-            "initialization.seed_pose_used\n"
-            "                === false"
-        ),
-        (
-            "initialization.global_localization_requested\n"
-            "                === true"
-        ),
-        (
-            "initialization.initial_pose_supplied\n"
-            "                === false"
-        ),
-        (
-            "initialization.nomotion_updates_requested\n"
-            "                === 20"
-        ),
-        (
-            "initialization.navigation_goal_executed\n"
-            "                === false"
-        ),
-        (
-            "initialization.motion_enabled\n"
-            "                === false"
-        ),
-        (
-            "navigation.motion_output_connected\n"
-            "                === false"
-        ),
+        "initialization.trusted===true",
+        'initialization.localization_method==="amcl_seeded"',
+        'initialization.search_scope==="known_home_pose"',
+        "initialization.seed_pose_used===true",
+        "initialization.global_localization_requested===false",
+        "initialization.initial_pose_supplied===true",
+        "initialization.nomotion_updates_requested===20",
+        "initialization.navigation_goal_executed===false",
+        "initialization.motion_enabled===false",
+        "navigation.motion_output_connected===false",
     )
 
     for marker in required:
-        assert marker in source
+        assert marker in compact
+
 
 
 def test_compute_button_uses_only_tony2_planner_action():

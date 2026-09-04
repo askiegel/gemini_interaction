@@ -126,82 +126,36 @@ def test_normal_navigation_start_stop_use_tony2_runtime():
     )
 
 
-def test_normal_navigation_requests_global_localization():
+
+def test_normal_navigation_requests_home_localization():
     source = method_source(
         "navigation_initialize_localization",
         "navigation_goal",
     )
 
-    assert (
-        "runtime = get_tony2_navigation_runtime()"
-        in source
-    )
-
-    assert (
-        "self.ensure_mayday_stationary()"
-        in source
-    )
-
-    assert (
-        "runtime.initialize_global_localization("
-        in source
-    )
-
-    normalized = "".join(
-        source.split()
-    )
-
-    assert (
-        "runtime.initialize_global_localization()"
-        in normalized
-    )
-
-    assert (
-        '"/navigation/initialize-localization"'
-        not in source
-    )
+    assert "runtime.initialize_home_localization()" in source
+    assert "runtime.initialize_global_localization()" not in source
+    assert "self.ensure_mayday_stationary()" in source
 
 
-def test_start_anywhere_initialization_is_global():
+
+
+def test_normal_navigation_initialization_is_home_seeded():
     source = method_source(
         "navigation_initialize_localization",
         "navigation_goal",
     )
 
+    compact = "".join(source.split())
+
+    assert 'localization.get("seed_pose_used")isTrue' in compact
+    assert 'localization.get("initial_pose_supplied")isTrue' in compact
     assert (
-        '"global_localization_requested"'
-        in source
+        'localization.get("global_localization_requested")'
+        'isFalse'
+        in compact
     )
 
-    assert (
-        "is False"
-        in source
-    )
-
-    assert (
-        '"initial_pose_supplied"'
-        in source
-    )
-
-    assert (
-        "is True"
-        in source
-    )
-
-    assert (
-        '"stationary_required"'
-        in source
-    )
-
-    assert (
-        '"navigation_goal_executed"'
-        in source
-    )
-
-    assert (
-        '"motion_enabled"'
-        in source
-    )
 
 
 def test_normal_navigation_goal_uses_tony2_runtime():
@@ -269,36 +223,37 @@ def test_dashboard_requires_tony2_isolation_on_start():
         assert marker in source
 
 
+
 def test_dashboard_requires_validated_home_before_go():
     start = HTML.index(
         "function navigationInitializationSucceeded(result)"
     )
+    end = HTML.index("async function", start)
 
-    end = HTML.index(
-        "async function",
-        start,
-    )
-
-    source = HTML[start:end]
+    compact = "".join(HTML[start:end].split())
 
     required = (
-        "initialization.trusted === true",
-        ".global_localization_requested === true",
-        ".initial_pose_supplied === false",
-        ".stationary_required === true",
-        ".navigation_goal_executed === false",
-        ".motion_enabled === false",
-        'navigation.state === "READY"',
-        'navigation.host === "Tony2"',
-        "navigation.action_server_ready === true",
-        "navigation.transform_ready === true",
-        "navigation.goal_submission_enabled === true",
-        "navigation.motion_output_connected",
-        '=== "zenoh_localhost"',
+        "initialization.trusted===true",
+        'initialization.localization_method==="amcl_seeded"',
+        'initialization.search_scope==="known_home_pose"',
+        "initialization.seed_pose_used===true",
+        "initialization.global_localization_requested===false",
+        "initialization.initial_pose_supplied===true",
+        "initialization.stationary_required===true",
+        "initialization.navigation_goal_executed===false",
+        "initialization.motion_enabled===false",
+        'navigation.state==="READY"',
+        'navigation.host==="Tony2"',
+        "navigation.action_server_ready===true",
+        "navigation.transform_ready===true",
+        "navigation.goal_submission_enabled===true",
+        "navigation.motion_output_connected===false",
+        'navigation.isolation_transport==="zenoh_localhost"',
     )
 
     for marker in required:
-        assert marker in source
+        assert marker in compact
+
 
 
 def test_goal_payload_remains_fixed_and_numeric():

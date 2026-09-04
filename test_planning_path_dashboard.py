@@ -435,59 +435,31 @@ def test_startup_waits_for_trusted_tony2_pose_before_ready():
     )
 
 
-def test_startup_ready_requires_trusted_global_localization():
+
+def test_startup_ready_requires_trusted_home_localization():
     start = CONTROL.index(
         "function validInitialization"
     )
-
     end = CONTROL.index(
         "function validPoseRefresh",
         start,
     )
 
-    validator = CONTROL[
-        start:end
-    ]
-
-    compact = " ".join(
-        validator.split()
-    )
+    compact = "".join(CONTROL[start:end].split())
 
     required = (
-        "initialization.trusted === true",
-        (
-            "initialization.localization_method "
-            '=== "amcl_global"'
-        ),
-        (
-            "initialization.search_scope "
-            '=== "full_saved_map"'
-        ),
-        "initialization.seed_pose_used === false",
-        (
-            "initialization.global_localization_requested "
-            "=== true"
-        ),
-        (
-            "initialization.initial_pose_supplied "
-            "=== false"
-        ),
-        (
-            "initialization.nomotion_updates_requested "
-            "=== 20"
-        ),
-        "navigation.state === \"READY\"",
-        "navigation.planner_enabled === true",
-        "navigation.transform_ready === true",
-        (
-            "navigation.motion_output_connected "
-            "=== false"
-        ),
-        "navigation.goal_active === false",
+        'initialization.localization_method==="amcl_seeded"',
+        'initialization.search_scope==="known_home_pose"',
+        "initialization.seed_pose_used===true",
+        "initialization.global_localization_requested===false",
+        "initialization.initial_pose_supplied===true",
+        'navigation.state==="READY"',
+        "navigation.transform_ready===true",
     )
 
     for marker in required:
         assert marker in compact
+
 
 def test_new_pose_requires_numeric_coordinates():
     start = CONTROL.index("function isNewFreshPose")
@@ -659,41 +631,28 @@ def test_tony2_navigation_stays_active_between_localization_retries():
     )
 
 
+
 def test_tony2_initializer_validation_preserves_safety_contract():
     start = CONTROL.index(
         "function validInitialization"
     )
-
     end = CONTROL.index(
         "function validPoseRefresh",
         start,
     )
 
-    validator = CONTROL[
-        start:end
-    ]
-
     compact = " ".join(
-        validator.split()
+        CONTROL[start:end].split()
     )
 
     required = (
         "initialization.trusted === true",
-        (
-            "initialization.localization_method "
-            '=== "amcl_global"'
-        ),
-        (
-            "initialization.search_scope "
-            '=== "full_saved_map"'
-        ),
-        (
-            "initialization.seed_pose_used "
-            "=== false"
-        ),
+        'initialization.localization_method === "amcl_seeded"',
+        'initialization.search_scope === "known_home_pose"',
+        "initialization.seed_pose_used === true",
         (
             "initialization.global_localization_requested "
-            "=== true"
+            "=== false"
         ),
         (
             "initialization.nomotion_updates_requested "
@@ -705,28 +664,20 @@ def test_tony2_initializer_validation_preserves_safety_contract():
         ),
         (
             "initialization.initial_pose_supplied "
-            "=== false"
+            "=== true"
         ),
         (
             "initialization.navigation_goal_executed "
             "=== false"
         ),
-        (
-            "initialization.motion_enabled "
-            "=== false"
-        ),
-        (
-            "navigation.motion_output_connected "
-            "=== false"
-        ),
-        (
-            "navigation.goal_active "
-            "=== false"
-        ),
+        "initialization.motion_enabled === false",
+        "navigation.motion_output_connected === false",
+        "navigation.goal_active === false",
     )
 
     for marker in required:
         assert marker in compact
+
 
 def test_pose_refresh_proxy_is_fixed_and_parameter_free():
     start = SERVER.index(

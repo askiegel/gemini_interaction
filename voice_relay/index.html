@@ -4030,15 +4030,14 @@
             && initialization
             && initialization.trusted === true
             && initialization.localization_method
-                === "amcl_global"
+                === "amcl_seeded"
             && initialization.search_scope
-                === "full_saved_map"
-            && initialization.seed_pose_used
-                === false
+                === "known_home_pose"
+            && initialization.seed_pose_used === true
             && initialization.global_localization_requested
-                === true
-            && initialization.initial_pose_supplied
                 === false
+            && initialization.initial_pose_supplied
+                === true
             && initialization.nomotion_updates_requested
                 === 20
             && initialization.stationary_required
@@ -4047,29 +4046,17 @@
                 === false
             && initialization.motion_enabled
                 === false
+            && Number.isFinite(Number(finalPose.x))
+            && Number.isFinite(Number(finalPose.y))
+            && Number.isFinite(Number(finalPose.yaw_rad))
             && Number.isFinite(
-                Number(finalPose.x)
+                Number(uncertainty.sigma_x_m)
             )
             && Number.isFinite(
-                Number(finalPose.y)
+                Number(uncertainty.sigma_y_m)
             )
             && Number.isFinite(
-                Number(finalPose.yaw_rad)
-            )
-            && Number.isFinite(
-                Number(
-                    uncertainty.sigma_x_m
-                )
-            )
-            && Number.isFinite(
-                Number(
-                    uncertainty.sigma_y_m
-                )
-            )
-            && Number.isFinite(
-                Number(
-                    uncertainty.sigma_yaw_rad
-                )
+                Number(uncertainty.sigma_yaw_rad)
             )
             && navigation
             && navigation.state === "READY"
@@ -4764,23 +4751,27 @@
             && result.response
             && result.response.ok
             && result.payload
-            && result.payload.ok
+            && result.payload.ok === true
             && initialization
             && initialization.trusted === true
-            && initialization
-                .global_localization_requested === true
-            && initialization
-                .initial_pose_supplied === false
+            && initialization.localization_method
+                === "amcl_seeded"
+            && initialization.search_scope
+                === "known_home_pose"
+            && initialization.seed_pose_used === true
+            && initialization.global_localization_requested
+                === false
+            && initialization.initial_pose_supplied
+                === true
             && Number(
-                initialization
-                    .nomotion_updates_requested
+                initialization.nomotion_updates_requested
             ) >= 1
-            && initialization
-                .stationary_required === true
-            && initialization
-                .navigation_goal_executed === false
-            && initialization
-                .motion_enabled === false
+            && initialization.stationary_required
+                === true
+            && initialization.navigation_goal_executed
+                === false
+            && initialization.motion_enabled
+                === false
             && navigation
             && navigation.state === "READY"
             && navigation.host === "Tony2"

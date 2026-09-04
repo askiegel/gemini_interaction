@@ -1135,7 +1135,7 @@ class VoiceRelayHandler(BaseHTTPRequestHandler):
 
         try:
             result = (
-                runtime.initialize_global_localization()
+                runtime.initialize_home_localization()
             )
 
         except Exception as exc:
@@ -1168,9 +1168,12 @@ class VoiceRelayHandler(BaseHTTPRequestHandler):
             and localization.get("trusted") is True
             and localization.get(
                 "initial_pose_supplied"
-            ) is False
+            ) is True
             and localization.get(
                 "global_localization_requested"
+            ) is False
+            and localization.get(
+                "seed_pose_used"
             ) is True
             and localization.get(
                 "stationary_required"

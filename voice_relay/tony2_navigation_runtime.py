@@ -1438,20 +1438,32 @@ class Tony2NavigationRuntime:
         }
 
 
+
     def initialize_global_localization(self):
         """
         Run stationary map-wide AMCL localization.
 
-        The existing localization process owner is reused so
-        lifecycle, fail-closed STOP behavior, egress checks,
-        and trust handling remain unchanged. Its historical
-        x/y/yaw compatibility arguments are not used by the
-        helper to seed AMCL.
+        This remains the deliberate recovery path.
         """
         return self.initialize_operator_pose(
             0.0,
             0.0,
             0.0,
+            seed_pose=False,
+        )
+
+
+    def initialize_home_localization(self):
+        """
+        Initialize Mayday at the known fixed-map Home pose.
+
+        AMCL remains alive afterward to track subsequent motion.
+        """
+        return self.initialize_operator_pose(
+            -0.05,
+            -0.05,
+            -1.7906250685463345,
+            seed_pose=True,
         )
 
     def initialize_operator_pose(
@@ -1459,6 +1471,7 @@ class Tony2NavigationRuntime:
         x,
         y,
         yaw,
+        seed_pose=False,
     ):
         """
         Set and validate one stationary operator AMCL pose.
@@ -1628,6 +1641,11 @@ class Tony2NavigationRuntime:
             "-r",
             "/tf:=/nav_tf",
         ]
+
+        if seed_pose:
+            command.append(
+                "--seed-pose"
+            )
 
         try:
             completed = subprocess.run(
