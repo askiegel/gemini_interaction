@@ -97,3 +97,20 @@ def test_trust_thresholds_unchanged():
 
     for marker in required:
         assert marker in HELPER
+
+def test_seed_flag_precedes_ros_argument_tail():
+    start = RUNTIME.index(
+        "    def initialize_operator_pose"
+    )
+
+    section = RUNTIME[start:]
+
+    seed = section.index(
+        '"--seed-pose"'
+    )
+
+    ros_args = section.index(
+        '"--ros-args"'
+    )
+
+    assert seed < ros_args

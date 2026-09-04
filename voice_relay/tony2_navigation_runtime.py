@@ -1637,15 +1637,20 @@ class Tony2NavigationRuntime:
                     normalized["yaw"]
                 )
             ),
-            "--ros-args",
-            "-r",
-            "/tf:=/nav_tf",
         ]
 
         if seed_pose:
             command.append(
                 "--seed-pose"
             )
+
+        command.extend(
+            [
+                "--ros-args",
+                "-r",
+                "/tf:=/nav_tf",
+            ]
+        )
 
         try:
             completed = subprocess.run(
