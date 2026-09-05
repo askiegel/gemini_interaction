@@ -3483,109 +3483,44 @@ class VoiceRelayHandler(BaseHTTPRequestHandler):
                     localization_result
                 )
 
-                # Independent live confirmation that Robot Bridge
-                # is currently receiving /amcl_pose.
-                telemetry = None
-
-                telemetry_deadline = (
-                    _startup_time.monotonic()
-                    + 20.0
-                )
-
-                telemetry_url = (
-                    ROBOT_BRIDGE_URL
-                    + "/telemetry/localization"
-                )
-
-                while (
-                    _startup_time.monotonic()
-                    < telemetry_deadline
-                ):
-                    try:
-                        request = (
-                            _startup_urlrequest.Request(
-                                telemetry_url,
-                                method="GET",
+                # The global-localization helper is the
+                # authoritative attestation for this isolated
+                # Tony2 Nav2/AMCL runtime. Robot Bridge does not
+                # own or discover this isolated AMCL instance.
+                localization_attestation = {
+                    "source":
+                        "tony2_guarded_navigation",
+                    "action":
+                        localization_result.get(
+                            "action"
+                        ),
+                    "trusted":
+                        localization.get(
+                            "trusted"
+                        ),
+                    "transform_ready":
+                        navigation.get(
+                            "transform_ready"
+                        ),
+                    "supervisor_pid":
+                        (
+                            navigation.get(
+                                "pids"
                             )
-                        )
-
-                        with (
-                            _startup_urlrequest.urlopen(
-                                request,
-                                timeout=5,
+                            or {}
+                        ).get(
+                            "supervisor"
+                        ),
+                    "probe_pid":
+                        (
+                            navigation.get(
+                                "pids"
                             )
-                        ) as response:
-                            payload = (
-                                _startup_json.loads(
-                                    response
-                                    .read()
-                                    .decode(
-                                        "utf-8"
-                                    )
-                                )
-                            )
-
-                            live = (
-                                payload.get(
-                                    "telemetry"
-                                )
-                                if isinstance(
-                                    payload,
-                                    dict,
-                                )
-                                else None
-                            )
-
-                            if (
-                                getattr(
-                                    response,
-                                    "status",
-                                    200,
-                                )
-                                == 200
-                                and isinstance(
-                                    payload,
-                                    dict,
-                                )
-                                and payload.get(
-                                    "ok"
-                                )
-                                is True
-                                and payload.get(
-                                    "runtime_active"
-                                )
-                                is True
-                                and payload.get(
-                                    "topic"
-                                )
-                                == "/amcl_pose"
-                                and isinstance(
-                                    live,
-                                    dict,
-                                )
-                                and live.get(
-                                    "available"
-                                )
-                                is True
-                            ):
-                                telemetry = payload
-                                break
-
-                    except Exception:
-                        pass
-
-                    _startup_time.sleep(
-                        0.5
-                    )
-
-                if telemetry is None:
-                    clear_startup_localization_evidence()
-
-                    raise RuntimeError(
-                        "Trusted localization completed "
-                        "but live AMCL telemetry "
-                        "was not available."
-                    )
+                            or {}
+                        ).get(
+                            "probe"
+                        ),
+                }
 
                 prepared[
                     "navigation_start"
@@ -3596,8 +3531,8 @@ class VoiceRelayHandler(BaseHTTPRequestHandler):
                 ] = localization_result
 
                 prepared[
-                    "localization_telemetry"
-                ] = telemetry
+                    "localization_attestation"
+                ] = localization_attestation
 
                 prepared[
                     "localization_mode"

@@ -418,8 +418,6 @@ def test_startup_requires_trusted_global_localization():
         '"navigation_goal_executed"',
         '"motion_enabled"',
         "set_startup_localization_evidence",
-        '"/telemetry/localization"',
-        '"/amcl_pose"',
     )
 
     for value in required:
@@ -481,9 +479,6 @@ def test_startup_proof_uses_validated_localization_attestation():
         '"initial_pose_supplied"',
         '"navigation_goal_executed"',
         '"motion_enabled"',
-        '"/telemetry/localization"',
-        '"/amcl_pose"',
-        '"available"',
     )
 
     for value in required:
@@ -563,3 +558,125 @@ def test_prelocalization_does_not_require_navigation_servers_active():
 
     assert "initialize_global_localization" in block
     assert "initialize_home_localization" not in block
+
+
+
+def test_startup_uses_guarded_runtime_localization_attestation():
+    from pathlib import Path
+
+    server = Path(
+        "voice_relay/server.py"
+    ).read_text(
+        encoding="utf-8"
+    )
+
+    proof = Path(
+        "voice_relay/startup_proof.py"
+    ).read_text(
+        encoding="utf-8"
+    )
+
+    prepare_start = server.index(
+        'if path == "/dashboard/startup-prepare":'
+    )
+
+    prepare_end = server.index(
+        "\n            return",
+        prepare_start,
+    )
+
+    prepare = server[
+        prepare_start:
+        prepare_end
+    ]
+
+    assert (
+        "initialize_global_localization"
+        in prepare
+    )
+
+    assert (
+        "initialize_home_localization"
+        not in prepare
+    )
+
+    assert (
+        '"OPERATOR_POSE_VALIDATED"'
+        in prepare
+    )
+
+    assert (
+        '"trusted"'
+        in prepare
+    )
+
+    assert (
+        '"full_saved_map"'
+        in prepare
+    )
+
+    assert (
+        '"localization_attestation"'
+        in prepare
+    )
+
+    # Robot Bridge cannot authoritatively observe the
+    # isolated Tony2 AMCL runtime.
+    assert (
+        '"/telemetry/localization"'
+        not in prepare
+    )
+
+    assert (
+        '"/amcl_pose"'
+        not in prepare
+    )
+
+    current_check = proof[
+        proof.index(
+            '"current_pose_localization"'
+        ) - 9000:
+        proof.index(
+            '"current_pose_localization"'
+        ) + 3000
+    ]
+
+    assert (
+        "get_startup_localization_evidence"
+        in current_check
+    )
+
+    assert (
+        '"OPERATOR_POSE_VALIDATED"'
+        in current_check
+    )
+
+    assert (
+        '"trusted"'
+        in current_check
+    )
+
+    assert (
+        '"covariance_tight"'
+        in current_check
+    )
+
+    assert (
+        '"alignment_good"'
+        in current_check
+    )
+
+    assert (
+        '"global_search_completed"'
+        in current_check
+    )
+
+    assert (
+        '"/telemetry/localization"'
+        not in current_check
+    )
+
+    assert (
+        '"/amcl_pose"'
+        not in current_check
+    )

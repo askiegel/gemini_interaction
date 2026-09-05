@@ -1587,66 +1587,13 @@ def prove_ready(
             )
         )
 
-        localization_result = (
-            _startup_http_json(
-                f"{ROBOT_BRIDGE_URL}"
-                "/telemetry/localization",
-                timeout=6,
-            )
-        )
-
-        localization_payload = (
-            localization_result.get(
-                "payload"
-            )
-            or {}
-        )
-
-        live_telemetry = (
-            localization_payload.get(
-                "telemetry"
-            )
-            if isinstance(
-                localization_payload,
-                dict,
-            )
-            else None
-        )
-
-        live_amcl_ok = (
-            localization_result.get(
-                "http_status"
-            )
-            == 200
-            and isinstance(
-                localization_payload,
-                dict,
-            )
-            and localization_payload.get(
-                "ok"
-            )
-            is True
-            and localization_payload.get(
-                "runtime_active"
-            )
-            is True
-            and localization_payload.get(
-                "topic"
-            )
-            == "/amcl_pose"
-            and isinstance(
-                live_telemetry,
-                dict,
-            )
-            and live_telemetry.get(
-                "available"
-            )
-            is True
-        )
-
+        # The localization attestation was created by
+        # the same isolated Tony2 runtime whose current PIDs
+        # are checked above. The separate navigation readiness
+        # check proves that runtime remains alive, transformed,
+        # and fully READY after localization.
         current_pose_ok = (
             localization_numbers_ok
-            and live_amcl_ok
         )
 
         record_check(
@@ -1667,8 +1614,6 @@ def prove_ready(
                 f"{diagnostic.get('global_search_completed') if isinstance(diagnostic, dict) else None} "
                 f"seed="
                 f"{localization.get('seed_pose_used') if isinstance(localization, dict) else None} "
-                f"amcl_live="
-                f"{live_amcl_ok} "
                 f"pose={final_pose} "
                 f"uncertainty={uncertainty}"
             ),
