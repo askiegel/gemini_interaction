@@ -6165,5 +6165,657 @@
 </script>
 
 <!-- MAYDAY_FORWARD_UP_PERSISTENT_MAP_DISPLAY -->
+
+<!-- MAYDAY_STARTUP_TAB_BEGIN -->
+<style>
+#maydayStartupTabButton {
+    position: fixed;
+    top: 12px;
+    right: 18px;
+    z-index: 10000;
+    padding: 10px 18px;
+    border: 1px solid #64748b;
+    border-radius: 8px;
+    background: #0f172a;
+    color: #f8fafc;
+    font-weight: 700;
+    cursor: pointer;
+}
+
+#maydayStartupTabButton.ready {
+    background: #166534;
+}
+
+#maydayStartupTabButton.not-ready {
+    background: #991b1b;
+}
+
+#maydayStartupPanel {
+    position: fixed;
+    inset: 0;
+    z-index: 9999;
+    overflow: auto;
+    background: #0f172a;
+    color: #e2e8f0;
+    padding: 76px 24px 48px;
+}
+
+#maydayStartupPanel[hidden] {
+    display: none;
+}
+
+.mayday-startup-shell {
+    max-width: 1100px;
+    margin: 0 auto;
+}
+
+.mayday-startup-heading {
+    display: flex;
+    gap: 18px;
+    justify-content: space-between;
+    align-items: flex-start;
+    margin-bottom: 20px;
+}
+
+.mayday-startup-heading h1 {
+    margin: 0 0 6px;
+}
+
+.mayday-startup-heading p {
+    margin: 0;
+    color: #94a3b8;
+}
+
+.mayday-startup-close {
+    border: 1px solid #64748b;
+    background: transparent;
+    color: #f8fafc;
+    border-radius: 7px;
+    padding: 8px 14px;
+    cursor: pointer;
+}
+
+.mayday-startup-verdict {
+    text-align: center;
+    padding: 22px;
+    margin-bottom: 20px;
+    border-radius: 10px;
+    border: 2px solid #64748b;
+    font-size: 1.45rem;
+    font-weight: 800;
+}
+
+.mayday-startup-verdict.ready {
+    border-color: #22c55e;
+    background: #052e16;
+    color: #bbf7d0;
+}
+
+.mayday-startup-verdict.failed {
+    border-color: #ef4444;
+    background: #450a0a;
+    color: #fecaca;
+}
+
+.mayday-startup-verdict.running {
+    border-color: #f59e0b;
+    background: #451a03;
+    color: #fde68a;
+}
+
+.mayday-startup-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+    margin-bottom: 18px;
+}
+
+.mayday-startup-actions button {
+    padding: 10px 16px;
+    border-radius: 7px;
+    border: 1px solid #64748b;
+    cursor: pointer;
+    font-weight: 700;
+}
+
+#maydayPrepareButton {
+    background: #1d4ed8;
+    color: white;
+}
+
+#maydayProveButton {
+    background: #334155;
+    color: white;
+}
+
+#maydayCopyProofButton {
+    background: #e2e8f0;
+    color: #0f172a;
+}
+
+.mayday-startup-note {
+    margin: 0 0 20px;
+    padding: 12px 14px;
+    border-left: 4px solid #38bdf8;
+    background: #172554;
+}
+
+#maydayStartupChecks {
+    display: grid;
+    gap: 8px;
+}
+
+.mayday-startup-check {
+    display: grid;
+    grid-template-columns: 78px minmax(180px, 280px) 1fr;
+    gap: 12px;
+    padding: 12px;
+    border: 1px solid #334155;
+    border-radius: 8px;
+    background: #111827;
+    align-items: start;
+}
+
+.mayday-startup-check .result {
+    font-weight: 800;
+}
+
+.mayday-startup-check.pass .result {
+    color: #4ade80;
+}
+
+.mayday-startup-check.fail .result {
+    color: #f87171;
+}
+
+.mayday-startup-check.optional .result {
+    color: #fbbf24;
+}
+
+.mayday-startup-check .label {
+    font-weight: 700;
+}
+
+.mayday-startup-check .detail {
+    color: #cbd5e1;
+    overflow-wrap: anywhere;
+}
+
+.mayday-startup-summary {
+    margin: 18px 0;
+    color: #cbd5e1;
+}
+
+#maydayStartupProofLog {
+    width: 100%;
+    box-sizing: border-box;
+    min-height: 260px;
+    margin-top: 12px;
+    background: #020617;
+    color: #cbd5e1;
+    border: 1px solid #334155;
+    border-radius: 8px;
+    padding: 14px;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+}
+</style>
+
+<button
+    id="maydayStartupTabButton"
+    type="button"
+>
+    Startup
+</button>
+
+<section
+    id="maydayStartupPanel"
+    aria-label="Mayday Startup"
+    hidden
+>
+    <div class="mayday-startup-shell">
+        <div class="mayday-startup-heading">
+            <div>
+                <h1>Mayday Startup Proof</h1>
+                <p>
+                    Prepare the stationary platform, then independently
+                    prove every required layer before navigation.
+                </p>
+            </div>
+
+            <button
+                id="maydayStartupCloseButton"
+                class="mayday-startup-close"
+                type="button"
+            >
+                Close
+            </button>
+        </div>
+
+        <div
+            id="maydayStartupVerdict"
+            class="mayday-startup-verdict failed"
+        >
+            NOT PROVEN
+        </div>
+
+        <div class="mayday-startup-actions">
+            <button
+                id="maydayPrepareButton"
+                type="button"
+            >
+                Prepare Session
+            </button>
+
+            <button
+                id="maydayProveButton"
+                type="button"
+            >
+                Prove Ready
+            </button>
+
+            <button
+                id="maydayCopyProofButton"
+                type="button"
+            >
+                Copy Proof Log
+            </button>
+        </div>
+
+        <p class="mayday-startup-note">
+            Prepare Session may restore missing hardware/Robot Bridge
+            services and reassert STOP. It does not start Nav2,
+            initialize localization, submit a goal, or command motion.
+            READY is granted only by the independent Prove Ready check.
+        </p>
+
+        <div id="maydayStartupChecks"></div>
+
+        <div
+            id="maydayStartupSummary"
+            class="mayday-startup-summary"
+        >
+            No startup proof has been completed.
+        </div>
+
+        <details>
+            <summary>Startup Proof Log</summary>
+            <pre id="maydayStartupProofLog"></pre>
+        </details>
+    </div>
+</section>
+
+<script>
+(function () {
+    "use strict";
+
+    const PROOF_URL =
+        "/dashboard/startup-proof";
+
+    const PREPARE_URL =
+        "/dashboard/startup-prepare";
+
+    const tabButton =
+        document.getElementById(
+            "maydayStartupTabButton"
+        );
+
+    const panel =
+        document.getElementById(
+            "maydayStartupPanel"
+        );
+
+    const closeButton =
+        document.getElementById(
+            "maydayStartupCloseButton"
+        );
+
+    const prepareButton =
+        document.getElementById(
+            "maydayPrepareButton"
+        );
+
+    const proveButton =
+        document.getElementById(
+            "maydayProveButton"
+        );
+
+    const copyButton =
+        document.getElementById(
+            "maydayCopyProofButton"
+        );
+
+    const verdict =
+        document.getElementById(
+            "maydayStartupVerdict"
+        );
+
+    const checks =
+        document.getElementById(
+            "maydayStartupChecks"
+        );
+
+    const summary =
+        document.getElementById(
+            "maydayStartupSummary"
+        );
+
+    const proofLog =
+        document.getElementById(
+            "maydayStartupProofLog"
+        );
+
+    let lastProof = null;
+
+    function setVerdict(
+        text,
+        state
+    ) {
+        verdict.textContent = text;
+        verdict.className =
+            "mayday-startup-verdict "
+            + state;
+
+        tabButton.classList.remove(
+            "ready",
+            "not-ready"
+        );
+
+        if (state === "ready") {
+            tabButton.classList.add(
+                "ready"
+            );
+        } else if (
+            state === "failed"
+        ) {
+            tabButton.classList.add(
+                "not-ready"
+            );
+        }
+    }
+
+    function renderProof(data) {
+        lastProof = data;
+
+        checks.textContent = "";
+
+        const items =
+            Array.isArray(data.checks)
+                ? data.checks
+                : [];
+
+        items.forEach(function (item) {
+            const row =
+                document.createElement(
+                    "div"
+                );
+
+            let rowClass =
+                item.passed
+                    ? "pass"
+                    : "fail";
+
+            if (!item.required) {
+                rowClass += " optional";
+            }
+
+            row.className =
+                "mayday-startup-check "
+                + rowClass;
+
+            const result =
+                document.createElement(
+                    "div"
+                );
+
+            result.className =
+                "result";
+
+            if (item.passed) {
+                result.textContent =
+                    "PASS";
+            } else if (
+                item.required
+            ) {
+                result.textContent =
+                    "FAIL";
+            } else {
+                result.textContent =
+                    "INFO";
+            }
+
+            const label =
+                document.createElement(
+                    "div"
+                );
+
+            label.className =
+                "label";
+
+            label.textContent =
+                item.label || item.id;
+
+            const detail =
+                document.createElement(
+                    "div"
+                );
+
+            detail.className =
+                "detail";
+
+            detail.textContent =
+                item.detail || "";
+
+            row.appendChild(
+                result
+            );
+
+            row.appendChild(
+                label
+            );
+
+            row.appendChild(
+                detail
+            );
+
+            checks.appendChild(
+                row
+            );
+        });
+
+        if (data.ready === true) {
+            setVerdict(
+                "READY FOR NAVIGATION",
+                "ready"
+            );
+        } else {
+            setVerdict(
+                "NOT READY",
+                "failed"
+            );
+        }
+
+        summary.textContent =
+            String(
+                data.passed_required || 0
+            )
+            + " / "
+            + String(
+                data.required_checks || 0
+            )
+            + " required checks passed"
+            + (
+                data.proved_at
+                    ? " — "
+                        + data.proved_at
+                    : ""
+            );
+
+        proofLog.textContent =
+            JSON.stringify(
+                data,
+                null,
+                2
+            );
+    }
+
+    function renderError(error) {
+        setVerdict(
+            "NOT READY",
+            "failed"
+        );
+
+        summary.textContent =
+            String(error);
+
+        proofLog.textContent =
+            String(error);
+    }
+
+    async function proveReady() {
+        setVerdict(
+            "PROVING READINESS...",
+            "running"
+        );
+
+        summary.textContent =
+            "Running required startup checks.";
+
+        try {
+            const response =
+                await fetch(
+                    PROOF_URL,
+                    {
+                        cache: "no-store"
+                    }
+                );
+
+            const data =
+                await response.json();
+
+            renderProof(data);
+
+            return data;
+        } catch (error) {
+            renderError(error);
+            throw error;
+        }
+    }
+
+    async function prepareSession() {
+        setVerdict(
+            "PREPARING SESSION...",
+            "running"
+        );
+
+        summary.textContent =
+            "Restoring required services "
+            + "and reasserting safe STOP.";
+
+        prepareButton.disabled = true;
+        proveButton.disabled = true;
+
+        try {
+            const response =
+                await fetch(
+                    PREPARE_URL,
+                    {
+                        method: "POST",
+                        headers: {
+                            "Content-Type":
+                                "application/json"
+                        },
+                        body: "{}"
+                    }
+                );
+
+            const data =
+                await response.json();
+
+            proofLog.textContent =
+                JSON.stringify(
+                    data,
+                    null,
+                    2
+                );
+
+            await proveReady();
+        } catch (error) {
+            renderError(error);
+        } finally {
+            prepareButton.disabled =
+                false;
+
+            proveButton.disabled =
+                false;
+        }
+    }
+
+    async function copyProof() {
+        if (!lastProof) {
+            return;
+        }
+
+        const text =
+            JSON.stringify(
+                lastProof,
+                null,
+                2
+            );
+
+        try {
+            await navigator.clipboard.writeText(
+                text
+            );
+
+            summary.textContent =
+                "Startup Proof Log copied.";
+        } catch (error) {
+            summary.textContent =
+                "Could not copy proof log: "
+                + error;
+        }
+    }
+
+    tabButton.addEventListener(
+        "click",
+        function () {
+            panel.hidden = false;
+
+            proveReady().catch(
+                function () {}
+            );
+        }
+    );
+
+    closeButton.addEventListener(
+        "click",
+        function () {
+            panel.hidden = true;
+        }
+    );
+
+    prepareButton.addEventListener(
+        "click",
+        prepareSession
+    );
+
+    proveButton.addEventListener(
+        "click",
+        function () {
+            proveReady().catch(
+                function () {}
+            );
+        }
+    );
+
+    copyButton.addEventListener(
+        "click",
+        copyProof
+    );
+})();
+</script>
+<!-- MAYDAY_STARTUP_TAB_END -->
+
 </body>
 </html>

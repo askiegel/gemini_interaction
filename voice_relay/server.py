@@ -2593,6 +2593,37 @@ class VoiceRelayHandler(BaseHTTPRequestHandler):
                 )
                 return
 
+        if path == "/dashboard/startup-proof":
+            try:
+                from startup_proof import prove_ready
+
+                navigation = (
+                    get_tony2_navigation_runtime()
+                    .status()
+                )
+
+                payload = prove_ready(
+                    navigation
+                )
+
+                self.send_json(
+                    200,
+                    payload,
+                )
+
+            except Exception as exc:
+                self.send_json(
+                    503,
+                    {
+                        "ok": False,
+                        "ready": False,
+                        "verdict": "NOT_READY",
+                        "error": str(exc),
+                    },
+                )
+
+            return
+
         if path == "/dashboard/navigation-control":
             status_code, payload = (
                 self.navigation_control_status()
@@ -2944,6 +2975,61 @@ class VoiceRelayHandler(BaseHTTPRequestHandler):
                 )
             )
             self.send_json(status_code, payload)
+            return
+
+        if path == "/dashboard/startup-prepare":
+            try:
+                from startup_proof import (
+                    prepare_session,
+                    prove_ready,
+                )
+
+                runtime = (
+                    get_tony2_navigation_runtime()
+                )
+
+                try:
+                    runtime.stop()
+                except Exception:
+                    pass
+
+                prepared = prepare_session()
+
+                navigation = runtime.status()
+
+                proof = prove_ready(
+                    navigation
+                )
+
+                prepared["proof"] = proof
+
+                prepared["ready"] = (
+                    proof.get("ready")
+                    is True
+                )
+
+                self.send_json(
+                    (
+                        200
+                        if prepared["ready"]
+                        else 503
+                    ),
+                    prepared,
+                )
+
+            except Exception as exc:
+                self.send_json(
+                    503,
+                    {
+                        "ok": False,
+                        "ready": False,
+                        "action": (
+                            "prepare_session"
+                        ),
+                        "error": str(exc),
+                    },
+                )
+
             return
 
         if path in (
