@@ -729,6 +729,202 @@ def get_startup_localization_evidence():
     )
 
 
+
+NODE_DISCOVERY_MAX_SAMPLES = 3
+NODE_DISCOVERY_RETRY_SECONDS = 0.75
+
+
+def _startup_hardware_nodes_with_retry(
+    initial_nodes,
+    expected_nodes,
+):
+    """
+    Confirm the required Mayday ROS nodes using bounded
+    fresh graph samples.
+
+    ROS 2 discovery can temporarily omit a healthy node from
+    one node-list sample. Readiness therefore requires one
+    complete sample, not a union of partial samples.
+    """
+    import subprocess as _startup_subprocess
+    import time as _startup_time
+    from urllib.parse import (
+        urlparse as _startup_urlparse,
+    )
+
+    expected = tuple(
+        expected_nodes
+    )
+
+    current_nodes = tuple(
+        sorted(
+            {
+                str(node).strip()
+                for node in (
+                    initial_nodes
+                    or ()
+                )
+                if str(node).strip()
+            }
+        )
+    )
+
+    def missing_from(nodes):
+        return [
+            node
+            for node in expected
+            if node not in nodes
+        ]
+
+    attempts = [
+        {
+            "sample": 1,
+            "missing":
+                missing_from(
+                    current_nodes
+                ),
+            "error": None,
+        }
+    ]
+
+    if not attempts[-1]["missing"]:
+        return (
+            current_nodes,
+            attempts,
+        )
+
+    host = (
+        _startup_urlparse(
+            ROBOT_BRIDGE_URL
+        ).hostname
+    )
+
+    if not host:
+        attempts.append(
+            {
+                "sample": 2,
+                "missing":
+                    missing_from(
+                        current_nodes
+                    ),
+                "error":
+                    "Robot Bridge host unavailable.",
+            }
+        )
+
+        return (
+            current_nodes,
+            attempts,
+        )
+
+    remote_script = r"""
+set +u
+set -o pipefail
+set -e
+
+source /opt/ros/humble/setup.bash
+source "$HOME/ros2_ws/install/setup.bash"
+
+export ROS_DOMAIN_ID=42
+export ROS_LOCALHOST_ONLY=0
+export RMW_IMPLEMENTATION=rmw_fastrtps_cpp
+export FASTDDS_BUILTIN_TRANSPORTS=UDPv4
+
+unset ROS_DISCOVERY_SERVER
+unset ROS_SUPER_CLIENT
+unset FASTRTPS_DEFAULT_PROFILES_FILE
+unset FASTDDS_DEFAULT_PROFILES_FILE
+
+ros2 node list --no-daemon \
+    | sort -u
+"""
+
+    for sample_number in range(
+        2,
+        NODE_DISCOVERY_MAX_SAMPLES + 1,
+    ):
+        _startup_time.sleep(
+            NODE_DISCOVERY_RETRY_SECONDS
+        )
+
+        error = None
+
+        try:
+            completed = (
+                _startup_subprocess.run(
+                    [
+                        "ssh",
+                        "-o",
+                        "BatchMode=yes",
+                        f"ubuntu@{host}",
+                        "bash",
+                        "-s",
+                    ],
+                    input=remote_script,
+                    text=True,
+                    capture_output=True,
+                    timeout=12,
+                    check=False,
+                )
+            )
+
+            if completed.returncode == 0:
+                # IMPORTANT:
+                # Replace the sample completely.
+                # Do not union samples; readiness
+                # requires simultaneous discovery.
+                current_nodes = tuple(
+                    sorted(
+                        {
+                            line.strip()
+                            for line
+                            in completed.stdout.splitlines()
+                            if line.strip().startswith(
+                                "/"
+                            )
+                        }
+                    )
+                )
+
+            else:
+                error = (
+                    completed.stderr.strip()
+                    or (
+                        "ROS node discovery "
+                        f"returned "
+                        f"{completed.returncode}."
+                    )
+                )
+
+        except Exception as exc:
+            error = str(exc)
+
+        missing = (
+            missing_from(
+                current_nodes
+            )
+        )
+
+        attempts.append(
+            {
+                "sample":
+                    sample_number,
+                "missing":
+                    missing,
+                "error":
+                    error,
+            }
+        )
+
+        if not missing:
+            break
+
+    return (
+        current_nodes,
+        attempts,
+    )
+
+
 def prove_ready(
     navigation=None,
     progress_callback=None,
@@ -1105,13 +1301,51 @@ def prove_ready(
         "/footprint_to_odom_ekf",
     )
 
+    (
+        hardware_nodes,
+        node_discovery_attempts,
+    ) = _startup_hardware_nodes_with_retry(
+        ros["nodes"],
+        expected_nodes,
+    )
+
     missing_nodes = [
         node
         for node in expected_nodes
-        if node not in ros[
-            "nodes"
-        ]
+        if node not in hardware_nodes
     ]
+
+    discovery_summary = "; ".join(
+        (
+            f"sample {attempt['sample']}: "
+            + (
+                "complete"
+                if not attempt["missing"]
+                else (
+                    "missing "
+                    + ", ".join(
+                        attempt["missing"]
+                    )
+                )
+            )
+            + (
+                ""
+                if not attempt.get(
+                    "error"
+                )
+                else (
+                    " error="
+                    + str(
+                        attempt[
+                            "error"
+                        ]
+                    )
+                )
+            )
+        )
+        for attempt
+        in node_discovery_attempts
+    )
 
     record_check(
         checks,
@@ -1119,13 +1353,23 @@ def prove_ready(
         "Required ROS hardware nodes",
         not missing_nodes,
         (
-            "all expected nodes present"
+            (
+                "all expected nodes present "
+                f"after "
+                f"{len(node_discovery_attempts)} "
+                "discovery sample(s); "
+                f"{discovery_summary}"
+            )
             if not missing_nodes
             else (
-                "missing: "
+                "missing after "
+                f"{len(node_discovery_attempts)} "
+                "discovery sample(s): "
                 + ", ".join(
                     missing_nodes
                 )
+                + "; "
+                + discovery_summary
             )
         ),
     )

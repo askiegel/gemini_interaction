@@ -680,3 +680,119 @@ def test_startup_uses_guarded_runtime_localization_attestation():
         '"/amcl_pose"'
         not in current_check
     )
+
+
+
+def test_hardware_node_proof_retries_transient_ros_discovery():
+    from pathlib import Path
+
+    proof = Path(
+        "voice_relay/startup_proof.py"
+    ).read_text(
+        encoding="utf-8"
+    )
+
+    assert (
+        "NODE_DISCOVERY_MAX_SAMPLES = 3"
+        in proof
+    )
+
+    assert (
+        "NODE_DISCOVERY_RETRY_SECONDS = 0.75"
+        in proof
+    )
+
+    assert (
+        "def _startup_hardware_nodes_with_retry("
+        in proof
+    )
+
+    assert (
+        "ros2 node list --no-daemon"
+        in proof
+    )
+
+    assert (
+        "FASTDDS_BUILTIN_TRANSPORTS=UDPv4"
+        in proof
+    )
+
+    assert (
+        "_startup_hardware_nodes_with_retry("
+        in proof
+    )
+
+    expected_start = proof.index(
+        "    expected_nodes = ("
+    )
+
+    hardware_end = proof.index(
+        '        "bridge_process",',
+        expected_start,
+    )
+
+    hardware = proof[
+        expected_start:
+        hardware_end
+    ]
+
+    # /servo_interface remains REQUIRED.
+    assert (
+        '"/servo_interface"'
+        in hardware
+    )
+
+    # All original required nodes remain present.
+    for node in (
+        "/quadruped_controller_node",
+        "/servo_interface",
+        "/LD06",
+        "/robot_state_publisher",
+        "/state_estimation_node",
+        "/base_to_footprint_ekf",
+        "/footprint_to_odom_ekf",
+    ):
+        assert node in hardware
+
+    # The check must still fail when a required node
+    # is absent after all bounded samples.
+    assert (
+        "missing_nodes"
+        in hardware
+    )
+
+    assert (
+        "not missing_nodes"
+        in hardware
+    )
+
+    # The implementation explicitly replaces each sample
+    # instead of unioning partial graph observations.
+    helper_start = proof.index(
+        "def _startup_hardware_nodes_with_retry("
+    )
+
+    helper_end = proof.index(
+        "def prove_ready(",
+        helper_start,
+    )
+
+    helper = proof[
+        helper_start:
+        helper_end
+    ]
+
+    assert (
+        "current_nodes = tuple("
+        in helper
+    )
+
+    assert (
+        "current_nodes.update"
+        not in helper
+    )
+
+    assert (
+        "|="
+        not in helper
+    )
