@@ -3163,18 +3163,6 @@ class VoiceRelayHandler(BaseHTTPRequestHandler):
                         )
                         is True
                         and status.get(
-                            "planner_enabled"
-                        )
-                        is True
-                        and status.get(
-                            "controller_enabled"
-                        )
-                        is True
-                        and status.get(
-                            "navigator_enabled"
-                        )
-                        is True
-                        and status.get(
                             "action_server_ready"
                         )
                         is True

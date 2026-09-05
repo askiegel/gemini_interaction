@@ -488,3 +488,78 @@ def test_startup_proof_uses_validated_localization_attestation():
 
     for value in required:
         assert value in proof
+
+
+
+def test_prelocalization_does_not_require_navigation_servers_active():
+    from pathlib import Path
+
+    server = Path(
+        "voice_relay/server.py"
+    ).read_text(
+        encoding="utf-8"
+    )
+
+    prepare_start = server.index(
+        'if path == "/dashboard/startup-prepare":'
+    )
+
+    prepare_end = server.index(
+        "\n            return",
+        prepare_start,
+    )
+
+    block = server[
+        prepare_start:
+        prepare_end
+    ]
+
+    pre_start = block.index(
+        "def prelocalization_ready"
+    )
+
+    post_start = block.index(
+        "def navigation_ready"
+    )
+
+    pre = block[
+        pre_start:
+        post_start
+    ]
+
+    post = block[
+        post_start:
+    ]
+
+    # Before AMCL establishes map->odom, these lifecycle
+    # nodes are allowed to remain inactive.
+    for value in (
+        '"planner_enabled"',
+        '"controller_enabled"',
+        '"navigator_enabled"',
+    ):
+        assert value not in pre
+
+    # After localization they are mandatory.
+    for value in (
+        '"planner_enabled"',
+        '"controller_enabled"',
+        '"navigator_enabled"',
+    ):
+        assert value in post
+
+    # The actual localization prerequisites remain enforced.
+    for value in (
+        '"map_server_enabled"',
+        '"localization_enabled"',
+        '"transform_ready"',
+        '"goal_submission_enabled"',
+        '"goal_active"',
+        '"motion_output_connected"',
+        '"motion_egress_ready"',
+        '"motion_egress_idle"',
+    ):
+        assert value in pre
+
+    assert "initialize_global_localization" in block
+    assert "initialize_home_localization" not in block
