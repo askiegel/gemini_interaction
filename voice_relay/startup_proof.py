@@ -161,83 +161,37 @@ def request_json(
 
 
 # STARTUP_LIVE_PROGRESS_BEGIN
-STARTUP_CHECK_PLAN = (
-    {
-        "id": 'dashboard_owner',
-        "label": 'Tony2 dashboard process',
-        "required": True,
-    },
-    {
-        "id": 'cognitive_source',
-        "label": 'Cognitive source state',
-        "required": True,
-    },
-    {
-        "id": 'guarded_asset',
-        "label": 'Guarded navigation asset',
-        "required": True,
-    },
-    {
-        "id": 'gait_threshold',
-        "label": 'Mayday navigation speed',
-        "required": True,
-    },
-    {
-        "id": 'mayday_reachable',
-        "label": 'Mayday / Robot Bridge',
-        "required": True,
-    },
-    {
-        "id": 'hardware_bringup',
-        "label": 'Hardware bringup service',
-        "required": True,
-    },
-    {
-        "id": 'hardware_nodes',
-        "label": 'Required ROS hardware nodes',
-        "required": True,
-    },
-    {
-        "id": 'bridge_process',
-        "label": 'Robot Bridge process',
-        "required": True,
-    },
-    {
-        "id": 'bridge_boot_service',
-        "label": 'Robot Bridge boot service',
-        "required": True,
-    },
-    {
-        "id": 'cmd_vel_chain',
-        "label": '/cmd_vel command chain',
-        "required": True,
-    },
-    {
-        "id": 'locomotion_chain',
-        "label": 'CHAMP -> servo trajectory chain',
-        "required": True,
-    },
-    {
-        "id": 'lidar',
-        "label": 'LD06 LiDAR /scan',
-        "required": True,
-    },
-    {
-        "id": 'motion_zero',
-        "label": 'Physical motion state',
-        "required": True,
-    },
-    {
-        "id": 'navigation_clean',
-        "label": 'Navigation clean state',
-        "required": True,
-    },
-    {
-        "id": 'navigation_envelope',
-        "label": 'Guarded navigation envelope',
-        "required": True,
-    },
-)
+STARTUP_CHECK_PLAN = [{'id': 'dashboard_owner', 'label': 'Tony2 dashboard process', 'required': True},
+ {'id': 'cognitive_source', 'label': 'Cognitive source state', 'required': True},
+ {'id': 'tony2_cognitive_boot',
+  'label': 'Tony2 cognitive boot services',
+  'required': True},
+ {'id': 'camera_vision_pipeline',
+  'label': 'Camera to Vision pipeline',
+  'required': True},
+ {'id': 'camera_relay_boot_service',
+  'label': 'Camera Relay boot service',
+  'required': True},
+ {'id': 'guarded_asset', 'label': 'Guarded navigation asset', 'required': True},
+ {'id': 'gait_threshold', 'label': 'Mayday navigation speed', 'required': True},
+ {'id': 'mayday_reachable', 'label': 'Mayday / Robot Bridge', 'required': True},
+ {'id': 'hardware_bringup', 'label': 'Hardware bringup service', 'required': True},
+ {'id': 'hardware_nodes', 'label': 'Required ROS hardware nodes', 'required': True},
+ {'id': 'bridge_process', 'label': 'Robot Bridge process', 'required': True},
+ {'id': 'bridge_boot_service', 'label': 'Robot Bridge boot service', 'required': True},
+ {'id': 'cmd_vel_chain', 'label': '/cmd_vel command chain', 'required': True},
+ {'id': 'locomotion_chain',
+  'label': 'CHAMP -> servo trajectory chain',
+  'required': True},
+ {'id': 'lidar', 'label': 'LD06 LiDAR /scan', 'required': True},
+ {'id': 'motion_zero', 'label': 'Physical motion state', 'required': True},
+ {'id': 'navigation_clean', 'label': 'Persistent Nav2 / AMCL ready', 'required': True},
+ {'id': 'current_pose_localization',
+  'label': 'Current physical pose localized',
+  'required': True},
+ {'id': 'navigation_envelope',
+  'label': 'Guarded navigation envelope',
+  'required': True}]
 # STARTUP_LIVE_PROGRESS_END
 
 def add_check(
@@ -560,6 +514,221 @@ timeout 8 ros2 topic info /scan --verbose 2>&1 || true
     }
 
 
+
+# _MAYDAY_FULL_STARTUP_PROOF_V2
+
+def _startup_local_systemd_state(service):
+    import subprocess
+
+    def command(*args):
+        result = subprocess.run(
+            list(args),
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=8,
+        )
+
+        return (
+            result.returncode,
+            result.stdout.strip(),
+            result.stderr.strip(),
+        )
+
+    enabled_rc, enabled, enabled_err = command(
+        "systemctl",
+        "is-enabled",
+        service,
+    )
+
+    active_rc, active, active_err = command(
+        "systemctl",
+        "is-active",
+        service,
+    )
+
+    pid_rc, pid_text, pid_err = command(
+        "systemctl",
+        "show",
+        service,
+        "-p",
+        "MainPID",
+        "--value",
+    )
+
+    try:
+        pid = int(pid_text)
+    except Exception:
+        pid = 0
+
+    return {
+        "service": service,
+        "enabled": enabled,
+        "active": active,
+        "main_pid": pid,
+        "ok": (
+            enabled_rc == 0
+            and enabled == "enabled"
+            and active_rc == 0
+            and active == "active"
+            and pid_rc == 0
+            and pid > 0
+        ),
+        "errors": [
+            value
+            for value in (
+                enabled_err,
+                active_err,
+                pid_err,
+            )
+            if value
+        ],
+    }
+
+
+def _startup_remote_systemd_state(service):
+    import subprocess
+    import urllib.parse
+
+    host = urllib.parse.urlparse(
+        ROBOT_BRIDGE_URL
+    ).hostname
+
+    if not host:
+        raise RuntimeError(
+            "Robot Bridge hostname unavailable."
+        )
+
+    target = f"ubuntu@{host}"
+
+    remote = (
+        f"systemctl is-enabled {service}; "
+        f"systemctl is-active {service}; "
+        f"systemctl show {service} "
+        "-p MainPID --value"
+    )
+
+    result = subprocess.run(
+        [
+            "ssh",
+            "-o",
+            "BatchMode=yes",
+            "-o",
+            "ConnectTimeout=5",
+            target,
+            remote,
+        ],
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=12,
+    )
+
+    lines = [
+        line.strip()
+        for line in result.stdout.splitlines()
+        if line.strip()
+    ]
+
+    enabled = (
+        lines[0]
+        if len(lines) >= 1
+        else ""
+    )
+
+    active = (
+        lines[1]
+        if len(lines) >= 2
+        else ""
+    )
+
+    try:
+        pid = int(
+            lines[2]
+            if len(lines) >= 3
+            else "0"
+        )
+    except Exception:
+        pid = 0
+
+    return {
+        "service": service,
+        "enabled": enabled,
+        "active": active,
+        "main_pid": pid,
+        "ssh_returncode":
+            result.returncode,
+        "stderr":
+            result.stderr.strip(),
+        "ok": (
+            result.returncode == 0
+            and enabled == "enabled"
+            and active == "active"
+            and pid > 0
+        ),
+    }
+
+
+def _startup_http_json(url, timeout=5):
+    import json
+    import urllib.request
+
+    request = urllib.request.Request(
+        url,
+        method="GET",
+    )
+
+    with urllib.request.urlopen(
+        request,
+        timeout=timeout,
+    ) as response:
+        status = getattr(
+            response,
+            "status",
+            200,
+        )
+
+        payload = json.loads(
+            response.read().decode(
+                "utf-8"
+            )
+        )
+
+    return {
+        "http_status": status,
+        "payload": payload,
+    }
+
+
+
+
+_STARTUP_LOCALIZATION_EVIDENCE = None
+
+
+def clear_startup_localization_evidence():
+    global _STARTUP_LOCALIZATION_EVIDENCE
+
+    _STARTUP_LOCALIZATION_EVIDENCE = None
+
+
+def set_startup_localization_evidence(value):
+    import copy
+
+    global _STARTUP_LOCALIZATION_EVIDENCE
+
+    _STARTUP_LOCALIZATION_EVIDENCE = (
+        copy.deepcopy(value)
+    )
+
+
+def get_startup_localization_evidence():
+    import copy
+
+    return copy.deepcopy(
+        _STARTUP_LOCALIZATION_EVIDENCE
+    )
+
+
 def prove_ready(
     navigation=None,
     progress_callback=None,
@@ -643,6 +812,130 @@ def prove_ready(
             checks,
             "cognitive_source",
             "Cognitive source state",
+            False,
+            exc,
+        )
+
+
+    try:
+        tony2_services = (
+            "mayday-vision-server.service",
+            "mayday-vision-service.service",
+            "mayday-cognitive-runtime.service",
+            "mayday-voice-relay.service",
+        )
+
+        tony2_states = {
+            service:
+                _startup_local_systemd_state(
+                    service
+                )
+            for service in tony2_services
+        }
+
+        tony2_boot_ok = all(
+            state.get("ok") is True
+            for state in tony2_states.values()
+        )
+
+        record_check(
+            checks,
+            "tony2_cognitive_boot",
+            "Tony2 cognitive boot services",
+            tony2_boot_ok,
+            str(tony2_states),
+        )
+
+    except Exception as exc:
+        record_check(
+            checks,
+            "tony2_cognitive_boot",
+            "Tony2 cognitive boot services",
+            False,
+            exc,
+        )
+
+    try:
+        vision_result = (
+            _startup_http_json(
+                "http://127.0.0.1:8000"
+                "/detections/latest",
+                timeout=6,
+            )
+        )
+
+        vision_payload = (
+            vision_result.get("payload")
+            or {}
+        )
+
+        camera_vision_ok = (
+            vision_result.get(
+                "http_status"
+            )
+            == 200
+            and isinstance(
+                vision_payload,
+                dict,
+            )
+            and vision_payload.get(
+                "camera_running"
+            )
+            is True
+            and not vision_payload.get(
+                "last_error"
+            )
+        )
+
+        record_check(
+            checks,
+            "camera_vision_pipeline",
+            "Camera to Vision pipeline",
+            camera_vision_ok,
+            (
+                f"http="
+                f"{vision_result.get('http_status')} "
+                f"camera_running="
+                f"{vision_payload.get('camera_running')} "
+                f"last_error="
+                f"{vision_payload.get('last_error')}"
+            ),
+        )
+
+    except Exception as exc:
+        record_check(
+            checks,
+            "camera_vision_pipeline",
+            "Camera to Vision pipeline",
+            False,
+            exc,
+        )
+
+    try:
+        camera_relay_state = (
+            _startup_remote_systemd_state(
+                "mayday-camera-relay.service"
+            )
+        )
+
+        record_check(
+            checks,
+            "camera_relay_boot_service",
+            "Camera Relay boot service",
+            (
+                camera_relay_state.get(
+                    "ok"
+                )
+                is True
+            ),
+            str(camera_relay_state),
+        )
+
+    except Exception as exc:
+        record_check(
+            checks,
+            "camera_relay_boot_service",
+            "Camera Relay boot service",
             False,
             exc,
         )
@@ -1031,18 +1324,36 @@ def prove_ready(
     )
 
     nav_clean = (
-        navigation.get(
-            "state"
-        )
-        == "STOPPED"
+        navigation.get("state")
+        == "READY"
         and navigation.get(
             "running"
         )
-        is False
+        is True
         and navigation.get(
             "owned"
         )
-        is False
+        is True
+        and navigation.get(
+            "map_server_enabled"
+        )
+        is True
+        and navigation.get(
+            "localization_enabled"
+        )
+        is True
+        and navigation.get(
+            "planner_enabled"
+        )
+        is True
+        and navigation.get(
+            "controller_enabled"
+        )
+        is True
+        and navigation.get(
+            "navigator_enabled"
+        )
+        is True
         and navigation.get(
             "goal_active"
         )
@@ -1054,11 +1365,11 @@ def prove_ready(
         and pids.get(
             "supervisor"
         )
-        is None
+        is not None
         and pids.get(
             "probe"
         )
-        is None
+        is not None
         and pids.get(
             "goal"
         )
@@ -1068,7 +1379,7 @@ def prove_ready(
     record_check(
         checks,
         "navigation_clean",
-        "Navigation clean state",
+        "Persistent Nav2 / AMCL ready",
         nav_clean,
         (
             f"state={navigation.get('state')} "
@@ -1079,6 +1390,299 @@ def prove_ready(
             f"pids={pids}"
         ),
     )
+
+    try:
+        evidence = (
+            get_startup_localization_evidence()
+        )
+
+        localization = (
+            evidence.get("localization")
+            if isinstance(
+                evidence,
+                dict,
+            )
+            else None
+        )
+
+        evidence_navigation = (
+            evidence.get("navigation")
+            if isinstance(
+                evidence,
+                dict,
+            )
+            else None
+        )
+
+        diagnostic = (
+            localization.get("diagnostic")
+            if isinstance(
+                localization,
+                dict,
+            )
+            else None
+        )
+
+        final_pose = (
+            localization.get("final_pose")
+            if isinstance(
+                localization,
+                dict,
+            )
+            else None
+        )
+
+        uncertainty = (
+            localization.get("uncertainty")
+            if isinstance(
+                localization,
+                dict,
+            )
+            else None
+        )
+
+        evidence_pids = (
+            evidence_navigation.get("pids")
+            if isinstance(
+                evidence_navigation,
+                dict,
+            )
+            else {}
+        ) or {}
+
+        current_pids = (
+            navigation.get("pids")
+            or {}
+        )
+
+        localization_result_ok = (
+            isinstance(
+                evidence,
+                dict,
+            )
+            and evidence.get(
+                "action"
+            )
+            == "OPERATOR_POSE_VALIDATED"
+            and isinstance(
+                localization,
+                dict,
+            )
+            and localization.get(
+                "ok"
+            )
+            is True
+            and localization.get(
+                "trusted"
+            )
+            is True
+            and localization.get(
+                "frame_id"
+            )
+            == "map"
+            and localization.get(
+                "localization_method"
+            )
+            == "amcl_global"
+            and localization.get(
+                "search_scope"
+            )
+            == "full_saved_map"
+            and localization.get(
+                "seed_pose_used"
+            )
+            is False
+            and localization.get(
+                "global_localization_requested"
+            )
+            is True
+            and localization.get(
+                "initial_pose_supplied"
+            )
+            is False
+            and localization.get(
+                "stationary_required"
+            )
+            is True
+            and localization.get(
+                "navigation_goal_executed"
+            )
+            is False
+            and localization.get(
+                "motion_enabled"
+            )
+            is False
+            and isinstance(
+                diagnostic,
+                dict,
+            )
+            and diagnostic.get(
+                "covariance_tight"
+            )
+            is True
+            and diagnostic.get(
+                "global_search_completed"
+            )
+            is True
+            and diagnostic.get(
+                "seed_pose_applied"
+            )
+            is False
+            and diagnostic.get(
+                "alignment_good"
+            )
+            is True
+            and diagnostic.get(
+                "trusted"
+            )
+            is True
+            and isinstance(
+                final_pose,
+                dict,
+            )
+            and isinstance(
+                uncertainty,
+                dict,
+            )
+            and evidence_pids.get(
+                "supervisor"
+            )
+            == current_pids.get(
+                "supervisor"
+            )
+            and evidence_pids.get(
+                "probe"
+            )
+            == current_pids.get(
+                "probe"
+            )
+            and evidence_pids.get(
+                "goal"
+            )
+            is None
+        )
+
+        numeric_values = (
+            final_pose.get("x"),
+            final_pose.get("y"),
+            final_pose.get("yaw_rad"),
+            uncertainty.get("sigma_x_m"),
+            uncertainty.get("sigma_y_m"),
+            uncertainty.get("sigma_yaw_rad"),
+        )
+
+        import math as _startup_math
+
+        localization_numbers_ok = (
+            localization_result_ok
+            and all(
+                isinstance(
+                    value,
+                    (int, float),
+                )
+                and _startup_math.isfinite(
+                    float(value)
+                )
+                for value in numeric_values
+            )
+        )
+
+        localization_result = (
+            _startup_http_json(
+                f"{ROBOT_BRIDGE_URL}"
+                "/telemetry/localization",
+                timeout=6,
+            )
+        )
+
+        localization_payload = (
+            localization_result.get(
+                "payload"
+            )
+            or {}
+        )
+
+        live_telemetry = (
+            localization_payload.get(
+                "telemetry"
+            )
+            if isinstance(
+                localization_payload,
+                dict,
+            )
+            else None
+        )
+
+        live_amcl_ok = (
+            localization_result.get(
+                "http_status"
+            )
+            == 200
+            and isinstance(
+                localization_payload,
+                dict,
+            )
+            and localization_payload.get(
+                "ok"
+            )
+            is True
+            and localization_payload.get(
+                "runtime_active"
+            )
+            is True
+            and localization_payload.get(
+                "topic"
+            )
+            == "/amcl_pose"
+            and isinstance(
+                live_telemetry,
+                dict,
+            )
+            and live_telemetry.get(
+                "available"
+            )
+            is True
+        )
+
+        current_pose_ok = (
+            localization_numbers_ok
+            and live_amcl_ok
+        )
+
+        record_check(
+            checks,
+            "current_pose_localization",
+            "Current physical pose localized",
+            current_pose_ok,
+            (
+                f"action="
+                f"{evidence.get('action') if isinstance(evidence, dict) else None} "
+                f"trusted="
+                f"{localization.get('trusted') if isinstance(localization, dict) else None} "
+                f"alignment="
+                f"{diagnostic.get('alignment_good') if isinstance(diagnostic, dict) else None} "
+                f"covariance="
+                f"{diagnostic.get('covariance_tight') if isinstance(diagnostic, dict) else None} "
+                f"global="
+                f"{diagnostic.get('global_search_completed') if isinstance(diagnostic, dict) else None} "
+                f"seed="
+                f"{localization.get('seed_pose_used') if isinstance(localization, dict) else None} "
+                f"amcl_live="
+                f"{live_amcl_ok} "
+                f"pose={final_pose} "
+                f"uncertainty={uncertainty}"
+            ),
+        )
+
+    except Exception as exc:
+        record_check(
+            checks,
+            "current_pose_localization",
+            "Current physical pose localized",
+            False,
+            exc,
+        )
+
 
     envelope_ok = (
         navigation.get(

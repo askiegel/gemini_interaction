@@ -231,14 +231,14 @@ def test_startup_live_progress_stream():
             break
 
     assert plan is not None
-    assert len(plan) == 15
+    assert len(plan) == 19
 
     assert len(
         {
             item["id"]
             for item in plan
         }
-    ) == 15
+    ) == len(plan)
 
     assert all(
         item["required"]
@@ -268,3 +268,223 @@ def test_prepare_requires_independent_live_proof():
     assert "prepare_session" in block
     assert "prove_ready" not in block
     assert '"proof_required"' in block
+
+
+
+def test_startup_uses_global_current_pose_localization():
+    from pathlib import Path
+
+    server = Path(
+        "voice_relay/server.py"
+    ).read_text(
+        encoding="utf-8"
+    )
+
+    start = server.index(
+        'if path == "/dashboard/startup-prepare":'
+    )
+
+    end = server.index(
+        "\n            return",
+        start,
+    )
+
+    block = server[
+        start:
+        end
+    ]
+
+    assert "runtime.start()" in block
+    assert (
+        "initialize_global_localization"
+        in block
+    )
+    assert (
+        "initialize_home_localization"
+        not in block
+    )
+    assert (
+        '"global_current_pose"'
+        in block
+    )
+    assert (
+        '"home_seed_used"'
+        in block
+    )
+    assert (
+        "send_goal"
+        not in block
+    )
+
+
+def test_startup_proves_complete_boot_platform():
+    from pathlib import Path
+
+    proof = Path(
+        "voice_relay/startup_proof.py"
+    ).read_text(
+        encoding="utf-8"
+    )
+
+    required = (
+        "tony2_cognitive_boot",
+        "camera_vision_pipeline",
+        "camera_relay_boot_service",
+        "Persistent Nav2 / AMCL ready",
+        "current_pose_localization",
+        "Current physical pose localized",
+        "mayday-vision-server.service",
+        "mayday-vision-service.service",
+        "mayday-cognitive-runtime.service",
+        "mayday-voice-relay.service",
+        "mayday-camera-relay.service",
+    )
+
+    for value in required:
+        assert value in proof
+
+
+def test_startup_global_localization_never_calls_home_initializer():
+    from pathlib import Path
+
+    server = Path(
+        "voice_relay/server.py"
+    ).read_text(
+        encoding="utf-8"
+    )
+
+    start = server.index(
+        'if path == "/dashboard/startup-prepare":'
+    )
+
+    end = server.index(
+        "\n            return",
+        start,
+    )
+
+    block = server[
+        start:
+        end
+    ]
+
+    assert (
+        "initialize_home_localization"
+        not in block
+    )
+
+    assert (
+        "initialize_global_localization"
+        in block
+    )
+
+
+
+def test_startup_requires_trusted_global_localization():
+    from pathlib import Path
+
+    server = Path(
+        "voice_relay/server.py"
+    ).read_text(
+        encoding="utf-8"
+    )
+
+    start = server.index(
+        'if path == "/dashboard/startup-prepare":'
+    )
+
+    end = server.index(
+        "\n            return",
+        start,
+    )
+
+    block = server[
+        start:
+        end
+    ]
+
+    required = (
+        "prelocalization_ready",
+        '"transform_ready"',
+        "initialize_global_localization",
+        '"OPERATOR_POSE_VALIDATED"',
+        '"trusted"',
+        '"covariance_tight"',
+        '"alignment_good"',
+        '"global_search_completed"',
+        '"full_saved_map"',
+        '"amcl_global"',
+        '"seed_pose_used"',
+        '"initial_pose_supplied"',
+        '"navigation_goal_executed"',
+        '"motion_enabled"',
+        "set_startup_localization_evidence",
+        '"/telemetry/localization"',
+        '"/amcl_pose"',
+    )
+
+    for value in required:
+        assert value in block
+
+    assert (
+        "initialize_home_localization"
+        not in block
+    )
+
+    assert (
+        "send_goal"
+        not in block
+    )
+
+    # The pre-localization phase must require NO transform.
+    pre = block[
+        block.index(
+            "def prelocalization_ready"
+        ):
+        block.index(
+            "def navigation_ready"
+        )
+    ]
+
+    assert (
+        '"transform_ready"'
+        in pre
+    )
+
+    assert (
+        "is False"
+        in pre
+    )
+
+
+def test_startup_proof_uses_validated_localization_attestation():
+    from pathlib import Path
+
+    proof = Path(
+        "voice_relay/startup_proof.py"
+    ).read_text(
+        encoding="utf-8"
+    )
+
+    required = (
+        "_STARTUP_LOCALIZATION_EVIDENCE",
+        "clear_startup_localization_evidence",
+        "set_startup_localization_evidence",
+        "get_startup_localization_evidence",
+        '"OPERATOR_POSE_VALIDATED"',
+        '"trusted"',
+        '"covariance_tight"',
+        '"alignment_good"',
+        '"global_search_completed"',
+        '"full_saved_map"',
+        '"amcl_global"',
+        '"seed_pose_used"',
+        '"initial_pose_supplied"',
+        '"navigation_goal_executed"',
+        '"motion_enabled"',
+        '"/telemetry/localization"',
+        '"/amcl_pose"',
+        '"available"',
+    )
+
+    for value in required:
+        assert value in proof

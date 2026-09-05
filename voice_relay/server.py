@@ -3101,14 +3101,26 @@ class VoiceRelayHandler(BaseHTTPRequestHandler):
 
         if path == "/dashboard/startup-prepare":
             try:
+                import json as _startup_json
+                import time as _startup_time
+                import urllib.request as _startup_urlrequest
+
                 from startup_proof import (
+                    clear_startup_localization_evidence,
                     prepare_session,
+                    set_startup_localization_evidence,
                 )
 
                 runtime = (
                     get_tony2_navigation_runtime()
                 )
 
+                # Any previous localization attestation belongs
+                # to the previous navigation runtime.
+                clear_startup_localization_evidence()
+
+                # Start from a deterministic stopped navigation
+                # state. No destination is submitted.
                 try:
                     runtime.stop()
                 except Exception:
@@ -3116,30 +3128,529 @@ class VoiceRelayHandler(BaseHTTPRequestHandler):
 
                 prepared = prepare_session()
 
-                prepared["ready"] = False
+                if prepared.get("ok") is not True:
+                    raise RuntimeError(
+                        "Base platform preparation failed."
+                    )
 
-                prepared["proof_required"] = True
+                start_result = runtime.start()
+
+                def prelocalization_ready(status):
+                    pids = (
+                        status.get("pids")
+                        or {}
+                    )
+
+                    # initialize_operator_pose() deliberately
+                    # requires transform_ready == False and GO
+                    # disabled. map->odom is created by the
+                    # localization that follows.
+                    return (
+                        status.get(
+                            "running"
+                        )
+                        is True
+                        and status.get(
+                            "owned"
+                        )
+                        is True
+                        and status.get(
+                            "map_server_enabled"
+                        )
+                        is True
+                        and status.get(
+                            "localization_enabled"
+                        )
+                        is True
+                        and status.get(
+                            "planner_enabled"
+                        )
+                        is True
+                        and status.get(
+                            "controller_enabled"
+                        )
+                        is True
+                        and status.get(
+                            "navigator_enabled"
+                        )
+                        is True
+                        and status.get(
+                            "action_server_ready"
+                        )
+                        is True
+                        and status.get(
+                            "transform_ready"
+                        )
+                        is False
+                        and status.get(
+                            "goal_submission_enabled"
+                        )
+                        is False
+                        and status.get(
+                            "goal_active"
+                        )
+                        is False
+                        and status.get(
+                            "motion_output_connected"
+                        )
+                        is False
+                        and status.get(
+                            "motion_egress_ready"
+                        )
+                        is True
+                        and status.get(
+                            "motion_egress_idle"
+                        )
+                        is True
+                        and pids.get(
+                            "supervisor"
+                        )
+                        is not None
+                        and pids.get(
+                            "probe"
+                        )
+                        is not None
+                        and pids.get(
+                            "goal"
+                        )
+                        is None
+                    )
+
+                def navigation_ready(status):
+                    pids = (
+                        status.get("pids")
+                        or {}
+                    )
+
+                    return (
+                        status.get(
+                            "state"
+                        )
+                        == "READY"
+                        and status.get(
+                            "running"
+                        )
+                        is True
+                        and status.get(
+                            "owned"
+                        )
+                        is True
+                        and status.get(
+                            "map_server_enabled"
+                        )
+                        is True
+                        and status.get(
+                            "localization_enabled"
+                        )
+                        is True
+                        and status.get(
+                            "planner_enabled"
+                        )
+                        is True
+                        and status.get(
+                            "controller_enabled"
+                        )
+                        is True
+                        and status.get(
+                            "navigator_enabled"
+                        )
+                        is True
+                        and status.get(
+                            "action_server_ready"
+                        )
+                        is True
+                        and status.get(
+                            "transform_ready"
+                        )
+                        is True
+                        and status.get(
+                            "goal_active"
+                        )
+                        is False
+                        and status.get(
+                            "motion_output_connected"
+                        )
+                        is False
+                        and status.get(
+                            "motion_egress_ready"
+                        )
+                        is True
+                        and status.get(
+                            "motion_egress_idle"
+                        )
+                        is True
+                        and pids.get(
+                            "supervisor"
+                        )
+                        is not None
+                        and pids.get(
+                            "probe"
+                        )
+                        is not None
+                        and pids.get(
+                            "goal"
+                        )
+                        is None
+                    )
+
+                # Phase 1:
+                # Wait for all Nav2 components needed by the
+                # stationary localization helper, but explicitly
+                # BEFORE map->odom is established.
+                deadline = (
+                    _startup_time.monotonic()
+                    + 60.0
+                )
+
+                navigation = runtime.status()
+
+                while (
+                    not prelocalization_ready(
+                        navigation
+                    )
+                    and _startup_time.monotonic()
+                    < deadline
+                ):
+                    _startup_time.sleep(
+                        0.5
+                    )
+
+                    navigation = (
+                        runtime.status()
+                    )
+
+                if not prelocalization_ready(
+                    navigation
+                ):
+                    raise RuntimeError(
+                        "Nav2/AMCL did not reach "
+                        "pre-localization readiness."
+                    )
+
+                # Phase 2:
+                # Search the COMPLETE saved map using AMCL.
+                # No initial pose and no Home pose are supplied.
+                localization_result = (
+                    runtime
+                    .initialize_global_localization()
+                )
+
+                localization = (
+                    localization_result.get(
+                        "localization"
+                    )
+                    if isinstance(
+                        localization_result,
+                        dict,
+                    )
+                    else None
+                )
+
+                diagnostic = (
+                    localization.get(
+                        "diagnostic"
+                    )
+                    if isinstance(
+                        localization,
+                        dict,
+                    )
+                    else None
+                )
+
+                final_pose = (
+                    localization.get(
+                        "final_pose"
+                    )
+                    if isinstance(
+                        localization,
+                        dict,
+                    )
+                    else None
+                )
+
+                uncertainty = (
+                    localization.get(
+                        "uncertainty"
+                    )
+                    if isinstance(
+                        localization,
+                        dict,
+                    )
+                    else None
+                )
+
+                localization_valid = (
+                    isinstance(
+                        localization_result,
+                        dict,
+                    )
+                    and localization_result.get(
+                        "action"
+                    )
+                    == "OPERATOR_POSE_VALIDATED"
+                    and isinstance(
+                        localization,
+                        dict,
+                    )
+                    and localization.get(
+                        "ok"
+                    )
+                    is True
+                    and localization.get(
+                        "trusted"
+                    )
+                    is True
+                    and localization.get(
+                        "frame_id"
+                    )
+                    == "map"
+                    and localization.get(
+                        "localization_method"
+                    )
+                    == "amcl_global"
+                    and localization.get(
+                        "search_scope"
+                    )
+                    == "full_saved_map"
+                    and localization.get(
+                        "seed_pose_used"
+                    )
+                    is False
+                    and localization.get(
+                        "global_localization_requested"
+                    )
+                    is True
+                    and localization.get(
+                        "initial_pose_supplied"
+                    )
+                    is False
+                    and localization.get(
+                        "stationary_required"
+                    )
+                    is True
+                    and localization.get(
+                        "navigation_goal_executed"
+                    )
+                    is False
+                    and localization.get(
+                        "motion_enabled"
+                    )
+                    is False
+                    and isinstance(
+                        diagnostic,
+                        dict,
+                    )
+                    and diagnostic.get(
+                        "covariance_tight"
+                    )
+                    is True
+                    and diagnostic.get(
+                        "global_search_completed"
+                    )
+                    is True
+                    and diagnostic.get(
+                        "seed_pose_applied"
+                    )
+                    is False
+                    and diagnostic.get(
+                        "alignment_good"
+                    )
+                    is True
+                    and diagnostic.get(
+                        "trusted"
+                    )
+                    is True
+                    and isinstance(
+                        final_pose,
+                        dict,
+                    )
+                    and isinstance(
+                        uncertainty,
+                        dict,
+                    )
+                )
+
+                if not localization_valid:
+                    raise RuntimeError(
+                        "Global AMCL localization was "
+                        "not validated and trusted."
+                    )
+
+                # The runtime helper already rejects untrusted
+                # covariance/alignment and only returns validated
+                # after Nav2 itself reaches full READY.
+                navigation = runtime.status()
+
+                if not navigation_ready(
+                    navigation
+                ):
+                    raise RuntimeError(
+                        "Nav2/AMCL did not reach READY "
+                        "after trusted localization."
+                    )
+
+                # Bind proof evidence to this exact persistent
+                # runtime. The final Startup proof also compares its PIDs.
+                set_startup_localization_evidence(
+                    localization_result
+                )
+
+                # Independent live confirmation that Robot Bridge
+                # is currently receiving /amcl_pose.
+                telemetry = None
+
+                telemetry_deadline = (
+                    _startup_time.monotonic()
+                    + 20.0
+                )
+
+                telemetry_url = (
+                    ROBOT_BRIDGE_URL
+                    + "/telemetry/localization"
+                )
+
+                while (
+                    _startup_time.monotonic()
+                    < telemetry_deadline
+                ):
+                    try:
+                        request = (
+                            _startup_urlrequest.Request(
+                                telemetry_url,
+                                method="GET",
+                            )
+                        )
+
+                        with (
+                            _startup_urlrequest.urlopen(
+                                request,
+                                timeout=5,
+                            )
+                        ) as response:
+                            payload = (
+                                _startup_json.loads(
+                                    response
+                                    .read()
+                                    .decode(
+                                        "utf-8"
+                                    )
+                                )
+                            )
+
+                            live = (
+                                payload.get(
+                                    "telemetry"
+                                )
+                                if isinstance(
+                                    payload,
+                                    dict,
+                                )
+                                else None
+                            )
+
+                            if (
+                                getattr(
+                                    response,
+                                    "status",
+                                    200,
+                                )
+                                == 200
+                                and isinstance(
+                                    payload,
+                                    dict,
+                                )
+                                and payload.get(
+                                    "ok"
+                                )
+                                is True
+                                and payload.get(
+                                    "runtime_active"
+                                )
+                                is True
+                                and payload.get(
+                                    "topic"
+                                )
+                                == "/amcl_pose"
+                                and isinstance(
+                                    live,
+                                    dict,
+                                )
+                                and live.get(
+                                    "available"
+                                )
+                                is True
+                            ):
+                                telemetry = payload
+                                break
+
+                    except Exception:
+                        pass
+
+                    _startup_time.sleep(
+                        0.5
+                    )
+
+                if telemetry is None:
+                    clear_startup_localization_evidence()
+
+                    raise RuntimeError(
+                        "Trusted localization completed "
+                        "but live AMCL telemetry "
+                        "was not available."
+                    )
+
+                prepared[
+                    "navigation_start"
+                ] = start_result
+
+                prepared[
+                    "localization"
+                ] = localization_result
+
+                prepared[
+                    "localization_telemetry"
+                ] = telemetry
+
+                prepared[
+                    "localization_mode"
+                ] = "global_current_pose"
+
+                prepared[
+                    "home_seed_used"
+                ] = False
+
+                prepared[
+                    "navigation"
+                ] = navigation
+
+                prepared["ready"] = False
+                prepared[
+                    "proof_required"
+                ] = True
 
                 self.send_json(
-                    (
-                        200
-                        if prepared.get("ok")
-                        is True
-                        else 503
-                    ),
+                    200,
                     prepared,
                 )
 
             except Exception as exc:
+                try:
+                    clear_startup_localization_evidence()
+                except Exception:
+                    pass
+
                 self.send_json(
                     503,
                     {
                         "ok": False,
                         "ready": False,
                         "proof_required": True,
-                        "action": (
-                            "prepare_session"
-                        ),
+                        "action":
+                            "prepare_session",
+                        "localization_mode":
+                            "global_current_pose",
+                        "home_seed_used":
+                            False,
                         "error": str(exc),
                     },
                 )
