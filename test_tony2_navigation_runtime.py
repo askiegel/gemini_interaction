@@ -1336,8 +1336,8 @@ class Tony2NavigationRuntimeTests(
 
         for required in (
             "min_vel_x: 0.0",
-            "max_vel_x: 0.18",
-            "max_speed_xy: 0.18",
+            "max_vel_x: 0.22",
+            "max_speed_xy: 0.22",
             "max_vel_theta: 0.25",
             "xy_goal_tolerance: 0.03",
             "yaw_goal_tolerance: 0.15",

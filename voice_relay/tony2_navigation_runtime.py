@@ -69,7 +69,7 @@ class Tony2NavigationRuntime:
     ASSET_HASHES = {
         "mayday_guarded_navigation.yaml":
             (
-                "78892e025683a5be5f3022c60970c950f527ef2456131f7af0946b2395b6737d"
+                "6db9a22382dee9ab1a5057be5e5562832c0f3e8813b33a607ee265d506efe20b"
             ),
         "mayday_supervised_route_03.yaml":
             (
