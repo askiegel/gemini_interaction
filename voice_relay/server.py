@@ -2593,6 +2593,128 @@ class VoiceRelayHandler(BaseHTTPRequestHandler):
                 )
                 return
 
+        if path == "/dashboard/startup-proof-stream":
+            try:
+                from startup_proof import (
+                    STARTUP_CHECK_PLAN,
+                    prove_ready,
+                )
+
+                navigation = (
+                    get_tony2_navigation_runtime()
+                    .status()
+                )
+
+            except Exception as exc:
+                self.send_json(
+                    503,
+                    {
+                        "ok": False,
+                        "ready": False,
+                        "verdict": "NOT_READY",
+                        "error": str(exc),
+                    },
+                )
+                return
+
+            self.send_response(
+                200
+            )
+
+            self.send_header(
+                "Content-Type",
+                (
+                    "application/x-ndjson; "
+                    "charset=utf-8"
+                ),
+            )
+
+            self.send_header(
+                "Cache-Control",
+                "no-store",
+            )
+
+            self.send_header(
+                "Connection",
+                "close",
+            )
+
+            self.end_headers()
+
+            self.close_connection = True
+
+            def send_stream_event(
+                payload,
+            ):
+                wire = (
+                    json.dumps(
+                        payload,
+                        separators=(",", ":"),
+                    )
+                    + "\n"
+                ).encode(
+                    "utf-8"
+                )
+
+                self.wfile.write(
+                    wire
+                )
+
+                self.wfile.flush()
+
+            try:
+                send_stream_event(
+                    {
+                        "type": "plan",
+                        "checks": list(
+                            STARTUP_CHECK_PLAN
+                        ),
+                    }
+                )
+
+                def progress_callback(
+                    check,
+                ):
+                    send_stream_event(
+                        {
+                            "type": "check",
+                            "check": check,
+                        }
+                    )
+
+                proof = prove_ready(
+                    navigation,
+                    progress_callback=(
+                        progress_callback
+                    ),
+                )
+
+                send_stream_event(
+                    {
+                        "type": "complete",
+                        "proof": proof,
+                    }
+                )
+
+            except (
+                BrokenPipeError,
+                ConnectionResetError,
+            ):
+                pass
+
+            except Exception as exc:
+                try:
+                    send_stream_event(
+                        {
+                            "type": "error",
+                            "error": str(exc),
+                        }
+                    )
+                except OSError:
+                    pass
+
+            return
+
         if path == "/dashboard/startup-proof":
             try:
                 from startup_proof import prove_ready
@@ -2981,7 +3103,6 @@ class VoiceRelayHandler(BaseHTTPRequestHandler):
             try:
                 from startup_proof import (
                     prepare_session,
-                    prove_ready,
                 )
 
                 runtime = (
@@ -2995,23 +3116,15 @@ class VoiceRelayHandler(BaseHTTPRequestHandler):
 
                 prepared = prepare_session()
 
-                navigation = runtime.status()
+                prepared["ready"] = False
 
-                proof = prove_ready(
-                    navigation
-                )
-
-                prepared["proof"] = proof
-
-                prepared["ready"] = (
-                    proof.get("ready")
-                    is True
-                )
+                prepared["proof_required"] = True
 
                 self.send_json(
                     (
                         200
-                        if prepared["ready"]
+                        if prepared.get("ok")
+                        is True
                         else 503
                     ),
                     prepared,
@@ -3023,6 +3136,7 @@ class VoiceRelayHandler(BaseHTTPRequestHandler):
                     {
                         "ok": False,
                         "ready": False,
+                        "proof_required": True,
                         "action": (
                             "prepare_session"
                         ),

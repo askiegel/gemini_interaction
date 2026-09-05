@@ -6332,6 +6332,18 @@
     color: #fbbf24;
 }
 
+.mayday-startup-check.waiting .result {
+    color: #94a3b8;
+}
+
+.mayday-startup-check.checking {
+    border-color: #f59e0b;
+}
+
+.mayday-startup-check.checking .result {
+    color: #fde68a;
+}
+
 .mayday-startup-check .label {
     font-weight: 700;
 }
@@ -6452,6 +6464,9 @@
     const PROOF_URL =
         "/dashboard/startup-proof";
 
+    const PROOF_STREAM_URL =
+        "/dashboard/startup-proof-stream";
+
     const PREPARE_URL =
         "/dashboard/startup-prepare";
 
@@ -6507,6 +6522,11 @@
 
     let lastProof = null;
 
+    let progressPlan = [];
+
+    const progressRows =
+        new Map();
+
     function setVerdict(
         text,
         state
@@ -6532,6 +6552,255 @@
                 "not-ready"
             );
         }
+    }
+
+    function renderProgressPlan(
+        items
+    ) {
+        checks.textContent = "";
+
+        progressRows.clear();
+
+        progressPlan =
+            Array.isArray(items)
+                ? items.slice()
+                : [];
+
+        progressPlan.forEach(
+            function (item) {
+                const row =
+                    document.createElement(
+                        "div"
+                    );
+
+                row.className =
+                    "mayday-startup-check "
+                    + "waiting"
+                    + (
+                        item.required
+                            ? ""
+                            : " optional"
+                    );
+
+                row.dataset.checkId =
+                    item.id;
+
+                const result =
+                    document.createElement(
+                        "div"
+                    );
+
+                result.className =
+                    "result";
+
+                result.textContent =
+                    "WAITING";
+
+                const label =
+                    document.createElement(
+                        "div"
+                    );
+
+                label.className =
+                    "label";
+
+                label.textContent =
+                    item.label || item.id;
+
+                const detail =
+                    document.createElement(
+                        "div"
+                    );
+
+                detail.className =
+                    "detail";
+
+                detail.textContent =
+                    "Waiting for backend check.";
+
+                row.appendChild(
+                    result
+                );
+
+                row.appendChild(
+                    label
+                );
+
+                row.appendChild(
+                    detail
+                );
+
+                checks.appendChild(
+                    row
+                );
+
+                progressRows.set(
+                    item.id,
+                    {
+                        row: row,
+                        result: result,
+                        detail: detail,
+                        item: item,
+                        complete: false
+                    }
+                );
+            }
+        );
+
+        const required =
+            progressPlan.filter(
+                function (item) {
+                    return item.required;
+                }
+            ).length;
+
+        summary.textContent =
+            "0 / "
+            + String(required)
+            + " required checks completed.";
+
+        proofLog.textContent = "";
+
+        if (progressPlan.length > 0) {
+            markChecking(
+                progressPlan[0].id
+            );
+        }
+    }
+
+    function markChecking(
+        checkId
+    ) {
+        const entry =
+            progressRows.get(
+                checkId
+            );
+
+        if (
+            !entry
+            || entry.complete
+        ) {
+            return;
+        }
+
+        entry.row.className =
+            "mayday-startup-check "
+            + "checking"
+            + (
+                entry.item.required
+                    ? ""
+                    : " optional"
+            );
+
+        entry.result.textContent =
+            "CHECKING";
+
+        entry.detail.textContent =
+            "Backend check in progress.";
+    }
+
+    function completeProgressCheck(
+        item
+    ) {
+        const entry =
+            progressRows.get(
+                item.id
+            );
+
+        if (!entry) {
+            return;
+        }
+
+        entry.item = item;
+        entry.complete = true;
+
+        let rowClass =
+            item.passed
+                ? "pass"
+                : "fail";
+
+        if (!item.required) {
+            rowClass += " optional";
+        }
+
+        entry.row.className =
+            "mayday-startup-check "
+            + rowClass;
+
+        if (item.passed) {
+            entry.result.textContent =
+                "PASS";
+        } else if (item.required) {
+            entry.result.textContent =
+                "FAIL";
+        } else {
+            entry.result.textContent =
+                "INFO";
+        }
+
+        entry.detail.textContent =
+            item.detail || "";
+
+        const index =
+            progressPlan.findIndex(
+                function (candidate) {
+                    return (
+                        candidate.id
+                        === item.id
+                    );
+                }
+            );
+
+        if (
+            index >= 0
+            && index + 1
+                < progressPlan.length
+        ) {
+            markChecking(
+                progressPlan[
+                    index + 1
+                ].id
+            );
+        }
+
+        let completedRequired = 0;
+        let totalRequired = 0;
+
+        progressPlan.forEach(
+            function (candidate) {
+                if (!candidate.required) {
+                    return;
+                }
+
+                totalRequired += 1;
+
+                const candidateEntry =
+                    progressRows.get(
+                        candidate.id
+                    );
+
+                if (
+                    candidateEntry
+                    && candidateEntry.complete
+                ) {
+                    completedRequired += 1;
+                }
+            }
+        );
+
+        summary.textContent =
+            String(completedRequired)
+            + " / "
+            + String(totalRequired)
+            + " required checks completed.";
+    }
+
+    function appendStreamEvent(
+        event
+    ) {
+        proofLog.textContent +=
+            JSON.stringify(event)
+            + "\n";
     }
 
     function renderProof(data) {
@@ -6679,26 +6948,171 @@
         );
 
         summary.textContent =
-            "Running required startup checks.";
+            "Waiting for backend proof stream.";
+
+        prepareButton.disabled = true;
+        proveButton.disabled = true;
+
+        lastProof = null;
 
         try {
             const response =
                 await fetch(
-                    PROOF_URL,
+                    PROOF_STREAM_URL,
                     {
                         cache: "no-store"
                     }
                 );
 
-            const data =
-                await response.json();
+            if (!response.ok) {
+                throw new Error(
+                    "Startup proof stream HTTP "
+                    + response.status
+                );
+            }
 
-            renderProof(data);
+            if (!response.body) {
+                throw new Error(
+                    "Browser does not expose "
+                    + "the proof response stream."
+                );
+            }
 
-            return data;
+            const reader =
+                response.body.getReader();
+
+            const decoder =
+                new TextDecoder();
+
+            let buffer = "";
+            let finalProof = null;
+
+            function processLine(
+                line
+            ) {
+                if (!line.trim()) {
+                    return;
+                }
+
+                const event =
+                    JSON.parse(line);
+
+                if (event.type === "plan") {
+                    renderProgressPlan(
+                        event.checks
+                    );
+
+                    appendStreamEvent(
+                        event
+                    );
+
+                    return;
+                }
+
+                if (event.type === "check") {
+                    completeProgressCheck(
+                        event.check
+                    );
+
+                    appendStreamEvent(
+                        event
+                    );
+
+                    return;
+                }
+
+                if (
+                    event.type
+                    === "complete"
+                ) {
+                    finalProof =
+                        event.proof;
+
+                    renderProof(
+                        finalProof
+                    );
+
+                    return;
+                }
+
+                if (
+                    event.type
+                    === "error"
+                ) {
+                    throw new Error(
+                        event.error
+                        || "Startup proof failed."
+                    );
+                }
+            }
+
+            while (true) {
+                const chunk =
+                    await reader.read();
+
+                buffer +=
+                    decoder.decode(
+                        chunk.value
+                            || new Uint8Array(),
+                        {
+                            stream:
+                                !chunk.done
+                        }
+                    );
+
+                let newline =
+                    buffer.indexOf("\n");
+
+                while (newline >= 0) {
+                    const line =
+                        buffer.slice(
+                            0,
+                            newline
+                        );
+
+                    buffer =
+                        buffer.slice(
+                            newline + 1
+                        );
+
+                    processLine(
+                        line
+                    );
+
+                    newline =
+                        buffer.indexOf("\n");
+                }
+
+                if (chunk.done) {
+                    break;
+                }
+            }
+
+            if (buffer.trim()) {
+                processLine(
+                    buffer
+                );
+            }
+
+            if (!finalProof) {
+                throw new Error(
+                    "Startup proof stream ended "
+                    + "without a final verdict."
+                );
+            }
+
+            return finalProof;
+
         } catch (error) {
             renderError(error);
             throw error;
+
+        } finally {
+            prepareButton.disabled =
+                false;
+
+            proveButton.disabled =
+                false;
         }
     }
 

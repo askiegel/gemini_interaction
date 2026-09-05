@@ -151,3 +151,120 @@ def test_robot_bridge_boot_service_is_required():
 
     assert isinstance(value, ast.Constant)
     assert value.value is True
+
+
+def test_startup_live_progress_stream():
+    import ast
+
+    server = SERVER.read_text(
+        encoding="utf-8"
+    )
+
+    html = HTML.read_text(
+        encoding="utf-8"
+    )
+
+    proof = PROOF.read_text(
+        encoding="utf-8"
+    )
+
+    assert (
+        '"/dashboard/startup-proof-stream"'
+        in server
+    )
+
+    assert (
+        "application/x-ndjson"
+        in server
+    )
+
+    assert (
+        "progress_callback"
+        in proof
+    )
+
+    assert (
+        "STARTUP_CHECK_PLAN"
+        in proof
+    )
+
+    required_ui = (
+        "PROOF_STREAM_URL",
+        "WAITING",
+        "CHECKING",
+        "response.body.getReader()",
+        "TextDecoder",
+        "completeProgressCheck",
+        "renderProgressPlan",
+    )
+
+    for value in required_ui:
+        assert value in html
+
+    tree = ast.parse(proof)
+
+    plan = None
+
+    for node in tree.body:
+        if not isinstance(
+            node,
+            ast.Assign,
+        ):
+            continue
+
+        names = [
+            target.id
+            for target in node.targets
+            if isinstance(
+                target,
+                ast.Name,
+            )
+        ]
+
+        if (
+            "STARTUP_CHECK_PLAN"
+            in names
+        ):
+            plan = ast.literal_eval(
+                node.value
+            )
+            break
+
+    assert plan is not None
+    assert len(plan) == 15
+
+    assert len(
+        {
+            item["id"]
+            for item in plan
+        }
+    ) == 15
+
+    assert all(
+        item["required"]
+        for item in plan
+    )
+
+
+def test_prepare_requires_independent_live_proof():
+    server = SERVER.read_text(
+        encoding="utf-8"
+    )
+
+    start = server.index(
+        'if path == '
+        '"/dashboard/startup-prepare":'
+    )
+
+    end = server.index(
+        'if path in (',
+        start,
+    )
+
+    block = server[
+        start:end
+    ]
+
+    assert "prepare_session" in block
+    assert "prove_ready" not in block
+    assert '"proof_required"' in block

@@ -160,6 +160,86 @@ def request_json(
         }
 
 
+# STARTUP_LIVE_PROGRESS_BEGIN
+STARTUP_CHECK_PLAN = (
+    {
+        "id": 'dashboard_owner',
+        "label": 'Tony2 dashboard process',
+        "required": True,
+    },
+    {
+        "id": 'cognitive_source',
+        "label": 'Cognitive source state',
+        "required": True,
+    },
+    {
+        "id": 'guarded_asset',
+        "label": 'Guarded navigation asset',
+        "required": True,
+    },
+    {
+        "id": 'gait_threshold',
+        "label": 'Mayday navigation speed',
+        "required": True,
+    },
+    {
+        "id": 'mayday_reachable',
+        "label": 'Mayday / Robot Bridge',
+        "required": True,
+    },
+    {
+        "id": 'hardware_bringup',
+        "label": 'Hardware bringup service',
+        "required": True,
+    },
+    {
+        "id": 'hardware_nodes',
+        "label": 'Required ROS hardware nodes',
+        "required": True,
+    },
+    {
+        "id": 'bridge_process',
+        "label": 'Robot Bridge process',
+        "required": True,
+    },
+    {
+        "id": 'bridge_boot_service',
+        "label": 'Robot Bridge boot service',
+        "required": True,
+    },
+    {
+        "id": 'cmd_vel_chain',
+        "label": '/cmd_vel command chain',
+        "required": True,
+    },
+    {
+        "id": 'locomotion_chain',
+        "label": 'CHAMP -> servo trajectory chain',
+        "required": True,
+    },
+    {
+        "id": 'lidar',
+        "label": 'LD06 LiDAR /scan',
+        "required": True,
+    },
+    {
+        "id": 'motion_zero',
+        "label": 'Physical motion state',
+        "required": True,
+    },
+    {
+        "id": 'navigation_clean',
+        "label": 'Navigation clean state',
+        "required": True,
+    },
+    {
+        "id": 'navigation_envelope',
+        "label": 'Guarded navigation envelope',
+        "required": True,
+    },
+)
+# STARTUP_LIVE_PROGRESS_END
+
 def add_check(
     checks,
     check_id,
@@ -169,15 +249,19 @@ def add_check(
     *,
     required=True,
 ):
+    item = {
+        "id": check_id,
+        "label": label,
+        "passed": bool(passed),
+        "required": bool(required),
+        "detail": str(detail),
+    }
+
     checks.append(
-        {
-            "id": check_id,
-            "label": label,
-            "passed": bool(passed),
-            "required": bool(required),
-            "detail": str(detail),
-        }
+        item
     )
+
+    return item
 
 
 def parse_float(
@@ -478,8 +562,25 @@ timeout 8 ros2 topic info /scan --verbose 2>&1 || true
 
 def prove_ready(
     navigation=None,
+    progress_callback=None,
 ):
     checks = []
+
+    def record_check(
+        *args,
+        **kwargs,
+    ):
+        item = add_check(
+            *args,
+            **kwargs,
+        )
+
+        if progress_callback is not None:
+            progress_callback(
+                dict(item)
+            )
+
+        return item
 
     try:
         local = (
@@ -497,7 +598,7 @@ def prove_ready(
             )
         )
 
-        add_check(
+        record_check(
             checks,
             "dashboard_owner",
             "Tony2 dashboard process",
@@ -509,7 +610,7 @@ def prove_ready(
             ),
         )
 
-        add_check(
+        record_check(
             checks,
             "cognitive_source",
             "Cognitive source state",
@@ -530,7 +631,7 @@ def prove_ready(
     except Exception as exc:
         local = {}
 
-        add_check(
+        record_check(
             checks,
             "dashboard_owner",
             "Tony2 dashboard process",
@@ -538,7 +639,7 @@ def prove_ready(
             exc,
         )
 
-        add_check(
+        record_check(
             checks,
             "cognitive_source",
             "Cognitive source state",
@@ -564,7 +665,7 @@ def prove_ready(
             expected_asset_hash()
         )
 
-        add_check(
+        record_check(
             checks,
             "guarded_asset",
             "Guarded navigation asset",
@@ -605,7 +706,7 @@ def prove_ready(
             == EXPECTED_MAX_VEL_X
         )
 
-        add_check(
+        record_check(
             checks,
             "gait_threshold",
             "Mayday navigation speed",
@@ -618,7 +719,7 @@ def prove_ready(
         )
 
     except Exception as exc:
-        add_check(
+        record_check(
             checks,
             "guarded_asset",
             "Guarded navigation asset",
@@ -626,7 +727,7 @@ def prove_ready(
             exc,
         )
 
-        add_check(
+        record_check(
             checks,
             "gait_threshold",
             "Mayday navigation speed",
@@ -649,7 +750,7 @@ def prove_ready(
         else {}
     )
 
-    add_check(
+    record_check(
         checks,
         "mayday_reachable",
         "Mayday / Robot Bridge",
@@ -679,7 +780,7 @@ def prove_ready(
 
     ros = robot["ros"]
 
-    add_check(
+    record_check(
         checks,
         "hardware_bringup",
         "Hardware bringup service",
@@ -719,7 +820,7 @@ def prove_ready(
         ]
     ]
 
-    add_check(
+    record_check(
         checks,
         "hardware_nodes",
         "Required ROS hardware nodes",
@@ -754,7 +855,7 @@ def prove_ready(
         in bridge_cmdline
     )
 
-    add_check(
+    record_check(
         checks,
         "bridge_process",
         "Robot Bridge process",
@@ -777,7 +878,7 @@ def prove_ready(
         == "active"
     )
 
-    add_check(
+    record_check(
         checks,
         "bridge_boot_service",
         "Robot Bridge boot service",
@@ -806,7 +907,7 @@ def prove_ready(
         in cmdvel
     )
 
-    add_check(
+    record_check(
         checks,
         "cmd_vel_chain",
         "/cmd_vel command chain",
@@ -839,7 +940,7 @@ def prove_ready(
         in servo
     )
 
-    add_check(
+    record_check(
         checks,
         "locomotion_chain",
         "CHAMP -> servo trajectory chain",
@@ -863,7 +964,7 @@ def prove_ready(
         )
     )
 
-    add_check(
+    record_check(
         checks,
         "lidar",
         "LD06 LiDAR /scan",
@@ -906,7 +1007,7 @@ def prove_ready(
     except Exception:
         motion_zero = False
 
-    add_check(
+    record_check(
         checks,
         "motion_zero",
         "Physical motion state",
@@ -964,7 +1065,7 @@ def prove_ready(
         is None
     )
 
-    add_check(
+    record_check(
         checks,
         "navigation_clean",
         "Navigation clean state",
@@ -990,7 +1091,7 @@ def prove_ready(
         == EXPECTED_TIMEOUT
     )
 
-    add_check(
+    record_check(
         checks,
         "navigation_envelope",
         "Guarded navigation envelope",
