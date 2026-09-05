@@ -4851,150 +4851,69 @@
         navigationCancelRequested = false;
         updateButtons();
 
-        setState("Arming", "busy");
-        setOverlay("Preparing guarded navigation", "busy");
+        setState("Checking", "busy");
+        setOverlay(
+            "Checking persistent navigation",
+            "busy"
+        );
         setMessage(
-            "Starting guarded navigation for the selected "
-            + "destination...",
+            "Verifying the already-running guarded navigation "
+            + "runtime before destination submission...",
             false
         );
 
         try {
-            const planningStop = await fetchJson(
-                STOP_ENDPOINT,
-                {
-                    method: "POST",
-                    headers: {
-                        "Content-Type":
-                            "application/json",
-                    },
-                    body: "{}",
-                }
+            const statusResult = await fetchJson(
+                STATUS_ENDPOINT
+            );
+
+            const navigation = (
+                statusResult.payload
+                && statusResult.payload.navigation
             );
 
             if (
-                !planningStop.response.ok
-                || !planningStop.payload.ok
+                !statusResult.response.ok
+                || !statusResult.payload.ok
+                || !navigation
+                || navigation.state !== "READY"
+                || navigation.running !== true
+                || navigation.owned !== true
+                || navigation.host !== "Tony2"
+                || navigation.source
+                    !== "tony2_guarded_navigation"
+                || navigation.fixed_map_required !== true
+                || navigation.action_server_ready !== true
+                || navigation.transform_ready !== true
+                || navigation.motion_egress_ready !== true
+                || navigation.motion_egress_idle !== true
+                || navigation.goal_submission_enabled !== true
+                || navigation.goal_active !== false
+                || navigation.motion_output_connected !== false
             ) {
                 throw new Error(
-                    planningStop.payload.error
-                    || "Planning could not be stopped."
+                    (
+                        statusResult.payload
+                        && statusResult.payload.error
+                    )
+                    || (
+                        "Persistent guarded navigation is not "
+                        + "READY for direct destination submission."
+                    )
                 );
             }
 
-            planningRunning = false;
-            planningReady = false;
-
             if (navigationCancelRequested) {
-                throw new Error("Navigation was cancelled.");
-            }
-
-            const navigationStart = await fetchJson(
-                NAVIGATION_START_ENDPOINT,
-                {
-                    method: "POST",
-                    headers: {
-                        "Content-Type":
-                            "application/json",
-                    },
-                    body: "{}",
-                }
-            );
-
-            if (!navigationWasStarted(navigationStart)) {
                 throw new Error(
-                    navigationStart.payload.error
-                    || "Guarded navigation failed to start."
+                    "Navigation was cancelled."
                 );
-            }
-
-            setState("Localizing", "busy");
-            setOverlay(
-                "Initializing navigation pose",
-                "busy"
-            );
-            setMessage(
-                "Guarded navigation started. Waiting for "
-                + "Nav2 lifecycle services...",
-                false
-            );
-
-            await wait(INITIALIZE_DISCOVERY_DELAY_MS);
-
-            let initialization = null;
-            let initializationError = (
-                "Navigation localization "
-                + "initialization failed."
-            );
-
-            for (
-                let attempt = 1;
-                attempt <= INITIALIZE_MAX_ATTEMPTS;
-                attempt += 1
-            ) {
-                if (navigationCancelRequested) {
-                    throw new Error(
-                        "Navigation was cancelled."
-                    );
-                }
-
-                try {
-                    initialization = await fetchJson(
-                        NAVIGATION_INITIALIZE_ENDPOINT,
-                        {
-                            method: "POST",
-                            headers: {
-                                "Content-Type":
-                                    "application/json",
-                            },
-                            body: "{}",
-                        }
-                    );
-
-                    if (
-                        navigationInitializationSucceeded(
-                            initialization
-                        )
-                    ) {
-                        break;
-                    }
-
-                    initializationError = (
-                        initialization.payload.error
-                        || initializationError
-                    );
-                } catch (error) {
-                    initializationError = (
-                        error.message
-                        || initializationError
-                    );
-                }
-
-                if (
-                    attempt < INITIALIZE_MAX_ATTEMPTS
-                ) {
-                    await wait(
-                        INITIALIZE_RETRY_DELAY_MS
-                    );
-                }
-            }
-
-            if (
-                !navigationInitializationSucceeded(
-                    initialization
-                )
-            ) {
-                throw new Error(initializationError);
-            }
-
-            if (navigationCancelRequested) {
-                throw new Error("Navigation was cancelled.");
             }
 
             setState("Moving", "busy");
             setOverlay("Mayday navigating", "busy");
             setMessage(
-                "Executing one bounded guarded goal. "
+                "Executing one bounded guarded goal through "
+                + "the existing persistent Nav2 runtime. "
                 + "STOP MAYDAY remains available.",
                 false
             );
@@ -5041,40 +4960,33 @@
             setState("Arrived", "ready");
             setOverlay("Goal reached", "ready");
             setMessage(
-                "Mayday reached the bounded selected goal.",
+                "Mayday reached the bounded selected goal. "
+                + "Persistent navigation remains READY.",
                 false
             );
         } catch (error) {
-            setState("Stopped", "error");
-            setOverlay("Navigation stopped", "error");
+            setState("Goal failed", "error");
+            setOverlay(
+                "Navigation goal failed",
+                "error"
+            );
             setMessage(error.message, true);
         } finally {
-            try {
-                await fetchJson(
-                    NAVIGATION_STOP_ENDPOINT,
-                    {
-                        method: "POST",
-                        headers: {
-                            "Content-Type":
-                                "application/json",
-                        },
-                        body: "{}",
-                    }
-                );
-            } catch (stopError) {
-                // Robot Bridge STOP remains independently available.
-            }
-
             navigationExecuting = false;
             navigationCancelRequested = false;
-            planningRunning = false;
-            planningReady = false;
             actionInFlight = false;
+
+            /*
+             * Mayday physically changed pose, so invalidate
+             * browser-local pose/path presentation. Do NOT stop
+             * the persistent Nav2 runtime.
+             */
             latestPose = null;
             latestPoseReceivedAt = null;
             selectedGoal = null;
             computedPath = null;
             uncertaintyBlocked = true;
+
             drawPath();
             updateButtons();
         }

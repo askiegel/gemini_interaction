@@ -272,25 +272,77 @@ def test_goal_payload_remains_fixed_and_numeric():
     )
 
 
-def test_navigation_always_stops_after_goal_attempt():
+def test_navigation_goal_keeps_persistent_runtime_running():
     start = HTML.index(
         "async function sendMayday"
     )
 
-    source = HTML[start:]
+    end = HTML.index(
+        "\n    function selectGoal(",
+        start,
+    )
 
-    goal = source.index(
+    source = HTML[
+        start:
+        end
+    ]
+
+    assert (
         "NAVIGATION_GOAL_ENDPOINT"
+        in source
     )
 
-    stop = source.index(
-        "NAVIGATION_STOP_ENDPOINT",
-        goal,
+    # A normal destination attempt must not tear down the
+    # already-running persistent Nav2 runtime.
+    assert (
+        "NAVIGATION_STOP_ENDPOINT"
+        not in source
     )
 
-    assert goal < stop
-    assert "finally" in source[goal:stop + 500]
+    assert (
+        "NAVIGATION_START_ENDPOINT"
+        not in source
+    )
 
+    assert (
+        "NAVIGATION_INITIALIZE_ENDPOINT"
+        not in source
+    )
+
+    assert (
+        "navigation.goal_submission_enabled !== true"
+        in source
+    )
+
+    assert (
+        "navigation.motion_output_connected !== false"
+        in source
+    )
+
+    assert (
+        "Persistent navigation remains READY."
+        in source
+    )
+
+    # Explicit operator STOP remains independently available.
+    stop_start = HTML.index(
+        "async function stopMayday"
+    )
+
+    stop_end = HTML.index(
+        "\n    async function sendMayday",
+        stop_start,
+    )
+
+    stop_source = HTML[
+        stop_start:
+        stop_end
+    ]
+
+    assert (
+        "NAVIGATION_STOP_ENDPOINT"
+        in stop_source
+    )
 
 def test_tony2_runtime_reports_fixed_map_and_zenoh():
     required = (
@@ -421,3 +473,76 @@ def test_normal_server_navigation_has_no_direct_robot_nav2_calls():
 
     for marker in forbidden:
         assert marker not in source
+
+def test_go_submits_directly_through_persistent_navigation():
+    from pathlib import Path
+
+    html = Path(
+        "voice_relay/index.html"
+    ).read_text(
+        encoding="utf-8"
+    )
+
+    start = html.index(
+        "    async function sendMayday() {"
+    )
+
+    end = html.index(
+        "\n    function selectGoal(",
+        start,
+    )
+
+    block = html[
+        start:
+        end
+    ]
+
+    required = (
+        "STATUS_ENDPOINT",
+        "NAVIGATION_GOAL_ENDPOINT",
+        'navigation.state !== "READY"',
+        "navigation.running !== true",
+        "navigation.owned !== true",
+        'navigation.host !== "Tony2"',
+        (
+            'navigation.source\n'
+            '                    !== '
+            '"tony2_guarded_navigation"'
+        ),
+        "navigation.action_server_ready !== true",
+        "navigation.transform_ready !== true",
+        "navigation.motion_egress_ready !== true",
+        "navigation.motion_egress_idle !== true",
+        "navigation.goal_submission_enabled !== true",
+        "navigation.goal_active !== false",
+        "navigation.motion_output_connected !== false",
+        "goal_x: executionGoal.x",
+        "goal_y: executionGoal.y",
+        "goal_yaw: executionGoal.yaw",
+        'result.status\n                    !== '
+        '"NAVIGATION_SUCCEEDED"',
+        "result.executed !== true",
+        "result.bounded !== true",
+        "Persistent navigation remains READY.",
+    )
+
+    for marker in required:
+        assert marker in block
+
+    forbidden = (
+        "STOP_ENDPOINT,",
+        "NAVIGATION_START_ENDPOINT",
+        "NAVIGATION_INITIALIZE_ENDPOINT",
+        "navigationInitializationSucceeded(",
+        "INITIALIZE_DISCOVERY_DELAY_MS",
+        "INITIALIZE_RETRY_DELAY_MS",
+        "INITIALIZE_MAX_ATTEMPTS",
+        "NAVIGATION_STOP_ENDPOINT",
+        "known_home_pose",
+        "amcl_seeded",
+        "planningRunning = false",
+        "planningReady = false",
+    )
+
+    for marker in forbidden:
+        assert marker not in block
