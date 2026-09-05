@@ -202,3 +202,26 @@ def test_no_robot_motion_surface():
 
     for item in forbidden:
         assert item not in text
+
+
+
+def test_voice_relay_boot_unit_loads_ros_environment():
+    from pathlib import Path
+
+    unit = Path(
+        "deploy/systemd/mayday-voice-relay.service"
+    ).read_text(
+        encoding="utf-8"
+    )
+
+    required = (
+        "source /opt/ros/humble/setup.bash",
+        "Environment=ROS_DOMAIN_ID=42",
+        "Environment=ROS_LOCALHOST_ONLY=0",
+        "Environment=RMW_IMPLEMENTATION=rmw_fastrtps_cpp",
+        "Environment=FASTDDS_BUILTIN_TRANSPORTS=UDPv4",
+        "scripts/run_tony2_service.py voice-relay",
+    )
+
+    for value in required:
+        assert value in unit
