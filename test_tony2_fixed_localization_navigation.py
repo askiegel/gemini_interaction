@@ -153,12 +153,12 @@ def test_motion_contract_remains_bounded():
     source = read(RUNTIME)
 
     assert (
-        "MAXIMUM_GOAL_DISTANCE_METERS = 0.50"
+        "MAXIMUM_GOAL_DISTANCE_METERS = 5.0"
         in source
     )
 
     assert (
-        "EXECUTION_TIMEOUT_SECONDS = 25.0"
+        "EXECUTION_TIMEOUT_SECONDS = 120.0"
         in source
     )
 

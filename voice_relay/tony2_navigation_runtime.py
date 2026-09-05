@@ -35,8 +35,8 @@ class Tony2NavigationRuntime:
     only, distance bounded, and timeout bounded.
     """
 
-    MAXIMUM_GOAL_DISTANCE_METERS = 0.50
-    EXECUTION_TIMEOUT_SECONDS = 25.0
+    MAXIMUM_GOAL_DISTANCE_METERS = 5.0
+    EXECUTION_TIMEOUT_SECONDS = 120.0
 
     FIXED_MAP_MIN_X = -2.60
     FIXED_MAP_MAX_X = 4.00

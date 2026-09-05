@@ -153,14 +153,14 @@ class Tony2NavigationRuntimeTests(
                 status[
                     "maximum_goal_distance_meters"
                 ],
-                0.50,
+                5.0,
             )
 
             self.assertEqual(
                 status[
                     "execution_timeout_seconds"
                 ],
-                25.0,
+                120.0,
             )
 
     def test_partial_runtime_fails_closed(
@@ -620,7 +620,7 @@ class Tony2NavigationRuntimeTests(
                     )
                     + 1
                 ],
-                "0.5",
+                "5.0",
             )
 
             self.assertEqual(
@@ -630,7 +630,7 @@ class Tony2NavigationRuntimeTests(
                     )
                     + 1
                 ],
-                "25.0",
+                "120.0",
             )
 
     def test_begin_and_release_motion_lease_keeps_ownership_until_stop(
