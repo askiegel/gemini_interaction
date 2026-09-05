@@ -3318,145 +3318,217 @@ class VoiceRelayHandler(BaseHTTPRequestHandler):
                 # Phase 2:
                 # Search the COMPLETE saved map using AMCL.
                 # No initial pose and no Home pose are supplied.
-                localization_result = (
-                    runtime
-                    .initialize_global_localization()
-                )
+                #
+                # Global AMCL is stochastic. A map-wide particle
+                # distribution can converge to a geometrically
+                # incorrect hypothesis even while covariance is
+                # tight. The existing independent LiDAR alignment
+                # gate detects that condition.
+                #
+                # Preserve every trust threshold and retry only an
+                # explicit OPERATOR_POSE_REJECTED result. Each retry
+                # starts a fresh isolated Nav2/AMCL runtime and again
+                # requires stationary pre-localization readiness.
+                GLOBAL_LOCALIZATION_MAX_ATTEMPTS = 3
 
-                localization = (
-                    localization_result.get(
-                        "localization"
-                    )
-                    if isinstance(
-                        localization_result,
-                        dict,
-                    )
-                    else None
-                )
+                localization_result = None
+                localization = None
+                diagnostic = None
+                final_pose = None
+                uncertainty = None
+                localization_valid = False
 
-                diagnostic = (
-                    localization.get(
-                        "diagnostic"
-                    )
-                    if isinstance(
-                        localization,
-                        dict,
-                    )
-                    else None
-                )
+                for localization_attempt in range(
+                    1,
+                    GLOBAL_LOCALIZATION_MAX_ATTEMPTS + 1,
+                ):
+                    if localization_attempt > 1:
+                        runtime.start()
 
-                final_pose = (
-                    localization.get(
-                        "final_pose"
-                    )
-                    if isinstance(
-                        localization,
-                        dict,
-                    )
-                    else None
-                )
+                        deadline = (
+                            _startup_time.monotonic()
+                            + 60.0
+                        )
 
-                uncertainty = (
-                    localization.get(
-                        "uncertainty"
-                    )
-                    if isinstance(
-                        localization,
-                        dict,
-                    )
-                    else None
-                )
+                        navigation = runtime.status()
 
-                localization_valid = (
-                    isinstance(
-                        localization_result,
-                        dict,
+                        while (
+                            not prelocalization_ready(
+                                navigation
+                            )
+                            and _startup_time.monotonic()
+                            < deadline
+                        ):
+                            _startup_time.sleep(
+                                0.5
+                            )
+
+                            navigation = (
+                                runtime.status()
+                            )
+
+                        if not prelocalization_ready(
+                            navigation
+                        ):
+                            raise RuntimeError(
+                                "Nav2/AMCL did not reach "
+                                "pre-localization readiness."
+                            )
+
+                    localization_result = (
+                        runtime
+                        .initialize_global_localization()
                     )
-                    and localization_result.get(
-                        "action"
+
+                    localization = (
+                        localization_result.get(
+                            "localization"
+                        )
+                        if isinstance(
+                            localization_result,
+                            dict,
+                        )
+                        else None
                     )
-                    == "OPERATOR_POSE_VALIDATED"
-                    and isinstance(
-                        localization,
-                        dict,
+
+                    diagnostic = (
+                        localization.get(
+                            "diagnostic"
+                        )
+                        if isinstance(
+                            localization,
+                            dict,
+                        )
+                        else None
                     )
-                    and localization.get(
-                        "ok"
+
+                    final_pose = (
+                        localization.get(
+                            "final_pose"
+                        )
+                        if isinstance(
+                            localization,
+                            dict,
+                        )
+                        else None
                     )
-                    is True
-                    and localization.get(
-                        "trusted"
+
+                    uncertainty = (
+                        localization.get(
+                            "uncertainty"
+                        )
+                        if isinstance(
+                            localization,
+                            dict,
+                        )
+                        else None
                     )
-                    is True
-                    and localization.get(
-                        "frame_id"
+
+                    localization_valid = (
+                        isinstance(
+                            localization_result,
+                            dict,
+                        )
+                        and localization_result.get(
+                            "action"
+                        )
+                        == "OPERATOR_POSE_VALIDATED"
+                        and isinstance(
+                            localization,
+                            dict,
+                        )
+                        and localization.get(
+                            "ok"
+                        )
+                        is True
+                        and localization.get(
+                            "trusted"
+                        )
+                        is True
+                        and localization.get(
+                            "frame_id"
+                        )
+                        == "map"
+                        and localization.get(
+                            "localization_method"
+                        )
+                        == "amcl_global"
+                        and localization.get(
+                            "search_scope"
+                        )
+                        == "full_saved_map"
+                        and localization.get(
+                            "seed_pose_used"
+                        )
+                        is False
+                        and localization.get(
+                            "global_localization_requested"
+                        )
+                        is True
+                        and localization.get(
+                            "initial_pose_supplied"
+                        )
+                        is False
+                        and localization.get(
+                            "stationary_required"
+                        )
+                        is True
+                        and localization.get(
+                            "navigation_goal_executed"
+                        )
+                        is False
+                        and localization.get(
+                            "motion_enabled"
+                        )
+                        is False
+                        and isinstance(
+                            diagnostic,
+                            dict,
+                        )
+                        and diagnostic.get(
+                            "covariance_tight"
+                        )
+                        is True
+                        and diagnostic.get(
+                            "global_search_completed"
+                        )
+                        is True
+                        and diagnostic.get(
+                            "seed_pose_applied"
+                        )
+                        is False
+                        and diagnostic.get(
+                            "alignment_good"
+                        )
+                        is True
+                        and diagnostic.get(
+                            "trusted"
+                        )
+                        is True
+                        and isinstance(
+                            final_pose,
+                            dict,
+                        )
+                        and isinstance(
+                            uncertainty,
+                            dict,
+                        )
                     )
-                    == "map"
-                    and localization.get(
-                        "localization_method"
-                    )
-                    == "amcl_global"
-                    and localization.get(
-                        "search_scope"
-                    )
-                    == "full_saved_map"
-                    and localization.get(
-                        "seed_pose_used"
-                    )
-                    is False
-                    and localization.get(
-                        "global_localization_requested"
-                    )
-                    is True
-                    and localization.get(
-                        "initial_pose_supplied"
-                    )
-                    is False
-                    and localization.get(
-                        "stationary_required"
-                    )
-                    is True
-                    and localization.get(
-                        "navigation_goal_executed"
-                    )
-                    is False
-                    and localization.get(
-                        "motion_enabled"
-                    )
-                    is False
-                    and isinstance(
-                        diagnostic,
-                        dict,
-                    )
-                    and diagnostic.get(
-                        "covariance_tight"
-                    )
-                    is True
-                    and diagnostic.get(
-                        "global_search_completed"
-                    )
-                    is True
-                    and diagnostic.get(
-                        "seed_pose_applied"
-                    )
-                    is False
-                    and diagnostic.get(
-                        "alignment_good"
-                    )
-                    is True
-                    and diagnostic.get(
-                        "trusted"
-                    )
-                    is True
-                    and isinstance(
-                        final_pose,
-                        dict,
-                    )
-                    and isinstance(
-                        uncertainty,
-                        dict,
-                    )
-                )
+
+                    if localization_valid:
+                        break
+
+                    if not (
+                        isinstance(
+                            localization_result,
+                            dict,
+                        )
+                        and localization_result.get(
+                            "action"
+                        )
+                        == "OPERATOR_POSE_REJECTED"
+                    ):
+                        break
 
                 if not localization_valid:
                     raise RuntimeError(

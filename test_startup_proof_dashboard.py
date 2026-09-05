@@ -904,3 +904,78 @@ def test_cmd_vel_proof_retries_transient_ros_discovery():
         "discovery sample(s)"
         in cmdvel_check
     )
+
+
+def test_startup_global_localization_retries_rejected_hypothesis():
+    from pathlib import Path
+
+    server = Path(
+        "voice_relay/server.py"
+    ).read_text(
+        encoding="utf-8"
+    )
+
+    start = server.index(
+        '        if path == "/dashboard/startup-prepare":'
+    )
+
+    end = server.index(
+        "\n        if path in (",
+        start,
+    )
+
+    block = server[start:end]
+
+    assert (
+        "GLOBAL_LOCALIZATION_MAX_ATTEMPTS = 3"
+        in block
+    )
+
+    assert (
+        "for localization_attempt in range("
+        in block
+    )
+
+    assert (
+        ".initialize_global_localization()"
+        in block
+    )
+
+    assert (
+        '"OPERATOR_POSE_REJECTED"'
+        in block
+    )
+
+    assert (
+        "localization_attempt > 1"
+        in block
+    )
+
+    assert (
+        "runtime.start()"
+        in block
+    )
+
+    assert (
+        "prelocalization_ready("
+        in block
+    )
+
+    # Retry must not weaken the established trust gates.
+    required = (
+        '"covariance_tight"',
+        '"alignment_good"',
+        '"global_search_completed"',
+        '"trusted"',
+        '"amcl_global"',
+        '"full_saved_map"',
+    )
+
+    for value in required:
+        assert value in block
+
+    # Startup remains current-pose global localization only.
+    assert (
+        "initialize_home_localization"
+        not in block
+    )
