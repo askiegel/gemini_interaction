@@ -788,7 +788,7 @@ def prove_ready(
             f"active="
             f"{service.get('bridge_service_active')}"
         ),
-        required=False,
+        required=True,
     )
 
     cmdvel = ros[

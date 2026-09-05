@@ -105,3 +105,49 @@ def test_proof_requires_real_locomotion_chain():
 
     for value in required:
         assert value in source
+
+
+def test_robot_bridge_boot_service_is_required():
+    import ast
+
+    source = PROOF.read_text(
+        encoding="utf-8"
+    )
+
+    tree = ast.parse(source)
+
+    label = "Robot Bridge boot service"
+
+    matches = []
+
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+
+        constants = [
+            child.value
+            for child in ast.walk(node)
+            if (
+                isinstance(child, ast.Constant)
+                and isinstance(child.value, str)
+            )
+        ]
+
+        if label not in constants:
+            continue
+
+        required = [
+            keyword
+            for keyword in node.keywords
+            if keyword.arg == "required"
+        ]
+
+        matches.append(required)
+
+    assert len(matches) == 1
+    assert len(matches[0]) == 1
+
+    value = matches[0][0].value
+
+    assert isinstance(value, ast.Constant)
+    assert value.value is True
