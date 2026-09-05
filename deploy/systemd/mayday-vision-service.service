@@ -1,0 +1,22 @@
+[Unit]
+Description=Mayday Vision Service
+Wants=mayday-vision-server.service
+After=mayday-vision-server.service
+
+[Service]
+Type=simple
+User=tkieg
+WorkingDirectory=/home/tkieg/robot_services/cognitive
+Environment=HOME=/home/tkieg
+Environment=PYTHONUNBUFFERED=1
+EnvironmentFile=-/home/tkieg/robot_services/cognitive/.env
+ExecStartPre=/usr/bin/bash -lc 'for i in {1..60}; do /usr/bin/curl -fsS --max-time 2 http://127.0.0.1:8000/detections/latest >/dev/null && exit 0; sleep 1; done; exit 1'
+ExecStart=/home/tkieg/robot_services/cognitive/.venv/bin/python3 /home/tkieg/robot_services/cognitive/scripts/run_tony2_service.py vision-service
+ExecStopPost=/usr/bin/rm -f /home/tkieg/robot_services/cognitive/.run/vision_service.pid
+Restart=on-failure
+RestartSec=2
+TimeoutStopSec=15
+KillMode=control-group
+
+[Install]
+WantedBy=multi-user.target

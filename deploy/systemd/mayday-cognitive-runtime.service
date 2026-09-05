@@ -1,0 +1,21 @@
+[Unit]
+Description=Mayday Cognitive Runtime
+Wants=mayday-vision-service.service
+After=mayday-vision-service.service
+
+[Service]
+Type=simple
+User=tkieg
+WorkingDirectory=/home/tkieg/robot_services/cognitive
+Environment=HOME=/home/tkieg
+Environment=PYTHONUNBUFFERED=1
+EnvironmentFile=-/home/tkieg/robot_services/cognitive/.env
+ExecStart=/home/tkieg/robot_services/cognitive/.venv/bin/python3 /home/tkieg/robot_services/cognitive/scripts/run_tony2_service.py cognitive-runtime
+ExecStopPost=/usr/bin/rm -f /home/tkieg/robot_services/cognitive/.run/runtime_api.pid
+Restart=on-failure
+RestartSec=2
+TimeoutStopSec=15
+KillMode=control-group
+
+[Install]
+WantedBy=multi-user.target
