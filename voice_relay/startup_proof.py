@@ -925,6 +925,192 @@ ros2 node list --no-daemon \
     )
 
 
+
+def _startup_cmd_vel_sample_complete(
+    cmdvel,
+):
+    """
+    Return True only when one /cmd_vel graph sample
+    simultaneously contains the complete guarded command chain.
+    """
+    sample = str(
+        cmdvel
+        or ""
+    )
+
+    return (
+        "Publisher count: 1"
+        in sample
+        and "Subscription count: 1"
+        in sample
+        and "robot_bridge_publisher"
+        in sample
+        and "quadruped_controller_node"
+        in sample
+    )
+
+
+def _startup_cmd_vel_with_retry(
+    initial_cmdvel,
+):
+    """
+    Confirm the guarded Mayday /cmd_vel graph using bounded
+    fresh DDS discovery samples.
+
+    ROS 2 discovery can temporarily omit a healthy endpoint
+    from one topic-info sample. Readiness therefore requires
+    one complete sample. Fresh samples replace earlier samples;
+    partial observations are never unioned.
+    """
+    import subprocess as _startup_subprocess
+    import time as _startup_time
+    from urllib.parse import (
+        urlparse as _startup_urlparse,
+    )
+
+    current_cmdvel = str(
+        initial_cmdvel
+        or ""
+    ).strip()
+
+    attempts = [
+        {
+            "sample": 1,
+            "complete":
+                _startup_cmd_vel_sample_complete(
+                    current_cmdvel
+                ),
+            "error": None,
+        }
+    ]
+
+    if attempts[-1]["complete"]:
+        return (
+            current_cmdvel,
+            attempts,
+        )
+
+    host = (
+        _startup_urlparse(
+            ROBOT_BRIDGE_URL
+        ).hostname
+    )
+
+    if not host:
+        attempts.append(
+            {
+                "sample": 2,
+                "complete": False,
+                "error":
+                    "Robot Bridge host unavailable.",
+            }
+        )
+
+        return (
+            current_cmdvel,
+            attempts,
+        )
+
+    remote_script = r"""
+set +u
+set -o pipefail
+set -e
+
+source /opt/ros/humble/setup.bash
+source "$HOME/ros2_ws/install/setup.bash"
+
+export ROS_DOMAIN_ID=42
+export ROS_LOCALHOST_ONLY=0
+export RMW_IMPLEMENTATION=rmw_fastrtps_cpp
+export FASTDDS_BUILTIN_TRANSPORTS=UDPv4
+
+unset ROS_DISCOVERY_SERVER
+unset ROS_SUPER_CLIENT
+unset FASTRTPS_DEFAULT_PROFILES_FILE
+unset FASTDDS_DEFAULT_PROFILES_FILE
+
+timeout 8 \
+    ros2 topic info \
+    /cmd_vel \
+    --verbose \
+    2>&1 \
+    || true
+"""
+
+    for sample_number in range(
+        2,
+        NODE_DISCOVERY_MAX_SAMPLES + 1,
+    ):
+        _startup_time.sleep(
+            NODE_DISCOVERY_RETRY_SECONDS
+        )
+
+        error = None
+
+        try:
+            completed = (
+                _startup_subprocess.run(
+                    [
+                        "ssh",
+                        "-o",
+                        "BatchMode=yes",
+                        f"ubuntu@{host}",
+                        "bash",
+                        "-s",
+                    ],
+                    input=remote_script,
+                    text=True,
+                    capture_output=True,
+                    timeout=12,
+                    check=False,
+                )
+            )
+
+            if completed.returncode == 0:
+                # IMPORTANT:
+                # Replace the complete graph sample.
+                # Do not union partial DDS observations.
+                current_cmdvel = (
+                    completed.stdout.strip()
+                )
+            else:
+                error = (
+                    completed.stderr.strip()
+                    or (
+                        "ROS cmd_vel discovery "
+                        f"returned "
+                        f"{completed.returncode}."
+                    )
+                )
+
+        except Exception as exc:
+            error = str(exc)
+
+        complete = (
+            _startup_cmd_vel_sample_complete(
+                current_cmdvel
+            )
+        )
+
+        attempts.append(
+            {
+                "sample":
+                    sample_number,
+                "complete":
+                    complete,
+                "error":
+                    error,
+            }
+        )
+
+        if complete:
+            break
+
+    return (
+        current_cmdvel,
+        attempts,
+    )
+
 def prove_ready(
     navigation=None,
     progress_callback=None,
@@ -1429,19 +1615,44 @@ def prove_ready(
         required=True,
     )
 
-    cmdvel = ros[
-        "cmdvel"
-    ]
+    (
+        cmdvel,
+        cmdvel_discovery_attempts,
+    ) = _startup_cmd_vel_with_retry(
+        ros["cmdvel"]
+    )
 
     cmdvel_ok = (
-        "Publisher count: 1"
-        in cmdvel
-        and "Subscription count: 1"
-        in cmdvel
-        and "robot_bridge_publisher"
-        in cmdvel
-        and "quadruped_controller_node"
-        in cmdvel
+        _startup_cmd_vel_sample_complete(
+            cmdvel
+        )
+    )
+
+    cmdvel_discovery_summary = "; ".join(
+        (
+            f"sample {attempt['sample']}: "
+            + (
+                "complete"
+                if attempt["complete"]
+                else "incomplete"
+            )
+            + (
+                ""
+                if not attempt.get(
+                    "error"
+                )
+                else (
+                    " error="
+                    + str(
+                        attempt[
+                            "error"
+                        ]
+                    )
+                )
+            )
+        )
+        for attempt
+        in cmdvel_discovery_attempts
     )
 
     record_check(
@@ -1450,10 +1661,21 @@ def prove_ready(
         "/cmd_vel command chain",
         cmdvel_ok,
         (
-            "1 Robot Bridge publisher -> "
-            "1 quadruped controller subscriber"
+            (
+                "1 Robot Bridge publisher -> "
+                "1 quadruped controller subscriber "
+                f"after "
+                f"{len(cmdvel_discovery_attempts)} "
+                "discovery sample(s); "
+                f"{cmdvel_discovery_summary}"
+            )
             if cmdvel_ok
-            else "unexpected /cmd_vel wiring"
+            else (
+                "unexpected /cmd_vel wiring after "
+                f"{len(cmdvel_discovery_attempts)} "
+                "discovery sample(s); "
+                f"{cmdvel_discovery_summary}"
+            )
         ),
     )
 

@@ -796,3 +796,111 @@ def test_hardware_node_proof_retries_transient_ros_discovery():
         "|="
         not in helper
     )
+
+def test_cmd_vel_proof_retries_transient_ros_discovery():
+    from pathlib import Path
+
+    proof = Path(
+        "voice_relay/startup_proof.py"
+    ).read_text(
+        encoding="utf-8"
+    )
+
+    assert (
+        "def _startup_cmd_vel_sample_complete("
+        in proof
+    )
+
+    assert (
+        "def _startup_cmd_vel_with_retry("
+        in proof
+    )
+
+    helper_start = proof.index(
+        "def _startup_cmd_vel_with_retry("
+    )
+
+    helper_end = proof.index(
+        "def prove_ready(",
+        helper_start,
+    )
+
+    helper = proof[
+        helper_start:
+        helper_end
+    ]
+
+    assert (
+        "NODE_DISCOVERY_MAX_SAMPLES + 1"
+        in helper
+    )
+
+    assert (
+        "NODE_DISCOVERY_RETRY_SECONDS"
+        in helper
+    )
+
+    assert (
+        "ros2 topic info"
+        in helper
+    )
+
+    assert (
+        "/cmd_vel"
+        in helper
+    )
+
+    assert (
+        "--verbose"
+        in helper
+    )
+
+    # Every successful retry replaces the entire
+    # topic-info sample. Partial DDS observations
+    # must never be accumulated across retries.
+    assert (
+        "current_cmdvel = ("
+        in helper
+    )
+
+    assert (
+        "completed.stdout.strip()"
+        in helper
+    )
+
+    assert ".union(" not in helper
+    assert "|=" not in helper
+
+    cmdvel_start = proof.index(
+        "        cmdvel,"
+    )
+
+    cmdvel_end = proof.index(
+        "    quadruped = ros[",
+        cmdvel_start,
+    )
+
+    cmdvel_check = proof[
+        cmdvel_start:
+        cmdvel_end
+    ]
+
+    assert (
+        "_startup_cmd_vel_with_retry("
+        in cmdvel_check
+    )
+
+    assert (
+        "_startup_cmd_vel_sample_complete("
+        in cmdvel_check
+    )
+
+    assert (
+        "cmdvel_discovery_attempts"
+        in cmdvel_check
+    )
+
+    assert (
+        "discovery sample(s)"
+        in cmdvel_check
+    )
