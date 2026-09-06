@@ -153,7 +153,7 @@ def test_motion_contract_remains_bounded():
     source = read(RUNTIME)
 
     assert (
-        "MAXIMUM_GOAL_DISTANCE_METERS = 5.0"
+        "MAXIMUM_GOAL_DISTANCE_METERS = 20.0"
         in source
     )
 

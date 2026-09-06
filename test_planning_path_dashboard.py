@@ -963,7 +963,7 @@ def test_path_preview_and_guarded_execution_are_distinct():
     assert "without execution." in dashboard
 
     # Guarded execution controls still exist separately.
-    assert "GO — max 0.50 m" in dashboard
+    assert "GO" in dashboard
     assert "STOP MAYDAY" in dashboard
 
     # Do not regress to copy that implies Compute Path

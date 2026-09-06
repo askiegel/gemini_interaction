@@ -108,7 +108,7 @@ def test_egress_defaults_are_guarded():
         == "/tony2_nav_cmd_vel_egress"
     )
 
-    assert MAX_LINEAR_X == 0.20
+    assert MAX_LINEAR_X == 0.50
     assert MAX_ANGULAR_Z == 1.00
 
     assert (
@@ -179,7 +179,7 @@ def test_linear_limit_violation_fail_stops():
     )
 
     result = controller.accept(
-        0.2001,
+        0.5001,
         0.0,
         now=1.0,
     )

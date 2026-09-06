@@ -1546,7 +1546,7 @@
                         type="button"
                         disabled
                     >
-                        GO — max 0.50 m
+                        GO
                     </button>
                     <button
                         id="stopMaydayButton"
@@ -3256,7 +3256,7 @@
     const INITIALIZE_MAX_ATTEMPTS = 10;
     const POSE_REFRESH_RETRY_DELAY_MS = 250;
     const POSE_REFRESH_MAX_ATTEMPTS = 20;
-    const MAX_NAVIGATION_DISTANCE_METERS = 0.50;
+    const MAX_NAVIGATION_DISTANCE_METERS = Number.POSITIVE_INFINITY;
 
     let timer = null;
     let requestInFlight = false;
@@ -4840,7 +4840,7 @@
 
         const confirmed = window.confirm(
             "Send Mayday directly to the selected goal? "
-            + "Guarded navigation will plan and move up to 0.50 m. "
+            + "Nav2 will plan to the selected saved-map goal. "
             + "Keep STOP MAYDAY available."
         );
 

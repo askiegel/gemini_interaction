@@ -267,7 +267,7 @@ def test_goal_payload_remains_fixed_and_numeric():
         assert marker in HTML
 
     assert (
-        "const MAX_NAVIGATION_DISTANCE_METERS = 0.50"
+        "const MAX_NAVIGATION_DISTANCE_METERS = Number.POSITIVE_INFINITY"
         in HTML
     )
 

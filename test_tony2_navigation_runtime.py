@@ -153,7 +153,7 @@ class Tony2NavigationRuntimeTests(
                 status[
                     "maximum_goal_distance_meters"
                 ],
-                5.0,
+                20.0,
             )
 
             self.assertEqual(
@@ -620,7 +620,7 @@ class Tony2NavigationRuntimeTests(
                     )
                     + 1
                 ],
-                "5.0",
+                "20.0",
             )
 
             self.assertEqual(

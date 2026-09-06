@@ -56,7 +56,7 @@ from voice_relay.tony2_navigation_motion_arm import (
 
 INPUT_TOPIC = "/tony2_nav_cmd_vel_egress"
 
-MAX_LINEAR_X = 0.20
+MAX_LINEAR_X = 0.50
 MAX_ANGULAR_Z = 1.00
 
 ROBOT_WATCHDOG_SECONDS = 0.50
