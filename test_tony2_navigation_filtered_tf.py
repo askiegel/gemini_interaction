@@ -34,12 +34,12 @@ def test_isolation_source_consumes_filtered_mapping_tree():
     )
 
     assert (
-        'TF_INPUT = "/mayday_navigation_tf"'
+        'TF_INPUT = "/tf"'
         in source
     )
 
     assert (
-        'TF_INPUT = "/tf"'
+        'TF_INPUT = "/mayday_navigation_tf"'
         not in source
     )
 

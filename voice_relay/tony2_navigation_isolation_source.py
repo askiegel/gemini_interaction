@@ -42,8 +42,15 @@ CHANNEL_TF_STATIC = 4
 
 SCAN_INPUT = "/scan"
 ODOM_INPUT = "/odom"
-TF_INPUT = "/mayday_navigation_tf"
+TF_INPUT = "/tf"
 TF_STATIC_INPUT = "/tf_static"
+
+NAVIGATION_TF_FRAME_PAIRS = frozenset(
+    {
+        ("odom", "base_footprint"),
+        ("base_footprint", "base_link"),
+    }
+)
 
 
 def best_effort_qos(depth):
@@ -132,11 +139,7 @@ class IsolationSource(Node):
         self.create_subscription(
             TFMessage,
             TF_INPUT,
-            lambda message:
-                self.forward(
-                    CHANNEL_TF,
-                    message,
-                ),
+            self.forward_navigation_tf,
             best_effort_qos(100),
         )
 
@@ -154,6 +157,33 @@ class IsolationSource(Node):
 
         self.get_logger().info(
             "Navigation isolation domain-42 source ready."
+        )
+
+    def forward_navigation_tf(
+        self,
+        message,
+    ):
+        selected = [
+            transform
+            for transform in message.transforms
+            if (
+                (
+                    transform.header.frame_id.lstrip("/"),
+                    transform.child_frame_id.lstrip("/"),
+                )
+                in NAVIGATION_TF_FRAME_PAIRS
+            )
+        ]
+
+        if not selected:
+            return
+
+        outgoing = TFMessage()
+        outgoing.transforms = selected
+
+        self.forward(
+            CHANNEL_TF,
+            outgoing,
         )
 
     def forward(

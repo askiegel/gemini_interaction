@@ -40,7 +40,7 @@ def test_domain42_source_has_exact_four_inputs():
     for expected in (
         'SCAN_INPUT = "/scan"',
         'ODOM_INPUT = "/odom"',
-        'TF_INPUT = "/mayday_navigation_tf"',
+        'TF_INPUT = "/tf"',
         'TF_STATIC_INPUT = "/tf_static"',
     ):
         assert expected in source
