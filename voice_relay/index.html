@@ -3246,7 +3246,7 @@
         "/dashboard/navigation-goal";
     const MAP_ENDPOINT = "/dashboard/map";
     const LOCALIZATION_ENDPOINT =
-        "/dashboard/localization";
+        "/dashboard/navigation-pose";
     const REFRESH_MS = 750;
     const MAP_PADDING = 32;
     const MAX_POSITION_STD_METERS = 0.40;
@@ -3513,6 +3513,198 @@
         setText("planningPathSummary", "—");
     }
 
+
+    function drawMaydayPositionMarker(
+        context,
+        drawing
+    ) {
+        if (
+            !latestPose
+            || !latestPose.position
+        ) {
+            return;
+        }
+
+        const point = mapToCanvas(
+            latestPose.position,
+            drawing
+        );
+
+        if (
+            !point
+            || !point.inside
+        ) {
+            return;
+        }
+
+        /*
+         * Persistent-map Mayday marker.
+         *
+         * Center dot = exact trusted map-frame position.
+         * Crosshairs = position reference.
+         *
+         * This is presentation-only and shares the active
+         * planning overlay so it remains visible whenever
+         * guarded map navigation owns a trusted pose.
+         */
+        const crosshairInner = 10;
+        const crosshairOuter = 27;
+        const centerRadius = 7;
+
+        context.save();
+
+        context.translate(
+            point.x,
+            point.y
+        );
+
+        context.lineCap = "round";
+        context.lineJoin = "round";
+
+        function drawCrosshairs() {
+            context.beginPath();
+
+            context.moveTo(
+                -crosshairOuter,
+                0
+            );
+            context.lineTo(
+                -crosshairInner,
+                0
+            );
+
+            context.moveTo(
+                crosshairInner,
+                0
+            );
+            context.lineTo(
+                crosshairOuter,
+                0
+            );
+
+            context.moveTo(
+                0,
+                -crosshairOuter
+            );
+            context.lineTo(
+                0,
+                -crosshairInner
+            );
+
+            context.moveTo(
+                0,
+                crosshairInner
+            );
+            context.lineTo(
+                0,
+                crosshairOuter
+            );
+        }
+
+        /*
+         * Dark crosshair underlay.
+         */
+        context.strokeStyle =
+            "rgba(15, 23, 42, 0.95)";
+        context.lineWidth = 8;
+
+        drawCrosshairs();
+        context.stroke();
+
+        /*
+         * Bright crosshair foreground.
+         */
+        context.strokeStyle = "#fff7ed";
+        context.lineWidth = 3;
+
+        drawCrosshairs();
+        context.stroke();
+
+        /*
+         * Exact position halo.
+         */
+        context.shadowColor =
+            "rgba(245, 158, 11, 0.9)";
+        context.shadowBlur = 12;
+
+        context.fillStyle = "#fff7ed";
+        context.strokeStyle =
+            "rgba(15, 23, 42, 0.95)";
+        context.lineWidth = 3;
+
+        context.beginPath();
+        context.arc(
+            0,
+            0,
+            centerRadius + 5,
+            0,
+            Math.PI * 2
+        );
+
+        context.fill();
+        context.stroke();
+
+        /*
+         * Exact position dot.
+         */
+        context.shadowBlur = 0;
+
+        context.fillStyle = "#f59e0b";
+        context.strokeStyle =
+            "rgba(15, 23, 42, 0.95)";
+        context.lineWidth = 2;
+
+        context.beginPath();
+        context.arc(
+            0,
+            0,
+            centerRadius,
+            0,
+            Math.PI * 2
+        );
+
+        context.fill();
+        context.stroke();
+
+        context.restore();
+
+        /*
+         * The persistent-map display is rotated for the
+         * operator's forward-up view. Counter-rotate only
+         * the label so Mayday's name reads upright.
+         */
+        context.save();
+
+        context.translate(
+            point.x,
+            point.y - 30
+        );
+
+        context.rotate(Math.PI);
+
+        context.font = "700 10px system-ui";
+        context.textAlign = "center";
+        context.textBaseline = "middle";
+        context.lineWidth = 3;
+        context.strokeStyle =
+            "rgba(15, 23, 42, 0.95)";
+        context.fillStyle = "#fff7ed";
+
+        context.strokeText(
+            "Mayday",
+            0,
+            0
+        );
+
+        context.fillText(
+            "Mayday",
+            0,
+            0
+        );
+
+        context.restore();
+    }
+
     function drawPath() {
         const canvas = byId("planningPathCanvas");
         if (!canvas) return;
@@ -3596,6 +3788,12 @@
                 context.restore();
             }
         }
+        /* Draw Mayday last so the position stays visible. */
+        drawMaydayPositionMarker(
+            context,
+            drawing
+        );
+
     }
 
     function updateButtons() {
@@ -3868,6 +4066,7 @@
             );
         }
 
+        drawPath();
         updateButtons();
     }
 

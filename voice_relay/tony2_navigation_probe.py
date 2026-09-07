@@ -3,6 +3,7 @@
 """Read-only guarded Nav2 readiness probe for Tony2."""
 
 import json
+import math
 import os
 import time
 from datetime import datetime
@@ -11,6 +12,7 @@ from pathlib import Path
 
 import rclpy
 
+from geometry_msgs.msg import PoseWithCovarianceStamped
 from lifecycle_msgs.msg import State
 from lifecycle_msgs.srv import GetState
 from nav2_msgs.action import NavigateToPose
@@ -75,6 +77,20 @@ class NavigationProbe(Node):
         self._tf_listener = TransformListener(
             self._tf_buffer,
             self,
+        )
+
+        # AMCL is the authoritative localization source for
+        # persistent fixed-map navigation. Observe it only;
+        # this probe never publishes a pose or transform.
+        self._latest_amcl_pose = None
+
+        self._amcl_pose_subscription = (
+            self.create_subscription(
+                PoseWithCovarianceStamped,
+                "/amcl_pose",
+                self._amcl_pose_received,
+                10,
+            )
         )
 
         self.create_timer(
@@ -149,6 +165,198 @@ class NavigationProbe(Node):
             == State.PRIMARY_STATE_ACTIVE
         )
 
+    def _amcl_pose_received(self, message):
+        """
+        Record the newest read-only AMCL map pose.
+
+        No transform, initial pose, velocity, goal, or other
+        command is published from this callback.
+        """
+
+        frame_id = str(
+            message.header.frame_id
+        ).lstrip("/")
+
+        if frame_id != "map":
+            return
+
+        pose = message.pose.pose
+        covariance = list(
+            message.pose.covariance
+        )
+
+        quaternion = pose.orientation
+
+        siny_cosp = 2.0 * (
+            quaternion.w * quaternion.z
+            + quaternion.x * quaternion.y
+        )
+
+        cosy_cosp = 1.0 - 2.0 * (
+            quaternion.y * quaternion.y
+            + quaternion.z * quaternion.z
+        )
+
+        yaw = math.atan2(
+            siny_cosp,
+            cosy_cosp,
+        )
+
+        def standard_deviation(index):
+            try:
+                variance = float(
+                    covariance[index]
+                )
+            except (
+                IndexError,
+                TypeError,
+                ValueError,
+            ):
+                return None
+
+            if (
+                not math.isfinite(variance)
+                or variance < 0.0
+            ):
+                return None
+
+            return math.sqrt(variance)
+
+        x_std = standard_deviation(0)
+        y_std = standard_deviation(7)
+        yaw_std = standard_deviation(35)
+
+        self._latest_amcl_pose = {
+            "received_at": utc_now(),
+            "observed_at_monotonic":
+                time.monotonic(),
+            "pose": {
+                "frame_id": "map",
+                "position": {
+                    "x": float(
+                        pose.position.x
+                    ),
+                    "y": float(
+                        pose.position.y
+                    ),
+                    "z": float(
+                        pose.position.z
+                    ),
+                },
+                "yaw_radians": float(yaw),
+                "yaw_degrees": float(
+                    math.degrees(yaw)
+                ),
+                "uncertainty": {
+                    "x_standard_deviation":
+                        x_std,
+                    "y_standard_deviation":
+                        y_std,
+                    "yaw_standard_deviation_radians":
+                        yaw_std,
+                },
+            },
+        }
+
+
+    def _current_map_pose(self):
+        """
+        Return the latest map-to-base_link transform as Mayday's
+        current fixed-map position and heading.
+
+        AMCL covariance is retained from the newest /amcl_pose
+        observation, but position freshness comes from the live
+        TF tree used by Nav2 itself.
+        """
+
+        try:
+            transform = (
+                self._tf_buffer.lookup_transform(
+                    "map",
+                    "base_link",
+                    Time(),
+                    timeout=Duration(
+                        seconds=0.05
+                    ),
+                )
+            )
+
+        except Exception:
+            return None
+
+        translation = (
+            transform.transform.translation
+        )
+
+        quaternion = (
+            transform.transform.rotation
+        )
+
+        siny_cosp = 2.0 * (
+            quaternion.w * quaternion.z
+            + quaternion.x * quaternion.y
+        )
+
+        cosy_cosp = 1.0 - 2.0 * (
+            quaternion.y * quaternion.y
+            + quaternion.z * quaternion.z
+        )
+
+        yaw = math.atan2(
+            siny_cosp,
+            cosy_cosp,
+        )
+
+        uncertainty = {
+            "x_standard_deviation": None,
+            "y_standard_deviation": None,
+            "yaw_standard_deviation_radians":
+                None,
+        }
+
+        if isinstance(
+            self._latest_amcl_pose,
+            dict,
+        ):
+            amcl_pose = (
+                self._latest_amcl_pose.get(
+                    "pose"
+                )
+                or {}
+            )
+
+            amcl_uncertainty = (
+                amcl_pose.get(
+                    "uncertainty"
+                )
+                or {}
+            )
+
+            uncertainty.update(
+                amcl_uncertainty
+            )
+
+        return {
+            "frame_id": "map",
+            "position": {
+                "x": float(
+                    translation.x
+                ),
+                "y": float(
+                    translation.y
+                ),
+                "z": float(
+                    translation.z
+                ),
+            },
+            "yaw_radians": float(yaw),
+            "yaw_degrees": float(
+                math.degrees(yaw)
+            ),
+            "uncertainty": uncertainty,
+        }
+
+
     def _transform_ready(self):
         try:
             return bool(
@@ -206,6 +414,22 @@ class NavigationProbe(Node):
             )
         )
 
+        current_pose = (
+            self._current_map_pose()
+        )
+
+        current_pose_received_at = (
+            utc_now()
+            if current_pose is not None
+            else None
+        )
+
+        current_pose_observed_at_monotonic = (
+            time.monotonic()
+            if current_pose is not None
+            else None
+        )
+
         payload = {
             "ok": True,
             "service":
@@ -214,6 +438,11 @@ class NavigationProbe(Node):
             "timestamp": utc_now(),
             "read_only": True,
             "goal_sent": False,
+            "pose": current_pose,
+            "pose_received_at":
+                current_pose_received_at,
+            "pose_observed_at_monotonic":
+                current_pose_observed_at_monotonic,
             "map_server_enabled":
                 map_server_active,
             "localization_enabled":

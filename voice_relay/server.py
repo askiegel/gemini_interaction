@@ -1061,6 +1061,42 @@ class VoiceRelayHandler(BaseHTTPRequestHandler):
 
 
 
+    def navigation_pose_status(self):
+        """
+        Return the current Tony2 fixed-map AMCL pose.
+
+        The data comes from the existing read-only navigation
+        probe. This endpoint cannot initialize localization,
+        submit a navigation goal, or authorize motion.
+        """
+
+        runtime = get_tony2_navigation_runtime()
+
+        try:
+            return runtime.live_pose_status()
+
+        except Exception as exc:
+            return 503, {
+                "ok": False,
+                "runtime_active": False,
+                "service":
+                    "mini_pupper_operator_dashboard",
+                "telemetry": {
+                    "available": False,
+                    "status":
+                        "NAVIGATION_POSE_UNAVAILABLE",
+                    "received_at": None,
+                    "age_seconds": None,
+                    "pose": None,
+                },
+                "source":
+                    "tony2_navigation_amcl",
+                "read_only": True,
+                "authoritative": True,
+                "error": str(exc),
+            }
+
+
     def navigation_control_action(self, action):
         """
         Start or stop isolated Tony2 fixed-map navigation.
@@ -2773,6 +2809,13 @@ class VoiceRelayHandler(BaseHTTPRequestHandler):
         if path == "/dashboard/navigation-control":
             status_code, payload = (
                 self.navigation_control_status()
+            )
+            self.send_json(status_code, payload)
+            return
+
+        if path == "/dashboard/navigation-pose":
+            status_code, payload = (
+                self.navigation_pose_status()
             )
             self.send_json(status_code, payload)
             return

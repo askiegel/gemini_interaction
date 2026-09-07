@@ -822,6 +822,113 @@ class Tony2NavigationRuntime:
 
         return False
 
+    def live_pose_status(self):
+        """
+        Return the current AMCL pose observed by the already
+        running Tony2 guarded-navigation probe.
+
+        This method is read-only. It does not publish an initial
+        pose, request global localization, submit a goal, create
+        a motion lease, or modify Nav2.
+        """
+
+        navigation = self.status()
+        snapshot = self._read_snapshot()
+
+        pose = (
+            snapshot.get("pose")
+            if isinstance(snapshot, dict)
+            else None
+        )
+
+        received_at = (
+            snapshot.get("pose_received_at")
+            if isinstance(snapshot, dict)
+            else None
+        )
+
+        observed_at = (
+            snapshot.get(
+                "pose_observed_at_monotonic"
+            )
+            if isinstance(snapshot, dict)
+            else None
+        )
+
+        age_seconds = None
+
+        try:
+            age_seconds = max(
+                0.0,
+                time.monotonic()
+                - float(observed_at),
+            )
+
+            if not math.isfinite(
+                age_seconds
+            ):
+                age_seconds = None
+
+        except (
+            TypeError,
+            ValueError,
+        ):
+            age_seconds = None
+
+        available = bool(
+            navigation.get("running") is True
+            and navigation.get(
+                "localization_enabled"
+            ) is True
+            and navigation.get(
+                "transform_ready"
+            ) is True
+            and isinstance(pose, dict)
+            and age_seconds is not None
+            and age_seconds < 3.0
+        )
+
+        return (
+            200 if available else 503,
+            {
+                "ok": available,
+                "runtime_active":
+                    navigation.get(
+                        "running"
+                    ) is True,
+                "service":
+                    "mini_pupper_operator_dashboard",
+                "navigation": navigation,
+                "telemetry": {
+                    "available": available,
+                    "status": (
+                        "READY"
+                        if available
+                        else (
+                            "WAITING_FOR_POSE"
+                            if navigation.get(
+                                "running"
+                            )
+                            else "NAVIGATION_STOPPED"
+                        )
+                    ),
+                    "received_at":
+                        received_at,
+                    "age_seconds":
+                        age_seconds,
+                    "pose":
+                        pose
+                        if available
+                        else None,
+                },
+                "source":
+                    "tony2_navigation_amcl",
+                "read_only": True,
+                "authoritative": True,
+            },
+        )
+
+
     def status(self):
         pids = self._runtime_pids()
 
