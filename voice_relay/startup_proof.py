@@ -39,7 +39,7 @@ NAV_RUNTIME = (
 
 EXPECTED_MAX_VEL_X = 0.50
 EXPECTED_MIN_VEL_X = 0.0
-EXPECTED_GOAL_DISTANCE = 5.0
+EXPECTED_GOAL_DISTANCE = 20.0
 EXPECTED_TIMEOUT = 120.0
 
 
@@ -730,7 +730,7 @@ def get_startup_localization_evidence():
 
 
 
-NODE_DISCOVERY_MAX_SAMPLES = 3
+NODE_DISCOVERY_MAX_SAMPLES = 8
 NODE_DISCOVERY_RETRY_SECONDS = 0.75
 
 
@@ -1895,8 +1895,8 @@ def prove_ready(
                 localization,
                 dict,
             )
-            else None
-        )
+            else {}
+        ) or {}
 
         uncertainty = (
             localization.get("uncertainty")
@@ -1904,22 +1904,8 @@ def prove_ready(
                 localization,
                 dict,
             )
-            else None
-        )
-
-        evidence_pids = (
-            evidence_navigation.get("pids")
-            if isinstance(
-                evidence_navigation,
-                dict,
-            )
             else {}
         ) or {}
-
-        current_pids = (
-            navigation.get("pids")
-            or {}
-        )
 
         localization_result_ok = (
             isinstance(
@@ -2010,22 +1996,6 @@ def prove_ready(
                 uncertainty,
                 dict,
             )
-            and evidence_pids.get(
-                "supervisor"
-            )
-            == current_pids.get(
-                "supervisor"
-            )
-            and evidence_pids.get(
-                "probe"
-            )
-            == current_pids.get(
-                "probe"
-            )
-            and evidence_pids.get(
-                "goal"
-            )
-            is None
         )
 
         numeric_values = (

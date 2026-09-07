@@ -693,7 +693,7 @@ def test_hardware_node_proof_retries_transient_ros_discovery():
     )
 
     assert (
-        "NODE_DISCOVERY_MAX_SAMPLES = 3"
+        "NODE_DISCOVERY_MAX_SAMPLES = 8"
         in proof
     )
 

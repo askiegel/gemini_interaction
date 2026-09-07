@@ -1215,6 +1215,24 @@ class VoiceRelayHandler(BaseHTTPRequestHandler):
                 "navigation": navigation,
             }
 
+        # A successful normal Start Planning localization
+        # is the same authoritative global-AMCL attestation
+        # used by Startup. Record it for the independent
+        # Startup proof without changing navigation behavior.
+        try:
+            from startup_proof import (
+                set_startup_localization_evidence,
+            )
+
+            set_startup_localization_evidence(
+                result
+            )
+
+        except Exception:
+            # Startup reporting must never make a valid
+            # navigation localization fail.
+            pass
+
         return 200, {
             "ok": True,
             "action":
