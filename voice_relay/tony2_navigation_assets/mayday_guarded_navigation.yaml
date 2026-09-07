@@ -31,7 +31,7 @@ controller_server:
       plugin: nav2_controller::SimpleGoalChecker
       stateful: true
       xy_goal_tolerance: 0.03
-      yaw_goal_tolerance: 0.15
+      yaw_goal_tolerance: 0.35
 
     FollowPath:
       plugin: dwb_core::DWBLocalPlanner

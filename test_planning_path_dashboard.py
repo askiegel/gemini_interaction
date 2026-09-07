@@ -397,6 +397,7 @@ def test_startup_global_localization_request_is_parameter_free():
         assert marker not in request
 
 
+
 def test_startup_waits_for_trusted_tony2_pose_before_ready():
     start = CONTROL.index(
         "async function startPlanning()"
@@ -407,36 +408,41 @@ def test_startup_waits_for_trusted_tony2_pose_before_ready():
         start,
     )
 
-    handler = CONTROL[
-        start:end
-    ]
+    handler = CONTROL[start:end]
+
+    readiness = handler.index(
+        "await waitForPreLocalizationReady();"
+    )
+
+    request = handler.index(
+        "const initializeResult = await fetchJson(",
+        readiness,
+    )
 
     validated = handler.index(
-        "validInitialization("
+        "validInitialization(",
+        request,
     )
 
-    complete = handler.index(
-        "if (!initializationComplete)"
-    )
-
-    final_pose = handler.index(
-        "initialization.final_pose"
+    adopted = handler.index(
+        "const initialization = (",
+        validated,
     )
 
     ready = handler.index(
-        "planningReady = true"
+        '"Ready"',
+        adopted,
     )
 
     assert (
-        validated
-        < complete
-        < final_pose
+        readiness
+        < request
+        < validated
+        < adopted
         < ready
     )
 
-
-
-def test_startup_ready_requires_trusted_home_localization():
+def test_startup_ready_requires_trusted_global_localization():
     start = CONTROL.index(
         "function validInitialization"
     )
@@ -445,21 +451,22 @@ def test_startup_ready_requires_trusted_home_localization():
         start,
     )
 
-    compact = "".join(CONTROL[start:end].split())
+    compact = "".join(
+        CONTROL[start:end].split()
+    )
 
     required = (
-        'initialization.localization_method==="amcl_seeded"',
-        'initialization.search_scope==="known_home_pose"',
-        "initialization.seed_pose_used===true",
-        "initialization.global_localization_requested===false",
-        "initialization.initial_pose_supplied===true",
+        'initialization.localization_method==="amcl_global"',
+        'initialization.search_scope==="full_saved_map"',
+        "initialization.seed_pose_used===false",
+        "initialization.global_localization_requested===true",
+        "initialization.initial_pose_supplied===false",
         'navigation.state==="READY"',
         "navigation.transform_ready===true",
     )
 
     for marker in required:
         assert marker in compact
-
 
 def test_new_pose_requires_numeric_coordinates():
     start = CONTROL.index("function isNewFreshPose")
@@ -552,85 +559,128 @@ def test_initializer_failure_clears_planning_ui_state():
     assert "STOP_ENDPOINT" in failure
 
 
+
 def test_tony2_start_waits_for_amcl_discovery():
+    required = (
+        "const PRELOCALIZATION_POLL_MS = 250",
+        "const PRELOCALIZATION_MAX_POLLS = 80",
+        "const PRELOCALIZATION_STABLE_SAMPLES = 3",
+        "async function waitForPreLocalizationReady()",
+        "navigation.running === true",
+        "navigation.map_server_enabled === true",
+        "navigation.localization_enabled === true",
+        "navigation.action_server_ready === true",
+        "navigation.motion_egress_ready === true",
+        "navigation.motion_egress_idle === true",
+        "navigation.goal_active === false",
+        "navigation.motion_output_connected === false",
+    )
+
+    for marker in required:
+        assert marker in CONTROL
+
     assert (
-        "const INITIALIZE_DISCOVERY_DELAY_MS = 2000"
+        "INITIALIZE_DISCOVERY_DELAY_MS"
+        not in CONTROL
+    )
+
+
+def test_tony2_global_initializer_runs_once_after_bounded_wait():
+    start = CONTROL.index(
+        "async function startPlanning()"
+    )
+
+    end = CONTROL.index(
+        "async function performAction(",
+        start,
+    )
+
+    handler = CONTROL[start:end]
+
+    readiness = handler.index(
+        "await waitForPreLocalizationReady();"
+    )
+
+    initialization = handler.index(
+        "const initializeResult = await fetchJson(",
+        readiness,
+    )
+
+    extraction = handler.index(
+        "const initialization = (",
+        initialization,
+    )
+
+    region = handler[
+        readiness:extraction
+    ]
+
+    assert (
+        region.count(
+            "INITIALIZE_ENDPOINT"
+        )
+        == 1
+    )
+
+    assert (
+        "PRELOCALIZATION_MAX_POLLS = 80"
         in CONTROL
     )
 
     assert (
-        "await wait(\n"
-        "                INITIALIZE_DISCOVERY_DELAY_MS"
-        in CONTROL
-    )
-
-    assert (
-        "Mayday must remain stationary while "
-        in CONTROL
-    )
-
-    assert (
-        "Tony2 AMCL searches the saved map..."
-        in CONTROL
-    )
-
-
-def test_tony2_global_initializer_retries_are_bounded():
-    assert (
-        "const INITIALIZE_MAX_ATTEMPTS = 10"
-        in CONTROL
-    )
-
-    assert (
-        "attempt <= INITIALIZE_MAX_ATTEMPTS"
-        in CONTROL
+        "INITIALIZE_MAX_ATTEMPTS"
+        not in CONTROL
     )
 
     assert (
         "INITIALIZE_RETRY_DELAY_MS"
-        in CONTROL
+        not in CONTROL
     )
 
-    compact = " ".join(
-        CONTROL.split()
+
+def test_tony2_readiness_poll_does_not_restart_navigation():
+    start = CONTROL.index(
+        "async function waitForPreLocalizationReady()"
+    )
+
+    end = CONTROL.index(
+        "async function startPlanning()",
+        start,
+    )
+
+    helper = CONTROL[start:end]
+
+    assert "STATUS_ENDPOINT" in helper
+
+    assert (
+        "stableSamples += 1"
+        in helper
     )
 
     assert (
-        "initializationComplete = true"
-        in compact
-    )
-
-
-def test_tony2_navigation_stays_active_between_localization_retries():
-    retry_start = CONTROL.index(
-        "for (\n"
-        "                let attempt = 1;"
-    )
-
-    retry_end = CONTROL.index(
-        "if (!initializationComplete)",
-        retry_start,
-    )
-
-    retry = CONTROL[
-        retry_start:retry_end
-    ]
-
-    assert "INITIALIZE_ENDPOINT" in retry
-    assert "INITIALIZE_RETRY_DELAY_MS" in retry
-    assert "STOP_ENDPOINT" not in retry
-
-    assert (
-        "Retrying stationary "
-        in retry
+        "stableSamples = 0"
+        in helper
     )
 
     assert (
-        "global localization..."
-        in retry
+        "PRELOCALIZATION_POLL_MS"
+        in helper
     )
 
+    assert (
+        "INITIALIZE_ENDPOINT"
+        not in helper
+    )
 
+    assert (
+        "START_ENDPOINT"
+        not in helper
+    )
+
+    assert (
+        "STOP_ENDPOINT"
+        not in helper
+    )
 
 def test_tony2_initializer_validation_preserves_safety_contract():
     start = CONTROL.index(
@@ -647,16 +697,16 @@ def test_tony2_initializer_validation_preserves_safety_contract():
 
     required = (
         "initialization.trusted === true",
-        'initialization.localization_method === "amcl_seeded"',
-        'initialization.search_scope === "known_home_pose"',
-        "initialization.seed_pose_used === true",
+        'initialization.localization_method === "amcl_global"',
+        'initialization.search_scope === "full_saved_map"',
+        "initialization.seed_pose_used === false",
         (
             "initialization.global_localization_requested "
-            "=== false"
+            "=== true"
         ),
         (
             "initialization.nomotion_updates_requested "
-            "=== 20"
+            "=== 40"
         ),
         (
             "initialization.stationary_required "
@@ -664,7 +714,7 @@ def test_tony2_initializer_validation_preserves_safety_contract():
         ),
         (
             "initialization.initial_pose_supplied "
-            "=== true"
+            "=== false"
         ),
         (
             "initialization.navigation_goal_executed "
@@ -677,7 +727,6 @@ def test_tony2_initializer_validation_preserves_safety_contract():
 
     for marker in required:
         assert marker in compact
-
 
 def test_pose_refresh_proxy_is_fixed_and_parameter_free():
     start = SERVER.index(
@@ -977,20 +1026,53 @@ def test_path_preview_and_guarded_execution_are_distinct():
         not in dashboard
     )
 
-def test_direct_go_uses_short_bounded_initialization_waits():
+
+def test_prelocalization_readiness_wait_is_short_and_bounded():
     assert (
-        "const INITIALIZE_DISCOVERY_DELAY_MS = 2000;"
-        in CONTROL
-    )
-    assert (
-        "const INITIALIZE_RETRY_DELAY_MS = 2000;"
-        in CONTROL
-    )
-    assert (
-        "const INITIALIZE_MAX_ATTEMPTS = 10;"
+        "const PRELOCALIZATION_POLL_MS = 250;"
         in CONTROL
     )
 
+    assert (
+        "const PRELOCALIZATION_MAX_POLLS = 80;"
+        in CONTROL
+    )
+
+    assert (
+        "const PRELOCALIZATION_STABLE_SAMPLES = 3;"
+        in CONTROL
+    )
+
+    start = CONTROL.index(
+        "async function waitForPreLocalizationReady()"
+    )
+
+    end = CONTROL.index(
+        "async function startPlanning()",
+        start,
+    )
+
+    helper = CONTROL[start:end]
+
+    assert (
+        "poll <= PRELOCALIZATION_MAX_POLLS"
+        in helper
+    )
+
+    assert (
+        "stableSamples"
+        in helper
+    )
+
+    assert (
+        "await wait("
+        in helper
+    )
+
+    assert (
+        "PRELOCALIZATION_POLL_MS"
+        in helper
+    )
 
 def test_planning_buttons_are_visible_with_guarded_defaults():
     dashboard = Path(

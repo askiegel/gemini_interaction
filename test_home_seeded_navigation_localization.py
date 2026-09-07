@@ -47,7 +47,8 @@ def test_global_recovery_is_preserved():
     assert "seed_pose=False" in RUNTIME
 
 
-def test_normal_server_uses_home():
+
+def test_normal_server_uses_global_localization():
     start = SERVER.index(
         "    def navigation_initialize_localization"
     )
@@ -58,30 +59,51 @@ def test_normal_server_uses_home():
 
     section = SERVER[start:end]
 
-    assert "runtime.initialize_home_localization()" in section
-    assert "runtime.initialize_global_localization()" not in section
+    assert (
+        "runtime.initialize_global_localization()"
+        in section
+    )
+
+    assert (
+        "runtime.initialize_home_localization()"
+        not in section
+    )
 
 
 def test_no_contradictory_dashboard_contract():
     start = HTML.index(
         "function navigationInitializationSucceeded(result)"
     )
-    end = HTML.index("async function", start)
-
-    compact = "".join(HTML[start:end].split())
-
-    assert "initialization.seed_pose_used===true" in compact
-
-    assert (
-        "initialization.global_localization_requested===false"
-        in compact
+    end = HTML.index(
+        "async function",
+        start,
     )
 
-    assert "initialization.initial_pose_supplied===true" in compact
+    compact = "".join(
+        HTML[start:end].split()
+    )
 
-    assert "global_localization_requested===true" not in compact
-    assert "initial_pose_supplied===false" not in compact
+    required = (
+        'initialization.localization_method==="amcl_global"',
+        'initialization.search_scope==="full_saved_map"',
+        "initialization.seed_pose_used===false",
+        "initialization.global_localization_requested===true",
+        "initialization.initial_pose_supplied===false",
+        "Number(initialization.nomotion_updates_requested)>=1",
+    )
 
+    for marker in required:
+        assert marker in compact
+
+    assert (
+        'initialization.localization_method==="amcl_seeded"'
+        not in compact
+    )
+
+    assert (
+        'initialization.search_scope==="known_home_pose"'
+        not in compact
+    )
 
 def test_trust_thresholds_unchanged():
     required = (

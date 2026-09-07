@@ -101,31 +101,65 @@ def test_runtime_exposes_global_entry_point():
 
 
 
-def test_server_uses_known_home_entry_point():
+
+def test_server_uses_mapwide_global_entry_point():
     section = localization_server_section()
 
-    assert "runtime.initialize_home_localization()" in section
-    assert "runtime.initialize_global_localization()" not in section
-
-
-
-
-def test_server_requires_seeded_home_result():
-    section = localization_server_section()
-    compact = "".join(section.split())
-
-    assert 'localization.get("seed_pose_used")isTrue' in compact
-    assert 'localization.get("initial_pose_supplied")isTrue' in compact
     assert (
-        'localization.get("global_localization_requested")'
-        'isFalse'
-        in compact
+        "runtime.initialize_global_localization()"
+        in section
+    )
+
+    assert (
+        "runtime.initialize_home_localization()"
+        not in section
     )
 
 
+def test_server_requires_unseeded_global_result():
+    section = localization_server_section()
+
+    compact = "".join(
+        section.split()
+    )
+
+    required = (
+        'localization.get("seed_pose_used")isFalse',
+        (
+            'localization.get('
+            '"global_localization_requested")isTrue'
+        ),
+        (
+            'localization.get('
+            '"initial_pose_supplied")isFalse'
+        ),
+        (
+            'localization.get('
+            '"localization_method")=="amcl_global"'
+        ),
+        (
+            'localization.get('
+            '"search_scope")=="full_saved_map"'
+        ),
+        (
+            'localization.get('
+            '"stationary_required")isTrue'
+        ),
+        (
+            'localization.get('
+            '"navigation_goal_executed")isFalse'
+        ),
+        (
+            'localization.get('
+            '"motion_enabled")isFalse'
+        ),
+    )
+
+    for marker in required:
+        assert marker in compact
 
 
-def test_stationary_guard_precedes_home_request():
+def test_stationary_guard_precedes_global_request():
     section = localization_server_section()
 
     stationary = section.index(
@@ -133,12 +167,10 @@ def test_stationary_guard_precedes_home_request():
     )
 
     request = section.index(
-        "runtime.initialize_home_localization()"
+        "runtime.initialize_global_localization()"
     )
 
     assert stationary < request
-
-
 
 def test_localization_route_has_no_motion_path():
     section = localization_server_section()
@@ -149,14 +181,53 @@ def test_localization_route_has_no_motion_path():
 
 
 
-def test_navigation_ui_accepts_home_seeded_result():
-    compact = "".join(HTML.split())
 
-    assert ".global_localization_requested===false" in compact
-    assert ".initial_pose_supplied===true" in compact
-    assert ".seed_pose_used===true" in compact
+def test_navigation_ui_accepts_global_result():
+    start = HTML.index(
+        "function validInitialization"
+    )
 
+    end = HTML.index(
+        "function validPoseRefresh",
+        start,
+    )
 
+    section = HTML[start:end]
+
+    compact = "".join(
+        section.split()
+    )
+
+    required = (
+        (
+            'initialization.localization_method'
+            '==="amcl_global"'
+        ),
+        (
+            'initialization.search_scope'
+            '==="full_saved_map"'
+        ),
+        (
+            "initialization.seed_pose_used"
+            "===false"
+        ),
+        (
+            "initialization."
+            "global_localization_requested"
+            "===true"
+        ),
+        (
+            "initialization.initial_pose_supplied"
+            "===false"
+        ),
+        (
+            "initialization.stationary_required"
+            "===true"
+        ),
+    )
+
+    for marker in required:
+        assert marker in compact
 
 def test_covariance_gate_is_defined_before_trust():
     definition = HELPER.index(

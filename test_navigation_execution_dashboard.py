@@ -127,36 +127,68 @@ def test_normal_navigation_start_stop_use_tony2_runtime():
 
 
 
-def test_normal_navigation_requests_home_localization():
+
+def test_normal_navigation_requests_global_localization():
     source = method_source(
         "navigation_initialize_localization",
         "navigation_goal",
     )
 
-    assert "runtime.initialize_home_localization()" in source
-    assert "runtime.initialize_global_localization()" not in source
-    assert "self.ensure_mayday_stationary()" in source
-
-
-
-
-def test_normal_navigation_initialization_is_home_seeded():
-    source = method_source(
-        "navigation_initialize_localization",
-        "navigation_goal",
-    )
-
-    compact = "".join(source.split())
-
-    assert 'localization.get("seed_pose_used")isTrue' in compact
-    assert 'localization.get("initial_pose_supplied")isTrue' in compact
     assert (
-        'localization.get("global_localization_requested")'
-        'isFalse'
+        "runtime.initialize_global_localization()"
+        in source
+    )
+
+    assert (
+        "runtime.initialize_home_localization()"
+        not in source
+    )
+
+
+def test_normal_navigation_initialization_is_global():
+    source = method_source(
+        "navigation_initialize_localization",
+        "navigation_goal",
+    )
+
+    compact = "".join(
+        source.split()
+    )
+
+    assert (
+        "runtime.initialize_global_localization()"
+        in source
+    )
+
+    assert (
+        "runtime.initialize_home_localization()"
+        not in source
+    )
+
+    assert (
+        'localization.get("seed_pose_used")isFalse'
         in compact
     )
 
+    assert (
+        'localization.get("global_localization_requested")isTrue'
+        in compact
+    )
 
+    assert (
+        'localization.get("initial_pose_supplied")isFalse'
+        in compact
+    )
+
+    assert (
+        'localization.get("localization_method")=="amcl_global"'
+        in compact
+    )
+
+    assert (
+        'localization.get("search_scope")=="full_saved_map"'
+        in compact
+    )
 
 def test_normal_navigation_goal_uses_tony2_runtime():
     source = method_source(
@@ -224,21 +256,27 @@ def test_dashboard_requires_tony2_isolation_on_start():
 
 
 
-def test_dashboard_requires_validated_home_before_go():
+
+def test_dashboard_requires_validated_global_before_go():
     start = HTML.index(
         "function navigationInitializationSucceeded(result)"
     )
-    end = HTML.index("async function", start)
+    end = HTML.index(
+        "async function",
+        start,
+    )
 
-    compact = "".join(HTML[start:end].split())
+    compact = "".join(
+        HTML[start:end].split()
+    )
 
     required = (
         "initialization.trusted===true",
-        'initialization.localization_method==="amcl_seeded"',
-        'initialization.search_scope==="known_home_pose"',
-        "initialization.seed_pose_used===true",
-        "initialization.global_localization_requested===false",
-        "initialization.initial_pose_supplied===true",
+        'initialization.localization_method==="amcl_global"',
+        'initialization.search_scope==="full_saved_map"',
+        "initialization.seed_pose_used===false",
+        "initialization.global_localization_requested===true",
+        "initialization.initial_pose_supplied===false",
         "initialization.stationary_required===true",
         "initialization.navigation_goal_executed===false",
         "initialization.motion_enabled===false",
@@ -253,8 +291,6 @@ def test_dashboard_requires_validated_home_before_go():
 
     for marker in required:
         assert marker in compact
-
-
 
 def test_goal_payload_remains_fixed_and_numeric():
     required = (

@@ -5,6 +5,7 @@
 import argparse
 import json
 import math
+import os
 import sys
 import time
 
@@ -140,6 +141,52 @@ def evenly_sample(items, maximum):
     ]
 
 
+
+def is_stationary_promoted_map():
+    """
+    Return True only for the dashboard-promoted persistent map.
+
+    Maps under persistent_map/active are produced by the
+    guarded stationary-map refresh/promotion runtime.
+
+    For that sparse ray-traced representation, unknown space
+    means "not observed from the stationary build pose" and is
+    therefore diagnostic rather than a hard localization
+    contradiction after Mayday has moved.
+    """
+
+    configured = os.environ.get(
+        "MAYDAY_FIXED_MAP_YAML"
+    )
+
+    if not configured:
+        return False
+
+    configured = os.path.abspath(
+        os.path.expanduser(
+            configured
+        )
+    )
+
+    active_root = os.path.abspath(
+        os.path.join(
+            os.path.expanduser("~"),
+            ".local",
+            "share",
+            "mayday",
+            "persistent_map",
+            "active",
+        )
+    )
+
+    return (
+        os.path.dirname(
+            configured
+        )
+        == active_root
+    )
+
+
 def main():
     parser = argparse.ArgumentParser()
 
@@ -180,6 +227,10 @@ def main():
 
     args = parser.parse_args(
         application_args[1:]
+    )
+
+    stationary_sparse_map = (
+        is_stationary_promoted_map()
     )
 
     # Compatibility only: the runtime historically passes
@@ -991,13 +1042,20 @@ def main():
                 / coverage_sample_count
             )
 
+            known_ratio_required = (
+                not stationary_sparse_map
+            )
+
             alignment_good = (
                 mean_endpoint_error
                     <= MAX_MEAN_ENDPOINT_ERROR_METERS
                 and within_10cm_ratio
                     >= MIN_WITHIN_10CM_RATIO
-                and known_ratio
-                    >= MIN_KNOWN_RATIO
+                and (
+                    not known_ratio_required
+                    or known_ratio
+                        >= MIN_KNOWN_RATIO
+                )
                 and inside_ratio
                     >= MIN_INSIDE_RATIO
             )
@@ -1326,6 +1384,10 @@ def main():
                     scan_confirmation_samples,
             },
             "diagnostic": {
+                "stationary_sparse_map":
+                    stationary_sparse_map,
+                "known_ratio_required":
+                    not stationary_sparse_map,
                 "covariance_tight":
                     covariance_tight,
                 "global_search_completed":

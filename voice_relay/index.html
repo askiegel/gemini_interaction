@@ -3251,9 +3251,9 @@
     const MAP_PADDING = 32;
     const MAX_POSITION_STD_METERS = 0.40;
     const MAX_YAW_STD_RADIANS = 0.80;
-    const INITIALIZE_DISCOVERY_DELAY_MS = 2000;
-    const INITIALIZE_RETRY_DELAY_MS = 2000;
-    const INITIALIZE_MAX_ATTEMPTS = 10;
+    const PRELOCALIZATION_POLL_MS = 250;
+    const PRELOCALIZATION_MAX_POLLS = 80;
+    const PRELOCALIZATION_STABLE_SAMPLES = 3;
     const POSE_REFRESH_RETRY_DELAY_MS = 250;
     const POSE_REFRESH_MAX_ATTEMPTS = 20;
     const MAX_NAVIGATION_DISTANCE_METERS = Number.POSITIVE_INFINITY;
@@ -4030,16 +4030,16 @@
             && initialization
             && initialization.trusted === true
             && initialization.localization_method
-                === "amcl_seeded"
+                === "amcl_global"
             && initialization.search_scope
-                === "known_home_pose"
-            && initialization.seed_pose_used === true
+                === "full_saved_map"
+            && initialization.seed_pose_used === false
             && initialization.global_localization_requested
-                === false
-            && initialization.initial_pose_supplied
                 === true
+            && initialization.initial_pose_supplied
+                === false
             && initialization.nomotion_updates_requested
-                === 20
+                === 40
             && initialization.stationary_required
                 === true
             && initialization.navigation_goal_executed
@@ -4154,6 +4154,79 @@
         );
     }
 
+    function preLocalizationReady(result) {
+        const navigation = (
+            result
+            && result.payload
+            && result.payload.navigation
+        );
+
+        return Boolean(
+            result
+            && result.response
+            && result.response.ok
+            && result.payload
+            && result.payload.ok
+            && navigation
+            && navigation.running === true
+            && navigation.map_server_enabled === true
+            && navigation.localization_enabled === true
+            && navigation.action_server_ready === true
+            && navigation.motion_egress_ready === true
+            && navigation.motion_egress_idle === true
+            && navigation.goal_active === false
+            && navigation.motion_output_connected === false
+        );
+    }
+
+    async function waitForPreLocalizationReady() {
+        let stableSamples = 0;
+
+        for (
+            let poll = 1;
+            poll <= PRELOCALIZATION_MAX_POLLS;
+            poll += 1
+        ) {
+            let statusResult = null;
+
+            try {
+                statusResult = await fetchJson(
+                    STATUS_ENDPOINT
+                );
+            } catch (_statusError) {
+                stableSamples = 0;
+            }
+
+            if (
+                statusResult
+                && preLocalizationReady(
+                    statusResult
+                )
+            ) {
+                stableSamples += 1;
+
+            } else {
+                stableSamples = 0;
+            }
+
+            if (
+                stableSamples
+                >= PRELOCALIZATION_STABLE_SAMPLES
+            ) {
+                return statusResult;
+            }
+
+            await wait(
+                PRELOCALIZATION_POLL_MS
+            );
+        }
+
+        throw new Error(
+            "Tony2 Nav2 did not reach stationary "
+            + "pre-localization readiness."
+        );
+    }
+
     async function startPlanning() {
         if (actionInFlight) return;
 
@@ -4239,86 +4312,70 @@
 
             updateButtons();
 
-            await wait(
-                INITIALIZE_DISCOVERY_DELAY_MS
+            setOverlay(
+                "Waiting for Tony2 Nav2",
+                "busy"
             );
 
-            let initializeResult = null;
-
-            let initializationComplete =
-                false;
-
-            let initializationError = (
-                "Tony2 start-anywhere "
-                + "localization failed."
+            setText(
+                "planningReadiness",
+                "Waiting for stationary "
+                + "pre-localization readiness"
             );
 
-            for (
-                let attempt = 1;
-                attempt <= INITIALIZE_MAX_ATTEMPTS;
-                attempt += 1
+            setMessage(
+                "Waiting for map server, AMCL, action server, "
+                + "and motion egress before global localization.",
+                false
+            );
+
+            await waitForPreLocalizationReady();
+
+            setOverlay(
+                "Global localization",
+                "busy"
+            );
+
+            setText(
+                "planningReadiness",
+                "Globally localizing on promoted map"
+            );
+
+            setMessage(
+                "Mayday must remain stationary while "
+                + "Tony2 AMCL searches the saved map...",
+                false
+            );
+
+            const initializeResult = await fetchJson(
+                INITIALIZE_ENDPOINT,
+                {
+                    method: "POST",
+                    headers: {
+                        "Content-Type":
+                            "application/json",
+                    },
+                    body: "{}",
+                }
+            );
+
+            if (
+                !validInitialization(
+                    initializeResult
+                )
             ) {
-                try {
-                    initializeResult = await fetchJson(
-                        INITIALIZE_ENDPOINT,
-                        {
-                            method: "POST",
-                            headers: {
-                                "Content-Type":
-                                    "application/json",
-                            },
-                            body: "{}",
-                        }
-                    );
+                const initializationPayload = (
+                    initializeResult
+                    && initializeResult.payload
+                ) || {};
 
-                    if (
-                        validInitialization(
-                            initializeResult
-                        )
-                    ) {
-                        initializationComplete =
-                            true;
-
-                        break;
-                    }
-
-                    initializationError = (
-                        initializeResult.payload.error
-                        || initializationError
-                    );
-
-                } catch (initializeError) {
-                    initializationError = (
-                        initializeError.message
-                        || initializationError
-                    );
-                }
-
-                if (
-                    attempt
-                    < INITIALIZE_MAX_ATTEMPTS
-                ) {
-                    setOverlay(
-                        "Waiting for Tony2 AMCL",
-                        "busy"
-                    );
-
-                    setMessage(
-                        "Map server or AMCL is still "
-                        + "starting. Retrying stationary "
-                        + "global localization...",
-                        false
-                    );
-
-                    await wait(
-                        INITIALIZE_RETRY_DELAY_MS
-                    );
-                }
-            }
-
-            if (!initializationComplete) {
                 throw new Error(
-                    initializationError
+                    initializationPayload.error
+                    || initializationPayload.message
+                    || (
+                        "Tony2 global localization returned "
+                        + "an invalid readiness contract."
+                    )
                 );
             }
 
@@ -4755,14 +4812,14 @@
             && initialization
             && initialization.trusted === true
             && initialization.localization_method
-                === "amcl_seeded"
+                === "amcl_global"
             && initialization.search_scope
-                === "known_home_pose"
-            && initialization.seed_pose_used === true
+                === "full_saved_map"
+            && initialization.seed_pose_used === false
             && initialization.global_localization_requested
-                === false
-            && initialization.initial_pose_supplied
                 === true
+            && initialization.initial_pose_supplied
+                === false
             && Number(
                 initialization.nomotion_updates_requested
             ) >= 1
@@ -5019,11 +5076,78 @@
             return;
         }
 
+        /*
+         * A mouse click expresses a destination position,
+         * not an absolute world-frame heading.
+         *
+         * Finish facing along the approach from Mayday's
+         * current trusted map pose to the clicked cell.
+         * This avoids forcing every click to map yaw 0.
+         */
+        const currentPosition = (
+            latestPose
+            && latestPose.position
+        );
+
+        const currentX = Number(
+            currentPosition
+            && currentPosition.x
+        );
+
+        const currentY = Number(
+            currentPosition
+            && currentPosition.y
+        );
+
+        const currentYaw = Number(
+            latestPose
+            && latestPose.yaw_radians
+        );
+
+        const deltaX = (
+            Number(goal.x) - currentX
+        );
+
+        const deltaY = (
+            Number(goal.y) - currentY
+        );
+
+        let destinationYaw = Number(
+            goal.yaw
+        );
+
+        if (
+            Number.isFinite(currentX)
+            && Number.isFinite(currentY)
+            && Number.isFinite(deltaX)
+            && Number.isFinite(deltaY)
+            && Math.hypot(
+                deltaX,
+                deltaY
+            ) > 0.01
+        ) {
+            destinationYaw = Math.atan2(
+                deltaY,
+                deltaX
+            );
+
+        } else if (
+            Number.isFinite(currentYaw)
+        ) {
+            /*
+             * For a click effectively on Mayday's current
+             * position, preserve current heading rather than
+             * introducing an arbitrary rotation.
+             */
+            destinationYaw = currentYaw;
+        }
+
         selectedGoal = {
             x: goal.x,
             y: goal.y,
-            yaw: goal.yaw,
+            yaw: destinationYaw,
         };
+
         computedPath = null;
 
         setText(
