@@ -1,5 +1,6 @@
 from dataclasses import dataclass, asdict
 from datetime import datetime
+import math
 from typing import Optional, Dict, Any
 
 
@@ -49,16 +50,42 @@ class ROS2Bridge:
         )
 
     def motion_request(self, linear_x=0.0, angular_z=0.0, duration_sec=0.5, source="behavior_manager"):
+        try:
+            linear_x = float(linear_x)
+            angular_z = float(angular_z)
+            duration_sec = float(duration_sec)
+        except (TypeError, ValueError, OverflowError) as exc:
+            return {
+                "ok": False,
+                "executed": False,
+                "reason": f"Invalid motion command parameters: {exc}",
+            }
+
+        if not all(math.isfinite(value) for value in (linear_x, angular_z, duration_sec)):
+            return {
+                "ok": False,
+                "executed": False,
+                "reason": "Invalid motion command parameters: values must be finite",
+            }
+
         command = {
             "timestamp": now_iso(),
             "source": source,
-            "linear_x": float(linear_x),
-            "angular_z": float(angular_z),
-            "duration_sec": float(duration_sec),
+            "linear_x": linear_x,
+            "angular_z": angular_z,
+            "duration_sec": duration_sec,
             "motion_topic": self.motion_topic,
         }
 
         self.last_command = command
+
+        if linear_x > 0.0:
+            return {
+                "ok": False,
+                "executed": False,
+                "reason": "Positive forward motion is denied on the legacy ROS2 path",
+                "command": command,
+            }
 
         if not self.ros2_available:
             self.bridge_status = "SIMULATED_COMMAND_ONLY"
