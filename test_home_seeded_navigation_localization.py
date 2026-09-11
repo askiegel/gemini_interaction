@@ -37,8 +37,9 @@ def test_seed_and_global_amcl_modes_exist():
 
 def test_home_pose_is_fixed():
     assert "def initialize_home_localization(self):" in RUNTIME
-    assert "-0.05," in RUNTIME
-    assert "-1.7906250685463345," in RUNTIME
+    assert "-0.4499999441206735," in RUNTIME
+    assert "0.20000006556511413," in RUNTIME
+    assert "-0.9198951421531195," in RUNTIME
     assert "seed_pose=True" in RUNTIME
 
 
@@ -153,7 +154,7 @@ def home_evidence():
             "trusted": True, "global_search_completed": False,
             "seed_pose_applied": True,
         },
-        "final_pose": {"x": -0.05, "y": -0.05, "yaw_rad": -1.7906250685463345},
+        "final_pose": {"x": -0.4499999441206735, "y": 0.20000006556511413, "yaw_rad": -0.9198951421531195},
         "uncertainty": {"sigma_x_m": 0.01, "sigma_y_m": 0.01, "sigma_yaw_rad": 0.01},
     }
 
@@ -250,9 +251,9 @@ def test_home_wrapper_validation_controls_navigation_gate(tmp_path):
         ) as global_init:
             result = runtime.initialize_home_localization()
         command = run.call_args.args[0]
-        assert "--x=-0.05" in command
-        assert "--y=-0.05" in command
-        assert "--yaw=-1.7906250685463345" in command
+        assert "--x=-0.4499999441206735" in command
+        assert "--y=0.20000006556511413" in command
+        assert "--yaw=-0.9198951421531195" in command
         assert "--seed-pose" in command
         assert runtime._localization_validated is trusted
         assert result["action"] == (

@@ -1594,9 +1594,9 @@ class Tony2NavigationRuntime:
         AMCL remains alive afterward to track subsequent motion.
         """
         return self.initialize_operator_pose(
-            -0.05,
-            -0.05,
-            -1.7906250685463345,
+            -0.4499999441206735,
+            0.20000006556511413,
+            -0.9198951421531195,
             seed_pose=True,
         )
 
