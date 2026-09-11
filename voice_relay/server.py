@@ -22,6 +22,7 @@ if str(PROJECT_DIR) not in sys.path:
 from config.config_manager import ConfigurationManager
 from conversation_manager import ConversationError
 from conversation_service import create_conversation_service
+from voice_relay.lidar_sectors import lidar_sector_payload
 
 
 HOST = "0.0.0.0"
@@ -458,6 +459,14 @@ class VoiceRelayHandler(BaseHTTPRequestHandler):
                 ),
             },
         )
+
+    def lidar_sectors_status(self):
+        """Derive local geometry using only the existing read-only LiDAR GET."""
+        status_code, source = self.lidar_status()
+        payload = lidar_sector_payload(source)
+        if status_code != 200:
+            return status_code, payload
+        return (200 if payload["ok"] else 503), payload
 
     def localization_control_status(self):
         """Proxy Robot Bridge localization ownership state."""
@@ -2585,6 +2594,11 @@ class VoiceRelayHandler(BaseHTTPRequestHandler):
             self.send_json(status_code, payload)
             return
 
+        if path == "/dashboard/lidar-sectors":
+            status_code, payload = self.lidar_sectors_status()
+            self.send_json(status_code, payload)
+            return
+
 
         if path == "/dashboard/persistent-map/refresh-status":
             status_code, payload = (
@@ -3043,6 +3057,13 @@ class VoiceRelayHandler(BaseHTTPRequestHandler):
     def do_POST(self):
         path = urlparse(self.path).path
 
+        if path == "/dashboard/lidar-sectors":
+            self.send_json(405, {
+                "ok": False,
+                "read_only": True,
+                "error": "LiDAR sectors support GET only.",
+            })
+            return
 
         if path == "/dashboard/persistent-map/refresh":
             status_code, payload = (
