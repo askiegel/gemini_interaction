@@ -17,15 +17,58 @@ SECTOR_BOUNDS = {
     "right": (-120, -60),
 }
 
+# Provisional sensor-origin perception thresholds, in meters. Order defines
+# precedence: BLOCKED before CAUTION, then robust before minimum within a state.
+CLASSIFICATION_RULES = (
+    ("BLOCKED", "robust_clearance_m", 0.45, "robust_at_or_below_blocked_threshold"),
+    ("BLOCKED", "minimum_clearance_m", 0.30, "minimum_at_or_below_blocked_threshold"),
+    ("CAUTION", "robust_clearance_m", 0.75, "robust_at_or_below_caution_threshold"),
+    ("CAUTION", "minimum_clearance_m", 0.60, "minimum_at_or_below_caution_threshold"),
+)
+
+
+def classify_sector(sector):
+    """Return an enriched copy; CLEAR never authorizes physical motion."""
+    state, reason = "UNKNOWN", "unavailable"
+    if sector.get("available") is True and all(
+        finite_number(sector.get(metric))
+        for metric in ("robust_clearance_m", "minimum_clearance_m")
+    ):
+        state, reason = "CLEAR", "clear_of_provisional_thresholds"
+        for candidate, metric, threshold, match_reason in CLASSIFICATION_RULES:
+            if sector[metric] <= threshold:
+                state, reason = candidate, match_reason
+                break
+    return {**sector, "state": state, "classification_reason": reason}
+
+
+def classification_metadata():
+    """Describe the same ordered rules used by the pure classifier."""
+    return {
+        "provisional": True,
+        "read_only": True,
+        "distance_reference": "sensor_origin",
+        "units": "meters",
+        "clear_authorizes_motion": False,
+        "clearance_note": "Not guaranteed body or foot clearances.",
+        "unknown_when": "unavailable or either distance metric missing/non-finite",
+        "precedence": "first matching rule; otherwise CLEAR",
+        "rules": [
+            {"state": state, "metric": metric, "operator": "<=",
+             "threshold_m": threshold, "classification_reason": reason}
+            for state, metric, threshold, reason in CLASSIFICATION_RULES
+        ],
+    }
+
 
 def empty_sectors():
     return {
-        name: {
+        name: classify_sector({
             "valid_sample_count": 0,
             "minimum_clearance_m": None,
             "robust_clearance_m": None,
             "available": False,
-        }
+        })
         for name in SECTOR_BOUNDS
     }
 
@@ -82,7 +125,7 @@ def calculate_sectors(scan, *, rotation_radians=0.0):
         position = (len(distances) - 1) * 0.1
         lower = math.floor(position)
         upper = math.ceil(position)
-        result[name] = {
+        result[name] = classify_sector({
             "valid_sample_count": len(distances),
             "minimum_clearance_m": distances[0],
             "robust_clearance_m": (
@@ -90,7 +133,7 @@ def calculate_sectors(scan, *, rotation_radians=0.0):
                 + (distances[upper] - distances[lower]) * (position - lower)
             ),
             "available": True,
-        }
+        })
     return result
 
 
@@ -108,6 +151,7 @@ def lidar_sector_payload(payload):
         "coordinate_convention": "robot-relative: 0 forward, positive left",
         "distance_reference": "sensor_origin",
         "robust_statistic": "linear_10th_percentile",
+        "classification_thresholds": classification_metadata(),
         "source": {
             "frame_id": scan.get("frame_id"),
             "stamp_seconds": scan.get("stamp_seconds"),

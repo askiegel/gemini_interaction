@@ -7,7 +7,9 @@ from unittest.mock import Mock, patch
 
 import pytest
 
-from voice_relay.lidar_sectors import calculate_sectors, lidar_sector_payload
+from voice_relay.lidar_sectors import (
+    calculate_sectors, classify_sector, lidar_sector_payload,
+)
 from voice_relay.server import ROBOT_BRIDGE_URL, VoiceRelayHandler
 
 
@@ -39,6 +41,8 @@ def test_angle_metadata_and_robot_orientation():
         assert result[name] == {
             "valid_sample_count": 1, "minimum_clearance_m": distance,
             "robust_clearance_m": distance, "available": True,
+            "state": "CLEAR",
+            "classification_reason": "clear_of_provisional_thresholds",
         }
 
 
@@ -68,6 +72,7 @@ def test_empty_sectors(ranges):
         assert sector == {
             "valid_sample_count": 0, "minimum_clearance_m": None,
             "robust_clearance_m": None, "available": False,
+            "state": "UNKNOWN", "classification_reason": "unavailable",
         }
 
 
@@ -153,6 +158,8 @@ def test_endpoint_only_calls_lidar_get_and_never_other_handler_actions(method):
         assert status == 200
         assert payload["read_only"] is True
         assert payload["perception"] == "local_obstacle_sectors"
+        assert payload["classification_thresholds"]["read_only"] is True
+        assert payload["sectors"]["front"]["state"] == "CLEAR"
         request.assert_called_once_with("GET", f"{ROBOT_BRIDGE_URL}/telemetry/lidar", timeout=3.0)
     else:
         assert status == 405
@@ -166,3 +173,70 @@ def test_endpoint_preserves_upstream_failure():
     assert status == 503
     assert payload["error"] == "offline"
     assert not any(x["available"] for x in payload["sectors"].values())
+
+
+@pytest.mark.parametrize("robust,minimum,state,reason", [
+    (1.30, 1.28, "CLEAR", "clear_of_provisional_thresholds"),
+    (0.486, 0.486, "CAUTION", "robust_at_or_below_caution_threshold"),
+    (0.334, 0.333, "BLOCKED", "robust_at_or_below_blocked_threshold"),
+    (0.80, 0.25, "BLOCKED", "minimum_at_or_below_blocked_threshold"),
+    (0.80, 0.50, "CAUTION", "minimum_at_or_below_caution_threshold"),
+    (0.45, 0.40, "BLOCKED", "robust_at_or_below_blocked_threshold"),
+    (0.80, 0.30, "BLOCKED", "minimum_at_or_below_blocked_threshold"),
+    (0.75, 0.65, "CAUTION", "robust_at_or_below_caution_threshold"),
+    (0.80, 0.60, "CAUTION", "minimum_at_or_below_caution_threshold"),
+    (0.450001, 0.40, "CAUTION", "robust_at_or_below_caution_threshold"),
+    (0.80, 0.300001, "CAUTION", "minimum_at_or_below_caution_threshold"),
+    (0.750001, 0.600001, "CLEAR", "clear_of_provisional_thresholds"),
+    (0.70, 0.25, "BLOCKED", "minimum_at_or_below_blocked_threshold"),
+    (0.40, 0.20, "BLOCKED", "robust_at_or_below_blocked_threshold"),
+    (0.70, 0.50, "CAUTION", "robust_at_or_below_caution_threshold"),
+])
+def test_classification_rules_and_preserved_fields(robust, minimum, state, reason):
+    original = {
+        "available": True, "valid_sample_count": 12,
+        "robust_clearance_m": robust, "minimum_clearance_m": minimum,
+    }
+    result = classify_sector(original)
+    assert result == {**original, "state": state, "classification_reason": reason}
+    assert classify_sector(original) == result
+    assert "state" not in original
+
+
+@pytest.mark.parametrize("metric", ["robust_clearance_m", "minimum_clearance_m"])
+@pytest.mark.parametrize("value", [None, math.nan, math.inf, -math.inf, "1.3", True])
+def test_invalid_classification_metric_is_unknown(metric, value):
+    sector = {"available": True, "robust_clearance_m": 1.3, "minimum_clearance_m": 1.28}
+    sector[metric] = value
+    result = classify_sector(sector)
+    assert result["state"] == "UNKNOWN"
+    assert result["classification_reason"] == "unavailable"
+    del sector[metric]
+    assert classify_sector(sector)["state"] == "UNKNOWN"
+
+
+def test_unavailable_classification_never_clear():
+    result = classify_sector({
+        "available": False, "robust_clearance_m": 1.3, "minimum_clearance_m": 1.28,
+    })
+    assert result["state"] == "UNKNOWN"
+    assert result["classification_reason"] == "unavailable"
+
+
+@pytest.mark.parametrize("source", [envelope(scan([1.3])), {}])
+def test_threshold_metadata_on_success_and_unavailable_payload(source):
+    metadata = lidar_sector_payload(source)["classification_thresholds"]
+    assert metadata["provisional"] is True
+    assert metadata["read_only"] is True
+    assert metadata["distance_reference"] == "sensor_origin"
+    assert metadata["units"] == "meters"
+    assert metadata["clear_authorizes_motion"] is False
+    assert metadata["clearance_note"] == "Not guaranteed body or foot clearances."
+    assert metadata["precedence"] == "first matching rule; otherwise CLEAR"
+    assert [(rule["state"], rule["metric"], rule["operator"], rule["threshold_m"])
+            for rule in metadata["rules"]] == [
+        ("BLOCKED", "robust_clearance_m", "<=", 0.45),
+        ("BLOCKED", "minimum_clearance_m", "<=", 0.30),
+        ("CAUTION", "robust_clearance_m", "<=", 0.75),
+        ("CAUTION", "minimum_clearance_m", "<=", 0.60),
+    ]
