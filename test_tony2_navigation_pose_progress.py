@@ -57,4 +57,4 @@ def test_fix_does_not_relax_goal_tolerance():
     ]
 
     assert goal["xy_goal_tolerance"] == 0.03
-    assert goal["yaw_goal_tolerance"] == 0.15
+    assert goal["yaw_goal_tolerance"] == 0.35

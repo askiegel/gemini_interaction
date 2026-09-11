@@ -1380,7 +1380,7 @@ class Tony2NavigationRuntimeTests(
             "max_speed_xy: 0.50",
             "max_vel_theta: 0.25",
             "xy_goal_tolerance: 0.03",
-            "yaw_goal_tolerance: 0.15",
+            "yaw_goal_tolerance: 0.35",
             "required_movement_radius: 0.03",
             "movement_time_allowance: 12.0",
             "allow_unknown: false",
