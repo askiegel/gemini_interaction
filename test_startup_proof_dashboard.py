@@ -271,7 +271,7 @@ def test_prepare_requires_independent_live_proof():
 
 
 
-def test_startup_uses_global_current_pose_localization():
+def test_startup_uses_known_home_pose_localization():
     from pathlib import Path
 
     server = Path(
@@ -296,15 +296,15 @@ def test_startup_uses_global_current_pose_localization():
 
     assert "runtime.start()" in block
     assert (
-        "initialize_global_localization"
+        "initialize_home_localization"
         in block
     )
     assert (
-        "initialize_home_localization"
+        "initialize_global_localization"
         not in block
     )
     assert (
-        '"global_current_pose"'
+        '"known_home_pose"'
         in block
     )
     assert (
@@ -344,7 +344,7 @@ def test_startup_proves_complete_boot_platform():
         assert value in proof
 
 
-def test_startup_global_localization_never_calls_home_initializer():
+def test_startup_uses_home_initializer_without_global_localization():
     from pathlib import Path
 
     server = Path(
@@ -368,18 +368,18 @@ def test_startup_global_localization_never_calls_home_initializer():
     ]
 
     assert (
-        "initialize_home_localization"
+        "initialize_global_localization"
         not in block
     )
 
     assert (
-        "initialize_global_localization"
+        "initialize_home_localization"
         in block
     )
 
 
 
-def test_startup_requires_trusted_global_localization():
+def test_startup_requires_trusted_home_localization():
     from pathlib import Path
 
     server = Path(
@@ -405,14 +405,14 @@ def test_startup_requires_trusted_global_localization():
     required = (
         "prelocalization_ready",
         '"transform_ready"',
-        "initialize_global_localization",
+        "initialize_home_localization",
         '"OPERATOR_POSE_VALIDATED"',
         '"trusted"',
         '"covariance_tight"',
         '"alignment_good"',
         '"global_search_completed"',
-        '"full_saved_map"',
-        '"amcl_global"',
+        '"known_home_pose"',
+        '"amcl_seeded"',
         '"seed_pose_used"',
         '"initial_pose_supplied"',
         '"navigation_goal_executed"',
@@ -424,7 +424,7 @@ def test_startup_requires_trusted_global_localization():
         assert value in block
 
     assert (
-        "initialize_home_localization"
+        "initialize_global_localization"
         not in block
     )
 
@@ -473,8 +473,8 @@ def test_startup_proof_uses_validated_localization_attestation():
         '"covariance_tight"',
         '"alignment_good"',
         '"global_search_completed"',
-        '"full_saved_map"',
-        '"amcl_global"',
+        '"known_home_pose"',
+        '"amcl_seeded"',
         '"seed_pose_used"',
         '"initial_pose_supplied"',
         '"navigation_goal_executed"',
@@ -556,8 +556,8 @@ def test_prelocalization_does_not_require_navigation_servers_active():
     ):
         assert value in pre
 
-    assert "initialize_global_localization" in block
-    assert "initialize_home_localization" not in block
+    assert "initialize_home_localization" in block
+    assert "initialize_global_localization" not in block
 
 
 
@@ -591,12 +591,12 @@ def test_startup_uses_guarded_runtime_localization_attestation():
     ]
 
     assert (
-        "initialize_global_localization"
+        "initialize_home_localization"
         in prepare
     )
 
     assert (
-        "initialize_home_localization"
+        "initialize_global_localization"
         not in prepare
     )
 
@@ -611,7 +611,7 @@ def test_startup_uses_guarded_runtime_localization_attestation():
     )
 
     assert (
-        '"full_saved_map"'
+        '"known_home_pose"'
         in prepare
     )
 
@@ -906,7 +906,7 @@ def test_cmd_vel_proof_retries_transient_ros_discovery():
     )
 
 
-def test_startup_global_localization_retries_rejected_hypothesis():
+def test_startup_home_localization_retries_rejected_hypothesis():
     from pathlib import Path
 
     server = Path(
@@ -927,7 +927,7 @@ def test_startup_global_localization_retries_rejected_hypothesis():
     block = server[start:end]
 
     assert (
-        "GLOBAL_LOCALIZATION_MAX_ATTEMPTS = 3"
+        "HOME_LOCALIZATION_MAX_ATTEMPTS = 3"
         in block
     )
 
@@ -937,7 +937,7 @@ def test_startup_global_localization_retries_rejected_hypothesis():
     )
 
     assert (
-        ".initialize_global_localization()"
+        ".initialize_home_localization()"
         in block
     )
 
@@ -967,15 +967,59 @@ def test_startup_global_localization_retries_rejected_hypothesis():
         '"alignment_good"',
         '"global_search_completed"',
         '"trusted"',
-        '"amcl_global"',
-        '"full_saved_map"',
+        '"amcl_seeded"',
+        '"known_home_pose"',
     )
 
     for value in required:
         assert value in block
 
-    # Startup remains current-pose global localization only.
+    # Startup repeats Home localization only, without global fallback.
     assert (
-        "initialize_home_localization"
+        "initialize_global_localization"
         not in block
     )
+
+
+def test_startup_failure_before_localization_does_not_claim_home_seed():
+    import ast
+    import sys
+    from types import ModuleType
+    from unittest.mock import Mock, patch
+
+    # Execute only this route with fake platform/runtime dependencies.
+    # Never import the production server or execute the live Startup proof.
+    tree = ast.parse(SERVER.read_text(encoding="utf-8"))
+    routes = [node for node in ast.walk(tree)
+              if isinstance(node, ast.If)
+              and isinstance(node.test, ast.Compare)
+              and isinstance(node.test.left, ast.Name)
+              and node.test.left.id == "path"
+              and len(node.test.comparators) == 1
+              and isinstance(node.test.comparators[0], ast.Constant)
+              and node.test.comparators[0].value == "/dashboard/startup-prepare"]
+    assert len(routes) == 1
+    wrapper = ast.parse("def prepare(self):\n    pass\n")
+    wrapper.body[0].body = routes[0].body
+    ast.fix_missing_locations(wrapper)
+
+    runtime = Mock()
+    proof = ModuleType("startup_proof")
+    proof.clear_startup_localization_evidence = Mock()
+    proof.set_startup_localization_evidence = Mock()
+    proof.prepare_session = Mock(side_effect=RuntimeError("preparation failed"))
+    namespace = {"get_tony2_navigation_runtime": Mock(return_value=runtime)}
+    exec(compile(wrapper, "startup_prepare_route", "exec"), namespace)
+    handler = Mock()
+    with patch.dict(sys.modules, {"startup_proof": proof}):
+        namespace["prepare"](handler)
+
+    code, payload = handler.send_json.call_args.args
+    assert code == 503
+    assert payload["ok"] is False
+    assert payload["ready"] is False
+    assert payload["home_seed_used"] is False
+    assert payload["error"] == "preparation failed"
+    runtime.initialize_home_localization.assert_not_called()
+    runtime.initialize_global_localization.assert_not_called()
+    runtime.start.assert_not_called()

@@ -126,7 +126,7 @@ def test_localization_attestation_does_not_depend_on_transient_pids():
     assert "current_pids" not in source
 
 
-def test_global_localization_safety_contract_remains_required():
+def test_home_localization_safety_contract_remains_required():
     source = localization_contract_source()
 
     required = (
@@ -134,9 +134,9 @@ def test_global_localization_safety_contract_remains_required():
         '"trusted"',
         '== "map"',
         '"localization_method"',
-        '== "amcl_global"',
+        '== "amcl_seeded"',
         '"search_scope"',
-        '== "full_saved_map"',
+        '== "known_home_pose"',
         '"seed_pose_used"',
         '"global_localization_requested"',
         '"initial_pose_supplied"',

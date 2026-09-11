@@ -1148,11 +1148,11 @@ class VoiceRelayHandler(BaseHTTPRequestHandler):
 
     def navigation_initialize_localization(self):
         """
-        Globally localize Mayday on the isolated Tony2 saved map.
+        Localize Mayday from the known Home pose on the Tony2 saved map.
 
         No pose, service, topic, frame, velocity, controller,
         or other ROS parameter is accepted from the browser.
-        AMCL searches the complete saved map using stationary
+        AMCL validates the known Home seed using stationary
         Live LiDAR observations.
 
         This path does not create a motion lease and does not
@@ -1171,7 +1171,7 @@ class VoiceRelayHandler(BaseHTTPRequestHandler):
 
         try:
             result = (
-                runtime.initialize_global_localization()
+                runtime.initialize_home_localization()
             )
 
         except Exception as exc:
@@ -1197,26 +1197,40 @@ class VoiceRelayHandler(BaseHTTPRequestHandler):
             runtime.status(),
         )
 
+        diagnostic = (
+            localization.get("diagnostic")
+            if isinstance(localization, dict)
+            else None
+        )
+
         trusted = (
             result.get("action")
             == "OPERATOR_POSE_VALIDATED"
             and isinstance(localization, dict)
+            and localization.get("ok") is True
             and localization.get("trusted") is True
+            and isinstance(diagnostic, dict)
+            and diagnostic.get("covariance_tight") is True
+            and diagnostic.get("alignment_good") is True
+            and diagnostic.get("trusted") is True
+            and diagnostic.get("global_search_completed") is False
+            and diagnostic.get("seed_pose_applied") is True
             and localization.get(
                 "initial_pose_supplied"
-            ) is False
-            and localization.get(
-                "global_localization_requested"
             ) is True
             and localization.get(
-                "seed_pose_used"
+                "global_localization_requested"
             ) is False
             and localization.get(
+                "seed_pose_used"
+            ) is True
+            and localization.get("nomotion_updates_requested") == 40
+            and localization.get(
                 "localization_method"
-            ) == "amcl_global"
+            ) == "amcl_seeded"
             and localization.get(
                 "search_scope"
-            ) == "full_saved_map"
+            ) == "known_home_pose"
             and localization.get(
                 "stationary_required"
             ) is True
@@ -1244,7 +1258,7 @@ class VoiceRelayHandler(BaseHTTPRequestHandler):
                     if isinstance(localization, dict)
                     else None
                 ) or (
-                    "Tony2 global localization "
+                    "Tony2 Home localization "
                     "was not trusted."
                 ),
                 "initialization": localization,
@@ -1252,7 +1266,7 @@ class VoiceRelayHandler(BaseHTTPRequestHandler):
             }
 
         # A successful normal Start Planning localization
-        # is the same authoritative global-AMCL attestation
+        # is the same authoritative Home-seeded AMCL attestation
         # used by Startup. Record it for the independent
         # Startup proof without changing navigation behavior.
         try:
@@ -1274,7 +1288,7 @@ class VoiceRelayHandler(BaseHTTPRequestHandler):
             "action":
                 "navigation_initialize_localization",
             "message": (
-                "Tony2 AMCL globally localized Mayday "
+                "Tony2 AMCL localized Mayday from Home "
                 "on the saved map."
             ),
             "initialization": localization,
@@ -3167,6 +3181,7 @@ class VoiceRelayHandler(BaseHTTPRequestHandler):
             return
 
         if path == "/dashboard/startup-prepare":
+            home_localization_attempted = False
             try:
                 import json as _startup_json
                 import time as _startup_time
@@ -3385,20 +3400,16 @@ class VoiceRelayHandler(BaseHTTPRequestHandler):
                     )
 
                 # Phase 2:
-                # Search the COMPLETE saved map using AMCL.
-                # No initial pose and no Home pose are supplied.
-                #
-                # Global AMCL is stochastic. A map-wide particle
-                # distribution can converge to a geometrically
-                # incorrect hypothesis even while covariance is
-                # tight. The existing independent LiDAR alignment
-                # gate detects that condition.
+                # Seed AMCL at the known Home pose. Each attempt must
+                # independently pass covariance and LiDAR alignment
+                # validation; the seed alone never establishes trust.
+                # Rejected Home hypotheses never trigger global fallback.
                 #
                 # Preserve every trust threshold and retry only an
                 # explicit OPERATOR_POSE_REJECTED result. Each retry
                 # starts a fresh isolated Nav2/AMCL runtime and again
                 # requires stationary pre-localization readiness.
-                GLOBAL_LOCALIZATION_MAX_ATTEMPTS = 3
+                HOME_LOCALIZATION_MAX_ATTEMPTS = 3
 
                 localization_result = None
                 localization = None
@@ -3409,7 +3420,7 @@ class VoiceRelayHandler(BaseHTTPRequestHandler):
 
                 for localization_attempt in range(
                     1,
-                    GLOBAL_LOCALIZATION_MAX_ATTEMPTS + 1,
+                    HOME_LOCALIZATION_MAX_ATTEMPTS + 1,
                 ):
                     if localization_attempt > 1:
                         runtime.start()
@@ -3444,9 +3455,10 @@ class VoiceRelayHandler(BaseHTTPRequestHandler):
                                 "pre-localization readiness."
                             )
 
+                    home_localization_attempted = True
                     localization_result = (
                         runtime
-                        .initialize_global_localization()
+                        .initialize_home_localization()
                     )
 
                     localization = (
@@ -3518,26 +3530,27 @@ class VoiceRelayHandler(BaseHTTPRequestHandler):
                             "frame_id"
                         )
                         == "map"
+                        and localization.get("nomotion_updates_requested") == 40
                         and localization.get(
                             "localization_method"
                         )
-                        == "amcl_global"
+                        == "amcl_seeded"
                         and localization.get(
                             "search_scope"
                         )
-                        == "full_saved_map"
+                        == "known_home_pose"
                         and localization.get(
                             "seed_pose_used"
                         )
-                        is False
+                        is True
                         and localization.get(
                             "global_localization_requested"
                         )
-                        is True
+                        is False
                         and localization.get(
                             "initial_pose_supplied"
                         )
-                        is False
+                        is True
                         and localization.get(
                             "stationary_required"
                         )
@@ -3561,11 +3574,11 @@ class VoiceRelayHandler(BaseHTTPRequestHandler):
                         and diagnostic.get(
                             "global_search_completed"
                         )
-                        is True
+                        is False
                         and diagnostic.get(
                             "seed_pose_applied"
                         )
-                        is False
+                        is True
                         and diagnostic.get(
                             "alignment_good"
                         )
@@ -3601,7 +3614,7 @@ class VoiceRelayHandler(BaseHTTPRequestHandler):
 
                 if not localization_valid:
                     raise RuntimeError(
-                        "Global AMCL localization was "
+                        "Home-seeded AMCL localization was "
                         "not validated and trusted."
                     )
 
@@ -3624,7 +3637,7 @@ class VoiceRelayHandler(BaseHTTPRequestHandler):
                     localization_result
                 )
 
-                # The global-localization helper is the
+                # The Home-localization helper is the
                 # authoritative attestation for this isolated
                 # Tony2 Nav2/AMCL runtime. Robot Bridge does not
                 # own or discover this isolated AMCL instance.
@@ -3677,11 +3690,11 @@ class VoiceRelayHandler(BaseHTTPRequestHandler):
 
                 prepared[
                     "localization_mode"
-                ] = "global_current_pose"
+                ] = "known_home_pose"
 
                 prepared[
                     "home_seed_used"
-                ] = False
+                ] = True
 
                 prepared[
                     "navigation"
@@ -3712,9 +3725,9 @@ class VoiceRelayHandler(BaseHTTPRequestHandler):
                         "action":
                             "prepare_session",
                         "localization_mode":
-                            "global_current_pose",
+                            "known_home_pose",
                         "home_seed_used":
-                            False,
+                            home_localization_attempted,
                         "error": str(exc),
                     },
                 )

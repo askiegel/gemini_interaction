@@ -1585,7 +1585,7 @@
                 </div>
 
                 <p class="small-text planning-path-safety">
-                    Start Planning performs stationary global localization. Then click a free map location and use Compute Selected Path to preview Tony2 Nav2's exact map-frame path without execution.
+                    Start Planning performs stationary localization from the known Home pose. Then click a free map location and use Compute Selected Path to preview Tony2 Nav2's exact map-frame path without execution.
                 </p>
             </section>
         </article>
@@ -4229,14 +4229,14 @@
             && initialization
             && initialization.trusted === true
             && initialization.localization_method
-                === "amcl_global"
+                === "amcl_seeded"
             && initialization.search_scope
-                === "full_saved_map"
-            && initialization.seed_pose_used === false
+                === "known_home_pose"
+            && initialization.seed_pose_used === true
             && initialization.global_localization_requested
-                === true
-            && initialization.initial_pose_supplied
                 === false
+            && initialization.initial_pose_supplied
+                === true
             && initialization.nomotion_updates_requested
                 === 40
             && initialization.stationary_required
@@ -4489,7 +4489,7 @@
             );
 
             setOverlay(
-                "Global localization",
+                "Home localization",
                 "busy"
             );
 
@@ -4500,12 +4500,12 @@
 
             setText(
                 "planningReadiness",
-                "Globally localizing on promoted map"
+                "Validating Home pose on promoted map"
             );
 
             setMessage(
                 "Mayday must remain stationary while "
-                + "Tony2 AMCL searches the saved map...",
+                + "Tony2 AMCL validates the known Home pose...",
                 false
             );
 
@@ -4524,25 +4524,25 @@
 
             setMessage(
                 "Waiting for map server, AMCL, action server, "
-                + "and motion egress before global localization.",
+                + "and motion egress before Home localization.",
                 false
             );
 
             await waitForPreLocalizationReady();
 
             setOverlay(
-                "Global localization",
+                "Home localization",
                 "busy"
             );
 
             setText(
                 "planningReadiness",
-                "Globally localizing on promoted map"
+                "Validating Home pose on promoted map"
             );
 
             setMessage(
                 "Mayday must remain stationary while "
-                + "Tony2 AMCL searches the saved map...",
+                + "Tony2 AMCL validates the known Home pose...",
                 false
             );
 
@@ -4572,7 +4572,7 @@
                     initializationPayload.error
                     || initializationPayload.message
                     || (
-                        "Tony2 global localization returned "
+                        "Tony2 Home localization returned "
                         + "an invalid readiness contract."
                     )
                 );
@@ -5011,17 +5011,17 @@
             && initialization
             && initialization.trusted === true
             && initialization.localization_method
-                === "amcl_global"
+                === "amcl_seeded"
             && initialization.search_scope
-                === "full_saved_map"
-            && initialization.seed_pose_used === false
+                === "known_home_pose"
+            && initialization.seed_pose_used === true
             && initialization.global_localization_requested
-                === true
-            && initialization.initial_pose_supplied
                 === false
+            && initialization.initial_pose_supplied
+                === true
             && Number(
                 initialization.nomotion_updates_requested
-            ) >= 1
+            ) === 40
             && initialization.stationary_required
                 === true
             && initialization.navigation_goal_executed

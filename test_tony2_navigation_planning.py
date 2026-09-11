@@ -292,7 +292,7 @@ def test_planning_initialization_requires_trusted_home():
         "initialization.seed_pose_used===true",
         "initialization.global_localization_requested===false",
         "initialization.initial_pose_supplied===true",
-        "initialization.nomotion_updates_requested===20",
+        "initialization.nomotion_updates_requested===40",
         "initialization.navigation_goal_executed===false",
         "initialization.motion_enabled===false",
         "navigation.motion_output_connected===false",

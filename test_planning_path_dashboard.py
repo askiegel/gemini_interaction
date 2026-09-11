@@ -212,7 +212,7 @@ def test_existing_saved_map_controller_remains_read_only():
 
 def test_read_only_planning_copy_is_visible():
     for marker in (
-        "Start Planning performs stationary global localization.",
+        "Start Planning performs stationary localization from the known Home pose.",
         "Then click a free map location",
         "Compute Selected Path",
         "Tony2 Nav2's exact map-frame path",
@@ -442,7 +442,7 @@ def test_startup_waits_for_trusted_tony2_pose_before_ready():
         < ready
     )
 
-def test_startup_ready_requires_trusted_global_localization():
+def test_startup_ready_requires_trusted_home_localization():
     start = CONTROL.index(
         "function validInitialization"
     )
@@ -456,11 +456,11 @@ def test_startup_ready_requires_trusted_global_localization():
     )
 
     required = (
-        'initialization.localization_method==="amcl_global"',
-        'initialization.search_scope==="full_saved_map"',
-        "initialization.seed_pose_used===false",
-        "initialization.global_localization_requested===true",
-        "initialization.initial_pose_supplied===false",
+        'initialization.localization_method==="amcl_seeded"',
+        'initialization.search_scope==="known_home_pose"',
+        "initialization.seed_pose_used===true",
+        "initialization.global_localization_requested===false",
+        "initialization.initial_pose_supplied===true",
         'navigation.state==="READY"',
         "navigation.transform_ready===true",
     )
@@ -697,12 +697,12 @@ def test_tony2_initializer_validation_preserves_safety_contract():
 
     required = (
         "initialization.trusted === true",
-        'initialization.localization_method === "amcl_global"',
-        'initialization.search_scope === "full_saved_map"',
-        "initialization.seed_pose_used === false",
+        'initialization.localization_method === "amcl_seeded"',
+        'initialization.search_scope === "known_home_pose"',
+        "initialization.seed_pose_used === true",
         (
             "initialization.global_localization_requested "
-            "=== true"
+            "=== false"
         ),
         (
             "initialization.nomotion_updates_requested "
@@ -714,7 +714,7 @@ def test_tony2_initializer_validation_preserves_safety_contract():
         ),
         (
             "initialization.initial_pose_supplied "
-            "=== false"
+            "=== true"
         ),
         (
             "initialization.navigation_goal_executed "

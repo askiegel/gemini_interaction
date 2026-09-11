@@ -1932,26 +1932,27 @@ def prove_ready(
                 "frame_id"
             )
             == "map"
+            and localization.get("nomotion_updates_requested") == 40
             and localization.get(
                 "localization_method"
             )
-            == "amcl_global"
+            == "amcl_seeded"
             and localization.get(
                 "search_scope"
             )
-            == "full_saved_map"
+            == "known_home_pose"
             and localization.get(
                 "seed_pose_used"
             )
-            is False
+            is True
             and localization.get(
                 "global_localization_requested"
             )
-            is True
+            is False
             and localization.get(
                 "initial_pose_supplied"
             )
-            is False
+            is True
             and localization.get(
                 "stationary_required"
             )
@@ -1975,11 +1976,11 @@ def prove_ready(
             and diagnostic.get(
                 "global_search_completed"
             )
-            is True
+            is False
             and diagnostic.get(
                 "seed_pose_applied"
             )
-            is False
+            is True
             and diagnostic.get(
                 "alignment_good"
             )

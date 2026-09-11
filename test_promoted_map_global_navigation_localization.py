@@ -45,47 +45,47 @@ def planning_controller():
     return INDEX[start:end]
 
 
-def test_dashboard_initializer_uses_mapwide_amcl():
+def test_dashboard_initializer_uses_home_seeded_amcl():
     source = server_navigation_initializer()
 
     assert (
-        "runtime.initialize_global_localization()"
+        "runtime.initialize_home_localization()"
         in source
     )
 
     assert (
-        "runtime.initialize_home_localization()"
+        "runtime.initialize_global_localization()"
         not in source
     )
 
 
-def test_browser_accepts_global_localization_contract():
+def test_browser_accepts_home_localization_contract():
     source = planning_controller()
 
     assert source.count(
-        '=== "amcl_global"'
-    ) == 2
-
-    assert (
         '=== "amcl_seeded"'
-        not in source
-    )
-
-    assert source.count(
-        '=== "full_saved_map"'
     ) == 2
 
     assert (
+        '=== "amcl_global"'
+        not in source
+    )
+
+    assert source.count(
         '=== "known_home_pose"'
+    ) == 2
+
+    assert (
+        '=== "full_saved_map"'
         not in source
     )
 
 
-def test_browser_global_localization_is_unseeded():
+def test_browser_home_localization_is_seeded():
     source = planning_controller()
 
     assert source.count(
-        "initialization.seed_pose_used === false"
+        "initialization.seed_pose_used === true"
     ) == 2
 
     assert source.count(
@@ -97,7 +97,7 @@ def test_browser_global_localization_is_unseeded():
     ) >= 2
 
 
-def test_server_trust_gate_requires_unseeded_global_amcl():
+def test_server_trust_gate_requires_seeded_home_amcl():
     source = server_navigation_initializer()
 
     compact = " ".join(
@@ -105,11 +105,11 @@ def test_server_trust_gate_requires_unseeded_global_amcl():
     )
 
     required = (
-        '"initial_pose_supplied" ) is False',
-        '"global_localization_requested" ) is True',
-        '"seed_pose_used" ) is False',
-        '"localization_method" ) == "amcl_global"',
-        '"search_scope" ) == "full_saved_map"',
+        '"initial_pose_supplied" ) is True',
+        '"global_localization_requested" ) is False',
+        '"seed_pose_used" ) is True',
+        '"localization_method" ) == "amcl_seeded"',
+        '"search_scope" ) == "known_home_pose"',
         '"stationary_required" ) is True',
         '"navigation_goal_executed" ) is False',
         '"motion_enabled" ) is False',
@@ -119,9 +119,9 @@ def test_server_trust_gate_requires_unseeded_global_amcl():
         assert marker in compact
 
     forbidden = (
-        '"initial_pose_supplied" ) is True',
-        '"global_localization_requested" ) is False',
-        '"seed_pose_used" ) is True',
+        '"initial_pose_supplied" ) is False',
+        '"global_localization_requested" ) is True',
+        '"seed_pose_used" ) is False',
     )
 
     for marker in forbidden:

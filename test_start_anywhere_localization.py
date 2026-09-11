@@ -102,21 +102,21 @@ def test_runtime_exposes_global_entry_point():
 
 
 
-def test_server_uses_mapwide_global_entry_point():
+def test_server_uses_home_seeded_home_entry_point():
     section = localization_server_section()
 
     assert (
-        "runtime.initialize_global_localization()"
+        "runtime.initialize_home_localization()"
         in section
     )
 
     assert (
-        "runtime.initialize_home_localization()"
+        "runtime.initialize_global_localization()"
         not in section
     )
 
 
-def test_server_requires_unseeded_global_result():
+def test_server_requires_seeded_home_result():
     section = localization_server_section()
 
     compact = "".join(
@@ -124,22 +124,22 @@ def test_server_requires_unseeded_global_result():
     )
 
     required = (
-        'localization.get("seed_pose_used")isFalse',
+        'localization.get("seed_pose_used")isTrue',
         (
             'localization.get('
-            '"global_localization_requested")isTrue'
+            '"global_localization_requested")isFalse'
         ),
         (
             'localization.get('
-            '"initial_pose_supplied")isFalse'
+            '"initial_pose_supplied")isTrue'
         ),
         (
             'localization.get('
-            '"localization_method")=="amcl_global"'
+            '"localization_method")=="amcl_seeded"'
         ),
         (
             'localization.get('
-            '"search_scope")=="full_saved_map"'
+            '"search_scope")=="known_home_pose"'
         ),
         (
             'localization.get('
@@ -159,7 +159,7 @@ def test_server_requires_unseeded_global_result():
         assert marker in compact
 
 
-def test_stationary_guard_precedes_global_request():
+def test_stationary_guard_precedes_home_request():
     section = localization_server_section()
 
     stationary = section.index(
@@ -167,7 +167,7 @@ def test_stationary_guard_precedes_global_request():
     )
 
     request = section.index(
-        "runtime.initialize_global_localization()"
+        "runtime.initialize_home_localization()"
     )
 
     assert stationary < request
@@ -182,7 +182,7 @@ def test_localization_route_has_no_motion_path():
 
 
 
-def test_navigation_ui_accepts_global_result():
+def test_navigation_ui_accepts_home_result():
     start = HTML.index(
         "function validInitialization"
     )
@@ -201,24 +201,24 @@ def test_navigation_ui_accepts_global_result():
     required = (
         (
             'initialization.localization_method'
-            '==="amcl_global"'
+            '==="amcl_seeded"'
         ),
         (
             'initialization.search_scope'
-            '==="full_saved_map"'
+            '==="known_home_pose"'
         ),
         (
             "initialization.seed_pose_used"
-            "===false"
+            "===true"
         ),
         (
             "initialization."
             "global_localization_requested"
-            "===true"
+            "===false"
         ),
         (
             "initialization.initial_pose_supplied"
-            "===false"
+            "===true"
         ),
         (
             "initialization.stationary_required"
