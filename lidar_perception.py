@@ -155,6 +155,10 @@ class LidarPerceptionWorker:
         finally:
             self.stop()
 
+    @property
+    def running(self):
+        return bool(self._thread and self._thread.is_alive() and not self._stop.is_set())
+
     def start(self):
         with self._publication_lock:
             if self._stop.is_set():

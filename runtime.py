@@ -9,6 +9,7 @@ from typing import Any, Dict, Optional
 
 from behavior_manager import BehaviorManager
 from config import load_config
+from lidar_perception import LidarPerceptionWorker, unavailable_state
 from mission_manager import MissionManager
 from provider_factory import create_provider
 from robot_bridge.client import RobotBridgeClient
@@ -46,6 +47,7 @@ class CognitiveRuntime:
         robot_client=None,
         behavior_manager=None,
         loop_interval=None,
+        lidar_worker_factory=None,
     ):
         self.config = None
 
@@ -85,6 +87,69 @@ class CognitiveRuntime:
         self._state_lock = threading.RLock()
         self._last_runtime_state = None
         self._control_generation = 0
+        self._lidar_lifecycle_lock = threading.RLock()
+        self._lidar_started = False
+        self._lidar_stopped = False
+        self._lidar_error = None
+        self.lidar_worker = None
+        try:
+            factory = lidar_worker_factory or LidarPerceptionWorker
+            self.lidar_worker = factory(
+                self.world_model,
+                base_url=getattr(self.robot_client, "base_url", None),
+            )
+        except Exception as exc:
+            self._lidar_error = str(exc)
+            try:
+                self.world_model.publish_lidar_obstacles(unavailable_state("worker_creation_failed"))
+            except Exception:
+                pass
+
+    def _start_lidar(self):
+        with self._lidar_lifecycle_lock:
+            if self._lidar_started or self._lidar_stopped or self.lidar_worker is None:
+                return
+            self._lidar_started = True
+            try:
+                self.lidar_worker.start()
+            except Exception as exc:
+                self._lidar_error = str(exc)
+                self._stop_lidar()
+
+    def _stop_lidar(self):
+        with self._lidar_lifecycle_lock:
+            if self._lidar_stopped:
+                return
+            self._lidar_stopped = True
+            if self.lidar_worker is not None:
+                try:
+                    self.lidar_worker.stop()
+                except Exception as exc:
+                    self._lidar_error = str(exc)
+
+    def _lidar_status(self):
+        worker = self.lidar_worker
+        session = worker.session if worker is not None else None
+        state = self.world_model.get_lidar_obstacles(expected_session=session)
+        running = bool(worker is not None and worker.running)
+        if self._lidar_error or not running:
+            state.update(available=False, valid=False)
+            if state.get("reason") == "fresh":
+                state["reason"] = "worker_not_running"
+        return {
+            "running": running,
+            "producer_session": session,
+            "acquisition_sequence": worker.sequence if worker is not None else 0,
+            "available": state.get("available", False),
+            "valid": state.get("valid", False),
+            "reason": state.get("reason"),
+            "effective_age_seconds": state.get("effective_age_seconds"),
+            "front_state": (
+                state.get("sectors", {}).get("front", {}).get("state", "UNKNOWN")
+                if state.get("valid") else "UNKNOWN"
+            ),
+            "last_error": self._lidar_error or (worker.last_error if worker is not None else None),
+        }
 
     def submit_text(self, user_text: str):
         """
@@ -323,22 +388,23 @@ class CognitiveRuntime:
         self.running = True
         self.started_at = time.time()
 
-        self.world_model.update_robot_state(
-            runtime_state="STARTING",
-            cognitive_runtime_running=True,
-            mission=self._active_mission_dict(),
-            mission_queue=self.mission_manager.get_queue(),
-        )
-
-        print("============================================")
-        print(" Mini Pupper 2 Cognitive Runtime")
-        print("============================================")
-        print("State:   RUNNING")
-        print("Mode:    Persistent mission processing")
-        print("Stop:    Ctrl+C")
-        print()
-
         try:
+            self.world_model.update_robot_state(
+                runtime_state="STARTING",
+                cognitive_runtime_running=True,
+                mission=self._active_mission_dict(),
+                mission_queue=self.mission_manager.get_queue(),
+            )
+
+            print("============================================")
+            print(" Mini Pupper 2 Cognitive Runtime")
+            print("============================================")
+            print("State:   RUNNING")
+            print("Mode:    Persistent mission processing")
+            print("Stop:    Ctrl+C")
+            print()
+
+            self._start_lidar()
             while self.running:
                 self.run_once()
                 time.sleep(self.loop_interval)
@@ -350,6 +416,8 @@ class CognitiveRuntime:
                 self.robot_client.stop()
             except Exception:
                 pass
+
+            self._stop_lidar()
 
             self.world_model.update_robot_state(
                 runtime_state="STOPPED",
@@ -366,6 +434,7 @@ class CognitiveRuntime:
         Request a clean runtime shutdown.
         """
         self.running = False
+        self._stop_lidar()
 
     def get_status(self):
         """
@@ -403,6 +472,7 @@ class CognitiveRuntime:
                 "last_result": self.last_result,
                 "tracking": dict(self.tracking_state),
                 "last_error": self.last_error,
+                "lidar_perception": self._lidar_status(),
             }
 
     def _active_mission_dict(self):
