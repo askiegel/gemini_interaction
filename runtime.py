@@ -10,6 +10,7 @@ from typing import Any, Dict, Optional
 from behavior_manager import BehaviorManager
 from config import load_config
 from lidar_perception import LidarPerceptionWorker, unavailable_state
+from robot_bridge.forward_interlock import ForwardMotionInterlock
 from mission_manager import MissionManager
 from provider_factory import create_provider
 from robot_bridge.client import RobotBridgeClient
@@ -92,12 +93,21 @@ class CognitiveRuntime:
         self._lidar_stopped = False
         self._lidar_error = None
         self.lidar_worker = None
+        self.forward_interlock = None
         try:
             factory = lidar_worker_factory or LidarPerceptionWorker
             self.lidar_worker = factory(
                 self.world_model,
                 base_url=getattr(self.robot_client, "base_url", None),
             )
+            self.forward_interlock = ForwardMotionInterlock(
+                self.world_model.get_lidar_obstacles,
+                expected_session=self.lidar_worker.session,
+                stop_callback=self.robot_client.stop,
+            )
+            configure = getattr(self.robot_client, "configure_forward_interlock", None)
+            if callable(configure):
+                configure(self.forward_interlock)
         except Exception as exc:
             self._lidar_error = str(exc)
             try:
@@ -405,6 +415,8 @@ class CognitiveRuntime:
             print()
 
             self._start_lidar()
+            if self.forward_interlock is not None:
+                self.forward_interlock.start()
             while self.running:
                 self.run_once()
                 time.sleep(self.loop_interval)
@@ -418,6 +430,8 @@ class CognitiveRuntime:
                 pass
 
             self._stop_lidar()
+            if self.forward_interlock is not None:
+                self.forward_interlock.stop()
 
             self.world_model.update_robot_state(
                 runtime_state="STOPPED",
@@ -435,6 +449,8 @@ class CognitiveRuntime:
         """
         self.running = False
         self._stop_lidar()
+        if self.forward_interlock is not None:
+            self.forward_interlock.stop()
 
     def get_status(self):
         """
@@ -473,6 +489,11 @@ class CognitiveRuntime:
                 "tracking": dict(self.tracking_state),
                 "last_error": self.last_error,
                 "lidar_perception": self._lidar_status(),
+                "forward_interlock": (
+                    self.forward_interlock.status()
+                    if self.forward_interlock is not None
+                    else {"configured": False, "reason": "not_configured"}
+                ),
             }
 
     def _active_mission_dict(self):

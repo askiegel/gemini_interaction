@@ -12,6 +12,7 @@ class RobotBridgeClient:
         base_url=None,
         timeout=3.0,
         config_manager=None,
+        forward_interlock=None,
     ):
         if base_url is not None:
             self.config_manager = config_manager
@@ -32,6 +33,10 @@ class RobotBridgeClient:
             )
         self.base_url = resolved_url.rstrip("/")
         self.timeout = timeout
+        self.forward_interlock = forward_interlock
+
+    def configure_forward_interlock(self, interlock):
+        self.forward_interlock = interlock
 
     def _request(self, method, path, payload=None):
         url = f"{self.base_url}{path}"
@@ -73,7 +78,10 @@ class RobotBridgeClient:
         return self._request("GET", "/status")
 
     def stop(self):
-        return self._request("POST", "/stop")
+        result = self._request("POST", "/stop")
+        if self.forward_interlock is not None:
+            self.forward_interlock.stop_active()
+        return result
 
     def motion(
         self,
@@ -83,9 +91,11 @@ class RobotBridgeClient:
         streaming=False,
         watchdog_timeout=0.50,
     ):
+        linear_x = float(linear_x)
+        angular_z = float(angular_z)
         payload = {
-            "linear_x": float(linear_x),
-            "angular_z": float(angular_z),
+            "linear_x": linear_x,
+            "angular_z": angular_z,
             "duration": float(duration),
         }
 
@@ -99,11 +109,25 @@ class RobotBridgeClient:
                 }
             )
 
-        return self._request(
-            "POST",
-            "/motion",
-            payload,
-        )
+        if linear_x > 0:
+            if self.forward_interlock is None:
+                return {"ok": False, "forwarded": False, "error": "forward_interlock_not_configured"}
+            interlock = self.forward_interlock
+            try:
+                generation = interlock.begin_positive_dispatch(streaming=streaming)
+            except PermissionError as exc:
+                return {"ok": False, "forwarded": False, "error": str(exc)}
+            result = None
+            try:
+                result = self._request("POST", "/motion", payload)
+                return result
+            finally:
+                interlock.finalize_positive_dispatch(generation, result)
+
+        result = self._request("POST", "/motion", payload)
+        if self.forward_interlock is not None:
+            self.forward_interlock.stop_active()
+        return result
 
     def streaming_motion(
         self,

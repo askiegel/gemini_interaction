@@ -5,9 +5,23 @@ from unittest.mock import patch
 from robot_bridge.client import RobotBridgeClient
 
 
+class FreshClearInterlock:
+    def begin_positive_dispatch(self, *, streaming):
+        assert streaming is True
+        return 1
+
+    def finalize_positive_dispatch(self, generation, transport_result):
+        del generation
+        return True
+
+    def stop_active(self):
+        pass
+
+
 def main():
     client = RobotBridgeClient(
         base_url="http://robot.invalid",
+        forward_interlock=FreshClearInterlock(),
     )
 
     captured = {}
