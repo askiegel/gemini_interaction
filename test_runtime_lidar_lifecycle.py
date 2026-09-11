@@ -86,11 +86,11 @@ def test_replacement_session_invalidates_old_state(tmp_path):
     factory = lambda world, **kw: LidarPerceptionWorker(world, fetch=payload, **kw)
     first = make_runtime(tmp_path, factory)
     first.lidar_worker.run_once()
+    first.stop()
     second = make_runtime(tmp_path, factory)
     assert first.lidar_worker.session != second.lidar_worker.session
+    assert first.world_model.get_lidar_obstacles(expected_session=first.lidar_worker.session)["reason"] == "stopped"
     assert not second.get_status()["lidar_perception"]["valid"]
-    assert first.world_model.get_lidar_obstacles(expected_session=first.lidar_worker.session)["reason"] == "producer_session_mismatch"
-    first.stop()
     second.stop()
 
 

@@ -91,6 +91,8 @@ class WorldModel:
         self.lock_path = f"{self.storage_path}.lock"
 
         self._thread_lock = threading.RLock()
+        self._lidar_lock = threading.Lock()
+        self._lidar_obstacles = None
         self._pending_events: List[Dict[str, Any]] = []
 
         self.robot_state = self._default_robot_state()
@@ -291,17 +293,17 @@ class WorldModel:
             return self.robot_state
 
     def publish_lidar_obstacles(self, state):
-        """Atomically merge the producer's dedicated perception field."""
-        self.update_robot_state(lidar_obstacles=copy.deepcopy(state))
+        """Publish the producer's transient, authoritative safety snapshot."""
+        with self._lidar_lock:
+            self._lidar_obstacles = copy.deepcopy(state)
 
     def get_lidar_obstacles(self, *, expected_session, now=None):
-        """Read shared LiDAR state, never deriving freshness from updated_at."""
+        """Read the transient safety snapshot without persistence I/O."""
         from lidar_perception import read_lidar_state, unavailable_state
 
         try:
-            with self._thread_lock:
-                self.reload()
-                state = copy.deepcopy(self.robot_state.get("lidar_obstacles"))
+            with self._lidar_lock:
+                state = copy.deepcopy(self._lidar_obstacles)
         except Exception:
             return unavailable_state("world_model_read_error")
         return read_lidar_state(state, expected_session=expected_session, now=now)
@@ -807,6 +809,7 @@ class WorldModel:
                             {},
                         )
                     )
+                    merged_robot_state.pop("lidar_obstacles", None)
 
                     for key in changed_robot_keys:
                         merged_robot_state[key] = copy.deepcopy(
@@ -1227,6 +1230,7 @@ class WorldModel:
         )
 
         self.robot_state = robot_state
+        self.robot_state.pop("lidar_obstacles", None)
         self.environment = copy.deepcopy(
             data.get(
                 "environment",

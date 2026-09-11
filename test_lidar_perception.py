@@ -1,13 +1,14 @@
 """Offline worker tests with fake telemetry, clocks, and temporary World Models."""
 
 import copy
+import json
 import math
 import threading
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import pytest
 
-from lidar_perception import LidarPerceptionWorker, read_lidar_state
+from lidar_perception import LidarPerceptionWorker, read_lidar_state, unavailable_state
 from voice_relay.lidar_sectors import lidar_sector_payload
 from world_model import WorldModel
 
@@ -188,15 +189,16 @@ def test_concurrent_world_updates_preserve_snapshot(setup):
     thread.join()
     world.reload()
     assert world.robot_state["counter"] == 9
-    assert world.robot_state["lidar_obstacles"]["acquisition_sequence"] == 10
     assert world.get_lidar_obstacles(expected_session=worker.session, now=clock.now)["producer_session"] == worker.session
+    assert "lidar_obstacles" not in world.robot_state
 
 
 def test_read_failure_and_clock_regression_fail_closed(setup):
     world, worker, clock, _ = setup
     state = worker.run_once()
-    with patch.object(world, "reload", side_effect=OSError("unreadable")):
-        assert world.get_lidar_obstacles(expected_session=worker.session)["reason"] == "world_model_read_error"
+    with patch.object(world, "reload", side_effect=OSError("unreadable")) as reload:
+        assert world.get_lidar_obstacles(expected_session=worker.session, now=clock.now)["valid"]
+        reload.assert_not_called()
     assert read_lidar_state(state, expected_session=worker.session, now=clock.now - 1)["reason"] == "invalid_freshness"
 
 
@@ -219,4 +221,99 @@ def test_publication_and_read_do_not_alias_caller_state(setup):
     current = world.get_lidar_obstacles(expected_session=worker.session, now=clock.now)
     assert current["sectors"]["front"]["state"] == "CLEAR"
     current["sectors"]["front"]["state"] = "BROKEN"
-    assert world.robot_state["lidar_obstacles"]["sectors"]["front"]["state"] == "CLEAR"
+    assert world.get_lidar_obstacles(expected_session=worker.session, now=clock.now)["sectors"]["front"]["state"] == "CLEAR"
+
+
+def test_lidar_publish_and_read_do_not_persist_or_lock_disk(setup):
+    world, worker, clock, _ = setup
+    state = worker.run_once()
+    with patch.object(world, "update_robot_state", side_effect=AssertionError("LiDAR used persisted state")), \
+         patch.object(world, "reload", side_effect=AssertionError("LiDAR reloaded persisted state")), \
+         patch.object(world, "save", side_effect=AssertionError("LiDAR saved persisted state")), \
+         patch.object(world, "_open_lock_file", side_effect=AssertionError("LiDAR acquired file lock")):
+        world.publish_lidar_obstacles(state)
+        current = world.get_lidar_obstacles(expected_session=worker.session, now=clock.now)
+    assert current["producer_session"] == worker.session
+
+
+def test_lidar_publish_stores_independent_copy_and_read_returns_copy(setup):
+    world, worker, clock, _ = setup
+    state = worker.run_once()
+    state["sectors"]["front"]["state"] = "BROKEN"
+    current = world.get_lidar_obstacles(expected_session=worker.session, now=clock.now)
+    assert current["sectors"]["front"]["state"] == "CLEAR"
+    current["sectors"]["front"]["state"] = "BROKEN"
+    assert world.get_lidar_obstacles(expected_session=worker.session, now=clock.now)["sectors"]["front"]["state"] == "CLEAR"
+
+
+def test_persisted_lidar_snapshot_is_ignored_after_reload(tmp_path):
+    path = tmp_path / "world.json"
+    world = WorldModel(str(path))
+    stale = unavailable_state("fresh", "old-session")
+    world.update_robot_state(battery=88)
+    persisted = json.loads(path.read_text())
+    persisted["robot_state"]["lidar_obstacles"] = stale
+    path.write_text(json.dumps(persisted))
+    reloaded = WorldModel(str(path))
+    assert "lidar_obstacles" not in reloaded.robot_state
+    result = reloaded.get_lidar_obstacles(expected_session="old-session")
+    assert not result["valid"]
+    assert result["reason"] == "producer_session_mismatch"
+    reloaded.update_robot_state(battery=87)
+    assert "lidar_obstacles" not in json.loads(path.read_text())["robot_state"]
+
+
+def test_new_world_model_has_no_authoritative_lidar_until_publish(tmp_path):
+    world = WorldModel(str(tmp_path / "world.json"))
+    result = world.get_lidar_obstacles(expected_session="new-session")
+    assert not result["valid"]
+    assert result["reason"] == "producer_session_mismatch"
+
+
+def test_lidar_cache_is_not_coupled_to_slow_persistence(setup):
+    world, worker, clock, _ = setup
+    state = worker.run_once()
+    slow = Mock(side_effect=AssertionError("LiDAR touched persistence"))
+    with patch.object(world, "save", slow), patch.object(world, "reload", slow), patch.object(world, "_open_lock_file", slow):
+        for _ in range(100):
+            world.publish_lidar_obstacles(state)
+            assert world.get_lidar_obstacles(expected_session=worker.session, now=clock.now)["producer_session"] == worker.session
+    slow.assert_not_called()
+
+
+def test_reload_preserves_live_transient_lidar_over_legacy_persisted_state(setup):
+    world, worker, clock, _ = setup
+    published = worker.run_once()
+    before = world.get_lidar_obstacles(expected_session=worker.session, now=clock.now)
+    before_signature = {
+        "producer_session": before["producer_session"],
+        "acquisition_sequence": before["acquisition_sequence"],
+        "stamp_seconds": before["source"]["stamp_seconds"],
+        "front_state": before["sectors"]["front"]["state"],
+        "age": before["effective_age_seconds"],
+    }
+
+    world.update_robot_state(battery=88)
+    world.robot_state["battery"] = 0
+    with open(world.storage_path, encoding="utf-8") as state_file:
+        persisted = json.load(state_file)
+    persisted["robot_state"]["lidar_obstacles"] = {
+        **published,
+        "producer_session": "legacy-session",
+        "acquisition_sequence": 9999,
+        "source": {**published["source"], "stamp_seconds": 9999},
+        "sectors": {**published["sectors"], "front": {"state": "BLOCKED", "available": True}},
+    }
+    with open(world.storage_path, "w", encoding="utf-8") as state_file:
+        json.dump(persisted, state_file)
+
+    world.reload()
+    after = world.get_lidar_obstacles(expected_session=worker.session, now=clock.now + 0.10)
+    assert world.robot_state["battery"] == 88
+    assert after["producer_session"] == before_signature["producer_session"]
+    assert after["acquisition_sequence"] == before_signature["acquisition_sequence"]
+    assert after["source"]["stamp_seconds"] == before_signature["stamp_seconds"]
+    assert after["sectors"]["front"]["state"] == before_signature["front_state"]
+    assert after["effective_age_seconds"] == pytest.approx(before_signature["age"] + 0.10)
+    assert after["effective_age_seconds"] != before_signature["age"]
+    assert "lidar_obstacles" not in world.robot_state
