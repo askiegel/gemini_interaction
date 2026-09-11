@@ -290,6 +290,22 @@ class WorldModel:
 
             return self.robot_state
 
+    def publish_lidar_obstacles(self, state):
+        """Atomically merge the producer's dedicated perception field."""
+        self.update_robot_state(lidar_obstacles=copy.deepcopy(state))
+
+    def get_lidar_obstacles(self, *, expected_session, now=None):
+        """Read shared LiDAR state, never deriving freshness from updated_at."""
+        from lidar_perception import read_lidar_state, unavailable_state
+
+        try:
+            with self._thread_lock:
+                self.reload()
+                state = copy.deepcopy(self.robot_state.get("lidar_obstacles"))
+        except Exception:
+            return unavailable_state("world_model_read_error")
+        return read_lidar_state(state, expected_session=expected_session, now=now)
+
     def update_from_detections(
         self,
         detections,
