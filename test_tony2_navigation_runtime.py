@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 
+import ast
 import sys
 import signal
 import tempfile
@@ -46,6 +47,33 @@ class Tony2NavigationRuntimeTests(
                 "http://robot.invalid:8090"
             ),
         )
+
+    def test_server_execution_readiness_requires_validation_and_permission(self):
+        # Compile only the pure predicate, without importing the server.
+        source = (VOICE_RELAY / "server.py").read_text(encoding="utf-8")
+        predicates = [
+            node for node in ast.walk(ast.parse(source))
+            if isinstance(node, ast.FunctionDef) and node.name == "navigation_ready"
+        ]
+        self.assertEqual(len(predicates), 1)
+        namespace = {}
+        exec(compile(ast.Module(body=predicates, type_ignores=[]), "server.py", "exec"), namespace)
+        ready = namespace["navigation_ready"]
+        status = dict.fromkeys((
+            "running", "owned", "map_server_enabled", "localization_enabled",
+            "planner_enabled", "controller_enabled", "navigator_enabled",
+            "action_server_ready", "transform_ready", "motion_egress_ready",
+            "motion_egress_idle", "localization_validated", "goal_submission_enabled",
+        ), True)
+        status.update(state="READY", goal_active=False, motion_output_connected=False,
+                      pids={"supervisor": 100, "probe": 101, "goal": None})
+        self.assertTrue(ready(status))
+        for field in ("localization_validated", "goal_submission_enabled"):
+            with self.subTest(field=field):
+                self.assertFalse(ready(dict(status, **{field: False})))
+                missing = dict(status)
+                del missing[field]
+                self.assertFalse(ready(missing))
 
     def test_guarded_assets_match_expected_hashes(
         self,
@@ -243,6 +271,12 @@ class Tony2NavigationRuntimeTests(
                 },
             ):
                 status = runtime.status()
+                self.assertEqual(status["state"], "READY")
+                self.assertFalse(status["localization_validated"])
+                self.assertFalse(status["goal_submission_enabled"])
+                runtime._localization_validated = True
+                status = runtime.status()
+                self.assertTrue(status["localization_validated"])
 
             self.assertEqual(
                 status["state"],
@@ -511,6 +545,7 @@ class Tony2NavigationRuntimeTests(
             runtime = self.make_runtime(
                 Path(directory)
             )
+            runtime._localization_validated = True
 
             process = Mock()
             process.pid = 321
@@ -640,6 +675,8 @@ class Tony2NavigationRuntimeTests(
             runtime = self.make_runtime(
                 Path(directory)
             )
+
+            runtime._localization_validated = True
 
             lease = Mock()
             token = "c" * 48
@@ -937,6 +974,7 @@ class Tony2NavigationRuntimeTests(
             runtime = self.make_runtime(
                 Path(directory)
             )
+            runtime._localization_validated = True
 
             lease = Mock()
 
@@ -1047,6 +1085,7 @@ class Tony2NavigationRuntimeTests(
                     runtime = self.make_runtime(
                         Path(directory)
                     )
+                    runtime._localization_validated = True
 
                     process = Mock()
                     process.pid = 321
@@ -1137,6 +1176,7 @@ class Tony2NavigationRuntimeTests(
             runtime = self.make_runtime(
                 Path(directory)
             )
+            runtime._localization_validated = True
 
             process = Mock()
             process.pid = 321

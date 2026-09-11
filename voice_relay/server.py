@@ -3282,6 +3282,8 @@ class VoiceRelayHandler(BaseHTTPRequestHandler):
                             "state"
                         )
                         == "READY"
+                        and status.get("localization_validated") is True
+                        and status.get("goal_submission_enabled") is True
                         and status.get(
                             "running"
                         )

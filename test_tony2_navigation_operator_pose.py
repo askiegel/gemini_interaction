@@ -81,6 +81,108 @@ class OperatorPoseRuntimeTests(
             "motion_egress_idle": True,
         }
 
+    def test_ready_without_validation_blocks_arm_and_goal(self):
+        runtime = self.make_runtime()
+        self.assertFalse(runtime._localization_validated)
+        with patch.object(runtime, "status", return_value=self.ready_status()), patch(
+            "tony2_navigation_runtime.MotionArmLease"
+        ) as lease, patch("tony2_navigation_runtime.subprocess.Popen") as popen:
+            for action in (
+                runtime._begin_motion_lease,
+                lambda: runtime.submit_goal(0.1, 0.0, 0.0),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "localization validation"):
+                    action()
+            lease.assert_not_called()
+            popen.assert_not_called()
+
+    def test_idempotent_start_preserves_validation_and_stop_clears_it(self):
+        runtime = self.make_runtime()
+        with patch.object(runtime, "validate_assets"), patch.object(
+            runtime, "mapping_status", return_value={"running": False}
+        ), patch.object(runtime, "_runtime_pids", return_value={
+            "supervisor": 100, "probe": 101, "goal": None,
+        }), patch.object(runtime, "status", return_value=self.ready_status()), patch.object(
+            runtime, "_terminate_group"
+        ), patch.object(runtime, "_spawn") as spawn:
+            runtime._localization_validated = True
+            attempt = object()
+            runtime._localization_attempt = attempt
+            self.assertEqual(runtime.start()["action"], "ALREADY_RUNNING")
+            self.assertTrue(runtime._localization_validated)
+            self.assertIs(runtime._localization_attempt, attempt)
+            spawn.assert_not_called()
+            runtime._localization_validated = True
+            runtime.stop()
+            self.assertFalse(runtime._localization_validated)
+
+    def test_new_start_clears_validation_before_spawning(self):
+        runtime = self.make_runtime()
+        runtime._localization_validated = True
+        runtime._localization_attempt = object()
+
+        def spawn(*args):
+            self.assertFalse(runtime._localization_validated)
+            self.assertIsNone(runtime._localization_attempt)
+            return 100
+
+        with patch.object(runtime, "validate_assets"), patch.object(
+            runtime, "mapping_status", return_value={"running": False}
+        ), patch.object(runtime, "_runtime_pids", side_effect=[
+            {"supervisor": None, "probe": None, "goal": None},
+            {"supervisor": 100, "probe": 101, "goal": None},
+        ]), patch.object(runtime, "status", return_value=self.ready_status()), patch.object(
+            runtime, "_spawn", side_effect=spawn
+        ) as spawned, patch("tony2_navigation_runtime.time.sleep"):
+            self.assertEqual(runtime.start()["action"], "STARTED")
+        self.assertEqual(spawned.call_count, 2)
+        self.assertFalse(runtime._localization_validated)
+
+    def test_invalid_start_clears_validation(self):
+        for mapping, pids, asset_error in (
+            (False, {"supervisor": 100, "probe": None}, None),
+            (False, {"supervisor": None, "probe": 101}, None),
+            (True, {"supervisor": 100, "probe": 101}, None),
+            (False, {"supervisor": 100, "probe": 101}, RuntimeError("assets")),
+        ):
+            with self.subTest(mapping=mapping, pids=pids, asset_error=asset_error):
+                runtime = self.make_runtime()
+                runtime._localization_validated = True
+                runtime._localization_attempt = object()
+                with patch.object(runtime, "validate_assets", side_effect=asset_error), patch.object(
+                    runtime, "mapping_status", return_value={"running": mapping}
+                ), patch.object(runtime, "_runtime_pids", return_value=pids), patch.object(
+                    runtime, "_spawn"
+                ) as spawn:
+                    with self.assertRaises(RuntimeError):
+                        runtime.start()
+                    spawn.assert_not_called()
+                self.assertFalse(runtime._localization_validated)
+                self.assertIsNone(runtime._localization_attempt)
+
+    def test_invalid_reinitialization_clears_validation(self):
+        runtime = self.make_runtime()
+        runtime._localization_validated = True
+        with self.assertRaises(ValueError):
+            runtime.initialize_operator_pose(float("nan"), 0.0, 0.0)
+        self.assertFalse(runtime._localization_validated)
+
+    def test_stop_during_validation_cannot_restore_permission(self):
+        runtime = self.make_runtime()
+        def stop_during_helper(*args, **kwargs):
+            runtime.stop()
+            return subprocess.CompletedProcess([], 0, '{"ok":true,"trusted":true}')
+        with patch.object(runtime, "status", side_effect=[
+            self.preinit_status(), {"state": "STOPPED"}, self.ready_status(),
+        ]), patch.object(runtime, "_runtime_pids", return_value={
+            "supervisor": None, "probe": None, "goal": None,
+        }), patch.object(runtime, "_terminate_group"), patch(
+            "tony2_navigation_runtime.subprocess.run", side_effect=stop_during_helper
+        ):
+            with self.assertRaisesRegex(RuntimeError, "invalidated"):
+                runtime.initialize_operator_pose(0.0, 0.0, 0.0)
+        self.assertFalse(runtime._localization_validated)
+
     def test_trusted_operator_pose_reaches_ready(
         self,
     ):
@@ -141,6 +243,15 @@ class OperatorPoseRuntimeTests(
             ]
         )
 
+        self.assertTrue(runtime._localization_validated)
+        with patch.object(runtime, "status", return_value=self.ready_status()), patch(
+            "tony2_navigation_runtime.MotionArmLease"
+        ) as lease:
+            armed_lease, token, generation = runtime._begin_motion_lease()
+            self.assertIs(armed_lease, lease.return_value)
+            lease.return_value.start.assert_called_once_with()
+            runtime._release_motion_lease(armed_lease)
+
         command = (
             run.call_args.args[0]
         )
@@ -169,6 +280,8 @@ class OperatorPoseRuntimeTests(
         self,
     ):
         runtime = self.make_runtime()
+
+        runtime._localization_validated = True
 
         helper_result = {
             "ok": True,
@@ -222,6 +335,7 @@ class OperatorPoseRuntimeTests(
                 )
             )
 
+        self.assertFalse(runtime._localization_validated)
         stop.assert_called_once_with()
 
         self.assertEqual(

@@ -243,6 +243,8 @@ class Tony2NavigationRuntime:
         self._stop_requested = threading.Event()
         self._stop_generation = 0
         self._stopping = False
+        self._localization_validated = False
+        self._localization_attempt = None
 
         self._active_motion_lease = None
         self._active_motion_token = None
@@ -651,6 +653,14 @@ class Tony2NavigationRuntime:
                     == token
             )
 
+    def _require_localization_validated(self):
+        with self._motion_lock:
+            if not self._localization_validated:
+                raise RuntimeError(
+                    "Successful localization validation is required "
+                    "before motion authorization or goal submission."
+                )
+
     def _begin_motion_lease(self):
         with self._motion_lock:
             if (
@@ -666,6 +676,8 @@ class Tony2NavigationRuntime:
                     "Tony2 motion authorization "
                     "is already active."
                 )
+
+            self._require_localization_validated()
 
             status = self.status()
 
@@ -1035,6 +1047,8 @@ class Tony2NavigationRuntime:
 
 
         with self._motion_lock:
+            localization_validated = self._localization_validated
+
             active_token = (
                 self._active_motion_token
             )
@@ -1120,8 +1134,10 @@ class Tony2NavigationRuntime:
                 motion_egress_ready,
             "motion_egress_idle":
                 motion_egress_idle,
+            "localization_validated": localization_validated,
             "goal_submission_enabled": (
                 runtime_ready
+                and localization_validated
                 and motion_egress_idle
                 and not goal_active
                 and not stopping
@@ -1191,17 +1207,20 @@ class Tony2NavigationRuntime:
         does not create or send a NavigateToPose goal.
         """
 
-        self.validate_assets()
-
-        mapping = self.mapping_status()
-
-        if mapping["running"]:
-            raise RuntimeError(
-                "Tony2 Cartographer mapping must "
-                "be stopped before fixed-map navigation."
-            )
-
-        current = self._runtime_pids()
+        try:
+            self.validate_assets()
+            mapping = self.mapping_status()
+            if mapping["running"]:
+                raise RuntimeError(
+                    "Tony2 Cartographer mapping must "
+                    "be stopped before fixed-map navigation."
+                )
+            current = self._runtime_pids()
+        except Exception:
+            with self._motion_lock:
+                self._localization_validated = False
+                self._localization_attempt = None
+            raise
 
         if (
             current["supervisor"] is not None
@@ -1213,6 +1232,12 @@ class Tony2NavigationRuntime:
                 "navigation":
                     self.status(),
             }
+
+        # Only the no-op path above retains validation. Invalidate
+        # before replacing the runtime or rejecting a partial runtime.
+        with self._motion_lock:
+            self._localization_validated = False
+            self._localization_attempt = None
 
         if (
             current["supervisor"] is not None
@@ -1446,6 +1471,8 @@ class Tony2NavigationRuntime:
         lease_stop_error = None
 
         with self._motion_lock:
+            self._localization_validated = False
+            self._localization_attempt = None
             self._stop_generation += 1
             self._stopping = True
 
@@ -1587,6 +1614,11 @@ class Tony2NavigationRuntime:
         submits a navigation goal. Any failed localization
         validation stops the navigation runtime fail closed.
         """
+
+        with self._motion_lock:
+            self._localization_validated = False
+            attempt = object()
+            self._localization_attempt = attempt
 
         values = {
             "x": x,
@@ -1886,6 +1918,18 @@ class Tony2NavigationRuntime:
                 "navigation":
                     stopped["navigation"],
             }
+
+        with self._motion_lock:
+            if (
+                self._localization_attempt is not attempt
+                or self._stop_requested.is_set()
+                or self._stopping
+            ):
+                raise RuntimeError(
+                    "Localization validation was invalidated by "
+                    "a runtime lifecycle change or newer initialization."
+                )
+            self._localization_validated = True
 
         return {
             "action":
@@ -2210,6 +2254,8 @@ class Tony2NavigationRuntime:
                 "be READY before goal submission."
             )
 
+        self._require_localization_validated()
+
         if not status.get(
             "goal_submission_enabled"
         ):
@@ -2307,6 +2353,8 @@ class Tony2NavigationRuntime:
                             "Tony2 guarded GO was "
                             "cancelled before goal launch."
                         )
+
+                    self._require_localization_validated()
 
                     locked_status = self.status()
 
