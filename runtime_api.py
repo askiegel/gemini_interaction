@@ -172,6 +172,53 @@ class RuntimeAPIHandler(BaseHTTPRequestHandler):
             )
             return
 
+        if path == "/lidar/transient":
+            runtime = self.server.runtime
+            worker = getattr(runtime, "lidar_worker", None)
+            producer_session = (
+                worker.session
+                if worker is not None
+                else None
+            )
+            worker_running = bool(
+                worker is not None
+                and worker.running
+            )
+            acquisition_sequence = (
+                worker.sequence
+                if worker is not None
+                else 0
+            )
+            try:
+                snapshot = runtime.world_model.get_lidar_obstacles(
+                    expected_session=producer_session,
+                )
+                self.send_json(
+                    200,
+                    {
+                        "ok": True,
+                        "read_only": True,
+                        "worker_running": worker_running,
+                        "producer_session": producer_session,
+                        "acquisition_sequence": acquisition_sequence,
+                        "snapshot": snapshot,
+                    },
+                )
+            except Exception as exc:
+                self.send_json(
+                    200,
+                    {
+                        "ok": True,
+                        "read_only": True,
+                        "worker_running": worker_running,
+                        "producer_session": producer_session,
+                        "acquisition_sequence": acquisition_sequence,
+                        "snapshot": None,
+                        "error": str(exc),
+                    },
+                )
+            return
+
         if path == "/config":
             self.send_json(
                 200,
