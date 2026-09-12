@@ -390,6 +390,11 @@ class BehaviorManager:
     TARGET_CONFIRMATION_WINDOW_SECONDS = 0.90
     TARGET_CONFIRMATION_POLL_SECONDS = 0.05
 
+    FIND_CENTER_TOLERANCE_PIXELS = 50.0
+    FIND_CENTER_TURN_SPEED = 0.20
+    FIND_CENTER_TURN_SECONDS = 0.25
+    FIND_CENTER_MAX_TURN_CHUNKS = 8
+
     CENTER_TURN_SPEED = 0.60
     CENTER_TURN_SECONDS = 0.40
 
@@ -475,6 +480,19 @@ class BehaviorManager:
         self._guarded_turn_slot_lock = threading.Lock()
         self._guarded_turn_owner_generation = None
         self._guarded_turn_monitor = None
+        # Optional runtime-owned hook for live, dashboard-facing telemetry.
+        # BehaviorManager remains usable without a runtime callback.
+        self.tracking_state_callback = None
+
+    def _publish_tracking_state(self, result):
+        callback = getattr(self, "tracking_state_callback", None)
+        if not callable(callback):
+            return
+        try:
+            callback(result)
+        except Exception:
+            # Telemetry must never affect guarded behavior or motion safety.
+            return
 
     def simulate(self, mission):
         """
@@ -1204,6 +1222,191 @@ class BehaviorManager:
             return None
         return promoted if self._target_is_fresh_and_acquired(promoted) else None
 
+    def _center_acquired_target(self, target_name, observation, base):
+        """Center an acquired FIND_OBJECT target in bounded guarded chunks."""
+        centering_attempted = 0
+        centering_completed = 0
+        current = observation
+        last_guarded_result = base.get("last_guarded_turn_result")
+
+        def result(**fields):
+            value = dict(
+                base,
+                target=target_name,
+                target_found=fields.pop("target_found", True),
+                centering_turn_chunks_attempted=centering_attempted,
+                centering_turn_chunks_completed=centering_completed,
+                maximum_centering_turn_chunks=(
+                    self.FIND_CENTER_MAX_TURN_CHUNKS
+                ),
+                center_tolerance_pixels=(
+                    self.FIND_CENTER_TOLERANCE_PIXELS
+                ),
+                last_guarded_turn_result=last_guarded_result,
+                **fields,
+            )
+            self._publish_tracking_state(value)
+            return value
+
+        while True:
+            if not self._target_is_fresh_and_acquired(current):
+                return result(
+                    ok=False,
+                    completed=False,
+                    state="TARGET_LOST_DURING_CENTERING",
+                    reason="Target observation is no longer actionable.",
+                    target_observation=current,
+                )
+
+            cx = current.get("cx")
+            image_width = current.get("image_width")
+            image_center_x = float(image_width) / 2.0
+            horizontal_error = float(cx) - image_center_x
+            telemetry = {
+                "target_label": target_name,
+                "target_confidence": current.get("confidence"),
+                "target_center_x": float(cx),
+                "target_center_y": float(current.get("cy")),
+                "target_area": float(current.get("area")),
+                "bbox": current.get("bbox"),
+                "image_width": float(image_width),
+                "image_height": float(current.get("image_height")),
+                "image_center_x": image_center_x,
+                "horizontal_error": horizontal_error,
+                "horizontal_error_pixels": horizontal_error,
+                "steering_direction": (
+                    "LEFT"
+                    if horizontal_error < -self.FIND_CENTER_TOLERANCE_PIXELS
+                    else (
+                        "RIGHT"
+                        if horizontal_error > self.FIND_CENTER_TOLERANCE_PIXELS
+                        else "CENTERED"
+                    )
+                ),
+                "centering_direction": (
+                    "LEFT"
+                    if horizontal_error < -self.FIND_CENTER_TOLERANCE_PIXELS
+                    else (
+                        "RIGHT"
+                        if horizontal_error > self.FIND_CENTER_TOLERANCE_PIXELS
+                        else "CENTERED"
+                    )
+                ),
+                "target_observation": current,
+            }
+
+            # Publish the state before any guarded turn transport begins so
+            # the runtime status endpoint reflects the action in progress.
+            self._publish_tracking_state(dict(
+                base,
+                **telemetry,
+                target=target_name,
+                target_found=True,
+                state="CENTERING",
+                ok=True,
+                completed=False,
+            ))
+
+            if abs(horizontal_error) <= self.FIND_CENTER_TOLERANCE_PIXELS:
+                return result(
+                    ok=True,
+                    completed=True,
+                    executed=base["turn_chunks_attempted"] > 0
+                    or centering_attempted > 0,
+                    state="CENTERED",
+                    reason=f"Centered {target_name}.",
+                    **telemetry,
+                )
+
+            if centering_attempted >= self.FIND_CENTER_MAX_TURN_CHUNKS:
+                return result(
+                    ok=False,
+                    completed=False,
+                    state="CENTERING_EXHAUSTED",
+                    reason=f"{target_name} remained outside center tolerance.",
+                    **telemetry,
+                )
+
+            direction = (
+                "LEFT"
+                if horizontal_error < 0.0
+                else "RIGHT"
+            )
+            session = self._current_lidar_session()
+            if session is None:
+                return result(
+                    ok=False,
+                    completed=False,
+                    state="CENTERING_BLOCKED",
+                    reason="LiDAR producer session is unavailable.",
+                    **telemetry,
+                )
+
+            centering_attempted += 1
+            try:
+                guarded_result = self.execute_guarded_turn(
+                    direction,
+                    self.FIND_CENTER_TURN_SPEED,
+                    self.FIND_CENTER_TURN_SECONDS,
+                    expected_lidar_session=session,
+                )
+            except Exception as exc:
+                return result(
+                    ok=False,
+                    completed=False,
+                    state="CENTERING_BLOCKED",
+                    reason="guarded_turn_exception",
+                    error=str(exc),
+                    error_type=type(exc).__name__,
+                    **telemetry,
+                )
+
+            last_guarded_result = guarded_result
+            if (
+                not isinstance(guarded_result, dict)
+                or guarded_result.get("ok") is not True
+                or guarded_result.get("permitted") is not True
+            ):
+                return result(
+                    ok=False,
+                    completed=False,
+                    state="CENTERING_BLOCKED",
+                    reason=(
+                        guarded_result.get("reason", "guarded_turn_failed")
+                        if isinstance(guarded_result, dict)
+                        else "guarded_turn_invalid_result"
+                    ),
+                    stop_reason=(
+                        guarded_result.get("reason")
+                        if isinstance(guarded_result, dict)
+                        else None
+                    ),
+                    **telemetry,
+                )
+
+            centering_completed += 1
+            confirmed = self._confirm_target_candidates(target_name)
+            if confirmed is None:
+                return result(
+                    ok=False,
+                    completed=False,
+                    target_found=False,
+                    state="TARGET_LOST_DURING_CENTERING",
+                    reason="Target was not re-confirmed after centering turn.",
+                    **telemetry,
+                )
+            promoted = self._promote_confirmed_target(confirmed)
+            if promoted is None:
+                return result(
+                    ok=False,
+                    completed=False,
+                    target_found=False,
+                    state="TARGET_LOST_DURING_CENTERING",
+                    reason="Target promotion failed after centering turn.",
+                    **telemetry,
+                )
+            current = promoted
+
     def _execute_guarded_find_search(self, target_name):
         """Search in independent guarded turn chunks with camera rechecks."""
         base = {
@@ -1220,6 +1423,15 @@ class BehaviorManager:
             "turn_angular_speed": self.SEARCH_TURN_SPEED,
             "turn_duration": self.SEARCH_TURN_SECONDS,
             "search_direction": self.SEARCH_DIRECTION,
+            "centering_turn_chunks_attempted": 0,
+            "centering_turn_chunks_completed": 0,
+            "maximum_centering_turn_chunks": (
+                self.FIND_CENTER_MAX_TURN_CHUNKS
+            ),
+            "center_tolerance_pixels": self.FIND_CENTER_TOLERANCE_PIXELS,
+            "horizontal_error_pixels": None,
+            "image_center_x": None,
+            "centering_direction": None,
             "last_guarded_turn_result": None,
             "stop_reason": None,
         }
@@ -1243,30 +1455,20 @@ class BehaviorManager:
                 )
 
             if self._target_is_fresh_and_acquired(target):
-                return dict(
+                return self._center_acquired_target(
+                    target_name,
+                    target,
                     base,
-                    ok=True,
-                    completed=True,
-                    executed=base["turn_chunks_attempted"] > 0,
-                    target_found=True,
-                    state="ACQUIRED",
-                    reason=f"Acquired {target_name}.",
-                    target_observation=target,
                 )
 
             confirmed = self._confirm_target_candidates(target_name)
             if confirmed is not None:
                 promoted = self._promote_confirmed_target(confirmed)
                 if promoted is not None:
-                    return dict(
+                    return self._center_acquired_target(
+                        target_name,
+                        promoted,
                         base,
-                        ok=True,
-                        completed=True,
-                        executed=base["turn_chunks_attempted"] > 0,
-                        target_found=True,
-                        state="ACQUIRED",
-                        reason=f"Acquired {target_name}.",
-                        target_observation=promoted,
                     )
 
             if base["turn_chunks_attempted"] >= self.SEARCH_MAX_TURN_CHUNKS:

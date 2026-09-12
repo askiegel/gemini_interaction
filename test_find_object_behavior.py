@@ -2,12 +2,15 @@
 
 import json
 import math
+import threading
 
 import pytest
 
 import behavior_manager as behavior_module
 from behavior_manager import BehaviorManager
 from mission_types import create_mission
+from runtime import CognitiveRuntime
+from tracking_state import build_tracking_state, empty_tracking_state
 
 
 class FakeRobotBridgeClient:
@@ -537,7 +540,7 @@ def test_confirmed_candidate_is_promoted_without_turn():
         "permitted": True,
     }
     result = manager.execute(_mission())
-    assert result["state"] == "ACQUIRED"
+    assert result["state"] == "CENTERED"
     assert result["target_found"] is True
     assert result["turn_chunks_attempted"] == 0
     assert len(vision.promotions) == 1
@@ -569,11 +572,257 @@ def test_confirmed_candidate_after_one_turn_stops_search():
 
     manager.execute_guarded_turn = turn
     result = manager.execute(_mission())
-    assert result["state"] == "ACQUIRED"
+    assert result["state"] == "CENTERED"
     assert result["target_found"] is True
     assert result["turn_chunks_attempted"] == 1
     assert result["turn_chunks_completed"] == 1
     assert len(calls) == 1
+
+
+def located_target(cx, target="backpack"):
+    result = found_target(target)
+    result["cx"] = float(cx)
+    return result
+
+
+def centered_candidate_payloads(prefix, cx=320):
+    half_width = 120
+    bbox = (cx - half_width, 160, cx + half_width, 460)
+    return [
+        candidate_detection(f"{prefix}-1", bbox=bbox, confidence=0.12),
+        candidate_detection(f"{prefix}-2", bbox=bbox, confidence=0.11),
+        candidate_detection(f"{prefix}-3", bbox=bbox, confidence=0.10),
+    ]
+
+
+def make_centering_manager(observations, candidate_payloads, turn_results=None):
+    vision = CandidateVisionAdapter(observations, candidate_payloads)
+    manager = BehaviorManager(
+        robot_client=GuardedSearchRobot(),
+        vision_adapter=vision,
+    )
+    manager.lidar_session = "session-1"
+    calls = []
+    results = list(turn_results or [])
+
+    def turn(direction, speed, duration, *, expected_lidar_session, now=None):
+        calls.append((direction, speed, duration, expected_lidar_session))
+        if results:
+            return dict(results.pop(0))
+        return {"ok": True, "permitted": True, "reason": "completed"}
+
+    manager.execute_guarded_turn = turn
+    return manager, vision, calls
+
+
+def test_already_centered_target_completes_without_turn():
+    manager = BehaviorManager(
+        robot_client=GuardedSearchRobot(),
+        vision_adapter=SequencedVisionAdapter([located_target(320)]),
+    )
+    manager.lidar_session = "session-1"
+    manager.execute_guarded_turn = lambda *args, **kwargs: pytest.fail(
+        "centered target must not turn"
+    )
+    result = manager.execute(_mission())
+    assert result["state"] == "CENTERED"
+    assert result["completed"] is True
+    assert result["turn_chunks_attempted"] == 0
+    assert result["centering_turn_chunks_attempted"] == 0
+    assert result["steering_direction"] == "CENTERED"
+
+
+def test_centering_publishes_live_tracking_state_updates():
+    manager, _vision, _calls = make_centering_manager(
+        [located_target(145), located_target(320)],
+        centered_candidate_payloads("telemetry"),
+    )
+    tracking = empty_tracking_state()
+    updates = []
+
+    def publish(result):
+        nonlocal tracking
+        tracking = build_tracking_state(result, previous=tracking)
+        updates.append(dict(tracking))
+
+    manager.tracking_state_callback = publish
+    result = manager.execute(_mission())
+
+    centering = next(
+        item for item in updates
+        if item["state"] == "CENTERING"
+    )
+    assert centering["behavior"] == "FIND_OBJECT"
+    assert centering["target_label"] == "backpack"
+    assert centering["horizontal_error"] < -50
+    assert centering["steering_direction"] == "LEFT"
+    assert centering["target_area"] > 0
+    assert result["state"] == "CENTERED"
+    assert tracking["state"] == "CENTERED"
+    assert tracking["steering_direction"] == "CENTER"
+    assert abs(tracking["horizontal_error"]) <= 50
+    assert tracking["locked_identity_id"] is None
+    assert tracking["locked_entity_id"] is None
+
+
+def test_runtime_tracking_callback_updates_status_state_without_identity():
+    runtime = object.__new__(CognitiveRuntime)
+    runtime._state_lock = threading.RLock()
+    runtime._behavior_execution_generation = 7
+    runtime._control_generation = 7
+    runtime.tracking_state = empty_tracking_state()
+
+    runtime._publish_behavior_tracking({
+        "behavior": "FIND_OBJECT",
+        "state": "CENTERING",
+        "target_label": "backpack",
+        "target_confidence": 0.15,
+        "target_center_x": 145.0,
+        "target_center_y": 240.0,
+        "image_width": 640.0,
+        "image_height": 480.0,
+        "image_center_x": 320.0,
+        "horizontal_error": -175.0,
+        "target_area": 42000.0,
+        "steering_direction": "LEFT",
+    })
+    assert runtime.tracking_state["behavior"] == "FIND_OBJECT"
+    assert runtime.tracking_state["state"] == "CENTERING"
+    assert runtime.tracking_state["target_label"] == "backpack"
+    assert runtime.tracking_state["horizontal_error"] == -175.0
+    assert runtime.tracking_state["target_area"] > 0
+    assert runtime.tracking_state["steering_direction"] == "LEFT"
+    assert runtime.tracking_state["locked_identity_id"] is None
+
+    runtime._publish_behavior_tracking({
+        "behavior": "FIND_OBJECT",
+        "state": "CENTERED",
+        "target_label": "backpack",
+        "target_center_x": 320.0,
+        "image_width": 640.0,
+        "horizontal_error": 0.0,
+        "steering_direction": "CENTERED",
+    })
+    assert runtime.tracking_state["state"] == "CENTERED"
+    assert runtime.tracking_state["steering_direction"] == "CENTER"
+
+    runtime._control_generation = 8
+    runtime._publish_behavior_tracking({
+        "behavior": "FIND_OBJECT",
+        "state": "CENTERING",
+        "target_label": "backpack",
+        "horizontal_error": -200.0,
+        "steering_direction": "LEFT",
+    })
+    assert runtime.tracking_state["state"] == "CENTERED"
+
+
+def test_left_target_uses_guarded_centering_constants():
+    manager, _vision, calls = make_centering_manager(
+        [located_target(145), located_target(320)],
+        centered_candidate_payloads("left"),
+    )
+    result = manager.execute(_mission())
+    assert result["state"] == "CENTERED"
+    assert result["centering_turn_chunks_attempted"] == 1
+    assert result["centering_turn_chunks_completed"] == 1
+    assert calls == [("LEFT", 0.20, 0.25, "session-1")]
+
+
+def test_right_target_uses_right_guarded_centering_direction():
+    manager, _vision, calls = make_centering_manager(
+        [located_target(500), located_target(320)],
+        centered_candidate_payloads("right"),
+    )
+    result = manager.execute(_mission())
+    assert result["state"] == "CENTERED"
+    assert calls[0] == ("RIGHT", 0.20, 0.25, "session-1")
+
+
+def test_centering_requires_new_confirmation_after_each_turn():
+    manager, vision, calls = make_centering_manager(
+        [located_target(145), located_target(500), located_target(320)],
+        centered_candidate_payloads("first", 500)
+        + centered_candidate_payloads("second", 320),
+    )
+    result = manager.execute(_mission())
+    assert result["state"] == "CENTERED"
+    assert result["centering_turn_chunks_attempted"] == 2
+    assert result["centering_turn_chunks_completed"] == 2
+    assert len(calls) == 2
+    assert vision.candidate_calls == 6
+
+
+def test_target_loss_after_centering_turn_stops_without_second_turn():
+    manager, _vision, calls = make_centering_manager(
+        [located_target(145)],
+        [],
+    )
+    result = manager.execute(_mission())
+    assert result["state"] == "TARGET_LOST_DURING_CENTERING"
+    assert result["completed"] is False
+    assert result["target_found"] is False
+    assert result["centering_turn_chunks_attempted"] == 1
+    assert len(calls) == 1
+
+
+def test_guarded_centering_denial_stops_without_retry():
+    manager, _vision, calls = make_centering_manager(
+        [located_target(145)],
+        [],
+        [{"ok": False, "permitted": False, "reason": "turn_side_not_clear"}],
+    )
+    result = manager.execute(_mission())
+    assert result["state"] == "CENTERING_BLOCKED"
+    assert result["completed"] is False
+    assert result["last_guarded_turn_result"]["reason"] == "turn_side_not_clear"
+    assert len(calls) == 1
+
+
+def test_centering_exhausts_at_eight_chunks():
+    observations = [located_target(145)] + [located_target(145)] * 8
+    payloads = []
+    for index in range(8):
+        payloads.extend(centered_candidate_payloads(f"exhaust-{index}", 145))
+    manager, _vision, calls = make_centering_manager(observations, payloads)
+    result = manager.execute(_mission())
+    assert result["state"] == "CENTERING_EXHAUSTED"
+    assert result["completed"] is False
+    assert result["target_found"] is True
+    assert result["centering_turn_chunks_attempted"] == 8
+    assert result["centering_turn_chunks_completed"] == 8
+    assert len(calls) == 8
+
+
+def test_search_and_centering_counters_remain_separate():
+    failed_search = [
+        candidate_detection("search-1", bbox=(10, 10, 100, 100)),
+        candidate_detection("search-2", bbox=(300, 10, 390, 100)),
+        candidate_detection("search-3", bbox=(500, 10, 590, 100)),
+    ]
+    acquired = centered_candidate_payloads("acquired", 145)
+    centered = centered_candidate_payloads("centered", 320)
+    manager, _vision, calls = make_centering_manager(
+        [not_found(), located_target(145), located_target(320)],
+        failed_search + acquired + centered,
+    )
+    result = manager.execute(_mission())
+    assert result["state"] == "CENTERED"
+    assert result["turn_chunks_attempted"] == 1
+    assert result["turn_chunks_completed"] == 1
+    assert result["centering_turn_chunks_attempted"] == 1
+    assert result["centering_turn_chunks_completed"] == 1
+    assert len(calls) == 2
+
+
+def test_invalid_center_geometry_does_not_start_centering():
+    invalid = located_target(float("nan"))
+    manager = BehaviorManager(
+        robot_client=GuardedSearchRobot(),
+        vision_adapter=SequencedVisionAdapter([invalid]),
+    )
+    result = manager.execute(_mission())
+    assert result["centering_turn_chunks_attempted"] == 0
 
 
 def detection(cx, area):

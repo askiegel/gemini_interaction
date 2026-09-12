@@ -88,12 +88,16 @@ class CognitiveRuntime:
         self._state_lock = threading.RLock()
         self._last_runtime_state = None
         self._control_generation = 0
+        self._behavior_execution_generation = None
         self._lidar_lifecycle_lock = threading.RLock()
         self._lidar_started = False
         self._lidar_stopped = False
         self._lidar_error = None
         self.lidar_worker = None
         self.forward_interlock = None
+        self.behavior_manager.tracking_state_callback = (
+            self._publish_behavior_tracking
+        )
         try:
             factory = lidar_worker_factory or LidarPerceptionWorker
             self.lidar_worker = factory(
@@ -128,6 +132,24 @@ class CognitiveRuntime:
             except Exception as exc:
                 self._lidar_error = str(exc)
                 self._stop_lidar()
+
+    def _publish_behavior_tracking(self, result):
+        """Publish in-progress visual behavior telemetry safely.
+
+        BehaviorManager calls this only for transient FIND_OBJECT states.
+        The execution generation check prevents a late callback from
+        overwriting an operator STOP state.
+        """
+        with self._state_lock:
+            if (
+                self._behavior_execution_generation is None
+                or self._behavior_execution_generation != self._control_generation
+            ):
+                return
+            self.tracking_state = build_tracking_state(
+                result,
+                previous=self.tracking_state,
+            )
 
     def _stop_lidar(self):
         with self._lidar_lifecycle_lock:
@@ -285,6 +307,7 @@ class CognitiveRuntime:
 
             mission_id = mission.mission_id
             control_generation = self._control_generation
+            self._behavior_execution_generation = control_generation
 
             self.world_model.update_robot_state(
                 runtime_state="EXECUTING",
@@ -322,10 +345,13 @@ class CognitiveRuntime:
                 # STOP arrived while this bounded behavior was executing.
                 # submit_intent(STOP) already cancelled all missions, stopped
                 # the robot, and persisted the authoritative stopped state.
+                if self._behavior_execution_generation == control_generation:
+                    self._behavior_execution_generation = None
                 return self.last_result
 
             self.last_result = result
             self.last_error = execution_error
+            self._behavior_execution_generation = None
             self.tracking_state = build_tracking_state(
                 result,
                 previous=self.tracking_state,
