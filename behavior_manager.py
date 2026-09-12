@@ -10,6 +10,11 @@ class _GuardedTurnMonitor:
     """Monitor one explicit bounded turn without owning transport locks."""
 
     INTERVAL_SECONDS = 0.05
+    # Allow the synchronous bounded Robot Bridge request to return after the
+    # physical window.  This covers the bridge's documented post-zero delay
+    # and ordinary scheduling/HTTP overhead; it never changes the requested
+    # motion duration.
+    TRANSPORT_COMPLETION_ALLOWANCE_SECONDS = 0.25
 
     def __init__(
         self,
@@ -39,9 +44,20 @@ class _GuardedTurnMonitor:
         self._active = False
         self._dispatch_started = None
         self._deadline = None
+        self._completion_deadline = None
         self._transport_began = False
         self._window_complete = False
         self._late_transport = False
+        self._deadline_stop_attempted = False
+        self._deadline_stop_result = None
+        self._deadline_stop_error = None
+        self._deadline_stop_error_type = None
+        self._transport_completion_pending = False
+        self._transport_completion_pending_seen = False
+        self._transport_completion_timed_out = False
+        self._normal_completion = False
+        self._completed_after_deadline = False
+        self._physical_deadline_reached = False
         self._transport_returned = False
         self._transport_accepted = False
         self._inhibited = False
@@ -76,6 +92,9 @@ class _GuardedTurnMonitor:
             self._active = True
             self._dispatch_started = dispatch_started
             self._deadline = dispatch_started + self.duration
+            self._completion_deadline = (
+                self._deadline + self.TRANSPORT_COMPLETION_ALLOWANCE_SECONDS
+            )
             self._transport_began = True
             return True
 
@@ -96,6 +115,30 @@ class _GuardedTurnMonitor:
         with self._lock:
             self._transport_returned = True
             self._transport_accepted = bool(accepted)
+            self._transport_completion_pending = False
+            now_monotonic = time.monotonic()
+            after_deadline = bool(
+                self._deadline is not None
+                and now_monotonic >= self._deadline
+            )
+            if after_deadline:
+                self._physical_deadline_reached = True
+            self._normal_completion = bool(accepted and not self._invalidated)
+            self._completed_after_deadline = bool(
+                self._normal_completion
+                and after_deadline
+            )
+            needs_deadline_stop = bool(
+                accepted
+                and after_deadline
+                and not self._deadline_stop_attempted
+                and not self._invalidated
+            )
+            if needs_deadline_stop:
+                self._transport_completion_pending_seen = True
+            if needs_deadline_stop:
+                self._deadline_stop_attempted = True
+            return needs_deadline_stop
 
     def window_expired(self):
         with self._lock:
@@ -117,13 +160,6 @@ class _GuardedTurnMonitor:
                 return True
             self._stop.wait(min(remaining, self.INTERVAL_SECONDS))
         return False
-
-    def mark_late_transport(self):
-        with self._lock:
-            self._late_transport = True
-            self._window_complete = True
-            self._inhibited = True
-            self._reason = "transport_returned_after_window"
 
     def _read_validation(self):
         try:
@@ -160,35 +196,49 @@ class _GuardedTurnMonitor:
                     "monitor_error": str(exc),
                 }
             should_stop = False
+            deadline_stop = False
             with self._lock:
                 self._validation = validation
+                now_monotonic = time.monotonic()
                 deadline_expired = (
                     self._active
                     and self._deadline is not None
-                    and time.monotonic() >= self._deadline
+                    and now_monotonic >= self._deadline
                 )
                 if deadline_expired:
                     self._window_complete = True
+                    self._physical_deadline_reached = True
                 if not validation.get("permitted"):
-                    self._reason = validation.get("reason")
-                    self._inhibited = True
+                    if not self._invalidated:
+                        self._reason = validation.get("reason")
+                        self._inhibited = True
                     if not self._invalidated and (self._pending or self._active):
                         self._invalidated = True
                         should_stop = True
-                elif (
-                    deadline_expired
-                    and not self._transport_returned
-                    and not self._invalidated
-                ):
-                    self._invalidated = True
-                    self._inhibited = True
-                    self._reason = "turn_window_expired"
-                    should_stop = True
+                elif deadline_expired and not self._transport_returned:
+                    self._transport_completion_pending = True
+                    self._transport_completion_pending_seen = True
+                    if not self._deadline_stop_attempted:
+                        self._deadline_stop_attempted = True
+                        deadline_stop = True
+                    if (
+                        self._completion_deadline is not None
+                        and now_monotonic >= self._completion_deadline
+                        and not self._invalidated
+                    ):
+                        self._invalidated = True
+                        self._inhibited = True
+                        self._transport_completion_timed_out = True
+                        self._reason = "transport_completion_timeout"
+                        should_stop = True
+            if deadline_stop:
+                stop_result = self._dispatch_stop(source="deadline")
+                self._record_deadline_stop_outcome(stop_result)
             if should_stop:
-                self._dispatch_stop()
+                self._dispatch_stop(source="monitor")
             self._stop.wait(self.INTERVAL_SECONDS)
 
-    def _dispatch_stop(self):
+    def _dispatch_stop(self, source="monitor"):
         """Issue ungated STOP with no monitor lock held across transport."""
         result = None
         error = None
@@ -205,12 +255,36 @@ class _GuardedTurnMonitor:
             self._last_stop_result = result
             self._last_stop_error = error
             self._last_stop_error_type = error_type
-            self._stop_events.append({
+            event = {
                 "result": result,
                 "error": error,
                 "error_type": error_type,
-            })
+                "source": source,
+            }
+            self._stop_events.append(event)
+            if source == "deadline":
+                self._deadline_stop_result = result
+                self._deadline_stop_error = error
+                self._deadline_stop_error_type = error_type
         return result, error, error_type
+
+    def _record_deadline_stop_outcome(self, stop_outcome):
+        """Invalidate if the normal-window STOP was not confirmed."""
+        result, error, _error_type = stop_outcome
+        confirmed = (
+            error is None
+            and isinstance(result, dict)
+            and result.get("ok") is True
+        )
+        if confirmed:
+            return False
+        with self._lock:
+            if self._invalidated:
+                return False
+            self._invalidated = True
+            self._inhibited = True
+            self._reason = "deadline_stop_failed"
+        return True
 
     def record_external_stop(self, result, error=None, error_type=None):
         """Record an operator STOP that already served immediate cancellation."""
@@ -261,7 +335,29 @@ class _GuardedTurnMonitor:
                 "inhibited": self._inhibited,
                 "dispatch_started_monotonic": self._dispatch_started,
                 "window_complete": self._window_complete,
+                "physical_deadline_reached": self._physical_deadline_reached,
                 "late_transport": self._late_transport,
+                "transport_completion_allowance_seconds": (
+                    self.TRANSPORT_COMPLETION_ALLOWANCE_SECONDS
+                ),
+                "transport_completion_deadline_monotonic": (
+                    self._completion_deadline
+                ),
+                "transport_completion_pending": (
+                    self._transport_completion_pending
+                ),
+                "transport_completion_pending_seen": (
+                    self._transport_completion_pending_seen
+                ),
+                "transport_completion_timed_out": (
+                    self._transport_completion_timed_out
+                ),
+                "normal_completion": self._normal_completion,
+                "completed_after_deadline": self._completed_after_deadline,
+                "deadline_stop_attempted": self._deadline_stop_attempted,
+                "deadline_stop_result": self._deadline_stop_result,
+                "deadline_stop_error": self._deadline_stop_error,
+                "deadline_stop_error_type": self._deadline_stop_error_type,
                 "transport_returned": self._transport_returned,
                 "transport_accepted": self._transport_accepted,
                 "transport_began": self._transport_began,
@@ -650,19 +746,17 @@ class BehaviorManager:
             and isinstance(transport_result, dict)
             and transport_result.get("ok") is True
         )
-        monitor.mark_transport_returned(transport_ok)
-        late_transport = False
+        deadline_stop_needed = monitor.mark_transport_returned(transport_ok)
+        if deadline_stop_needed:
+            # A response that arrives just after the physical deadline may
+            # race the monitor's sampling tick.  Preserve the same normal
+            # deadline-stop semantics, including fail-closed failure handling.
+            deadline_stop = monitor._dispatch_stop(source="deadline")
+            monitor._record_deadline_stop_outcome(deadline_stop)
         if transport_error is None and transport_ok:
-            if not monitor.is_invalidated():
-                late_transport = monitor.window_expired()
-                if late_transport:
-                    monitor.mark_late_transport()
-                else:
-                    monitor.wait_for_window()
-        if late_transport:
-            force_post_stop = True
-        else:
-            force_post_stop = False
+            if not monitor.is_invalidated() and not monitor.window_expired():
+                monitor.wait_for_window()
+        force_post_stop = False
         monitor.stop_monitor()
         invalidated, forced_post, post_return_stop = monitor.finalize(
             force_post_stop=force_post_stop,

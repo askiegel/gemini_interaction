@@ -103,7 +103,15 @@ class FirstStopFailsRobot(BlockingRobot):
     def stop(self):
         self.stop_calls += 1
         if self.stop_calls == 1:
-            raise RuntimeError("immediate stop unavailable")
+            raise self.stop_error or RuntimeError("immediate stop unavailable")
+        return {"ok": True, "action": "stop"}
+
+
+class FirstStopRejectsRobot(BlockingRobot):
+    def stop(self):
+        self.stop_calls += 1
+        if self.stop_calls == 1:
+            return {"ok": False, "error": "stop rejected"}
         return {"ok": True, "action": "stop"}
 
 
@@ -371,7 +379,7 @@ def test_unsafe_transition_after_http_return_stops_before_window_end():
     assert robot.stop_calls == 2
 
 
-def test_transport_still_pending_at_window_end_is_stopped_and_not_extended():
+def test_normal_synchronous_transport_completion_after_window_succeeds():
     robot = BlockingRobot()
     state = snapshot()
     world, behavior, worker, result_box = run_blocked_turn(state, robot)
@@ -380,9 +388,112 @@ def test_transport_still_pending_at_window_end_is_stopped_and_not_extended():
     robot.release_motion.set()
     worker.join(timeout=1.0)
     result = result_box[0]
+    assert result["ok"] is True
+    assert result["generation_invalidated"] is False
+    assert result["reason"] != "turn_window_expired"
+    assert result["deadline_stop_attempted"] is True
+    assert result["normal_completion"] is True
+    assert result["completed_after_deadline"] is True
+    assert result["stop_count"] == 1
+    assert robot.stop_calls == 1
+
+
+def test_unsafe_transition_during_transport_completion_wait_stops_and_reasserts():
+    robot = BlockingRobot()
+    state = snapshot()
+    world, behavior, worker, result_box = run_blocked_turn(state, robot)
+    wait_for_stop(robot, 1)
+    state["sectors"]["left"]["state"] = "CAUTION"
+    wait_for_stop(robot, 2)
+    robot.release_motion.set()
+    worker.join(timeout=1.0)
+    result = result_box[0]
     assert result["generation_invalidated"] is True
-    assert result["monitor_reason"] == "turn_window_expired"
-    assert result["stop_count"] == 2
+    assert result["monitor_reason"] == "turn_side_not_clear"
+    assert result["stop_count"] == 3
+    assert robot.stop_calls == 3
+
+
+def test_operator_stop_during_transport_completion_wait_reasserts():
+    robot = BlockingRobot()
+    state = snapshot()
+    world, behavior, worker, result_box = run_blocked_turn(state, robot)
+    wait_for_stop(robot, 1)
+    stop_result = behavior._execute_stop()
+    assert stop_result["ok"] is True
+    assert robot.stop_calls == 2
+    robot.release_motion.set()
+    worker.join(timeout=1.0)
+    result = result_box[0]
+    assert result["generation_invalidated"] is True
+    assert result["monitor_reason"] == "operator_stop"
+    assert result["stop_count"] == 3
+    assert robot.stop_calls == 3
+
+
+def test_transport_completion_timeout_is_distinct_and_reasserted(monkeypatch):
+    monkeypatch.setattr(
+        behavior_manager_module._GuardedTurnMonitor,
+        "TRANSPORT_COMPLETION_ALLOWANCE_SECONDS",
+        0.10,
+    )
+    robot = BlockingRobot()
+    state = snapshot()
+    world, behavior, worker, result_box = run_blocked_turn(state, robot)
+    wait_for_stop(robot, 2)
+    assert robot.release_motion.is_set() is False
+    robot.release_motion.set()
+    worker.join(timeout=1.0)
+    result = result_box[0]
+    assert result["ok"] is False
+    assert result["generation_invalidated"] is True
+    assert result["monitor_reason"] == "transport_completion_timeout"
+    assert result["transport_completion_timed_out"] is True
+    assert result["stop_count"] == 3
+    assert robot.stop_calls == 3
+
+
+def test_failed_deadline_stop_response_invalidates_and_reasserts():
+    robot = FirstStopRejectsRobot()
+    state = snapshot()
+    world, behavior, worker, result_box = run_blocked_turn(state, robot)
+    wait_for_stop(robot, 1)
+    robot.release_motion.set()
+    worker.join(timeout=1.0)
+    result = result_box[0]
+    assert result["ok"] is False
+    assert result["generation_invalidated"] is True
+    assert result["monitor_reason"] == "deadline_stop_failed"
+    assert result["reason"] == "deadline_stop_failed"
+    assert result["normal_completion"] is False
+    assert result["deadline_stop_result"] == {
+        "ok": False,
+        "error": "stop rejected",
+    }
+    assert result["stop_fallback_attempted"] is True
+    assert result["stop_fallback_result"]["ok"] is True
+    assert len(robot.motion_calls) == 1
+    assert robot.stop_calls == 2
+
+
+def test_failed_deadline_stop_exception_is_json_safe_and_reasserted():
+    error = RuntimeError("deadline stop unavailable")
+    robot = FirstStopFailsRobot(stop_error=error)
+    state = snapshot()
+    world, behavior, worker, result_box = run_blocked_turn(state, robot)
+    wait_for_stop(robot, 1)
+    robot.release_motion.set()
+    worker.join(timeout=1.0)
+    result = result_box[0]
+    assert result["ok"] is False
+    assert result["generation_invalidated"] is True
+    assert result["monitor_reason"] == "deadline_stop_failed"
+    assert result["normal_completion"] is False
+    assert result["deadline_stop_error"] == str(error)
+    assert result["deadline_stop_error_type"] == "RuntimeError"
+    assert result["stop_fallback_attempted"] is True
+    assert result["stop_fallback_result"]["ok"] is True
+    json.dumps(result)
     assert robot.stop_calls == 2
 
 
