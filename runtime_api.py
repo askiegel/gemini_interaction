@@ -2,6 +2,7 @@
 
 import argparse
 import json
+import math
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Dict
@@ -389,6 +390,7 @@ class RuntimeAPIHandler(BaseHTTPRequestHandler):
         path = urlparse(self.path).path
 
         supported_paths = {
+            "/guarded-turn",
             "/missions",
             "/network/connect",
             "/network/disconnect",
@@ -407,6 +409,61 @@ class RuntimeAPIHandler(BaseHTTPRequestHandler):
 
         try:
             request_data = self.require_json_request()
+
+            if path == "/guarded-turn":
+                required_fields = {
+                    "direction",
+                    "angular_speed",
+                    "duration",
+                }
+                if set(request_data) != required_fields:
+                    raise ValueError(
+                        "guarded-turn requires exactly direction, "
+                        "angular_speed, and duration."
+                    )
+
+                direction = request_data["direction"]
+                angular_speed = request_data["angular_speed"]
+                duration = request_data["duration"]
+                if (
+                    not isinstance(direction, str)
+                    or direction not in {"LEFT", "RIGHT"}
+                ):
+                    raise ValueError(
+                        "direction must be exactly LEFT or RIGHT."
+                    )
+                if (
+                    isinstance(angular_speed, bool)
+                    or not isinstance(angular_speed, (int, float))
+                    or not math.isfinite(angular_speed)
+                ):
+                    raise ValueError(
+                        "angular_speed must be a finite number."
+                    )
+                if (
+                    isinstance(duration, bool)
+                    or not isinstance(duration, (int, float))
+                    or not math.isfinite(duration)
+                ):
+                    raise ValueError(
+                        "duration must be a finite number."
+                    )
+
+                runtime = self.server.runtime
+                worker = getattr(runtime, "lidar_worker", None)
+                producer_session = (
+                    worker.session
+                    if worker is not None
+                    else None
+                )
+                result = runtime.behavior_manager.execute_guarded_turn(
+                    direction,
+                    angular_speed,
+                    duration,
+                    expected_lidar_session=producer_session,
+                )
+                self.send_json(200, result)
+                return
 
             if path == "/network/connect":
                 ssid = request_data.get("ssid")
