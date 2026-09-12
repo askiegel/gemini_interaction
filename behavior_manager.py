@@ -380,8 +380,10 @@ class _GuardedTurnMonitor:
 
 
 class BehaviorManager:
-    SEARCH_TURN_SPEED = 0.40
-    SEARCH_TURN_SECONDS = 0.35
+    SEARCH_TURN_SPEED = 0.30
+    SEARCH_TURN_SECONDS = 1.0
+    SEARCH_MAX_TURN_CHUNKS = 3
+    SEARCH_DIRECTION = "LEFT"
 
     CENTER_TURN_SPEED = 0.60
     CENTER_TURN_SECONDS = 0.40
@@ -968,9 +970,141 @@ class BehaviorManager:
                 ),
             }
 
-        return self._execute_find_object_cycle(
-            target_name=target_name,
-            cycle_number=1,
+        return self._execute_guarded_find_search(target_name)
+
+    def _current_lidar_session(self):
+        provider = getattr(self, "lidar_session_provider", None)
+        if callable(provider):
+            try:
+                return provider()
+            except Exception:
+                return None
+        return getattr(self, "lidar_session", None)
+
+    @staticmethod
+    def _target_is_fresh_and_acquired(target):
+        return (
+            isinstance(target, dict)
+            and target.get("found") is True
+            and target.get("stale") is not True
+        )
+
+    def _execute_guarded_find_search(self, target_name):
+        """Search in independent guarded turn chunks with camera rechecks."""
+        base = {
+            "ok": False,
+            "executed": False,
+            "completed": False,
+            "behavior": "FIND_OBJECT",
+            "target": target_name,
+            "target_found": False,
+            "search_exhausted": False,
+            "turn_chunks_attempted": 0,
+            "turn_chunks_completed": 0,
+            "maximum_turn_chunks": self.SEARCH_MAX_TURN_CHUNKS,
+            "turn_angular_speed": self.SEARCH_TURN_SPEED,
+            "turn_duration": self.SEARCH_TURN_SECONDS,
+            "search_direction": self.SEARCH_DIRECTION,
+            "last_guarded_turn_result": None,
+            "stop_reason": None,
+        }
+
+        for _chunk_number in range(self.SEARCH_MAX_TURN_CHUNKS + 1):
+            try:
+                target = self._get_target_observation(target_name)
+            except Exception as exc:
+                return dict(
+                    base,
+                    reason="perception_error",
+                    error=str(exc),
+                    error_type=type(exc).__name__,
+                )
+
+            if not isinstance(target, dict):
+                return dict(
+                    base,
+                    state="SEARCH_BLOCKED",
+                    reason="invalid_target_observation",
+                )
+
+            if self._target_is_fresh_and_acquired(target):
+                return dict(
+                    base,
+                    ok=True,
+                    completed=True,
+                    executed=base["turn_chunks_attempted"] > 0,
+                    target_found=True,
+                    state="ACQUIRED",
+                    reason=f"Acquired {target_name}.",
+                    target_observation=target,
+                )
+
+            if base["turn_chunks_attempted"] >= self.SEARCH_MAX_TURN_CHUNKS:
+                return dict(
+                    base,
+                    ok=False,
+                    state="SEARCH_EXHAUSTED",
+                    search_exhausted=True,
+                    reason=f"{target_name} not found after bounded search.",
+                    target_observation=target,
+                )
+
+            session = self._current_lidar_session()
+            if session is None:
+                return dict(
+                    base,
+                    state="SEARCH_BLOCKED",
+                    reason="LiDAR producer session is unavailable.",
+                    target_observation=target,
+                )
+
+            base["turn_chunks_attempted"] += 1
+            base["executed"] = True
+            try:
+                guarded_result = self.execute_guarded_turn(
+                    self.SEARCH_DIRECTION,
+                    self.SEARCH_TURN_SPEED,
+                    self.SEARCH_TURN_SECONDS,
+                    expected_lidar_session=session,
+                )
+            except Exception as exc:
+                return dict(
+                    base,
+                    state="SEARCH_BLOCKED",
+                    reason="guarded_turn_exception",
+                    error=str(exc),
+                    error_type=type(exc).__name__,
+                )
+            base["last_guarded_turn_result"] = guarded_result
+
+            if not isinstance(guarded_result, dict):
+                return dict(
+                    base,
+                    state="SEARCH_BLOCKED",
+                    reason="guarded_turn_invalid_result",
+                )
+
+            if (
+                guarded_result.get("ok") is not True
+                or guarded_result.get("permitted") is not True
+            ):
+                return dict(
+                    base,
+                    state="SEARCH_BLOCKED",
+                    reason=guarded_result.get(
+                        "reason", "guarded_turn_failed"
+                    ),
+                    stop_reason=guarded_result.get("reason"),
+                    target_observation=target,
+                )
+
+            base["turn_chunks_completed"] += 1
+
+        return dict(
+            base,
+            state="SEARCH_EXHAUSTED",
+            search_exhausted=True,
+            reason=f"{target_name} not found after bounded search.",
         )
 
     def _get_target_observation(self, target_name):
@@ -1008,21 +1142,7 @@ class BehaviorManager:
         target_name,
         cycle_number,
     ):
-        return self._execute_visual_servo_cycle(
-            behavior="FIND_OBJECT",
-            target_name=target_name,
-            cycle_number=cycle_number,
-            stop_area=self.FIND_ARRIVAL_AREA,
-            search_turn_speed=self.SEARCH_TURN_SPEED,
-            search_turn_seconds=self.SEARCH_TURN_SECONDS,
-            center_turn_speed=self.CENTER_TURN_SPEED,
-            center_turn_seconds=self.CENTER_TURN_SECONDS,
-            forward_speed=self.FIND_FORWARD_SPEED,
-            forward_seconds=self.FIND_FORWARD_SECONDS,
-            complete_when_close=True,
-            close_state="ARRIVED",
-            close_reason=f"Arrived at {target_name}.",
-        )
+        return self._execute_guarded_find_search(target_name)
 
     @staticmethod
     def _clamp(value, minimum, maximum):
@@ -1450,6 +1570,9 @@ class BehaviorManager:
         loops internally. The CognitiveRuntime decides whether another
         cycle should run.
         """
+        if behavior == "FIND_OBJECT":
+            return self._execute_guarded_find_search(target_name)
+
         try:
             if (
                 behavior == "FOLLOW_PERSON"

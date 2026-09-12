@@ -105,6 +105,9 @@ class CognitiveRuntime:
                 expected_session=self.lidar_worker.session,
                 stop_callback=self.robot_client.stop,
             )
+            self.behavior_manager.lidar_session_provider = (
+                lambda: self.lidar_worker.session
+            )
             configure = getattr(self.robot_client, "configure_forward_interlock", None)
             if callable(configure):
                 configure(self.forward_interlock)
