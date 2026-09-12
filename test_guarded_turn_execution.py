@@ -1,7 +1,10 @@
 """Offline tests for the explicit guarded bounded-turn execution boundary."""
 
 import json
+import threading
+import time
 
+import behavior_manager as behavior_manager_module
 from behavior_manager import BehaviorManager
 from local_obstacle_policy import recommend_local_avoidance
 
@@ -64,6 +67,43 @@ class FakeRobot:
         self.stop_calls += 1
         if self.stop_error:
             raise self.stop_error
+        return {"ok": True, "action": "stop"}
+
+
+class BlockingRobot(FakeRobot):
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.motion_started = threading.Event()
+        self.release_motion = threading.Event()
+
+    def motion(self, **payload):
+        self.motion_calls.append(payload)
+        self.motion_started.set()
+        self.release_motion.wait(timeout=2.0)
+        if self.error:
+            raise self.error
+        return self.result
+
+
+class ReturningRobot(FakeRobot):
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.motion_started = threading.Event()
+        self.motion_returned = threading.Event()
+
+    def motion(self, **payload):
+        self.motion_calls.append(payload)
+        self.motion_started.set()
+        result = self.result
+        self.motion_returned.set()
+        return result
+
+
+class FirstStopFailsRobot(BlockingRobot):
+    def stop(self):
+        self.stop_calls += 1
+        if self.stop_calls == 1:
+            raise RuntimeError("immediate stop unavailable")
         return {"ok": True, "action": "stop"}
 
 
@@ -231,6 +271,385 @@ def test_advisory_recommendation_does_not_execute_a_turn():
     )
     assert recommendation["recommendation"] == "FORWARD"
     assert robot.motion_calls == []
+
+
+def run_blocked_turn(state, robot, direction="LEFT"):
+    world = FakeWorldModel(state)
+    behavior = BehaviorManager(robot_client=robot, world_model=world)
+    result_box = []
+    worker = threading.Thread(
+        target=lambda: result_box.append(
+            behavior.execute_guarded_turn(
+                direction,
+                0.5,
+                0.4,
+                expected_lidar_session=SESSION,
+                now=10.0,
+            )
+        )
+    )
+    worker.start()
+    assert robot.motion_started.wait(timeout=1.0)
+    return world, behavior, worker, result_box
+
+
+def wait_for_stop(robot, expected=1):
+    deadline = time.monotonic() + 1.0
+    while robot.stop_calls < expected and time.monotonic() < deadline:
+        time.sleep(0.005)
+    assert robot.stop_calls >= expected
+
+
+def test_left_and_right_clear_turns_complete_without_spurious_stop():
+    for direction in ("LEFT", "RIGHT"):
+        robot = BlockingRobot()
+        world, behavior, worker, result_box = run_blocked_turn(
+            snapshot(), robot, direction,
+        )
+        robot.release_motion.set()
+        worker.join(timeout=1.0)
+        result = result_box[0]
+        assert result["ok"] is True
+        assert result["active_turn"] is False
+        assert result["pending_turn"] is False
+        assert result["generation_invalidated"] is False
+        assert result["monitor_running"] is False
+        assert robot.stop_calls == 0
+        assert world.calls
+
+
+def test_early_http_return_keeps_monitor_alive_until_duration_window():
+    robot = ReturningRobot()
+    state = snapshot()
+    world = FakeWorldModel(state)
+    behavior = BehaviorManager(robot_client=robot, world_model=world)
+    result_box = []
+    worker = threading.Thread(
+        target=lambda: result_box.append(
+            behavior.execute_guarded_turn(
+                "LEFT", 0.5, 0.4,
+                expected_lidar_session=SESSION,
+                now=10.0,
+            )
+        )
+    )
+    worker.start()
+    assert robot.motion_returned.wait(timeout=1.0)
+    time.sleep(0.05)
+    assert worker.is_alive()
+    assert robot.stop_calls == 0
+    worker.join(timeout=1.0)
+    result = result_box[0]
+    assert result["window_complete"] is True
+    assert result["monitor_running"] is False
+    assert result["stop_count"] == 0
+
+
+def test_unsafe_transition_after_http_return_stops_before_window_end():
+    robot = ReturningRobot()
+    state = snapshot()
+    world = FakeWorldModel(state)
+    behavior = BehaviorManager(robot_client=robot, world_model=world)
+    result_box = []
+    worker = threading.Thread(
+        target=lambda: result_box.append(
+            behavior.execute_guarded_turn(
+                "LEFT", 0.5, 0.4,
+                expected_lidar_session=SESSION,
+                now=10.0,
+            )
+        )
+    )
+    worker.start()
+    assert robot.motion_returned.wait(timeout=1.0)
+    state["sectors"]["left"]["state"] = "BLOCKED"
+    wait_for_stop(robot, 1)
+    worker.join(timeout=1.0)
+    result = result_box[0]
+    assert result["generation_invalidated"] is True
+    assert result["stop_count"] == 2
+    assert robot.stop_calls == 2
+
+
+def test_transport_still_pending_at_window_end_is_stopped_and_not_extended():
+    robot = BlockingRobot()
+    state = snapshot()
+    world, behavior, worker, result_box = run_blocked_turn(state, robot)
+    wait_for_stop(robot, 1)
+    assert robot.release_motion.is_set() is False
+    robot.release_motion.set()
+    worker.join(timeout=1.0)
+    result = result_box[0]
+    assert result["generation_invalidated"] is True
+    assert result["monitor_reason"] == "turn_window_expired"
+    assert result["stop_count"] == 2
+    assert robot.stop_calls == 2
+
+
+def test_only_one_guarded_turn_owns_the_slot_at_a_time():
+    robot = BlockingRobot()
+    state = snapshot()
+    world = FakeWorldModel(state)
+    behavior = BehaviorManager(robot_client=robot, world_model=world)
+    first_result = []
+    first = threading.Thread(
+        target=lambda: first_result.append(
+            behavior.execute_guarded_turn(
+                "LEFT", 0.5, 0.4,
+                expected_lidar_session=SESSION,
+                now=10.0,
+            )
+        )
+    )
+    first.start()
+    assert robot.motion_started.wait(timeout=1.0)
+    second = behavior.execute_guarded_turn(
+        "RIGHT", 0.5, 0.4,
+        expected_lidar_session=SESSION,
+        now=10.0,
+    )
+    assert second["permitted"] is False
+    assert second["reason"] == "turn_already_active"
+    assert second["transport_attempted"] is False
+    assert len(robot.motion_calls) == 1
+    robot.release_motion.set()
+    first.join(timeout=1.0)
+    assert first_result[0]["generation_invalidated"] is False
+    third = behavior.execute_guarded_turn(
+        "RIGHT", 0.5, 0.4,
+        expected_lidar_session=SESSION,
+        now=10.0,
+    )
+    assert third["ok"] is True
+    assert len(robot.motion_calls) == 2
+
+
+def test_operator_stop_invalidates_pending_turn_and_reasserts_after_return():
+    robot = BlockingRobot()
+    state = snapshot()
+    world = FakeWorldModel(state)
+    behavior = BehaviorManager(robot_client=robot, world_model=world)
+    result_box = []
+    worker = threading.Thread(
+        target=lambda: result_box.append(
+            behavior.execute_guarded_turn(
+                "LEFT", 0.5, 0.4,
+                expected_lidar_session=SESSION,
+                now=10.0,
+            )
+        )
+    )
+    worker.start()
+    assert robot.motion_started.wait(timeout=1.0)
+    stop_result = behavior._execute_stop()
+    assert stop_result["ok"] is True
+    assert robot.stop_calls == 1
+    robot.release_motion.set()
+    worker.join(timeout=1.0)
+    result = result_box[0]
+    assert result["generation_invalidated"] is True
+    assert result["monitor_reason"] == "operator_stop"
+    assert result["active_turn"] is False
+    assert result["pending_turn"] is False
+    assert robot.stop_calls == 2
+
+
+def test_operator_stop_before_transport_boundary_prevents_motion(monkeypatch):
+    robot = FakeRobot()
+    state = snapshot()
+    world = FakeWorldModel(state)
+    behavior = BehaviorManager(robot_client=robot, world_model=world)
+    entered = threading.Event()
+    release = threading.Event()
+    original = behavior_manager_module._GuardedTurnMonitor.begin_transport
+
+    def gated_begin(monitor, dispatch_started):
+        entered.set()
+        release.wait(timeout=1.0)
+        return original(monitor, dispatch_started)
+
+    monkeypatch.setattr(
+        behavior_manager_module._GuardedTurnMonitor,
+        "begin_transport",
+        gated_begin,
+    )
+    result_box = []
+    worker = threading.Thread(
+        target=lambda: result_box.append(
+            behavior.execute_guarded_turn(
+                "LEFT", 0.5, 0.4,
+                expected_lidar_session=SESSION,
+                now=10.0,
+            )
+        )
+    )
+    worker.start()
+    assert entered.wait(timeout=1.0)
+    assert robot.motion_calls == []
+    behavior._execute_stop()
+    assert robot.stop_calls == 1
+    release.set()
+    worker.join(timeout=1.0)
+    result = result_box[0]
+    assert result["ok"] is False
+    assert result["transport_attempted"] is False
+    assert result["generation_invalidated"] is True
+    assert result["monitor_reason"] == "operator_stop"
+    assert result["pending_turn"] is False
+    assert result["active_turn"] is False
+    assert result["stop_count"] == 1
+    assert robot.motion_calls == []
+    next_result = behavior.execute_guarded_turn(
+        "RIGHT", 0.5, 0.4,
+        expected_lidar_session=SESSION,
+        now=10.0,
+    )
+    assert next_result["ok"] is True
+
+
+def test_lidar_invalidation_before_transport_boundary_prevents_motion(monkeypatch):
+    robot = FakeRobot()
+    state = snapshot()
+    world = FakeWorldModel(state)
+    behavior = BehaviorManager(robot_client=robot, world_model=world)
+    entered = threading.Event()
+    release = threading.Event()
+    original = behavior_manager_module._GuardedTurnMonitor.begin_transport
+
+    def gated_begin(monitor, dispatch_started):
+        entered.set()
+        release.wait(timeout=1.0)
+        return original(monitor, dispatch_started)
+
+    monkeypatch.setattr(
+        behavior_manager_module._GuardedTurnMonitor,
+        "begin_transport",
+        gated_begin,
+    )
+    result_box = []
+    worker = threading.Thread(
+        target=lambda: result_box.append(
+            behavior.execute_guarded_turn(
+                "LEFT", 0.5, 0.4,
+                expected_lidar_session=SESSION,
+                now=10.0,
+            )
+        )
+    )
+    worker.start()
+    assert entered.wait(timeout=1.0)
+    state["sectors"]["left"]["state"] = "BLOCKED"
+    wait_for_stop(robot, 1)
+    release.set()
+    worker.join(timeout=1.0)
+    result = result_box[0]
+    assert result["ok"] is False
+    assert result["transport_attempted"] is False
+    assert result["generation_invalidated"] is True
+    assert result["monitor_reason"] == "turn_side_not_clear"
+    assert result["stop_count"] == 1
+    assert robot.stop_calls == 1
+    assert robot.motion_calls == []
+
+
+def test_transport_after_atomic_boundary_retains_two_stop_protection():
+    robot = BlockingRobot()
+    state = snapshot()
+    world, behavior, worker, result_box = run_blocked_turn(state, robot)
+    assert result_box == []
+    state["sectors"]["left"]["state"] = "CAUTION"
+    wait_for_stop(robot, 1)
+    robot.release_motion.set()
+    worker.join(timeout=1.0)
+    result = result_box[0]
+    assert result["transport_began"] is True
+    assert result["transport_attempted"] is True
+    assert result["generation_invalidated"] is True
+    assert robot.stop_calls == 2
+
+
+def test_unsafe_transition_while_motion_pending_gets_immediate_and_post_return_stops():
+    robot = BlockingRobot()
+    state = snapshot()
+    world, behavior, worker, result_box = run_blocked_turn(state, robot)
+    state["sectors"]["left"]["state"] = "CAUTION"
+    wait_for_stop(robot, 1)
+    assert robot.release_motion.is_set() is False
+    assert robot.stop_calls == 1
+    robot.release_motion.set()
+    worker.join(timeout=1.0)
+    result = result_box[0]
+    assert result["generation_invalidated"] is True
+    assert result["inhibited"] is True
+    assert result["stop_count"] == 2
+    assert robot.stop_calls == 2
+    assert result["active_turn"] is False
+    assert result["pending_turn"] is False
+
+
+def test_invalidated_turn_is_not_replayed_after_lidar_returns_clear():
+    robot = BlockingRobot()
+    state = snapshot()
+    world, behavior, worker, result_box = run_blocked_turn(state, robot)
+    state["sectors"]["left"]["state"] = "BLOCKED"
+    wait_for_stop(robot, 1)
+    state["sectors"]["left"]["state"] = "CLEAR"
+    robot.release_motion.set()
+    worker.join(timeout=1.0)
+    result = result_box[0]
+    assert result["generation_invalidated"] is True
+    assert robot.motion_calls and len(robot.motion_calls) == 1
+    assert robot.stop_calls == 2
+
+
+def test_front_blocked_alone_does_not_stop_clear_escape_turn():
+    robot = BlockingRobot()
+    world, behavior, worker, result_box = run_blocked_turn(
+        snapshot(front="BLOCKED"), robot,
+    )
+    robot.release_motion.set()
+    worker.join(timeout=1.0)
+    assert result_box[0]["ok"] is True
+    assert robot.stop_calls == 0
+
+
+def test_stale_session_invalid_and_malformed_states_stop_during_turn():
+    mutations = (
+        lambda state: state.update(age_at_receipt_seconds=0.31),
+        lambda state: state.update(producer_session="other"),
+        lambda state: state.update(available=False, valid=False),
+        lambda state: state["sectors"].update(left=[]),
+        lambda state: state["sectors"]["left"].update(state="UNKNOWN"),
+        lambda state: state["sectors"].update(front=[]),
+        lambda state: state["sectors"]["front"].update(state="UNKNOWN"),
+    )
+    for mutate in mutations:
+        robot = BlockingRobot()
+        state = snapshot()
+        world, behavior, worker, result_box = run_blocked_turn(state, robot)
+        mutate(state)
+        wait_for_stop(robot, 1)
+        robot.release_motion.set()
+        worker.join(timeout=1.0)
+        result = result_box[0]
+        assert result["generation_invalidated"] is True
+        assert robot.stop_calls == 2
+
+
+def test_monitor_stop_exception_is_captured_and_cleanup_completes():
+    robot = FirstStopFailsRobot()
+    state = snapshot()
+    world, behavior, worker, result_box = run_blocked_turn(state, robot)
+    state["sectors"]["front_left"]["state"] = "CAUTION"
+    wait_for_stop(robot, 1)
+    robot.release_motion.set()
+    worker.join(timeout=1.0)
+    result = result_box[0]
+    assert result["generation_invalidated"] is True
+    assert result["monitor_running"] is False
+    assert result["stop_count"] == 2
+    assert result["stop_events"][0]["error"] == "immediate stop unavailable"
+    assert robot.stop_calls == 2
 
 
 def test_all_guarded_turn_result_variants_are_json_serializable():

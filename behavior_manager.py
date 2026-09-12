@@ -1,8 +1,286 @@
+import threading
 import time
 
 from robot_bridge.client import RobotBridgeClient
 from guarded_turn_policy import validate_guarded_turn
 from target_lock import TargetLock
+
+
+class _GuardedTurnMonitor:
+    """Monitor one explicit bounded turn without owning transport locks."""
+
+    INTERVAL_SECONDS = 0.05
+
+    def __init__(
+        self,
+        *,
+        world_model,
+        robot,
+        direction,
+        angular_speed,
+        duration,
+        expected_session,
+        generation,
+        initial_validation,
+        now=None,
+    ):
+        self.world_model = world_model
+        self.robot = robot
+        self.direction = direction
+        self.angular_speed = angular_speed
+        self.duration = duration
+        self.expected_session = expected_session
+        self.generation = generation
+        self.now = now
+        self._lock = threading.RLock()
+        self._stop = threading.Event()
+        self._thread = None
+        self._pending = True
+        self._active = False
+        self._dispatch_started = None
+        self._deadline = None
+        self._transport_began = False
+        self._window_complete = False
+        self._late_transport = False
+        self._transport_returned = False
+        self._transport_accepted = False
+        self._inhibited = False
+        self._invalidated = False
+        self._reason = initial_validation.get("reason")
+        self._validation = dict(initial_validation)
+        self._last_stop_result = None
+        self._last_stop_error = None
+        self._last_stop_error_type = None
+        self._stop_count = 0
+        self._stop_events = []
+
+    @property
+    def running(self):
+        return bool(self._thread and self._thread.is_alive())
+
+    def start(self):
+        if self.world_model is None:
+            return
+        self._thread = threading.Thread(
+            target=self._run,
+            name="guarded-turn-monitor",
+            daemon=True,
+        )
+        self._thread.start()
+
+    def begin_transport(self, dispatch_started):
+        with self._lock:
+            if self._invalidated:
+                return False
+            self._pending = False
+            self._active = True
+            self._dispatch_started = dispatch_started
+            self._deadline = dispatch_started + self.duration
+            self._transport_began = True
+            return True
+
+    def cancel(self, reason="operator_stop"):
+        """Invalidate this generation without dispatching a duplicate STOP."""
+        with self._lock:
+            was_invalidated = self._invalidated
+            self._invalidated = True
+            self._inhibited = True
+            self._reason = reason
+            return not was_invalidated
+
+    def is_invalidated(self):
+        with self._lock:
+            return self._invalidated
+
+    def mark_transport_returned(self, accepted):
+        with self._lock:
+            self._transport_returned = True
+            self._transport_accepted = bool(accepted)
+
+    def window_expired(self):
+        with self._lock:
+            return self._deadline is not None and time.monotonic() >= self._deadline
+
+    def wait_for_window(self):
+        """Keep the monitor alive through the approved monotonic window."""
+        while not self._stop.is_set():
+            with self._lock:
+                if self._invalidated:
+                    return False
+                deadline = self._deadline
+            if deadline is None:
+                return False
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                with self._lock:
+                    self._window_complete = True
+                return True
+            self._stop.wait(min(remaining, self.INTERVAL_SECONDS))
+        return False
+
+    def mark_late_transport(self):
+        with self._lock:
+            self._late_transport = True
+            self._window_complete = True
+            self._inhibited = True
+            self._reason = "transport_returned_after_window"
+
+    def _read_validation(self):
+        try:
+            state = self.world_model.get_lidar_obstacles(
+                expected_session=self.expected_session,
+                now=self.now,
+            )
+        except Exception:
+            state = None
+        return validate_guarded_turn(
+            self.direction,
+            self.angular_speed,
+            self.duration,
+            state,
+            expected_session=self.expected_session,
+            now=self.now,
+        )
+
+    def _run(self):
+        while not self._stop.is_set():
+            try:
+                validation = self._read_validation()
+            except Exception as exc:
+                validation = {
+                    "permitted": False,
+                    "reason": "monitor_validation_error",
+                    "producer_session": self.expected_session,
+                    "effective_age_seconds": None,
+                    "front_state": "UNKNOWN",
+                    "left_state": "UNKNOWN",
+                    "front_left_state": "UNKNOWN",
+                    "right_state": "UNKNOWN",
+                    "front_right_state": "UNKNOWN",
+                    "monitor_error": str(exc),
+                }
+            should_stop = False
+            with self._lock:
+                self._validation = validation
+                deadline_expired = (
+                    self._active
+                    and self._deadline is not None
+                    and time.monotonic() >= self._deadline
+                )
+                if deadline_expired:
+                    self._window_complete = True
+                if not validation.get("permitted"):
+                    self._reason = validation.get("reason")
+                    self._inhibited = True
+                    if not self._invalidated and (self._pending or self._active):
+                        self._invalidated = True
+                        should_stop = True
+                elif (
+                    deadline_expired
+                    and not self._transport_returned
+                    and not self._invalidated
+                ):
+                    self._invalidated = True
+                    self._inhibited = True
+                    self._reason = "turn_window_expired"
+                    should_stop = True
+            if should_stop:
+                self._dispatch_stop()
+            self._stop.wait(self.INTERVAL_SECONDS)
+
+    def _dispatch_stop(self):
+        """Issue ungated STOP with no monitor lock held across transport."""
+        result = None
+        error = None
+        error_type = None
+        try:
+            result = self.robot.stop()
+            if not isinstance(result, dict) or result.get("ok") is not True:
+                error = str(result)
+        except Exception as exc:
+            error = str(exc)
+            error_type = type(exc).__name__
+        with self._lock:
+            self._stop_count += 1
+            self._last_stop_result = result
+            self._last_stop_error = error
+            self._last_stop_error_type = error_type
+            self._stop_events.append({
+                "result": result,
+                "error": error,
+                "error_type": error_type,
+            })
+        return result, error, error_type
+
+    def record_external_stop(self, result, error=None, error_type=None):
+        """Record an operator STOP that already served immediate cancellation."""
+        if error is None and (
+            not isinstance(result, dict) or result.get("ok") is not True
+        ):
+            error = str(result)
+        with self._lock:
+            self._stop_count += 1
+            self._last_stop_result = result
+            self._last_stop_error = error
+            self._last_stop_error_type = error_type
+            self._stop_events.append({
+                "result": result,
+                "error": error,
+                "error_type": error_type,
+                "source": "operator",
+            })
+
+    def stop_monitor(self):
+        self._stop.set()
+        thread = self._thread
+        if thread is not None and thread is not threading.current_thread():
+            thread.join()
+
+    def finalize(self, *, force_post_stop=False):
+        with self._lock:
+            invalidated = self._invalidated
+            self._pending = False
+            self._active = False
+            if invalidated or force_post_stop:
+                self._inhibited = True
+            transport_began = self._transport_began
+        post_return = None
+        if transport_began and (invalidated or force_post_stop):
+            post_return = self._dispatch_stop()
+        return invalidated, force_post_stop, post_return
+
+    def status(self):
+        with self._lock:
+            validation = dict(self._validation)
+            return {
+                "monitor_configured": self.world_model is not None,
+                "monitor_running": self.running,
+                "direction": self.direction,
+                "pending_turn": self._pending,
+                "active_turn": self._active,
+                "inhibited": self._inhibited,
+                "dispatch_started_monotonic": self._dispatch_started,
+                "window_complete": self._window_complete,
+                "late_transport": self._late_transport,
+                "transport_returned": self._transport_returned,
+                "transport_accepted": self._transport_accepted,
+                "transport_began": self._transport_began,
+                "generation": self.generation,
+                "generation_invalidated": self._invalidated,
+                "reason": self._reason,
+                "producer_session": validation.get("producer_session"),
+                "effective_age_seconds": validation.get("effective_age_seconds"),
+                "front_state": validation.get("front_state", "UNKNOWN"),
+                "left_state": validation.get("left_state", "UNKNOWN"),
+                "front_left_state": validation.get("front_left_state", "UNKNOWN"),
+                "right_state": validation.get("right_state", "UNKNOWN"),
+                "front_right_state": validation.get("front_right_state", "UNKNOWN"),
+                "last_stop_result": self._last_stop_result,
+                "last_stop_error": self._last_stop_error,
+                "last_stop_error_type": self._last_stop_error_type,
+                "stop_count": self._stop_count,
+                "stop_events": list(self._stop_events),
+            }
 
 
 class BehaviorManager:
@@ -90,6 +368,10 @@ class BehaviorManager:
         )
 
         self._follow_mission_id = None
+        self._guarded_turn_generation = 0
+        self._guarded_turn_slot_lock = threading.Lock()
+        self._guarded_turn_owner_generation = None
+        self._guarded_turn_monitor = None
 
     def simulate(self, mission):
         """
@@ -187,7 +469,22 @@ class BehaviorManager:
             self.target_lock.reset()
 
         self._follow_mission_id = None
-        robot_result = self.robot.stop()
+        with self._guarded_turn_slot_lock:
+            guarded_monitor = self._guarded_turn_monitor
+            if guarded_monitor is not None:
+                guarded_monitor.cancel("operator_stop")
+        try:
+            robot_result = self.robot.stop()
+        except Exception as exc:
+            if guarded_monitor is not None:
+                guarded_monitor.record_external_stop(
+                    None,
+                    str(exc),
+                    type(exc).__name__,
+                )
+            raise
+        if guarded_monitor is not None:
+            guarded_monitor.record_external_stop(robot_result)
 
         return {
             "ok": bool(robot_result.get("ok")),
@@ -197,6 +494,13 @@ class BehaviorManager:
             "reason": "Robot stop command sent.",
             "robot_result": robot_result,
         }
+
+    def _release_guarded_turn(self, monitor):
+        """Release only the slot owned by this completed generation."""
+        with self._guarded_turn_slot_lock:
+            if self._guarded_turn_monitor is monitor:
+                self._guarded_turn_monitor = None
+                self._guarded_turn_owner_generation = None
 
     def execute_guarded_turn(
         self,
@@ -247,12 +551,90 @@ class BehaviorManager:
             stop_fallback_result=None,
             stop_fallback_error=None,
             stop_fallback_error_type=None,
+            pending_turn=False,
+            active_turn=False,
+            generation=None,
+            generation_invalidated=False,
+            monitor_configured=self.world_model is not None,
+            monitor_running=False,
+            inhibited=not validation.get("permitted"),
+            last_stop_result=None,
+            last_stop_error=None,
+            last_stop_error_type=None,
+            stop_count=0,
+            stop_events=[],
         )
+
+        with self._guarded_turn_slot_lock:
+            slot_occupied = self._guarded_turn_owner_generation is not None
+        if slot_occupied:
+            result.update(
+                permitted=False,
+                reason="turn_already_active",
+                validation_reason="turn_already_active",
+                inhibited=True,
+            )
+            return result
 
         if not validation.get("permitted"):
             return result
 
+        with self._guarded_turn_slot_lock:
+            if self._guarded_turn_owner_generation is not None:
+                result.update(
+                    permitted=False,
+                    reason="turn_already_active",
+                    validation_reason="turn_already_active",
+                    inhibited=True,
+                )
+                return result
+            self._guarded_turn_generation += 1
+            generation = self._guarded_turn_generation
+            monitor = _GuardedTurnMonitor(
+                world_model=self.world_model,
+                robot=self.robot,
+                direction=direction,
+                angular_speed=angular_speed,
+                duration=validation["duration"],
+                expected_session=expected_lidar_session,
+                generation=generation,
+                initial_validation=validation,
+                now=now,
+            )
+            self._guarded_turn_owner_generation = generation
+            self._guarded_turn_monitor = monitor
+        result["generation"] = generation
+        result["pending_turn"] = True
+        result["monitor_configured"] = True
+        result["monitor_running"] = True
+        monitor.start()
+        dispatch_started = time.monotonic()
+        transport_began = monitor.begin_transport(dispatch_started)
+        if not transport_began:
+            monitor.stop_monitor()
+            invalidated, forced_post, post_return_stop = monitor.finalize()
+            status = monitor.status()
+            self._release_guarded_turn(monitor)
+            result.update(status)
+            result.update(
+                ok=False,
+                forwarded=False,
+                confirmed_forwarded=False,
+                transport_attempted=False,
+                reason=status["reason"] or "turn_cancelled_before_transport",
+                validation_reason=status["reason"] or "turn_cancelled_before_transport",
+                generation_invalidated=invalidated,
+                pending_turn=False,
+                active_turn=False,
+            )
+            result["monitor_reason"] = status["reason"]
+            return result
+        result["dispatch_started_monotonic"] = dispatch_started
+        result["active_turn"] = True
+        result["pending_turn"] = False
         result["transport_attempted"] = True
+        transport_result = None
+        transport_error = None
         try:
             transport_result = self.robot.motion(
                 linear_x=0.0,
@@ -261,46 +643,98 @@ class BehaviorManager:
                 streaming=False,
             )
         except Exception as exc:
-            result["delivery_uncertain"] = True
-            result["transport_error"] = str(exc)
-            result["transport_error_type"] = type(exc).__name__
-            result["stop_fallback_attempted"] = True
-            try:
-                result["stop_fallback_result"] = self.robot.stop()
-            except Exception as stop_exc:
-                result["stop_fallback_error"] = str(stop_exc)
-                result["stop_fallback_error_type"] = type(stop_exc).__name__
-            result.update(
-                reason="transport_exception",
-                transport_result={
-                    "ok": False,
-                    "error": str(exc),
-                },
-            )
-            return result
+            transport_error = exc
 
         transport_ok = (
-            isinstance(transport_result, dict)
+            transport_error is None
+            and isinstance(transport_result, dict)
             and transport_result.get("ok") is True
         )
-        if not transport_ok:
+        monitor.mark_transport_returned(transport_ok)
+        late_transport = False
+        if transport_error is None and transport_ok:
+            if not monitor.is_invalidated():
+                late_transport = monitor.window_expired()
+                if late_transport:
+                    monitor.mark_late_transport()
+                else:
+                    monitor.wait_for_window()
+        if late_transport:
+            force_post_stop = True
+        else:
+            force_post_stop = False
+        monitor.stop_monitor()
+        invalidated, forced_post, post_return_stop = monitor.finalize(
+            force_post_stop=force_post_stop,
+        )
+        status = monitor.status()
+        self._release_guarded_turn(monitor)
+        result.update(status)
+        result["monitor_reason"] = status["reason"]
+        result["pending_turn"] = False
+        result["active_turn"] = False
+        if invalidated:
+            result["inhibited"] = True
+            result["reason"] = status["reason"] or "turn_invalidated"
+        if transport_error is not None:
+            result["delivery_uncertain"] = True
+            result["transport_error"] = str(transport_error)
+            result["transport_error_type"] = type(transport_error).__name__
+            result["reason"] = "transport_exception"
+            result["transport_result"] = {
+                "ok": False,
+                "error": str(transport_error),
+            }
+        else:
+            result["transport_result"] = transport_result
+        if invalidated or forced_post:
+            result["stop_fallback_attempted"] = True
+            result["stop_fallback_result"] = post_return_stop[0]
+            result["stop_fallback_error"] = post_return_stop[1]
+            result["stop_fallback_error_type"] = post_return_stop[2]
+        elif not transport_ok:
             result["delivery_uncertain"] = True
             result["stop_fallback_attempted"] = True
+            fallback_result = None
+            fallback_error = None
+            fallback_error_type = None
             try:
-                result["stop_fallback_result"] = self.robot.stop()
+                fallback_result = self.robot.stop()
+                result["stop_fallback_result"] = fallback_result
+                if not isinstance(fallback_result, dict) or fallback_result.get("ok") is not True:
+                    fallback_error = str(fallback_result)
             except Exception as stop_exc:
-                result["stop_fallback_error"] = str(stop_exc)
-                result["stop_fallback_error_type"] = type(stop_exc).__name__
+                fallback_error = str(stop_exc)
+                fallback_error_type = type(stop_exc).__name__
+                result["stop_fallback_error"] = fallback_error
+                result["stop_fallback_error_type"] = fallback_error_type
+            if fallback_error is not None:
+                result["stop_fallback_error"] = fallback_error
+                result["stop_fallback_error_type"] = fallback_error_type
+            result["last_stop_result"] = fallback_result
+            result["last_stop_error"] = fallback_error
+            result["last_stop_error_type"] = fallback_error_type
+            result["stop_count"] = 1
+            result["stop_events"] = [{
+                "result": fallback_result,
+                "error": fallback_error,
+                "error_type": fallback_error_type,
+            }]
         result.update(
-            ok=transport_ok,
+            ok=transport_ok and not invalidated and not forced_post,
             forwarded=transport_ok,
             confirmed_forwarded=transport_ok,
-            reason=(
-                validation.get("reason")
-                if transport_ok
-                else "transport_failed"
-            ),
-            transport_result=transport_result,
+            reason=(result["reason"] if invalidated else (
+                "transport_exception"
+                if transport_error is not None
+                else status["reason"]
+                if forced_post
+                else (
+                    validation.get("reason")
+                    if transport_ok
+                    else "transport_failed"
+                )
+            )),
         )
         return result
 
