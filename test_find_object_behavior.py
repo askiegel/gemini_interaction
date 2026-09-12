@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 
 import json
+import math
+
+import pytest
 
 from behavior_manager import BehaviorManager
 from mission_types import create_mission
@@ -129,6 +132,19 @@ def found_target(target="backpack"):
     }
 
 
+def semantic_only_target(target="backpack"):
+    result = found_target(target)
+    result.update(
+        cx=None,
+        cy=None,
+        area=None,
+        bbox=None,
+        image_width=None,
+        image_height=None,
+    )
+    return result
+
+
 def guarded_search_manager(observations, turn_results=None):
     robot = GuardedSearchRobot()
     vision = SequencedVisionAdapter(observations)
@@ -182,6 +198,54 @@ def test_guarded_search_rechecks_camera_after_first_chunk():
     assert len(calls) == 1
     assert calls[0] == ("LEFT", 0.30, 1.0, "session-1")
     assert vision.calls == 2
+
+
+def test_fresh_semantic_only_target_is_not_acquired_immediately():
+    manager, _robot, _vision, calls = guarded_search_manager(
+        [semantic_only_target()] * 4
+    )
+    result = manager.execute(_mission())
+    assert result["target_found"] is False
+    assert result["state"] == "SEARCH_EXHAUSTED"
+    assert result["turn_chunks_attempted"] == 3
+    assert len(calls) == 3
+
+
+def test_semantic_only_target_then_actionable_geometry_is_acquired():
+    manager, _robot, _vision, calls = guarded_search_manager(
+        [semantic_only_target(), found_target()]
+    )
+    result = manager.execute(_mission())
+    assert result["ok"] is True
+    assert result["target_found"] is True
+    assert result["completed"] is True
+    assert result["turn_chunks_attempted"] == 1
+    assert result["turn_chunks_completed"] == 1
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("cx", math.nan),
+        ("cy", math.inf),
+        ("area", 0.0),
+        ("area", -1.0),
+        ("image_width", 0.0),
+        ("image_height", -1.0),
+    ],
+)
+def test_invalid_target_geometry_is_not_acquired(field, value):
+    invalid = found_target()
+    invalid[field] = value
+    manager, _robot, _vision, calls = guarded_search_manager(
+        [invalid, found_target()]
+    )
+    result = manager.execute(_mission())
+    assert result["target_found"] is True
+    assert result["completed"] is True
+    assert result["turn_chunks_attempted"] == 1
+    assert len(calls) == 1
 
 
 def test_guarded_search_stops_after_second_chunk_when_acquired():

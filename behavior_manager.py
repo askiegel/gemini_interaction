@@ -1,3 +1,4 @@
+import math
 import threading
 import time
 
@@ -983,10 +984,25 @@ class BehaviorManager:
 
     @staticmethod
     def _target_is_fresh_and_acquired(target):
+        def finite(value):
+            return (
+                isinstance(value, (int, float))
+                and not isinstance(value, bool)
+                and math.isfinite(value)
+            )
+
         return (
             isinstance(target, dict)
             and target.get("found") is True
             and target.get("stale") is not True
+            and finite(target.get("cx"))
+            and finite(target.get("cy"))
+            and finite(target.get("area"))
+            and target.get("area") > 0
+            and finite(target.get("image_width"))
+            and target.get("image_width") > 0
+            and finite(target.get("image_height"))
+            and target.get("image_height") > 0
         )
 
     def _execute_guarded_find_search(self, target_name):
