@@ -54,6 +54,25 @@ def test_valid_right_turn_is_permitted_with_clear_directional_sectors():
     assert result["angular_z"] == -0.5
 
 
+def test_maximum_one_second_turn_is_permitted():
+    result = turn("LEFT", duration=1.0)
+    assert result["permitted"] is True
+    assert result["duration"] == 1.0
+
+
+def test_existing_half_second_turn_remains_permitted():
+    result = turn("RIGHT", duration=0.5)
+    assert result["permitted"] is True
+    assert result["duration"] == 0.5
+
+
+def test_duration_above_one_second_is_denied_without_clamping():
+    result = turn("LEFT", duration=1.000001)
+    assert result["permitted"] is False
+    assert result["reason"] == "duration_exceeds_limit"
+    assert result["duration"] == 1.000001
+
+
 @pytest.mark.parametrize("direction", [None, "left", [], 1])
 def test_invalid_direction_is_denied(direction):
     assert turn(direction)["permitted"] is False

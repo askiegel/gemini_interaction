@@ -154,6 +154,29 @@ def test_valid_right_forwards_once_with_negative_angular_z():
     assert robot.motion_calls[0]["angular_z"] == -0.5
 
 
+def test_one_second_approved_window_is_forwarded_without_extra_wait(monkeypatch):
+    def finish_window_immediately(monitor):
+        with monitor._lock:
+            monitor._window_complete = True
+        return True
+
+    monkeypatch.setattr(
+        behavior_manager_module._GuardedTurnMonitor,
+        "wait_for_window",
+        finish_window_immediately,
+    )
+    robot = FakeRobot()
+    result = execute(snapshot(), duration=1.0, robot=robot)
+    assert result["ok"] is True
+    assert result["duration"] == 1.0
+    assert robot.motion_calls == [{
+        "linear_x": 0.0,
+        "angular_z": 0.5,
+        "duration": 1.0,
+        "streaming": False,
+    }]
+
+
 def test_front_blocked_with_clear_turn_side_can_forward():
     robot = FakeRobot()
     result = execute(snapshot(front="BLOCKED"), robot=robot)
@@ -197,7 +220,7 @@ def test_stale_unavailable_and_session_mismatch_deny_before_transport():
 
 
 def test_speed_and_duration_bounds_deny_without_transport():
-    for speed, duration in ((1.01, 0.4), (0.5, 0.51), (0.0, 0.4), (0.5, 0.0)):
+    for speed, duration in ((1.01, 0.4), (0.5, 1.01), (0.0, 0.4), (0.5, 0.0)):
         robot = FakeRobot()
         result = execute(snapshot(), speed=speed, duration=duration, robot=robot)
         assert result["permitted"] is False
