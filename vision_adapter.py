@@ -73,6 +73,35 @@ class VisionAdapter:
 
         return data
 
+    def fetch_target_candidates(
+        self,
+        target_label: str,
+    ) -> Dict[str, Any]:
+        """Read the Vision Server's transient target-candidate cache."""
+        marker = "/detections/latest"
+        if marker in self.vision_url:
+            target_url = self.vision_url.replace(
+                marker,
+                "/detections/target/latest",
+            )
+        else:
+            target_url = self.vision_url.rstrip(
+                "/"
+            ) + "/detections/target/latest"
+
+        response = requests.get(
+            target_url,
+            params={"label": str(target_label)},
+            timeout=0.25,
+        )
+        response.raise_for_status()
+        payload = response.json()
+        if not isinstance(payload, dict):
+            raise ValueError(
+                "Vision target-candidate response must be an object."
+            )
+        return payload
+
     def _assign_person_identities(
         self,
         detections: List[Dict[str, Any]],

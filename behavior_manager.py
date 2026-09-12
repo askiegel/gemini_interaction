@@ -385,6 +385,10 @@ class BehaviorManager:
     SEARCH_TURN_SECONDS = 1.0
     SEARCH_MAX_TURN_CHUNKS = 3
     SEARCH_DIRECTION = "LEFT"
+    TARGET_CONFIRMATION_MAX_FRAMES = 3
+    TARGET_CONFIRMATION_MIN_SUPPORT = 2
+    TARGET_CONFIRMATION_WINDOW_SECONDS = 0.90
+    TARGET_CONFIRMATION_POLL_SECONDS = 0.05
 
     CENTER_TURN_SPEED = 0.60
     CENTER_TURN_SECONDS = 0.40
@@ -1005,6 +1009,201 @@ class BehaviorManager:
             and target.get("image_height") > 0
         )
 
+    @staticmethod
+    def _target_bbox(target):
+        bbox = target.get("bbox") if isinstance(target, dict) else None
+        if not isinstance(bbox, dict):
+            return None
+        values = (
+            bbox.get("x1"),
+            bbox.get("y1"),
+            bbox.get("x2"),
+            bbox.get("y2"),
+        )
+        if not all(
+            isinstance(value, (int, float))
+            and not isinstance(value, bool)
+            and math.isfinite(value)
+            for value in values
+        ):
+            return None
+        if values[2] <= values[0] or values[3] <= values[1]:
+            return None
+        return {
+            "x1": float(values[0]),
+            "y1": float(values[1]),
+            "x2": float(values[2]),
+            "y2": float(values[3]),
+        }
+
+    @classmethod
+    def _target_bbox_iou(cls, first, second):
+        first_bbox = cls._target_bbox(first)
+        second_bbox = cls._target_bbox(second)
+        if first_bbox is None or second_bbox is None:
+            return 0.0
+
+        x1 = max(first_bbox["x1"], second_bbox["x1"])
+        y1 = max(first_bbox["y1"], second_bbox["y1"])
+        x2 = min(first_bbox["x2"], second_bbox["x2"])
+        y2 = min(first_bbox["y2"], second_bbox["y2"])
+        intersection = max(0.0, x2 - x1) * max(0.0, y2 - y1)
+        first_area = (
+            first_bbox["x2"] - first_bbox["x1"]
+        ) * (first_bbox["y2"] - first_bbox["y1"])
+        second_area = (
+            second_bbox["x2"] - second_bbox["x1"]
+        ) * (second_bbox["y2"] - second_bbox["y1"])
+        union = first_area + second_area - intersection
+        return intersection / union if union > 0.0 else 0.0
+
+    def _confirm_target_candidates(self, target_name):
+        """Confirm a target across distinct cached Vision Server frames."""
+        fetch = getattr(self.vision, "fetch_target_candidates", None)
+        normalize = getattr(self.vision, "normalize_detection", None)
+        if not callable(fetch) or not callable(normalize):
+            return None
+
+        started = time.monotonic()
+        seen_timestamps = set()
+        clusters = []
+
+        while (
+            len(seen_timestamps) < self.TARGET_CONFIRMATION_MAX_FRAMES
+            and time.monotonic() - started
+            <= self.TARGET_CONFIRMATION_WINDOW_SECONDS
+        ):
+            try:
+                payload = fetch(target_name)
+            except Exception:
+                return None
+
+            if not isinstance(payload, dict):
+                return None
+            if payload.get("camera_running") is not True:
+                return None
+
+            timestamp = payload.get("timestamp")
+            if not isinstance(timestamp, str) or not timestamp.strip():
+                return None
+            if timestamp in seen_timestamps:
+                time.sleep(self.TARGET_CONFIRMATION_POLL_SECONDS)
+                continue
+
+            seen_timestamps.add(timestamp)
+            raw_detections = payload.get("detections")
+            if not isinstance(raw_detections, list):
+                continue
+
+            observations = []
+            for raw_detection in raw_detections:
+                if not isinstance(raw_detection, dict):
+                    continue
+                label = str(raw_detection.get("label", ""))
+                if label.casefold() != str(target_name).casefold():
+                    continue
+                try:
+                    normalized = normalize(raw_detection)
+                except Exception:
+                    continue
+                if not isinstance(normalized, dict):
+                    continue
+                normalized["found"] = True
+                normalized["stale"] = False
+                normalized["target"] = target_name
+                normalized["source_timestamp"] = timestamp
+                normalized["raw_detection"] = dict(raw_detection)
+                if (
+                    self._target_is_fresh_and_acquired(normalized)
+                    and self._target_bbox(normalized) is not None
+                ):
+                    observations.append(normalized)
+
+            for observation in sorted(
+                observations,
+                key=lambda item: (
+                    -(item.get("confidence") or 0.0),
+                    -(item.get("area") or 0.0),
+                ),
+            ):
+                matching = []
+                for index, cluster in enumerate(clusters):
+                    if timestamp in cluster["timestamps"]:
+                        continue
+                    iou = max(
+                        self._target_bbox_iou(observation, member)
+                        for member in cluster["observations"]
+                    )
+                    if iou >= 0.50:
+                        matching.append((iou, index))
+
+                if matching:
+                    _, cluster_index = max(
+                        matching,
+                        key=lambda item: (item[0], -item[1]),
+                    )
+                    cluster = clusters[cluster_index]
+                    cluster["observations"].append(observation)
+                    cluster["timestamps"].add(timestamp)
+                else:
+                    clusters.append({
+                        "observations": [observation],
+                        "timestamps": {timestamp},
+                    })
+
+        eligible = [
+            cluster
+            for cluster in clusters
+            if len(cluster["timestamps"])
+            >= self.TARGET_CONFIRMATION_MIN_SUPPORT
+        ]
+        if not eligible:
+            return None
+
+        def cluster_key(cluster):
+            observations = cluster["observations"]
+            mean_confidence = sum(
+                float(item.get("confidence") or 0.0)
+                for item in observations
+            ) / len(observations)
+            mean_area = sum(
+                float(item.get("area") or 0.0)
+                for item in observations
+            ) / len(observations)
+            return (
+                len(cluster["timestamps"]),
+                mean_confidence,
+                mean_area,
+            )
+
+        winning = max(
+            eligible,
+            key=cluster_key,
+        )
+        return max(
+            winning["observations"],
+            key=lambda item: (
+                float(item.get("confidence") or 0.0),
+                float(item.get("area") or 0.0),
+            ),
+        )
+
+    def _promote_confirmed_target(self, target):
+        processor = getattr(self.vision, "process_detection_frame", None)
+        if not callable(processor):
+            return None
+        raw_detection = target.get("raw_detection")
+        if not isinstance(raw_detection, dict):
+            return None
+        try:
+            processor([dict(raw_detection)])
+            promoted = self._get_target_observation(
+                target.get("target", "")
+            )
+        except Exception:
+            return None
+        return promoted if self._target_is_fresh_and_acquired(promoted) else None
+
     def _execute_guarded_find_search(self, target_name):
         """Search in independent guarded turn chunks with camera rechecks."""
         base = {
@@ -1054,6 +1253,21 @@ class BehaviorManager:
                     reason=f"Acquired {target_name}.",
                     target_observation=target,
                 )
+
+            confirmed = self._confirm_target_candidates(target_name)
+            if confirmed is not None:
+                promoted = self._promote_confirmed_target(confirmed)
+                if promoted is not None:
+                    return dict(
+                        base,
+                        ok=True,
+                        completed=True,
+                        executed=base["turn_chunks_attempted"] > 0,
+                        target_found=True,
+                        state="ACQUIRED",
+                        reason=f"Acquired {target_name}.",
+                        target_observation=promoted,
+                    )
 
             if base["turn_chunks_attempted"] >= self.SEARCH_MAX_TURN_CHUNKS:
                 return dict(
