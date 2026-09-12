@@ -1,6 +1,7 @@
 import time
 
 from robot_bridge.client import RobotBridgeClient
+from guarded_turn_policy import validate_guarded_turn
 from target_lock import TargetLock
 
 
@@ -196,6 +197,112 @@ class BehaviorManager:
             "reason": "Robot stop command sent.",
             "robot_result": robot_result,
         }
+
+    def execute_guarded_turn(
+        self,
+        direction,
+        angular_speed,
+        duration,
+        *,
+        expected_lidar_session,
+        now=None,
+    ):
+        """Validate and execute one explicit bounded turn request.
+
+        This is an advisory caller's execution boundary, not an autonomous
+        behavior.  The transient World Model snapshot is validated before a
+        single bounded angular-only Robot Bridge request is sent.  STOP
+        remains independent and unconditional through ``execute``.
+        """
+        state = None
+        if self.world_model is not None:
+            try:
+                state = self.world_model.get_lidar_obstacles(
+                    expected_session=expected_lidar_session,
+                    now=now,
+                )
+            except Exception:
+                state = None
+
+        validation = validate_guarded_turn(
+            direction,
+            angular_speed,
+            duration,
+            state,
+            expected_session=expected_lidar_session,
+            now=now,
+        )
+        result = dict(validation)
+        result.update(
+            ok=False,
+            forwarded=False,
+            confirmed_forwarded=False,
+            transport_attempted=False,
+            delivery_uncertain=False,
+            validation_reason=validation.get("reason"),
+            transport_result=None,
+            transport_error=None,
+            transport_error_type=None,
+            stop_fallback_attempted=False,
+            stop_fallback_result=None,
+            stop_fallback_error=None,
+            stop_fallback_error_type=None,
+        )
+
+        if not validation.get("permitted"):
+            return result
+
+        result["transport_attempted"] = True
+        try:
+            transport_result = self.robot.motion(
+                linear_x=0.0,
+                angular_z=validation["angular_z"],
+                duration=validation["duration"],
+                streaming=False,
+            )
+        except Exception as exc:
+            result["delivery_uncertain"] = True
+            result["transport_error"] = str(exc)
+            result["transport_error_type"] = type(exc).__name__
+            result["stop_fallback_attempted"] = True
+            try:
+                result["stop_fallback_result"] = self.robot.stop()
+            except Exception as stop_exc:
+                result["stop_fallback_error"] = str(stop_exc)
+                result["stop_fallback_error_type"] = type(stop_exc).__name__
+            result.update(
+                reason="transport_exception",
+                transport_result={
+                    "ok": False,
+                    "error": str(exc),
+                },
+            )
+            return result
+
+        transport_ok = (
+            isinstance(transport_result, dict)
+            and transport_result.get("ok") is True
+        )
+        if not transport_ok:
+            result["delivery_uncertain"] = True
+            result["stop_fallback_attempted"] = True
+            try:
+                result["stop_fallback_result"] = self.robot.stop()
+            except Exception as stop_exc:
+                result["stop_fallback_error"] = str(stop_exc)
+                result["stop_fallback_error_type"] = type(stop_exc).__name__
+        result.update(
+            ok=transport_ok,
+            forwarded=transport_ok,
+            confirmed_forwarded=transport_ok,
+            reason=(
+                validation.get("reason")
+                if transport_ok
+                else "transport_failed"
+            ),
+            transport_result=transport_result,
+        )
+        return result
 
     def _execute_follow_person(self, mission):
         """
