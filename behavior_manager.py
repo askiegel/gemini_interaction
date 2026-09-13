@@ -1075,8 +1075,56 @@ class BehaviorManager:
         union = first_area + second_area - intersection
         return intersection / union if union > 0.0 else 0.0
 
+    @classmethod
+    def _target_observations_match(cls, first, second):
+        """Return whether two same-label observations can share a cluster."""
+        first_label = first.get("label") if isinstance(first, dict) else None
+        second_label = second.get("label") if isinstance(second, dict) else None
+        if (
+            not isinstance(first_label, str)
+            or not isinstance(second_label, str)
+            or first_label.casefold() != second_label.casefold()
+        ):
+            return False
+
+        if cls._target_bbox_iou(first, second) >= 0.50:
+            return True
+
+        def finite_positive(value):
+            return (
+                isinstance(value, (int, float))
+                and not isinstance(value, bool)
+                and math.isfinite(value)
+                and value > 0.0
+            )
+
+        metrics = (
+            first.get("cx"),
+            first.get("cy"),
+            first.get("area"),
+            first.get("image_width"),
+            first.get("image_height"),
+            second.get("cx"),
+            second.get("cy"),
+            second.get("area"),
+            second.get("image_width"),
+            second.get("image_height"),
+        )
+        if not all(finite_positive(value) for value in metrics):
+            return False
+
+        # FIND_OBJECT turns on horizontal image error.  Associate detector
+        # shape variants by horizontal center so changes in box height do not
+        # split one visible target into separate temporal clusters.
+        center_distance = abs(float(first["cx"]) - float(second["cx"]))
+        area_ratio = max(float(first["area"]), float(second["area"])) / min(
+            float(first["area"]), float(second["area"])
+        )
+        return center_distance <= 60.0 and area_ratio <= 2.0
+
     def _confirm_target_candidates(self, target_name):
         """Confirm a target across distinct cached Vision Server frames."""
+        self._last_target_confirmation_status = "target_lost"
         fetch = getattr(self.vision, "fetch_target_candidates", None)
         normalize = getattr(self.vision, "normalize_detection", None)
         if not callable(fetch) or not callable(normalize):
@@ -1085,6 +1133,7 @@ class BehaviorManager:
         started = time.monotonic()
         seen_timestamps = set()
         clusters = []
+        candidate_seen = False
 
         while (
             len(seen_timestamps) < self.TARGET_CONFIRMATION_MAX_FRAMES
@@ -1094,6 +1143,11 @@ class BehaviorManager:
             try:
                 payload = fetch(target_name)
             except Exception:
+                self._last_target_confirmation_status = (
+                    "target_reconfirmation_failed"
+                    if candidate_seen
+                    else "target_lost"
+                )
                 return None
 
             if not isinstance(payload, dict):
@@ -1135,6 +1189,7 @@ class BehaviorManager:
                     self._target_is_fresh_and_acquired(normalized)
                     and self._target_bbox(normalized) is not None
                 ):
+                    candidate_seen = True
                     observations.append(normalized)
 
             for observation in sorted(
@@ -1148,12 +1203,11 @@ class BehaviorManager:
                 for index, cluster in enumerate(clusters):
                     if timestamp in cluster["timestamps"]:
                         continue
-                    iou = max(
-                        self._target_bbox_iou(observation, member)
+                    if any(
+                        self._target_observations_match(observation, member)
                         for member in cluster["observations"]
-                    )
-                    if iou >= 0.50:
-                        matching.append((iou, index))
+                    ):
+                        matching.append((1.0, index))
 
                 if matching:
                     _, cluster_index = max(
@@ -1176,6 +1230,11 @@ class BehaviorManager:
             >= self.TARGET_CONFIRMATION_MIN_SUPPORT
         ]
         if not eligible:
+            self._last_target_confirmation_status = (
+                "target_reconfirmation_failed"
+                if candidate_seen
+                else "target_lost"
+            )
             return None
 
         def cluster_key(cluster):
@@ -1387,12 +1446,28 @@ class BehaviorManager:
             centering_completed += 1
             confirmed = self._confirm_target_candidates(target_name)
             if confirmed is None:
+                confirmation_status = getattr(
+                    self,
+                    "_last_target_confirmation_status",
+                    "target_lost",
+                )
+                confirmation_failed = (
+                    confirmation_status == "target_reconfirmation_failed"
+                )
                 return result(
                     ok=False,
                     completed=False,
                     target_found=False,
-                    state="TARGET_LOST_DURING_CENTERING",
-                    reason="Target was not re-confirmed after centering turn.",
+                    state=(
+                        "TARGET_RECONFIRMATION_FAILED"
+                        if confirmation_failed
+                        else "TARGET_LOST_DURING_CENTERING"
+                    ),
+                    reason=(
+                        "Target candidates were not temporally re-confirmed."
+                        if confirmation_failed
+                        else "Target was not re-confirmed after centering turn."
+                    ),
                     **telemetry,
                 )
             promoted = self._promote_confirmed_target(confirmed)

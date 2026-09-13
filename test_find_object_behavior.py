@@ -413,6 +413,19 @@ def test_same_candidate_timestamp_does_not_confirm(monkeypatch):
     monkeypatch.setattr(behavior_module.time, "monotonic", lambda: next(clock, 1.0))
     monkeypatch.setattr(behavior_module.time, "sleep", lambda _seconds: None)
     assert manager._confirm_target_candidates("backpack") is None
+    assert manager._last_target_confirmation_status == "target_reconfirmation_failed"
+
+
+def test_malformed_same_label_candidates_are_target_lost():
+    payloads = []
+    for timestamp in ("bad-1", "bad-2", "bad-3"):
+        payload = candidate_detection(timestamp)
+        payload["detections"][0]["area"] = float("nan")
+        payloads.append(payload)
+    vision = CandidateVisionAdapter([], payloads)
+    manager = BehaviorManager(robot_client=GuardedSearchRobot(), vision_adapter=vision)
+    assert manager._confirm_target_candidates("backpack") is None
+    assert manager._last_target_confirmation_status == "target_lost"
 
 
 def test_two_consistent_distinct_frames_confirm():
@@ -430,6 +443,82 @@ def test_two_consistent_distinct_frames_confirm():
     assert confirmed["source_timestamp"] in {"frame-1", "frame-2"}
 
 
+def test_bbox_shape_variation_matches_by_center_and_area():
+    first = {
+        "label": "backpack",
+        "cx": 213.5,
+        "cy": 368.0,
+        "area": 40836.0,
+        "image_width": 640.0,
+        "image_height": 480.0,
+        "bbox": {"x1": 89.0, "y1": 286.0, "x2": 338.0, "y2": 450.0},
+    }
+    second = {
+        "label": "backpack",
+        "cx": 229.5,
+        "cy": 293.5,
+        "area": 23095.0,
+        "image_width": 640.0,
+        "image_height": 480.0,
+        "bbox": {"x1": 152.0, "y1": 219.0, "x2": 307.0, "y2": 368.0},
+    }
+    assert behavior_module.BehaviorManager._target_bbox_iou(first, second) < 0.50
+    assert behavior_module.BehaviorManager._target_observations_match(first, second)
+
+
+def test_target_association_rejects_area_or_center_outliers():
+    base = {
+        "label": "backpack",
+        "cx": 200.0,
+        "cy": 250.0,
+        "area": 10000.0,
+        "image_width": 640.0,
+        "image_height": 480.0,
+        "bbox": {"x1": 150.0, "y1": 200.0, "x2": 250.0, "y2": 300.0},
+    }
+    area_outlier = dict(
+        base,
+        area=21000.0,
+        bbox={"x1": 400.0, "y1": 20.0, "x2": 500.0, "y2": 120.0},
+    )
+    center_outlier = dict(
+        base,
+        cx=261.0,
+        bbox={"x1": 400.0, "y1": 20.0, "x2": 500.0, "y2": 120.0},
+    )
+    other_label = dict(
+        base,
+        label="suitcase",
+        bbox={"x1": 400.0, "y1": 20.0, "x2": 500.0, "y2": 120.0},
+    )
+    assert not behavior_module.BehaviorManager._target_observations_match(
+        base, area_outlier
+    )
+    assert not behavior_module.BehaviorManager._target_observations_match(
+        base, center_outlier
+    )
+    assert not behavior_module.BehaviorManager._target_observations_match(
+        base, other_label
+    )
+
+
+def test_target_reconfirmation_failure_is_distinct_from_target_loss():
+    payload = candidate_detection("same-frame")
+    vision = CandidateVisionAdapter([], [payload, payload, payload])
+    manager = BehaviorManager(robot_client=GuardedSearchRobot(), vision_adapter=vision)
+    assert manager._confirm_target_candidates("backpack") is None
+    assert manager._last_target_confirmation_status == "target_reconfirmation_failed"
+
+    manager, _vision, calls = make_centering_manager(
+        [located_target(145)],
+        [payload, payload, payload],
+    )
+    result = manager.execute(_mission())
+    assert result["state"] == "TARGET_RECONFIRMATION_FAILED"
+    assert result["completed"] is False
+    assert len(calls) == 1
+
+
 def test_only_one_consistent_frame_does_not_confirm():
     vision = CandidateVisionAdapter(
         [],
@@ -441,6 +530,7 @@ def test_only_one_consistent_frame_does_not_confirm():
     )
     manager = BehaviorManager(robot_client=GuardedSearchRobot(), vision_adapter=vision)
     assert manager._confirm_target_candidates("backpack") is None
+    assert manager._last_target_confirmation_status == "target_reconfirmation_failed"
 
 
 def test_large_cluster_wins_using_all_frame_candidates():
