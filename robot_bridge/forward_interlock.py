@@ -53,7 +53,13 @@ class ForwardMotionInterlock:
         self._state = None
         self._active_forward = False
         self._pending_dispatches = {}
+        self._dispatch_outcomes = {}
+        self._invalidation_reasons = {}
         self._generation = 0
+        self._dispatch_sequence = 0
+        self._dispatch_epochs = {}
+        self._dispatch_modes = {}
+        self._bounded_authorization_consumed = False
         self._last_stop_error = None
         self._stopped = False
 
@@ -78,11 +84,13 @@ class ForwardMotionInterlock:
             self._permitted = permitted
             if not permitted:
                 self._inhibited = True
+                self._invalidation_reasons[self._generation] = reason
                 self._generation += 1
                 self._reason = reason
                 should_stop = was_active
                 self._active_forward = False
             else:
+                self._bounded_authorization_consumed = False
                 self._inhibited = self._stopped or any(
                     generation != self._generation for generation in self._pending_dispatches
                 )
@@ -108,13 +116,24 @@ class ForwardMotionInterlock:
         with self._lock:
             if not self._configured:
                 raise PermissionError("forward_interlock_not_configured")
-            if not streaming:
-                raise PermissionError("bounded_forward_motion_not_supported")
             if not self._permitted or self._inhibited:
                 raise PermissionError(self._reason)
-            generation = self._generation
-            self._pending_dispatches[generation] = self._pending_dispatches.get(generation, 0) + 1
-            return generation
+            if (
+                not streaming
+                and self._bounded_authorization_consumed
+            ):
+                raise PermissionError(
+                    "bounded_forward_authorization_refresh_required"
+                )
+            epoch = self._generation
+            dispatch_id = self._dispatch_sequence
+            self._dispatch_sequence += 1
+            self._dispatch_epochs[dispatch_id] = epoch
+            self._dispatch_modes[dispatch_id] = bool(streaming)
+            self._pending_dispatches[epoch] = (
+                self._pending_dispatches.get(epoch, 0) + 1
+            )
+            return dispatch_id
 
     def finalize_positive_dispatch(self, generation, transport_result):
         """Finalize an attempted transport, including failures and exceptions.
@@ -123,21 +142,51 @@ class ForwardMotionInterlock:
         monitor's STOP. Always send another STOP now that transport has returned.
         """
         with self._lock:
-            invalidated = generation != self._generation or self._inhibited
+            epoch = self._dispatch_epochs.pop(generation, generation)
+            streaming = self._dispatch_modes.pop(generation, True)
+            transport_uncertain = transport_result is None
+            invalidated = (
+                epoch != self._generation
+                or self._inhibited
+                or transport_uncertain
+            )
+            invalidation_reason = self._invalidation_reasons.pop(
+                epoch,
+                "transport_exception"
+                if transport_uncertain and epoch == self._generation
+                else self._reason if invalidated else None,
+            )
             if invalidated:
                 self._inhibited = True
                 self._active_forward = False
+                if transport_uncertain and epoch == self._generation:
+                    self._reason = "transport_exception"
+                    self._generation += 1
             elif isinstance(transport_result, dict) and transport_result.get("ok") is True:
                 self._active_forward = True
+            if not streaming:
+                self._bounded_authorization_consumed = True
+                if invalidated:
+                    self._dispatch_outcomes[generation] = {
+                        "valid": False,
+                        "reason": invalidation_reason,
+                    }
         if invalidated:
             self._dispatch_stop()
         with self._lock:
-            remaining = self._pending_dispatches[generation] - 1
+            remaining = self._pending_dispatches[epoch] - 1
             if remaining:
-                self._pending_dispatches[generation] = remaining
+                self._pending_dispatches[epoch] = remaining
             else:
-                del self._pending_dispatches[generation]
+                del self._pending_dispatches[epoch]
         return not invalidated
+
+    def dispatch_outcome(self, generation):
+        """Return the completion outcome for one finalized generation."""
+        with self._lock:
+            return copy.deepcopy(
+                self._dispatch_outcomes.pop(generation, None)
+            )
 
     def stop_active(self):
         with self._lock:
@@ -171,6 +220,9 @@ class ForwardMotionInterlock:
             self._inhibited = True
             self._permitted = False
             self._reason = "interlock_stopped"
+            self._invalidation_reasons[self._generation] = (
+                "interlock_stopped"
+            )
             self._generation += 1
             thread = self._thread
         if thread is not None and thread is not threading.current_thread():

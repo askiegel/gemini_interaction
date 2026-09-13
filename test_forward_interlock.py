@@ -26,8 +26,6 @@ class FakeInterlock:
 
     def begin_positive_dispatch(self, *, streaming):
         self.calls.append(("gate", streaming))
-        if not streaming:
-            raise PermissionError("bounded_forward_motion_not_supported")
         if not self.permitted:
             raise PermissionError("unsafe")
         return 1
@@ -64,12 +62,373 @@ def test_default_positive_and_bounded_positive_are_denied_without_post():
     client._request.assert_not_called()
 
 
-def test_clear_streaming_dispatches_but_bounded_does_not():
+def test_clear_streaming_and_bounded_dispatches():
     client = RobotBridgeClient(base_url="http://robot.invalid", forward_interlock=FakeInterlock())
     client._request = Mock(return_value={"ok": True})
     assert client.streaming_motion(linear_x=0.1)["ok"] is True
-    assert client.move_forward()["error"] == "bounded_forward_motion_not_supported"
+    assert client.move_forward()["ok"] is True
+    assert client._request.call_count == 2
+
+
+def test_bounded_forward_uses_pending_guard_and_clears_on_completion():
+    current = state()
+    reader = Mock(return_value=current)
+    interlock = ForwardMotionInterlock(
+        reader,
+        expected_session="s",
+        stop_callback=Mock(return_value={"ok": True}),
+    )
+    client = RobotBridgeClient(
+        base_url="http://robot.invalid",
+        forward_interlock=interlock,
+    )
+    observed = {}
+
+    def transport(method, path, payload=None):
+        del method
+        assert path == "/motion"
+        observed["pending"] = interlock.status()["pending_forward"]
+        observed["payload"] = payload
+        return {"ok": True, "forwarded": True}
+
+    client._request = transport
+    assert interlock.refresh() == (True, "fresh_clear")
+    result = client.move_forward(speed=0.08, seconds=0.50)
+
+    assert result["ok"] is True
+    assert observed["pending"] is True
+    assert observed["payload"] == {
+        "linear_x": 0.08,
+        "angular_z": 0.0,
+        "duration": 0.5,
+    }
+    assert interlock.status()["pending_forward"] is False
+    assert interlock.status()["active_forward"] is False
+    assert reader.call_args.kwargs["expected_session"] == "s"
+    interlock.stop()
+
+
+@pytest.mark.parametrize("front,reason", [
+    ("CAUTION", "front_not_clear"),
+    ("BLOCKED", "front_not_clear"),
+])
+def test_bounded_forward_denied_before_transport(front, reason):
+    current = state(front=front)
+    interlock = ForwardMotionInterlock(
+        lambda **_: current,
+        expected_session="s",
+        stop_callback=Mock(return_value={"ok": True}),
+    )
+    client = RobotBridgeClient(
+        base_url="http://robot.invalid",
+        forward_interlock=interlock,
+    )
+    client._request = Mock(return_value={"ok": True})
+    interlock.refresh()
+
+    result = client.move_forward(speed=0.08, seconds=0.50)
+
+    assert result["ok"] is False
+    assert result["error"] == reason
+    client._request.assert_not_called()
+    interlock.stop()
+
+
+def test_bounded_forward_pending_invalidation_stops_and_does_not_replay():
+    current = state()
+    entered = threading.Event()
+    release = threading.Event()
+    events = []
+    client = RobotBridgeClient(base_url="http://robot.invalid")
+    interlock = ForwardMotionInterlock(
+        lambda **_: current,
+        expected_session="s",
+        stop_callback=client.stop,
+    )
+    client.configure_forward_interlock(interlock)
+
+    def transport(method, path, payload=None):
+        del method, payload
+        events.append(path)
+        if path == "/motion":
+            entered.set()
+            assert release.wait(2)
+            return {"ok": True}
+        return {"ok": True}
+
+    client._request = transport
+    interlock.refresh()
+    result = {}
+    thread = threading.Thread(
+        target=lambda: result.setdefault(
+            "value", client.move_forward(speed=0.08, seconds=0.50)
+        )
+    )
+    thread.start()
+    assert entered.wait(1)
+    current["sectors"]["front"]["state"] = "CAUTION"
+    interlock.refresh()
+    assert interlock.status()["inhibited"] is True
+    assert events == ["/motion", "/stop"]
+    release.set()
+    thread.join(2)
+
+    assert not thread.is_alive()
+    assert events == ["/motion", "/stop", "/stop"]
+    assert interlock.status()["pending_forward"] is False
+    assert interlock.status()["active_forward"] is False
+    assert result["value"]["ok"] is False
+    assert result["value"]["bounded_forward_invalidated"] is True
+    assert result["value"]["reason"] == "front_not_clear"
+    assert result["value"]["transport_result"]["ok"] is True
+    interlock.stop()
+
+
+def test_bounded_forward_session_change_fails_closed_during_dispatch():
+    current = state()
+    entered = threading.Event()
+    release = threading.Event()
+    stop = Mock(return_value={"ok": True})
+    interlock = ForwardMotionInterlock(
+        lambda **_: current,
+        expected_session="s",
+        stop_callback=stop,
+    )
+    client = RobotBridgeClient(
+        base_url="http://robot.invalid",
+        forward_interlock=interlock,
+    )
+
+    def transport(method, path, payload=None):
+        del method, payload
+        if path == "/motion":
+            entered.set()
+            assert release.wait(2)
+        return {"ok": True}
+
+    client._request = transport
+    interlock.refresh()
+    result = {}
+    thread = threading.Thread(
+        target=lambda: result.setdefault(
+            "value", client.move_forward(speed=0.08, seconds=0.50)
+        )
+    )
+    thread.start()
+    assert entered.wait(1)
+    current["producer_session"] = "new-session"
+    interlock.refresh()
+    assert interlock.status()["reason"] == "producer_session_mismatch"
+    assert stop.call_count == 1
+    release.set()
+    thread.join(2)
+    assert not thread.is_alive()
+    assert stop.call_count == 2
+    assert result["value"]["ok"] is False
+    assert result["value"]["reason"] == "producer_session_mismatch"
+    assert result["value"]["bounded_forward_invalidated"] is True
+    interlock.stop()
+
+
+def test_bounded_forward_rejects_angular_or_invalid_duration():
+    interlock = Mock()
+    client = RobotBridgeClient(
+        base_url="http://robot.invalid",
+        forward_interlock=interlock,
+    )
+    client._request = Mock(return_value={"ok": True})
+
+    mixed = client.motion(
+        linear_x=0.08,
+        angular_z=0.1,
+        duration=0.50,
+    )
+    invalid = client.motion(
+        linear_x=0.08,
+        angular_z=0.0,
+        duration=0.0,
+    )
+
+    assert mixed["error"] == "bounded_forward_requires_zero_angular"
+    assert invalid["error"] == "invalid_bounded_forward_duration"
+    interlock.begin_positive_dispatch.assert_not_called()
+    client._request.assert_not_called()
+
+
+def test_bounded_transport_failure_is_not_replayed():
+    current = state()
+    interlock = ForwardMotionInterlock(
+        lambda **_: current,
+        expected_session="s",
+        stop_callback=Mock(return_value={"ok": True}),
+    )
+    client = RobotBridgeClient(
+        base_url="http://robot.invalid",
+        forward_interlock=interlock,
+    )
+    client._request = Mock(
+        return_value={"ok": False, "error": "bridge rejected"}
+    )
+    interlock.refresh()
+
+    result = client.move_forward(speed=0.08, seconds=0.50)
+
+    assert result["ok"] is False
+    assert result["error"] == "bridge rejected"
     assert client._request.call_count == 1
+    assert interlock.status()["pending_forward"] is False
+    assert interlock.status()["active_forward"] is False
+    interlock.stop()
+
+
+def test_independent_bounded_requests_get_fresh_epochs_and_tokens():
+    current = state()
+    reader = Mock(return_value=current)
+    stop = Mock(return_value={"ok": True})
+    interlock = ForwardMotionInterlock(
+        reader,
+        expected_session="s",
+        stop_callback=stop,
+    )
+    client = RobotBridgeClient(
+        base_url="http://robot.invalid",
+        forward_interlock=interlock,
+    )
+    client._request = Mock(return_value={"ok": True})
+    tokens = []
+    original_begin = interlock.begin_positive_dispatch
+
+    def record_begin(**kwargs):
+        token = original_begin(**kwargs)
+        tokens.append(token)
+        return token
+
+    interlock.begin_positive_dispatch = record_begin
+    interlock.refresh()
+    first = client.move_forward(speed=0.08, seconds=0.50)
+    assert first["ok"] is True
+    assert interlock.status()["pending_forward"] is False
+    assert interlock.status()["active_forward"] is False
+
+    # A second request requires a new LiDAR authorization tick and token.
+    assert interlock.refresh() == (True, "fresh_clear")
+    second = client.move_forward(speed=0.08, seconds=0.50)
+    assert second["ok"] is True
+    assert tokens[0] != tokens[1]
+    assert client._request.call_count == 2
+    assert reader.call_count >= 2
+    assert all(
+        call.kwargs["expected_session"] == "s"
+        for call in reader.call_args_list
+    )
+    assert interlock.status()["pending_forward"] is False
+    assert interlock.status()["active_forward"] is False
+    interlock.stop()
+
+
+def test_bounded_request_without_refresh_is_denied_then_refresh_reauthorizes():
+    current = state()
+    interlock = ForwardMotionInterlock(
+        lambda **_: current,
+        expected_session="s",
+        stop_callback=Mock(return_value={"ok": True}),
+    )
+    client = RobotBridgeClient(
+        base_url="http://robot.invalid",
+        forward_interlock=interlock,
+    )
+    client._request = Mock(return_value={"ok": True})
+    interlock.refresh()
+
+    first = client.move_forward(speed=0.08, seconds=0.50)
+    second = client.move_forward(speed=0.08, seconds=0.50)
+    assert first["ok"] is True
+    assert second["ok"] is False
+    assert second["error"] == (
+        "bounded_forward_authorization_refresh_required"
+    )
+    assert client._request.call_count == 1
+
+    assert interlock.refresh() == (True, "fresh_clear")
+    third = client.move_forward(speed=0.08, seconds=0.50)
+    assert third["ok"] is True
+    assert client._request.call_count == 2
+    interlock.stop()
+
+
+def test_dispatch_bookkeeping_is_clean_after_repeated_normal_requests():
+    current = state()
+    interlock = ForwardMotionInterlock(
+        lambda **_: current,
+        expected_session="s",
+        stop_callback=Mock(return_value={"ok": True}),
+    )
+    client = RobotBridgeClient(
+        base_url="http://robot.invalid",
+        forward_interlock=interlock,
+    )
+    client._request = Mock(return_value={"ok": True})
+
+    for _ in range(10):
+        interlock.refresh()
+        assert client.move_forward(speed=0.08, seconds=0.50)["ok"]
+
+    assert interlock._dispatch_outcomes == {}
+    assert interlock._dispatch_epochs == {}
+    assert interlock._invalidation_reasons == {}
+    interlock.stop()
+
+
+def test_changed_session_blocks_later_bounded_request_without_reconfiguration():
+    current = state()
+    interlock = ForwardMotionInterlock(
+        lambda **_: current,
+        expected_session="s",
+        stop_callback=Mock(return_value={"ok": True}),
+    )
+    client = RobotBridgeClient(
+        base_url="http://robot.invalid",
+        forward_interlock=interlock,
+    )
+    client._request = Mock(return_value={"ok": True})
+    interlock.refresh()
+    assert client.move_forward(speed=0.08, seconds=0.50)["ok"] is True
+
+    current["producer_session"] = "new-session"
+    assert interlock.refresh() == (False, "producer_session_mismatch")
+    second = client.move_forward(speed=0.08, seconds=0.50)
+
+    assert second["ok"] is False
+    assert second["error"] == "producer_session_mismatch"
+    assert client._request.call_count == 1
+    interlock.stop()
+
+
+def test_bounded_transport_exception_is_uncertain_and_stops():
+    current = state()
+    stop = Mock(return_value={"ok": True})
+    interlock = ForwardMotionInterlock(
+        lambda **_: current,
+        expected_session="s",
+        stop_callback=stop,
+    )
+    client = RobotBridgeClient(
+        base_url="http://robot.invalid",
+        forward_interlock=interlock,
+    )
+    client._request = Mock(side_effect=TimeoutError("delivery uncertain"))
+    interlock.refresh()
+
+    with pytest.raises(TimeoutError, match="delivery uncertain"):
+        client.move_forward(speed=0.08, seconds=0.50)
+
+    assert client._request.call_count == 1
+    assert stop.call_count == 1
+    assert interlock.status()["pending_forward"] is False
+    assert interlock.status()["active_forward"] is False
+    assert interlock.status()["inhibited"] is True
+    assert interlock.status()["reason"] == "transport_exception"
+    interlock.stop()
 
 
 @pytest.mark.parametrize("linear_x", [0.0, -0.1])

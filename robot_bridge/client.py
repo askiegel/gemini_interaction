@@ -1,4 +1,5 @@
 import json
+import math
 import urllib.request
 import urllib.error
 
@@ -110,6 +111,19 @@ class RobotBridgeClient:
             )
 
         if linear_x > 0:
+            if not streaming:
+                if not math.isfinite(angular_z) or angular_z != 0.0:
+                    return {
+                        "ok": False,
+                        "forwarded": False,
+                        "error": "bounded_forward_requires_zero_angular",
+                    }
+                if not math.isfinite(float(duration)) or float(duration) <= 0.0:
+                    return {
+                        "ok": False,
+                        "forwarded": False,
+                        "error": "invalid_bounded_forward_duration",
+                    }
             if self.forward_interlock is None:
                 return {"ok": False, "forwarded": False, "error": "forward_interlock_not_configured"}
             interlock = self.forward_interlock
@@ -122,7 +136,46 @@ class RobotBridgeClient:
                 result = self._request("POST", "/motion", payload)
                 return result
             finally:
-                interlock.finalize_positive_dispatch(generation, result)
+                dispatch_valid = interlock.finalize_positive_dispatch(
+                    generation,
+                    result,
+                )
+                if not streaming:
+                    interlock.stop_active()
+                    outcome_reader = getattr(
+                        interlock,
+                        "dispatch_outcome",
+                        None,
+                    )
+                    outcome = (
+                        outcome_reader(generation)
+                        if dispatch_valid is False
+                        and callable(outcome_reader)
+                        else None
+                    )
+                    if dispatch_valid is False and isinstance(result, dict):
+                        transport_result = dict(result)
+                        result.clear()
+                        result.update(transport_result)
+                        result.update({
+                            "ok": False,
+                            "forwarded": bool(
+                                transport_result.get(
+                                    "forwarded",
+                                    True,
+                                )
+                            ),
+                            "confirmed_forwarded": False,
+                            "transport_attempted": True,
+                            "bounded_forward_invalidated": True,
+                            "transport_result": transport_result,
+                            "error": "bounded_forward_invalidated",
+                            "reason": (
+                                outcome.get("reason")
+                                if isinstance(outcome, dict)
+                                else "forward_interlock_invalidated"
+                            ),
+                        })
 
         result = self._request("POST", "/motion", payload)
         if self.forward_interlock is not None:
