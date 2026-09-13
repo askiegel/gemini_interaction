@@ -1,6 +1,7 @@
 import math
 import threading
 import time
+from datetime import datetime, timezone
 
 from robot_bridge.client import RobotBridgeClient
 from guarded_turn_policy import validate_guarded_turn
@@ -400,6 +401,9 @@ class BehaviorManager:
 
     FIND_FORWARD_SPEED = 0.08
     FIND_FORWARD_SECONDS = 0.80
+    FIND_APPROACH_FORWARD_SPEED = 0.08
+    FIND_APPROACH_FORWARD_SECONDS = 0.50
+    FIND_APPROACH_MAX_CHUNKS = 1
     FIND_ARRIVAL_AREA = 75000.0
 
     FOLLOW_SEARCH_TURN_SPEED = 0.50
@@ -1278,7 +1282,54 @@ class BehaviorManager:
 
         return cls._target_bbox_intersection_over_smaller(first, second) >= 0.50
 
-    def _confirm_target_candidates_with_status(self, target_name):
+    @staticmethod
+    def _vision_timestamp_is_newer(timestamp, minimum_timestamp):
+        if minimum_timestamp is None:
+            return True
+        if not isinstance(timestamp, str) or not isinstance(
+            minimum_timestamp, str
+        ):
+            return False
+        timestamp = timestamp.strip()
+        minimum_timestamp = minimum_timestamp.strip()
+        if not timestamp or not minimum_timestamp or timestamp == minimum_timestamp:
+            return False
+
+        def parse(value):
+            normalized = value[:-1] + "+00:00" if value.endswith("Z") else value
+            try:
+                return datetime.fromisoformat(normalized)
+            except ValueError:
+                return None
+
+        parsed_timestamp = parse(timestamp)
+        parsed_minimum = parse(minimum_timestamp)
+        if parsed_timestamp is not None and parsed_minimum is not None:
+            if (parsed_timestamp.tzinfo is None) == (
+                parsed_minimum.tzinfo is None
+            ):
+                return parsed_timestamp > parsed_minimum
+        return timestamp > minimum_timestamp
+
+    @staticmethod
+    def _vision_timestamp_is_iso(timestamp):
+        if not isinstance(timestamp, str) or not timestamp.strip():
+            return False
+        value = timestamp.strip()
+        if value.endswith("Z"):
+            value = value[:-1] + "+00:00"
+        try:
+            datetime.fromisoformat(value)
+        except ValueError:
+            return False
+        return True
+
+    def _confirm_target_candidates_with_status(
+        self,
+        target_name,
+        *,
+        minimum_timestamp=None,
+    ):
         """Confirm a target and return its local confirmation status."""
         fetch = getattr(self.vision, "fetch_target_candidates", None)
         normalize = getattr(self.vision, "normalize_detection", None)
@@ -1325,6 +1376,11 @@ class BehaviorManager:
                 continue
 
             seen_timestamps.add(timestamp)
+            if not self._vision_timestamp_is_newer(
+                timestamp,
+                minimum_timestamp,
+            ):
+                continue
             raw_detections = payload.get("detections")
             if not isinstance(raw_detections, list):
                 continue
@@ -1535,14 +1591,14 @@ class BehaviorManager:
             ))
 
             if abs(horizontal_error) <= self.FIND_CENTER_TOLERANCE_PIXELS:
-                return result(
-                    ok=True,
-                    completed=True,
-                    executed=base["turn_chunks_attempted"] > 0
-                    or centering_attempted > 0,
-                    state="CENTERED",
-                    reason=f"Centered {target_name}.",
-                    **telemetry,
+                return self._execute_find_object_approach(
+                    target_name,
+                    current,
+                    base,
+                    centering_attempted=centering_attempted,
+                    centering_completed=centering_completed,
+                    last_guarded_result=last_guarded_result,
+                    telemetry=telemetry,
                 )
 
             if centering_attempted >= self.FIND_CENTER_MAX_TURN_CHUNKS:
@@ -1650,6 +1706,318 @@ class BehaviorManager:
                 )
             current = promoted
 
+    def _execute_find_object_approach(
+        self,
+        target_name,
+        observation,
+        base,
+        *,
+        centering_attempted,
+        centering_completed,
+        last_guarded_result,
+        telemetry,
+    ):
+        """Execute one guarded forward step, then terminate FIND_OBJECT."""
+        approach_attempted = 0
+        approach_completed = 0
+        approach_result = None
+
+        def result(**fields):
+            value = dict(base)
+            value.update({
+                "target": target_name,
+                "target_found": fields.pop("target_found", True),
+                "centering_turn_chunks_attempted": centering_attempted,
+                "centering_turn_chunks_completed": centering_completed,
+                "maximum_centering_turn_chunks": (
+                    self.FIND_CENTER_MAX_TURN_CHUNKS
+                ),
+                "center_tolerance_pixels": self.FIND_CENTER_TOLERANCE_PIXELS,
+                "last_guarded_turn_result": last_guarded_result,
+                "approach_chunks_attempted": approach_attempted,
+                "approach_chunks_completed": approach_completed,
+                "maximum_approach_chunks": self.FIND_APPROACH_MAX_CHUNKS,
+                "approach_forward_speed": self.FIND_APPROACH_FORWARD_SPEED,
+                "approach_forward_duration": self.FIND_APPROACH_FORWARD_SECONDS,
+                "approach_result": fields.pop(
+                    "approach_result",
+                    approach_result,
+                ),
+            })
+            value.update(fields)
+            self._publish_tracking_state(value)
+            return value
+
+        telemetry = dict(telemetry)
+        telemetry["approach_forward_speed"] = (
+            self.FIND_APPROACH_FORWARD_SPEED
+        )
+        telemetry["approach_forward_duration"] = (
+            self.FIND_APPROACH_FORWARD_SECONDS
+        )
+        telemetry["approach_chunks_attempted"] = 0
+        telemetry["approach_chunks_completed"] = 0
+
+        # The RobotBridgeClient owns the interlock. Refresh that same object
+        # immediately before the bounded request when it is available.
+        interlock = getattr(self.robot, "forward_interlock", None)
+        if interlock is None:
+            approach_result = {
+                "ok": False,
+                "permitted": False,
+                "reason": "forward_interlock_not_configured",
+            }
+            return result(
+                ok=False,
+                completed=True,
+                state="APPROACH_BLOCKED",
+                reason="forward_interlock_not_configured",
+                approach_result=approach_result,
+                **telemetry,
+            )
+        refresh = getattr(interlock, "refresh", None)
+        if not callable(refresh):
+            approach_result = {
+                "ok": False,
+                "error": "forward_interlock_refresh_unavailable",
+            }
+            return result(
+                ok=False,
+                completed=True,
+                state="APPROACH_BLOCKED",
+                reason="forward_interlock_refresh_unavailable",
+                approach_result=approach_result,
+                **telemetry,
+            )
+        try:
+            permitted, reason = refresh()
+        except Exception as exc:
+            approach_result = {
+                "ok": False,
+                "error": str(exc),
+                "error_type": type(exc).__name__,
+            }
+            return result(
+                ok=False,
+                completed=True,
+                state="APPROACH_BLOCKED",
+                reason="forward_interlock_refresh_failed",
+                approach_result=approach_result,
+                **telemetry,
+            )
+        if permitted is not True:
+            approach_result = {
+                "ok": False,
+                "permitted": False,
+                "reason": reason,
+            }
+            return result(
+                ok=False,
+                completed=True,
+                state="APPROACH_BLOCKED",
+                reason=reason,
+                approach_result=approach_result,
+                **telemetry,
+            )
+
+        session = self._current_lidar_session()
+        if session is None:
+            approach_result = {
+                "ok": False,
+                "permitted": False,
+                "reason": "LiDAR producer session is unavailable.",
+            }
+            return result(
+                ok=False,
+                completed=True,
+                state="APPROACH_BLOCKED",
+                reason="LiDAR producer session is unavailable.",
+                approach_result=approach_result,
+                **telemetry,
+            )
+
+        cutoff = None
+        for key in ("source_timestamp", "timestamp", "last_seen"):
+            value = observation.get(key)
+            if isinstance(value, str) and value.strip():
+                cutoff = value.strip()
+                break
+
+        # Without a source timestamp we cannot prove that post-motion camera
+        # evidence is newer than the observation authorizing this step.
+        if cutoff is None:
+            approach_result = {
+                "ok": False,
+                "permitted": False,
+                "reason": "target_timestamp_unavailable",
+            }
+            return result(
+                ok=False,
+                completed=True,
+                state="APPROACH_BLOCKED",
+                reason="target_timestamp_unavailable",
+                approach_result=approach_result,
+                **telemetry,
+            )
+
+        approach_attempted = 1
+        base["executed"] = True
+        telemetry["approach_chunks_attempted"] = approach_attempted
+        self._publish_tracking_state(dict(
+            base,
+            **telemetry,
+            target=target_name,
+            target_found=True,
+            state="APPROACHING",
+            ok=True,
+            completed=False,
+            centering_turn_chunks_attempted=centering_attempted,
+            centering_turn_chunks_completed=centering_completed,
+            maximum_centering_turn_chunks=self.FIND_CENTER_MAX_TURN_CHUNKS,
+            last_guarded_turn_result=last_guarded_result,
+            approach_result=None,
+        ))
+
+        try:
+            approach_result = self.robot.move_forward(
+                speed=self.FIND_APPROACH_FORWARD_SPEED,
+                seconds=self.FIND_APPROACH_FORWARD_SECONDS,
+            )
+        except Exception as exc:
+            approach_result = {
+                "ok": False,
+                "error": str(exc),
+                "error_type": type(exc).__name__,
+                "transport_attempted": True,
+            }
+            return result(
+                ok=False,
+                completed=True,
+                state="APPROACH_FAILED",
+                reason="bounded forward transport exception",
+                error=str(exc),
+                error_type=type(exc).__name__,
+                approach_result=approach_result,
+                **telemetry,
+            )
+
+        if not isinstance(approach_result, dict):
+            approach_result = {
+                "ok": False,
+                "error": "invalid_bounded_forward_result",
+            }
+        if approach_result.get("ok") is not True:
+            blocked = bool(
+                approach_result.get("bounded_forward_invalidated")
+                or approach_result.get("forwarded") is False
+            )
+            return result(
+                ok=False,
+                completed=True,
+                state="APPROACH_BLOCKED" if blocked else "APPROACH_FAILED",
+                reason=approach_result.get(
+                    "reason",
+                    approach_result.get("error", "bounded forward failed"),
+                ),
+                approach_result=approach_result,
+                **telemetry,
+            )
+
+        approach_completed = 1
+        telemetry["approach_chunks_completed"] = approach_completed
+        post_motion_cutoff = cutoff
+        if self._vision_timestamp_is_iso(cutoff):
+            # World Model/Vision timestamps use wall-clock ISO values.  A
+            # completion-time cutoff rejects frames cached before the bounded
+            # transport returned, while synthetic/non-ISO test clocks retain
+            # their deterministic ordering semantics.
+            post_motion_cutoff = datetime.now(timezone.utc).isoformat()
+        confirmed, confirmation_status = (
+            self._confirm_target_candidates_with_status(
+                target_name,
+                minimum_timestamp=post_motion_cutoff,
+            )
+        )
+        if confirmed is None:
+            return result(
+                ok=False,
+                completed=True,
+                target_found=False,
+                state="TARGET_LOST_AFTER_APPROACH",
+                reason=(
+                    "Target candidates were not freshly re-confirmed after "
+                    "the bounded approach step."
+                ),
+                confirmation_status=confirmation_status,
+                approach_result=approach_result,
+                **telemetry,
+            )
+
+        promoted = self._promote_confirmed_target(confirmed)
+        if promoted is None:
+            return result(
+                ok=False,
+                completed=True,
+                target_found=False,
+                state="TARGET_LOST_AFTER_APPROACH",
+                reason="Target promotion failed after bounded approach step.",
+                approach_result=approach_result,
+                **telemetry,
+            )
+
+        post_telemetry = dict(telemetry)
+        image_width = promoted.get("image_width")
+        center_x = promoted.get("cx")
+        horizontal_error = None
+        image_center_x = None
+        if (
+            isinstance(image_width, (int, float))
+            and not isinstance(image_width, bool)
+            and math.isfinite(image_width)
+            and image_width > 0
+            and isinstance(center_x, (int, float))
+            and not isinstance(center_x, bool)
+            and math.isfinite(center_x)
+        ):
+            image_center_x = float(image_width) / 2.0
+            horizontal_error = float(center_x) - image_center_x
+        post_direction = (
+            "LEFT"
+            if horizontal_error is not None
+            and horizontal_error < -self.FIND_CENTER_TOLERANCE_PIXELS
+            else (
+                "RIGHT"
+                if horizontal_error is not None
+                and horizontal_error > self.FIND_CENTER_TOLERANCE_PIXELS
+                else "CENTERED"
+            )
+        )
+        post_telemetry.update({
+            "target_confidence": promoted.get("confidence"),
+            "target_center_x": promoted.get("cx"),
+            "target_center_y": promoted.get("cy"),
+            "target_area": promoted.get("area"),
+            "image_width": image_width,
+            "image_height": promoted.get("image_height"),
+            "image_center_x": image_center_x,
+            "horizontal_error": horizontal_error,
+            "horizontal_error_pixels": horizontal_error,
+            "steering_direction": post_direction,
+            "centering_direction": post_direction,
+            "bbox": promoted.get("bbox"),
+            "target_observation": promoted,
+        })
+        return result(
+            ok=True,
+            completed=True,
+            state="APPROACH_STEP_COMPLETE",
+            reason=(
+                "One bounded approach step completed and the target was "
+                "freshly re-confirmed."
+            ),
+            **post_telemetry,
+        )
+
     def _execute_guarded_find_search(self, target_name):
         """Search in independent guarded turn chunks with camera rechecks."""
         base = {
@@ -1675,6 +2043,12 @@ class BehaviorManager:
             "horizontal_error_pixels": None,
             "image_center_x": None,
             "centering_direction": None,
+            "approach_chunks_attempted": 0,
+            "approach_chunks_completed": 0,
+            "maximum_approach_chunks": self.FIND_APPROACH_MAX_CHUNKS,
+            "approach_forward_speed": self.FIND_APPROACH_FORWARD_SPEED,
+            "approach_forward_duration": self.FIND_APPROACH_FORWARD_SECONDS,
+            "approach_result": None,
             "last_guarded_turn_result": None,
             "stop_reason": None,
         }

@@ -86,12 +86,15 @@ class SequencedVisionAdapter:
     def __init__(self, results):
         self.results = list(results)
         self.calls = 0
+        self.last_result = None
+        self.candidate_calls = 0
+        self._allow_last_result = False
 
     def find_target(self, target):
         if not self.results:
-            raise AssertionError(
-                "Vision sequence exhausted."
-            )
+            if self._allow_last_result and self.last_result is not None:
+                return dict(self.last_result)
+            raise AssertionError("Vision sequence exhausted.")
 
         self.calls += 1
 
@@ -103,8 +106,75 @@ class SequencedVisionAdapter:
             "target",
             target,
         )
+        self.last_result = dict(result)
 
         return result
+
+    def fetch_target_candidates(self, target):
+        self.candidate_calls += 1
+        observation = self.last_result or found_target(target)
+        if observation.get("found") is not True or observation.get("stale") is True:
+            return {
+                "timestamp": f"post-{self.calls}-{self.candidate_calls}",
+                "camera_running": True,
+                "detections": [],
+            }
+        cx = float(observation.get("cx") or 320.0)
+        cy = float(observation.get("cy") or 240.0)
+        bbox = observation.get("bbox") or {
+            "x1": cx - 60.0,
+            "y1": cy - 60.0,
+            "x2": cx + 60.0,
+            "y2": cy + 60.0,
+        }
+        return {
+            "timestamp": f"post-{self.calls}-{self.candidate_calls}",
+            "camera_running": True,
+            "detections": [{
+                "label": target,
+                "confidence": observation.get("confidence", 0.9),
+                "x1": bbox["x1"],
+                "y1": bbox["y1"],
+                "x2": bbox["x2"],
+                "y2": bbox["y2"],
+                "center_x": cx,
+                "center_y": cy,
+                "area": observation.get("area", 12000.0),
+                "image_width": observation.get("image_width", 640.0),
+                "image_height": observation.get("image_height", 480.0),
+            }],
+        }
+
+    @staticmethod
+    def normalize_detection(detection):
+        x1 = float(detection["x1"])
+        y1 = float(detection["y1"])
+        x2 = float(detection["x2"])
+        y2 = float(detection["y2"])
+        return {
+            "label": detection["label"],
+            "confidence": float(detection["confidence"]),
+            "cx": float(detection["center_x"]),
+            "cy": float(detection["center_y"]),
+            "area": float(detection["area"]),
+            "bbox": {"x1": x1, "y1": y1, "x2": x2, "y2": y2},
+            "image_width": float(detection["image_width"]),
+            "image_height": float(detection["image_height"]),
+        }
+
+    def process_detection_frame(self, detections):
+        if detections:
+            self._allow_last_result = True
+            detection = detections[0]
+            normalized = self.normalize_detection(detection)
+            normalized.update(
+                found=True,
+                stale=False,
+                target=detection.get("label"),
+                last_seen="post-promotion",
+            )
+            self.last_result = normalized
+        return detections
 
 
 class CandidateVisionAdapter(SequencedVisionAdapter):
@@ -139,7 +209,7 @@ class CandidateVisionAdapter(SequencedVisionAdapter):
 
     def process_detection_frame(self, detections):
         self.promotions.extend(detections)
-        return detections
+        return super().process_detection_frame(detections)
 
 
 def candidate_detection(
@@ -171,13 +241,36 @@ def candidate_detection(
             "area": width * height,
             "image_width": 640,
             "image_height": 480,
-        }],
-    }
+            }],
+        }
+
+class AlwaysPermittedInterlock:
+    def __init__(self):
+        self.refresh_calls = 0
+
+    def refresh(self):
+        self.refresh_calls += 1
+        return True, "fresh_clear"
 
 
 class GuardedSearchRobot:
-    def __init__(self):
+    def __init__(self, move_result=None, move_exception=None, interlock=None):
         self.calls = []
+        self.move_result = move_result or {"ok": True, "automatic_stop": True}
+        self.move_exception = move_exception
+        self.forward_interlock = (
+            interlock if interlock is not None else AlwaysPermittedInterlock()
+        )
+
+    def move_forward(self, speed, seconds):
+        self.calls.append(("move_forward", speed, seconds))
+        if self.move_exception is not None:
+            raise self.move_exception
+        return dict(self.move_result)
+
+    def stop(self):
+        self.calls.append(("stop",))
+        return {"ok": True}
 
 
 def not_found(target="backpack", stale=False):
@@ -195,6 +288,7 @@ def found_target(target="backpack"):
         "stale": False,
         "target": target,
         "entity_id": "backpack-001",
+        "last_seen": "0",
         "confidence": 0.9,
         "cx": 320.0,
         "cy": 240.0,
@@ -254,7 +348,11 @@ def test_guarded_search_visible_before_turn_uses_zero_chunks():
     assert result["completed"] is True
     assert result["turn_chunks_attempted"] == 0
     assert calls == []
-    assert robot.calls == []
+    assert robot.calls == [("move_forward", 0.08, 0.50)]
+    assert result["state"] == "APPROACH_STEP_COMPLETE"
+    assert result["executed"] is True
+    assert result["approach_chunks_attempted"] == 1
+    assert result["approach_chunks_completed"] == 1
 
 
 def test_guarded_search_rechecks_camera_after_first_chunk():
@@ -679,6 +777,9 @@ def test_confirmed_candidate_is_promoted_without_turn():
             candidate_detection("frame-1"),
             candidate_detection("frame-2", confidence=0.12),
             candidate_detection("frame-3", confidence=0.10),
+            candidate_detection("post-1"),
+            candidate_detection("post-2", confidence=0.12),
+            candidate_detection("post-3", confidence=0.10),
         ],
     )
     manager = BehaviorManager(robot_client=GuardedSearchRobot(), vision_adapter=vision)
@@ -689,10 +790,10 @@ def test_confirmed_candidate_is_promoted_without_turn():
         "permitted": True,
     }
     result = manager.execute(_mission())
-    assert result["state"] == "CENTERED"
+    assert result["state"] == "APPROACH_STEP_COMPLETE"
     assert result["target_found"] is True
     assert result["turn_chunks_attempted"] == 0
-    assert len(vision.promotions) == 1
+    assert len(vision.promotions) == 2
     assert calls == []
 
 
@@ -709,7 +810,11 @@ def test_confirmed_candidate_after_one_turn_stops_search():
     ]
     vision = CandidateVisionAdapter(
         [not_found(), not_found(), found_target()],
-        first_attempt + second_attempt,
+        first_attempt + second_attempt + [
+            candidate_detection("post-1"),
+            candidate_detection("post-2", confidence=0.11),
+            candidate_detection("post-3", confidence=0.10),
+        ],
     )
     manager = BehaviorManager(robot_client=GuardedSearchRobot(), vision_adapter=vision)
     manager.lidar_session = "session-1"
@@ -721,7 +826,7 @@ def test_confirmed_candidate_after_one_turn_stops_search():
 
     manager.execute_guarded_turn = turn
     result = manager.execute(_mission())
-    assert result["state"] == "CENTERED"
+    assert result["state"] == "APPROACH_STEP_COMPLETE"
     assert result["target_found"] is True
     assert result["turn_chunks_attempted"] == 1
     assert result["turn_chunks_completed"] == 1
@@ -780,17 +885,208 @@ def test_already_centered_target_completes_without_turn():
         "centered target must not turn"
     )
     result = manager.execute(_mission())
-    assert result["state"] == "CENTERED"
+    assert result["state"] == "APPROACH_STEP_COMPLETE"
     assert result["completed"] is True
     assert result["turn_chunks_attempted"] == 0
     assert result["centering_turn_chunks_attempted"] == 0
     assert result["steering_direction"] == "CENTERED"
 
 
+class ApproachRefreshInterlock:
+    def __init__(self, permitted=True, reason="fresh_clear"):
+        self.permitted = permitted
+        self.reason = reason
+        self.refresh_calls = 0
+
+    def refresh(self):
+        self.refresh_calls += 1
+        return self.permitted, self.reason
+
+
+def test_approach_refreshes_existing_interlock_once_before_dispatch():
+    interlock = ApproachRefreshInterlock()
+    robot = GuardedSearchRobot(interlock=interlock)
+    manager = BehaviorManager(
+        robot_client=robot,
+        vision_adapter=SequencedVisionAdapter([located_target(320)]),
+    )
+    manager.lidar_session = "session-1"
+    result = manager.execute(_mission())
+    assert result["state"] == "APPROACH_STEP_COMPLETE"
+    assert interlock.refresh_calls == 1
+    assert robot.calls == [("move_forward", 0.08, 0.50)]
+
+
+def test_approach_interlock_denial_is_terminal_without_transport():
+    interlock = ApproachRefreshInterlock(False, "front_not_clear")
+    robot = GuardedSearchRobot(interlock=interlock)
+    manager = BehaviorManager(
+        robot_client=robot,
+        vision_adapter=SequencedVisionAdapter([located_target(320)]),
+    )
+    manager.lidar_session = "session-1"
+    result = manager.execute(_mission())
+    assert result["state"] == "APPROACH_BLOCKED"
+    assert result["ok"] is False
+    assert result["completed"] is True
+    assert result["approach_chunks_attempted"] == 0
+    assert robot.calls == []
+
+
+@pytest.mark.parametrize(
+    "move_result,state",
+    [
+        (
+            {"ok": False, "bounded_forward_invalidated": True,
+             "forwarded": True, "reason": "front_not_clear"},
+            "APPROACH_BLOCKED",
+        ),
+        (
+            {"ok": False, "error": "transport_failed"},
+            "APPROACH_FAILED",
+        ),
+    ],
+)
+def test_approach_failure_is_terminal_and_never_replayed(move_result, state):
+    robot = GuardedSearchRobot(move_result=move_result)
+    manager = BehaviorManager(
+        robot_client=robot,
+        vision_adapter=SequencedVisionAdapter([located_target(320)]),
+    )
+    manager.lidar_session = "session-1"
+    result = manager.execute(_mission())
+    assert result["state"] == state
+    assert result["ok"] is False
+    assert result["completed"] is True
+    assert result["approach_chunks_attempted"] == 1
+    assert result["approach_chunks_completed"] == 0
+    assert len(robot.calls) == 1
+
+
+def test_approach_transport_exception_is_terminal_without_replay():
+    robot = GuardedSearchRobot(move_exception=TimeoutError("uncertain"))
+    manager = BehaviorManager(
+        robot_client=robot,
+        vision_adapter=SequencedVisionAdapter([located_target(320)]),
+    )
+    manager.lidar_session = "session-1"
+    result = manager.execute(_mission())
+    assert result["state"] == "APPROACH_FAILED"
+    assert result["ok"] is False
+    assert result["completed"] is True
+    assert result["error_type"] == "TimeoutError"
+    assert result["approach_result"]["transport_attempted"] is True
+    assert len(robot.calls) == 1
+
+
+def test_approach_requires_post_motion_candidate_timestamp():
+    target = located_target(320)
+    target["last_seen"] = "z-cutoff"
+    payloads = [
+        candidate_detection("a-before"),
+        candidate_detection("b-before"),
+        candidate_detection("c-before"),
+    ]
+    robot = GuardedSearchRobot()
+    manager = BehaviorManager(
+        robot_client=robot,
+        vision_adapter=CandidateVisionAdapter([target], payloads),
+    )
+    manager.lidar_session = "session-1"
+    result = manager.execute(_mission())
+    assert result["state"] == "TARGET_LOST_AFTER_APPROACH"
+    assert result["completed"] is True
+    assert len(robot.calls) == 1
+
+
+class IdentityChangingCandidateVision(CandidateVisionAdapter):
+    def __init__(self, observations, candidate_payloads, post_entity_id=None):
+        super().__init__(observations, candidate_payloads)
+        self.post_entity_id = post_entity_id
+
+    @staticmethod
+    def normalize_detection(detection):
+        normalized = CandidateVisionAdapter.normalize_detection(detection)
+        if "track_id" in detection:
+            normalized["track_id"] = detection["track_id"]
+        return normalized
+
+    def process_detection_frame(self, detections):
+        result = super().process_detection_frame(detections)
+        if self.post_entity_id is not None and self.last_result is not None:
+            self.last_result["entity_id"] = self.post_entity_id
+        return result
+
+
+def _identity_change_payloads(track_ids):
+    payloads = []
+    for index, track_id in enumerate(track_ids, start=1):
+        payload = candidate_detection(f"identity-frame-{index}")
+        payload["detections"][0]["track_id"] = track_id
+        payloads.append(payload)
+    return payloads
+
+
+def test_approach_allows_post_motion_track_id_change():
+    pre_motion = located_target(320)
+    pre_motion["track_id"] = 101
+    vision = IdentityChangingCandidateVision(
+        [pre_motion],
+        _identity_change_payloads([202, 202, 303]),
+    )
+    robot = GuardedSearchRobot()
+    manager = BehaviorManager(robot_client=robot, vision_adapter=vision)
+    manager.lidar_session = "session-1"
+    turn_calls = []
+    manager.execute_guarded_turn = lambda *args, **kwargs: turn_calls.append(
+        (args, kwargs)
+    )
+
+    result = manager.execute(_mission())
+
+    assert result["state"] == "APPROACH_STEP_COMPLETE"
+    assert result["ok"] is True
+    assert result["completed"] is True
+    assert result["approach_chunks_attempted"] == 1
+    assert result["approach_chunks_completed"] == 1
+    assert result["target_observation"]["track_id"] != 101
+    assert robot.calls == [("move_forward", 0.08, 0.50)]
+    assert turn_calls == []
+
+
+def test_approach_allows_post_motion_entity_id_change():
+    pre_motion = located_target(320)
+    pre_motion["entity_id"] = "backpack-001"
+    vision = IdentityChangingCandidateVision(
+        [pre_motion],
+        _identity_change_payloads([401, 402, 403]),
+        post_entity_id="backpack-002",
+    )
+    robot = GuardedSearchRobot()
+    manager = BehaviorManager(robot_client=robot, vision_adapter=vision)
+    manager.lidar_session = "session-1"
+    turn_calls = []
+    manager.execute_guarded_turn = lambda *args, **kwargs: turn_calls.append(
+        (args, kwargs)
+    )
+
+    result = manager.execute(_mission())
+
+    assert result["state"] == "APPROACH_STEP_COMPLETE"
+    assert result["ok"] is True
+    assert result["completed"] is True
+    assert result["approach_chunks_attempted"] == 1
+    assert result["approach_chunks_completed"] == 1
+    assert result["target_observation"]["entity_id"] == "backpack-002"
+    assert robot.calls == [("move_forward", 0.08, 0.50)]
+    assert turn_calls == []
+
+
 def test_centering_publishes_live_tracking_state_updates():
     manager, _vision, _calls = make_centering_manager(
         [located_target(145), located_target(320)],
-        centered_candidate_payloads("telemetry"),
+        centered_candidate_payloads("telemetry")
+        + centered_candidate_payloads("telemetry-post"),
     )
     tracking = empty_tracking_state()
     updates = []
@@ -813,9 +1109,9 @@ def test_centering_publishes_live_tracking_state_updates():
     assert centering["steering_direction"] == "LEFT"
     assert centering["target_area"] > 0
     assert centering["bbox"]["x1"] == 85.0
-    assert result["state"] == "CENTERED"
-    assert tracking["state"] == "CENTERED"
-    assert tracking["bbox"]["x1"] == 260.0
+    assert result["state"] == "APPROACH_STEP_COMPLETE"
+    assert tracking["state"] == "APPROACH_STEP_COMPLETE"
+    assert tracking["bbox"]["x1"] == 200.0
     assert tracking["steering_direction"] == "CENTER"
     assert abs(tracking["horizontal_error"]) <= 50
     assert tracking["locked_identity_id"] is None
@@ -877,10 +1173,11 @@ def test_runtime_tracking_callback_updates_status_state_without_identity():
 def test_left_target_uses_guarded_centering_constants():
     manager, _vision, calls = make_centering_manager(
         [located_target(145), located_target(320)],
-        centered_candidate_payloads("left"),
+        centered_candidate_payloads("left")
+        + centered_candidate_payloads("left-post"),
     )
     result = manager.execute(_mission())
-    assert result["state"] == "CENTERED"
+    assert result["state"] == "APPROACH_STEP_COMPLETE"
     assert result["centering_turn_chunks_attempted"] == 1
     assert result["centering_turn_chunks_completed"] == 1
     assert calls == [("LEFT", 0.20, 0.50, "session-1")]
@@ -889,10 +1186,11 @@ def test_left_target_uses_guarded_centering_constants():
 def test_right_target_uses_right_guarded_centering_direction():
     manager, _vision, calls = make_centering_manager(
         [located_target(500), located_target(320)],
-        centered_candidate_payloads("right"),
+        centered_candidate_payloads("right")
+        + centered_candidate_payloads("right-post"),
     )
     result = manager.execute(_mission())
-    assert result["state"] == "CENTERED"
+    assert result["state"] == "APPROACH_STEP_COMPLETE"
     assert calls[0] == ("RIGHT", 0.20, 0.50, "session-1")
 
 
@@ -900,14 +1198,15 @@ def test_centering_requires_new_confirmation_after_each_turn():
     manager, vision, calls = make_centering_manager(
         [located_target(145), located_target(500), located_target(320)],
         centered_candidate_payloads("first", 500)
-        + centered_candidate_payloads("second", 320),
+        + centered_candidate_payloads("second", 320)
+        + centered_candidate_payloads("post", 320),
     )
     result = manager.execute(_mission())
-    assert result["state"] == "CENTERED"
+    assert result["state"] == "APPROACH_STEP_COMPLETE"
     assert result["centering_turn_chunks_attempted"] == 2
     assert result["centering_turn_chunks_completed"] == 2
     assert len(calls) == 2
-    assert vision.candidate_calls == 6
+    assert vision.candidate_calls == 9
 
 
 def test_target_loss_after_centering_turn_stops_without_second_turn():
@@ -959,12 +1258,13 @@ def test_search_and_centering_counters_remain_separate():
     ]
     acquired = centered_candidate_payloads("acquired", 145)
     centered = centered_candidate_payloads("centered", 320)
+    post_approach = centered_candidate_payloads("post-approach", 320)
     manager, _vision, calls = make_centering_manager(
         [not_found(), located_target(145), located_target(320)],
-        failed_search + acquired + centered,
+        failed_search + acquired + centered + post_approach,
     )
     result = manager.execute(_mission())
-    assert result["state"] == "CENTERED"
+    assert result["state"] == "APPROACH_STEP_COMPLETE"
     assert result["turn_chunks_attempted"] == 1
     assert result["turn_chunks_completed"] == 1
     assert result["centering_turn_chunks_attempted"] == 1
