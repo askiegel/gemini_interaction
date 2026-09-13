@@ -1076,6 +1076,28 @@ class BehaviorManager:
         return intersection / union if union > 0.0 else 0.0
 
     @classmethod
+    def _target_bbox_intersection_over_smaller(cls, first, second):
+        """Return intersection area divided by the smaller bbox area."""
+        first_bbox = cls._target_bbox(first)
+        second_bbox = cls._target_bbox(second)
+        if first_bbox is None or second_bbox is None:
+            return 0.0
+
+        x1 = max(first_bbox["x1"], second_bbox["x1"])
+        y1 = max(first_bbox["y1"], second_bbox["y1"])
+        x2 = min(first_bbox["x2"], second_bbox["x2"])
+        y2 = min(first_bbox["y2"], second_bbox["y2"])
+        intersection = max(0.0, x2 - x1) * max(0.0, y2 - y1)
+        first_area = (
+            first_bbox["x2"] - first_bbox["x1"]
+        ) * (first_bbox["y2"] - first_bbox["y1"])
+        second_area = (
+            second_bbox["x2"] - second_bbox["x1"]
+        ) * (second_bbox["y2"] - second_bbox["y1"])
+        smaller_area = min(first_area, second_area)
+        return intersection / smaller_area if smaller_area > 0.0 else 0.0
+
+    @classmethod
     def _target_observations_match(cls, first, second):
         """Return whether two same-label observations can share a cluster."""
         first_label = first.get("label") if isinstance(first, dict) else None
@@ -1120,7 +1142,13 @@ class BehaviorManager:
         area_ratio = max(float(first["area"]), float(second["area"])) / min(
             float(first["area"]), float(second["area"])
         )
-        return center_distance <= 60.0 and area_ratio <= 2.0
+        if center_distance > 60.0:
+            return False
+
+        if area_ratio <= 2.0:
+            return True
+
+        return cls._target_bbox_intersection_over_smaller(first, second) >= 0.50
 
     def _confirm_target_candidates(self, target_name):
         """Confirm a target across distinct cached Vision Server frames."""

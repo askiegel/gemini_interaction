@@ -463,7 +463,66 @@ def test_bbox_shape_variation_matches_by_center_and_area():
         "bbox": {"x1": 152.0, "y1": 219.0, "x2": 307.0, "y2": 368.0},
     }
     assert behavior_module.BehaviorManager._target_bbox_iou(first, second) < 0.50
+    assert (
+        behavior_module.BehaviorManager._target_bbox_intersection_over_smaller(
+            first, second
+        )
+        >= 0.50
+    )
     assert behavior_module.BehaviorManager._target_observations_match(first, second)
+
+
+def test_nested_live_backpack_boxes_match_by_intersection_over_smaller():
+    first = {
+        "label": "backpack",
+        "cx": 213.5,
+        "cy": 337.5,
+        "area": 59474.0,
+        "image_width": 640.0,
+        "image_height": 480.0,
+        "bbox": {"x1": 82.0, "y1": 224.0, "x2": 345.0, "y2": 451.0},
+    }
+    second = {
+        "label": "backpack",
+        "cx": 232.5,
+        "cy": 277.5,
+        "area": 17331.0,
+        "image_width": 640.0,
+        "image_height": 480.0,
+        "bbox": {"x1": 153.0, "y1": 223.0, "x2": 312.0, "y2": 332.0},
+    }
+    assert behavior_module.BehaviorManager._target_bbox_iou(first, second) < 0.50
+    assert max(first["area"], second["area"]) / min(first["area"], second["area"]) > 2.0
+    containment = behavior_module.BehaviorManager._target_bbox_intersection_over_smaller(
+        first, second
+    )
+    assert containment >= 0.50
+    assert behavior_module.BehaviorManager._target_observations_match(first, second)
+
+
+def test_nested_association_rejects_nonoverlap_and_different_labels():
+    base = {
+        "label": "backpack",
+        "cx": 200.0,
+        "cy": 250.0,
+        "area": 10000.0,
+        "image_width": 640.0,
+        "image_height": 480.0,
+        "bbox": {"x1": 150.0, "y1": 200.0, "x2": 250.0, "y2": 300.0},
+    }
+    separated = dict(
+        base,
+        cx=205.0,
+        cy=450.0,
+        area=25000.0,
+        bbox={"x1": 155.0, "y1": 400.0, "x2": 305.0, "y2": 566.67},
+    )
+    other_label = dict(separated, label="suitcase")
+    assert behavior_module.BehaviorManager._target_bbox_intersection_over_smaller(
+        base, separated
+    ) < 0.50
+    assert not behavior_module.BehaviorManager._target_observations_match(base, separated)
+    assert not behavior_module.BehaviorManager._target_observations_match(base, other_label)
 
 
 def test_target_association_rejects_area_or_center_outliers():
