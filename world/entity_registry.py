@@ -11,6 +11,15 @@ class EntityRegistry:
     It links repeated detections to the same entity when possible.
     """
 
+    # Detector metadata is retained on World Model observations for
+    # diagnostics, but it is not semantic evidence that two observations are
+    # the same object.  In particular, tracker IDs are transient and may be
+    # reused, and raw_detection contains those IDs as nested metadata.
+    _NON_SEMANTIC_MATCH_ATTRIBUTES = frozenset({
+        "track_id",
+        "raw_detection",
+    })
+
     def __init__(self, world_model: WorldModel):
         self.world_model = world_model
 
@@ -83,7 +92,11 @@ class EntityRegistry:
         score = 0.4
 
         if entity.attributes:
-            shared_keys = set(entity.attributes.keys()) & set(attributes.keys())
+            shared_keys = (
+                set(entity.attributes.keys())
+                & set(attributes.keys())
+                - self._NON_SEMANTIC_MATCH_ATTRIBUTES
+            )
 
             for key in shared_keys:
                 if entity.attributes.get(key) == attributes.get(key):
