@@ -546,6 +546,7 @@ def test_confirmation_diagnostics_mark_cutoff_and_duplicate_frames(monkeypatch):
     assert any(attempt["duplicate_timestamp"] for attempt in diagnostics["attempts"])
     assert diagnostics["distinct_fresh_timestamps"] == 1
     assert diagnostics["actionable_frames"] == 1
+    assert diagnostics["evidence_frames_evaluated"] == 1
 
 
 def test_confirmation_diagnostics_show_two_distinct_supporting_frames():
@@ -567,6 +568,7 @@ def test_confirmation_diagnostics_show_two_distinct_supporting_frames():
     assert status == "target_confirmed"
     assert diagnostics["distinct_fresh_timestamps"] == 3
     assert diagnostics["actionable_frames"] == 3
+    assert diagnostics["evidence_frames_evaluated"] == 3
     assert diagnostics["qualified_support_reached"] is True
     assert diagnostics["qualified_fallback_used"] is False
     assert any(
@@ -826,6 +828,126 @@ def test_pre_cutoff_duplicates_still_expire_confirmation_window(monkeypatch):
     assert status == "target_lost"
     assert diagnostics["distinct_fresh_timestamps"] == 0
     assert diagnostics["elapsed_seconds"] >= 0.90
+
+
+def test_empty_fresh_frames_do_not_consume_evidence_quota(monkeypatch):
+    def empty(timestamp):
+        payload = candidate_detection(timestamp)
+        payload["detections"] = []
+        return payload
+
+    payloads = [
+        candidate_detection("2026-09-13T21:42:19.745385+00:00"),
+        empty("2026-09-13T21:42:19.895385+00:00"),
+        empty("2026-09-13T21:42:20.045385+00:00"),
+        empty("2026-09-13T21:42:20.195385+00:00"),
+        candidate_detection("2026-09-13T21:42:20.345385+00:00"),
+        candidate_detection("2026-09-13T21:42:20.495385+00:00"),
+        candidate_detection("2026-09-13T21:42:20.645385+00:00"),
+    ]
+    (confirmed, status, diagnostics), vision = _run_timed_cutoff_confirmation(
+        monkeypatch,
+        payloads,
+        [0.10, 0.20, 0.30, 0.40, 0.50, 0.60, 0.70],
+    )
+    assert vision.candidate_calls == 7
+    assert confirmed is not None
+    assert status == "target_confirmed"
+    assert diagnostics["distinct_fresh_timestamps"] == 6
+    assert diagnostics["actionable_frames"] == 3
+    assert diagnostics["evidence_frames_evaluated"] == 3
+
+
+def test_empty_fresh_stream_remains_bounded(monkeypatch):
+    class EmptyVision(CandidateVisionAdapter):
+        def fetch_target_candidates(self, target):
+            self.candidate_calls += 1
+            timestamp = (
+                f"2026-09-13T21:42:20.{self.candidate_calls:06d}+00:00"
+            )
+            clock[0] += 0.10
+            return {
+                "timestamp": timestamp,
+                "camera_running": True,
+                "detections": [],
+            }
+
+    clock = [0.0]
+    vision = EmptyVision([], [])
+    manager = BehaviorManager(robot_client=GuardedSearchRobot(), vision_adapter=vision)
+    monkeypatch.setattr(behavior_module.time, "monotonic", lambda: clock[0])
+    confirmed, status, diagnostics = manager._confirm_target_candidates_with_status(
+        "backpack",
+        minimum_timestamp="2026-09-13T21:42:19.795554+00:00",
+        return_diagnostics=True,
+    )
+    assert confirmed is None
+    assert status == "target_lost"
+    assert diagnostics["evidence_frames_evaluated"] == 0
+    assert diagnostics["elapsed_seconds"] >= 0.90
+    assert diagnostics["fetch_attempts"] < 20
+
+
+def test_candidate_bearing_incompatible_frames_consume_evidence_quota(monkeypatch):
+    def empty(timestamp):
+        payload = candidate_detection(timestamp)
+        payload["detections"] = []
+        return payload
+
+    payloads = [
+        empty("2026-09-13T21:42:19.895385+00:00"),
+        empty("2026-09-13T21:42:20.045385+00:00"),
+        candidate_detection("2026-09-13T21:42:20.195385+00:00", bbox=(0, 0, 100, 100)),
+        candidate_detection("2026-09-13T21:42:20.345385+00:00", bbox=(300, 0, 400, 100)),
+        candidate_detection("2026-09-13T21:42:20.495385+00:00", bbox=(500, 0, 600, 100)),
+    ]
+    (confirmed, status, diagnostics), vision = _run_timed_cutoff_confirmation(
+        monkeypatch,
+        payloads,
+        [0.10, 0.20, 0.30, 0.40, 0.50],
+    )
+    assert confirmed is None
+    assert status == "target_reconfirmation_failed"
+    assert vision.candidate_calls == 5
+    assert diagnostics["actionable_frames"] == 3
+    assert diagnostics["evidence_frames_evaluated"] == 3
+
+
+def test_post_centering_empty_frames_allow_later_fresh_confirmation(monkeypatch):
+    def empty(timestamp):
+        payload = candidate_detection(timestamp)
+        payload["detections"] = []
+        return payload
+
+    payloads = [
+        candidate_detection("-1"),
+        empty("1"),
+        empty("2"),
+        empty("3"),
+        candidate_detection("4"),
+        candidate_detection("5"),
+        candidate_detection("6"),
+    ]
+    vision = CandidateVisionAdapter([], payloads)
+    manager = BehaviorManager(robot_client=GuardedSearchRobot(), vision_adapter=vision)
+    manager.lidar_session = "session-1"
+    manager.execute_guarded_turn = lambda *args, **kwargs: {
+        "ok": True, "permitted": True, "reason": "completed"
+    }
+    manager._promote_confirmed_target = lambda _candidate: located_target(320)
+    manager._execute_find_object_approach = lambda *args, **kwargs: {
+        "state": "CENTERED", "ok": True
+    }
+    clock = [0.0]
+    monkeypatch.setattr(behavior_module.time, "monotonic", lambda: clock[0])
+    result = manager._center_acquired_target(
+        "backpack",
+        located_target(145),
+        {"behavior": "FIND_OBJECT", "turn_chunks_attempted": 0,
+         "turn_chunks_completed": 0},
+    )
+    assert result["state"] == "CENTERED"
+    assert vision.candidate_calls == 7
 
 
 def _run_confirmation_mode(monkeypatch, payloads, *, diagnostics, minimum=None,

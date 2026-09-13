@@ -1373,6 +1373,7 @@ class BehaviorManager:
             "elapsed_seconds": 0.0,
             "fetch_attempts": 0,
             "distinct_fresh_timestamps": 0,
+            "evidence_frames_evaluated": 0,
             "actionable_frames": 0,
             "maximum_frames": self.TARGET_CONFIRMATION_MAX_FRAMES,
             "minimum_support": self.TARGET_CONFIRMATION_MIN_SUPPORT,
@@ -1473,7 +1474,8 @@ class BehaviorManager:
             )
 
         while (
-            len(fresh_timestamps) < self.TARGET_CONFIRMATION_MAX_FRAMES
+            diagnostics["evidence_frames_evaluated"]
+            < self.TARGET_CONFIRMATION_MAX_FRAMES
             and time.monotonic() - started
             <= self.TARGET_CONFIRMATION_WINDOW_SECONDS
         ):
@@ -1492,6 +1494,7 @@ class BehaviorManager:
                 "camera_running": None,
                 "raw_candidate_count": 0,
                 "actionable_candidate_count": 0,
+                "evidence_frame_evaluated": False,
                 "actionable_candidates": [],
                 "association_outcomes": [],
                 "cluster_count": len(clusters),
@@ -1612,6 +1615,8 @@ class BehaviorManager:
 
             if observations:
                 diagnostics["actionable_frames"] += 1
+                diagnostics["evidence_frames_evaluated"] += 1
+                attempt["evidence_frame_evaluated"] = True
 
             for observation in sorted(
                 observations,
