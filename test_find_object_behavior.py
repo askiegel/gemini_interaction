@@ -567,6 +567,8 @@ def test_confirmation_diagnostics_show_two_distinct_supporting_frames():
     assert status == "target_confirmed"
     assert diagnostics["distinct_fresh_timestamps"] == 3
     assert diagnostics["actionable_frames"] == 3
+    assert diagnostics["qualified_support_reached"] is True
+    assert diagnostics["qualified_fallback_used"] is False
     assert any(
         attempt["cluster_reached_support"]
         for attempt in diagnostics["attempts"]
@@ -627,6 +629,95 @@ def test_confirmation_diagnostics_record_fetch_failure_after_actionable_frame():
     assert status == "target_reconfirmation_failed"
     assert diagnostics["attempts"][-1]["fetch_error"]["type"] == "TimeoutError"
     assert diagnostics["actionable_frames"] == 1
+    assert diagnostics["qualified_support_reached"] is False
+    assert diagnostics["qualified_fallback_used"] is False
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        TimeoutError("candidate endpoint unavailable"),
+        None,
+        {"camera_running": True, "detections": []},
+    ],
+    ids=["timeout", "non_dict_payload", "missing_timestamp"],
+)
+def test_qualified_support_falls_back_after_optional_fetch_failure(failure):
+    class FailingAfterSupportVision(CandidateVisionAdapter):
+        def fetch_target_candidates(self, target):
+            if self.candidate_calls >= 2:
+                self.candidate_calls += 1
+                if isinstance(failure, BaseException):
+                    raise failure
+                return failure
+            return super().fetch_target_candidates(target)
+
+    vision = FailingAfterSupportVision(
+        [], [candidate_detection("frame-1"), candidate_detection("frame-2")]
+    )
+    manager = BehaviorManager(
+        robot_client=GuardedSearchRobot(), vision_adapter=vision
+    )
+    confirmed, status, diagnostics = (
+        manager._confirm_target_candidates_with_status(
+            "backpack", return_diagnostics=True
+        )
+    )
+    assert confirmed is not None
+    assert status == "target_confirmed"
+    assert diagnostics["qualified_support_reached"] is True
+    assert diagnostics["qualified_fallback_used"] is True
+    assert diagnostics["terminal_reason"] == (
+        "qualified_support_preserved_after_fetch_error"
+    )
+    assert diagnostics["attempts"][-1]["fetch_error"]["type"] in {
+        "TimeoutError", "invalid_payload", "invalid_timestamp"
+    }
+
+
+def test_camera_health_failure_does_not_use_qualified_support_fallback():
+    camera_off = candidate_detection("frame-3")
+    camera_off["camera_running"] = False
+    vision = CandidateVisionAdapter(
+        [], [candidate_detection("frame-1"), candidate_detection("frame-2"), camera_off]
+    )
+    manager = BehaviorManager(robot_client=GuardedSearchRobot(), vision_adapter=vision)
+    confirmed, status, diagnostics = manager._confirm_target_candidates_with_status(
+        "backpack", return_diagnostics=True
+    )
+    assert confirmed is None
+    assert status == "target_reconfirmation_failed"
+    assert diagnostics["qualified_support_reached"] is True
+    assert diagnostics["qualified_fallback_used"] is False
+    assert diagnostics["terminal_reason"] == "camera_not_running"
+
+
+def test_qualified_support_with_duplicates_until_window_expiry_confirms(monkeypatch):
+    class RepeatingVision(CandidateVisionAdapter):
+        def fetch_target_candidates(self, target):
+            if self.candidate_calls >= 2:
+                self.candidate_calls += 1
+                return dict(candidate_detection("frame-2"))
+            return super().fetch_target_candidates(target)
+
+    vision = RepeatingVision(
+        [], [candidate_detection("frame-1"), candidate_detection("frame-2")]
+    )
+    manager = BehaviorManager(robot_client=GuardedSearchRobot(), vision_adapter=vision)
+    clock = [0.0]
+    monkeypatch.setattr(behavior_module.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(
+        behavior_module.time,
+        "sleep",
+        lambda seconds: clock.__setitem__(0, clock[0] + seconds),
+    )
+    confirmed, status, diagnostics = manager._confirm_target_candidates_with_status(
+        "backpack", return_diagnostics=True
+    )
+    assert confirmed is not None
+    assert status == "target_confirmed"
+    assert diagnostics["qualified_fallback_used"] is False
+    assert diagnostics["terminal_reason"] == "support_reached"
 
 
 def _run_confirmation_mode(monkeypatch, payloads, *, diagnostics, minimum=None,

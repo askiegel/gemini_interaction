@@ -1381,9 +1381,11 @@ class BehaviorManager:
             "minimum_timestamp": minimum_timestamp,
             "attempts": [],
             "terminal_reason": None,
+            "qualified_support_reached": False,
+            "qualified_fallback_used": False,
         }
 
-        def finish(candidate, status):
+        def finish(candidate, status, terminal_reason=None):
             diagnostics["confirmation_status"] = status
             diagnostics["elapsed_seconds"] = round(
                 max(0.0, time.monotonic() - started),
@@ -1392,7 +1394,7 @@ class BehaviorManager:
             diagnostics["distinct_fresh_timestamps"] = len(
                 fresh_timestamps
             )
-            diagnostics["terminal_reason"] = (
+            diagnostics["terminal_reason"] = terminal_reason or (
                 diagnostics["attempts"][-1].get("fetch_error", {}).get(
                     "type"
                 )
@@ -1422,6 +1424,53 @@ class BehaviorManager:
         fresh_timestamps = set()
         clusters = []
         actionable_candidate_seen = False
+        qualified_support_reached = False
+
+        def eligible_clusters():
+            return [
+                cluster
+                for cluster in clusters
+                if len(cluster["timestamps"])
+                >= self.TARGET_CONFIRMATION_MIN_SUPPORT
+            ]
+
+        def select_winner(eligible):
+            def cluster_key(cluster):
+                observations = cluster["observations"]
+                mean_confidence = sum(
+                    float(item.get("confidence") or 0.0)
+                    for item in observations
+                ) / len(observations)
+                mean_area = sum(
+                    float(item.get("area") or 0.0)
+                    for item in observations
+                ) / len(observations)
+                return (
+                    len(cluster["timestamps"]),
+                    mean_confidence,
+                    mean_area,
+                )
+
+            winning = max(eligible, key=cluster_key)
+            return max(
+                winning["observations"],
+                key=lambda item: (
+                    float(item.get("confidence") or 0.0),
+                    float(item.get("area") or 0.0),
+                ),
+            )
+
+        def fallback_after_optional_failure():
+            nonlocal qualified_support_reached
+            eligible = eligible_clusters()
+            if not qualified_support_reached or not eligible:
+                return None
+            diagnostics["qualified_fallback_used"] = True
+            return finish(
+                select_winner(eligible),
+                "target_confirmed",
+                "qualified_support_preserved_after_fetch_error",
+            )
 
         while (
             len(seen_timestamps) < self.TARGET_CONFIRMATION_MAX_FRAMES
@@ -1459,6 +1508,9 @@ class BehaviorManager:
                     "type": type(exc).__name__,
                     "message": str(exc),
                 }
+                fallback = fallback_after_optional_failure()
+                if fallback is not None:
+                    return fallback
                 return finish(
                     None,
                     "target_reconfirmation_failed"
@@ -1470,6 +1522,9 @@ class BehaviorManager:
                     "type": "invalid_payload",
                     "message": "candidate response was not an object",
                 }
+                fallback = fallback_after_optional_failure()
+                if fallback is not None:
+                    return fallback
                 return finish(
                     None,
                     "target_reconfirmation_failed"
@@ -1494,6 +1549,9 @@ class BehaviorManager:
                     "type": "invalid_timestamp",
                     "message": "candidate response had no timestamp",
                 }
+                fallback = fallback_after_optional_failure()
+                if fallback is not None:
+                    return fallback
                 return finish(
                     None,
                     "target_reconfirmation_failed"
@@ -1603,46 +1661,18 @@ class BehaviorManager:
                 support >= self.TARGET_CONFIRMATION_MIN_SUPPORT
                 for support in attempt["cluster_support_counts"]
             )
+            if attempt["cluster_reached_support"]:
+                qualified_support_reached = True
+                diagnostics["qualified_support_reached"] = True
 
-        eligible = [
-            cluster
-            for cluster in clusters
-            if len(cluster["timestamps"])
-            >= self.TARGET_CONFIRMATION_MIN_SUPPORT
-        ]
+        eligible = eligible_clusters()
         if not eligible:
             return finish(None, (
                 "target_reconfirmation_failed"
                 if actionable_candidate_seen else "target_lost"
             ))
 
-        def cluster_key(cluster):
-            observations = cluster["observations"]
-            mean_confidence = sum(
-                float(item.get("confidence") or 0.0)
-                for item in observations
-            ) / len(observations)
-            mean_area = sum(
-                float(item.get("area") or 0.0)
-                for item in observations
-            ) / len(observations)
-            return (
-                len(cluster["timestamps"]),
-                mean_confidence,
-                mean_area,
-            )
-
-        winning = max(
-            eligible,
-            key=cluster_key,
-        )
-        return finish(max(
-            winning["observations"],
-            key=lambda item: (
-                float(item.get("confidence") or 0.0),
-                float(item.get("area") or 0.0),
-            ),
-        ), "target_confirmed")
+        return finish(select_winner(eligible), "target_confirmed")
 
     @staticmethod
     def _target_diagnostic_summary(observation):
