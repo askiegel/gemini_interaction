@@ -390,6 +390,7 @@ class BehaviorManager:
     TARGET_CONFIRMATION_MIN_SUPPORT = 2
     TARGET_CONFIRMATION_WINDOW_SECONDS = 0.90
     TARGET_CONFIRMATION_POLL_SECONDS = 0.05
+    FIND_POST_MOTION_CONFIRMATION_WINDOW_SECONDS = 1.50
 
     FIND_CENTER_TOLERANCE_PIXELS = 50.0
     FIND_CENTER_TURN_SPEED = 0.20
@@ -1365,9 +1366,15 @@ class BehaviorManager:
         *,
         minimum_timestamp=None,
         return_diagnostics=False,
+        confirmation_window_seconds=None,
     ):
         """Confirm a target and optionally return bounded diagnostics."""
         started = time.monotonic()
+        confirmation_window = (
+            self.TARGET_CONFIRMATION_WINDOW_SECONDS
+            if confirmation_window_seconds is None
+            else float(confirmation_window_seconds)
+        )
         diagnostics = {
             "confirmation_status": None,
             "elapsed_seconds": 0.0,
@@ -1377,7 +1384,7 @@ class BehaviorManager:
             "actionable_frames": 0,
             "maximum_frames": self.TARGET_CONFIRMATION_MAX_FRAMES,
             "minimum_support": self.TARGET_CONFIRMATION_MIN_SUPPORT,
-            "confirmation_window_seconds": self.TARGET_CONFIRMATION_WINDOW_SECONDS,
+            "confirmation_window_seconds": confirmation_window,
             "poll_seconds": self.TARGET_CONFIRMATION_POLL_SECONDS,
             "minimum_timestamp": minimum_timestamp,
             "attempts": [],
@@ -1477,7 +1484,7 @@ class BehaviorManager:
             diagnostics["evidence_frames_evaluated"]
             < self.TARGET_CONFIRMATION_MAX_FRAMES
             and time.monotonic() - started
-            <= self.TARGET_CONFIRMATION_WINDOW_SECONDS
+            <= confirmation_window
         ):
             diagnostics["fetch_attempts"] += 1
             attempt = {
@@ -1917,6 +1924,9 @@ class BehaviorManager:
                 target_name,
                 minimum_timestamp=post_turn_cutoff,
                 return_diagnostics=True,
+                confirmation_window_seconds=(
+                    self.FIND_POST_MOTION_CONFIRMATION_WINDOW_SECONDS
+                ),
             )
             self._last_target_confirmation_status = confirmation_status
             if confirmed is None:
@@ -2186,6 +2196,9 @@ class BehaviorManager:
                 target_name,
                 minimum_timestamp=post_motion_cutoff,
                 return_diagnostics=True,
+                confirmation_window_seconds=(
+                    self.FIND_POST_MOTION_CONFIRMATION_WINDOW_SECONDS
+                ),
             )
         )
         if confirmed is None:

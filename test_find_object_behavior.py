@@ -569,6 +569,7 @@ def test_confirmation_diagnostics_show_two_distinct_supporting_frames():
     assert diagnostics["distinct_fresh_timestamps"] == 3
     assert diagnostics["actionable_frames"] == 3
     assert diagnostics["evidence_frames_evaluated"] == 3
+    assert diagnostics["confirmation_window_seconds"] == 0.90
     assert diagnostics["qualified_support_reached"] is True
     assert diagnostics["qualified_fallback_used"] is False
     assert any(
@@ -948,6 +949,68 @@ def test_post_centering_empty_frames_allow_later_fresh_confirmation(monkeypatch)
     )
     assert result["state"] == "CENTERED"
     assert vision.candidate_calls == 7
+
+
+def test_post_centering_empty_recovery_uses_extended_bounded_window(monkeypatch):
+    class EmptyVision(CandidateVisionAdapter):
+        def fetch_target_candidates(self, target):
+            self.candidate_calls += 1
+            clock[0] += 0.10
+            return {
+                "timestamp": f"empty-{self.candidate_calls}",
+                "camera_running": True,
+                "detections": [],
+            }
+
+    clock = [0.0]
+    vision = EmptyVision([], [])
+    manager = BehaviorManager(robot_client=GuardedSearchRobot(), vision_adapter=vision)
+    manager.lidar_session = "session-1"
+    manager.execute_guarded_turn = lambda *args, **kwargs: {
+        "ok": True, "permitted": True, "reason": "completed"
+    }
+    monkeypatch.setattr(behavior_module.time, "monotonic", lambda: clock[0])
+    result = manager._center_acquired_target(
+        "backpack",
+        located_target(145),
+        {"behavior": "FIND_OBJECT", "turn_chunks_attempted": 0,
+         "turn_chunks_completed": 0},
+    )
+    assert result["state"] == "TARGET_LOST_DURING_CENTERING"
+    diagnostics = result["confirmation_diagnostics"]
+    assert diagnostics["confirmation_window_seconds"] == 1.50
+    assert diagnostics["elapsed_seconds"] >= 1.50
+    assert diagnostics["evidence_frames_evaluated"] == 0
+
+
+def test_post_forward_confirmation_uses_extended_window_and_returns_early():
+    class ClockedVision(CandidateVisionAdapter):
+        def fetch_target_candidates(self, target):
+            self.candidate_calls += 1
+            clock[0] += 0.20
+            return dict(self.candidate_payloads.pop(0))
+
+    clock = [0.0]
+    payloads = []
+    for index in range(3):
+        empty = candidate_detection(f"empty-{index}")
+        empty["detections"] = []
+        payloads.append(empty)
+    payloads.extend([
+        candidate_detection("target-1"),
+        candidate_detection("target-2"),
+        candidate_detection("target-3"),
+    ])
+    vision = ClockedVision([located_target(320)], payloads)
+    manager = BehaviorManager(robot_client=GuardedSearchRobot(), vision_adapter=vision)
+    manager.lidar_session = "session-1"
+    manager._promote_confirmed_target = lambda _candidate: located_target(320)
+    result = manager.execute(_mission())
+    assert result["state"] == "APPROACH_STEP_COMPLETE"
+    diagnostics = result["confirmation_diagnostics"]
+    assert diagnostics["confirmation_window_seconds"] == 1.50
+    assert diagnostics["elapsed_seconds"] < 1.50
+    assert diagnostics["evidence_frames_evaluated"] == 3
 
 
 def _run_confirmation_mode(monkeypatch, payloads, *, diagnostics, minimum=None,
@@ -2038,9 +2101,16 @@ def test_centering_cutoff_is_created_after_turn_returns():
         events.append("turn_returned")
         return {"ok": True, "permitted": True, "reason": "completed"}
 
-    def confirm(target_name, *, minimum_timestamp, return_diagnostics):
+    def confirm(
+        target_name,
+        *,
+        minimum_timestamp,
+        return_diagnostics,
+        confirmation_window_seconds,
+    ):
         events.append("confirmation_called")
         assert events == ["turn_returned", "confirmation_called"]
+        assert confirmation_window_seconds == 1.50
         assert behavior_module.BehaviorManager._vision_timestamp_is_iso(
             minimum_timestamp
         )
