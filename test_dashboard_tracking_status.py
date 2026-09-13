@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 
+from pathlib import Path
 from unittest.mock import patch
 
 from voice_relay.server import VoiceRelayHandler
@@ -129,6 +130,15 @@ def main():
     assert tracking["target_area"] == 47290.0
     assert tracking["steering_direction"] == "LEFT"
     assert tracking["distance_state"] == "TOO_FAR"
+
+    dashboard_source = Path(
+        __file__
+    ).with_name("voice_relay").joinpath("index.html").read_text(
+        encoding="utf-8"
+    )
+    assert "tracking.bbox" in dashboard_source
+    assert '"FIND_OBJECT"' in dashboard_source
+    assert "drawTrackingOverlay(\n                detections,\n                activeTarget,\n                tracking" in dashboard_source
 
     print("PASS: dashboard status forwards tracking unchanged")
     print("PASS: tracking state is runtime authoritative")

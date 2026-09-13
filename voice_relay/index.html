@@ -2007,20 +2007,25 @@
 
     function drawTrackingOverlay(
         detections,
-        activeTarget
+        activeTarget,
+        tracking
     ) {
         const canvas = elements.cameraOverlay;
         const context = canvas.getContext("2d");
 
         const imageWidth =
-            detections.length
+            tracking && Number.isFinite(Number(tracking.image_width))
+                ? Number(tracking.image_width)
+                : detections.length
                 ? Number(
                     detections[0].image_width || 640
                 )
                 : 640;
 
         const imageHeight =
-            detections.length
+            tracking && Number.isFinite(Number(tracking.image_height))
+                ? Number(tracking.image_height)
+                : detections.length
                 ? Number(
                     detections[0].image_height || 480
                 )
@@ -2181,6 +2186,68 @@
             context.arc(cx, cy, 5, 0, Math.PI * 2);
             context.fill();
         });
+
+        // FIND_OBJECT's selected target may be below the normal published
+        // detection threshold. Draw its authoritative tracking bbox
+        // separately from the general detector overlay.
+        const targetBbox =
+            tracking &&
+            String(tracking.behavior || "").toUpperCase() ===
+                "FIND_OBJECT"
+                ? tracking.bbox
+                : null;
+
+        if (
+            targetBbox &&
+            ["x1", "y1", "x2", "y2"].every(
+                (key) => Number.isFinite(Number(targetBbox[key]))
+            ) &&
+            Number(targetBbox.x2) > Number(targetBbox.x1) &&
+            Number(targetBbox.y2) > Number(targetBbox.y1)
+        ) {
+            const x1 = Number(targetBbox.x1);
+            const y1 = Number(targetBbox.y1);
+            const x2 = Number(targetBbox.x2);
+            const y2 = Number(targetBbox.y2);
+            const targetLabel =
+                String(tracking.target_label || "target").toLowerCase();
+            const targetConfidence =
+                tracking.target_confidence === null ||
+                tracking.target_confidence === undefined
+                    ? ""
+                    : " " +
+                        Math.round(
+                            Number(tracking.target_confidence) * 100
+                        ) +
+                        "%";
+            const horizontalError =
+                tracking.horizontal_error === null ||
+                tracking.horizontal_error === undefined
+                    ? ""
+                    : " " +
+                        Math.round(Number(tracking.horizontal_error)) +
+                        "px";
+            const text =
+                "FIND_OBJECT " +
+                targetLabel +
+                targetConfidence +
+                horizontalError;
+
+            context.save();
+            context.strokeStyle = "#f97316";
+            context.lineWidth = 5;
+            context.setLineDash([10, 5]);
+            context.strokeRect(x1, y1, x2 - x1, y2 - y1);
+            context.setLineDash([]);
+            context.font = "bold 15px sans-serif";
+            const textWidth = context.measureText(text).width;
+            const textY = Math.max(20, y1);
+            context.fillStyle = "rgba(154, 52, 18, 0.95)";
+            context.fillRect(x1, textY - 20, textWidth + 12, 22);
+            context.fillStyle = "#ffffff";
+            context.fillText(text, x1 + 6, textY - 4);
+            context.restore();
+        }
     }
 
     function setHealth(dot, detail, ready, text) {
@@ -2588,7 +2655,8 @@
 
             drawTrackingOverlay(
                 detections,
-                activeTarget
+                activeTarget,
+                tracking
             );
 
             elements.trackingTarget.textContent =

@@ -2,6 +2,7 @@
 
 from copy import deepcopy
 from datetime import datetime, timezone
+import math
 from typing import Any, Dict, Optional
 
 
@@ -48,6 +49,64 @@ def _first_value(
 
         if value is not None:
             return value
+
+    return None
+
+
+def _valid_bbox(value: Any) -> Optional[Dict[str, float]]:
+    if not isinstance(value, dict):
+        return None
+
+    values = (
+        value.get("x1"),
+        value.get("y1"),
+        value.get("x2"),
+        value.get("y2"),
+    )
+    if not all(
+        isinstance(item, (int, float))
+        and not isinstance(item, bool)
+        and math.isfinite(item)
+        for item in values
+    ):
+        return None
+    if values[2] <= values[0] or values[3] <= values[1]:
+        return None
+
+    return {
+        "x1": float(values[0]),
+        "y1": float(values[1]),
+        "x2": float(values[2]),
+        "y2": float(values[3]),
+    }
+
+
+def _observation_bbox(observation: Any) -> Optional[Dict[str, float]]:
+    """Extract the selected observation bbox without inventing geometry."""
+    if not isinstance(observation, dict):
+        return None
+
+    direct = _valid_bbox(observation.get("bbox"))
+    if direct is not None:
+        return direct
+
+    location = observation.get("location")
+    if isinstance(location, dict):
+        nested = _valid_bbox(location.get("bbox"))
+        if nested is not None:
+            return nested
+
+    attributes = observation.get("attributes")
+    if isinstance(attributes, dict):
+        raw_detection = attributes.get("raw_detection")
+        if isinstance(raw_detection, dict):
+            nested = _valid_bbox(raw_detection)
+            if nested is not None:
+                return nested
+
+    raw_detection = observation.get("raw_detection")
+    if isinstance(raw_detection, dict):
+        return _valid_bbox(raw_detection)
 
     return None
 
@@ -575,11 +634,30 @@ def build_tracking_state(
             round(detection_age_ms)
         )
 
-    bbox = _first_value(
-        merged,
-        "bbox",
-        "bounding_box",
-    )
+    selected_observation = result.get("target_observation")
+    bbox = _observation_bbox(selected_observation)
+    if bbox is None:
+        bbox = _valid_bbox(
+            _first_value(
+                merged,
+                "bbox",
+                "bounding_box",
+            )
+        )
+
+    if (
+        bbox is None
+        and behavior == "FIND_OBJECT"
+        and state in {
+            "CENTERING",
+            "CENTERED",
+            "TARGET_RECONFIRMATION_FAILED",
+            "TARGET_LOST_DURING_CENTERING",
+            "CENTERING_EXHAUSTED",
+        }
+        and isinstance(previous, dict)
+    ):
+        bbox = _valid_bbox(previous.get("bbox"))
 
     active = state not in {
         "STOPPED",

@@ -731,6 +731,12 @@ def test_confirmed_candidate_after_one_turn_stops_search():
 def located_target(cx, target="backpack"):
     result = found_target(target)
     result["cx"] = float(cx)
+    result["bbox"] = {
+        "x1": float(cx) - 60.0,
+        "y1": 160.0,
+        "x2": float(cx) + 60.0,
+        "y2": 460.0,
+    }
     return result
 
 
@@ -806,8 +812,10 @@ def test_centering_publishes_live_tracking_state_updates():
     assert centering["horizontal_error"] < -50
     assert centering["steering_direction"] == "LEFT"
     assert centering["target_area"] > 0
+    assert centering["bbox"]["x1"] == 85.0
     assert result["state"] == "CENTERED"
     assert tracking["state"] == "CENTERED"
+    assert tracking["bbox"]["x1"] == 260.0
     assert tracking["steering_direction"] == "CENTER"
     assert abs(tracking["horizontal_error"]) <= 50
     assert tracking["locked_identity_id"] is None
