@@ -720,6 +720,114 @@ def test_qualified_support_with_duplicates_until_window_expiry_confirms(monkeypa
     assert diagnostics["terminal_reason"] == "support_reached"
 
 
+def _run_timed_cutoff_confirmation(monkeypatch, payloads, times):
+    class TimedVision(CandidateVisionAdapter):
+        def fetch_target_candidates(self, target):
+            index = self.candidate_calls
+            self.candidate_calls += 1
+            clock[0] = times[index]
+            return dict(self.candidate_payloads.pop(0))
+
+    clock = [0.0]
+    vision = TimedVision([], payloads)
+    manager = BehaviorManager(
+        robot_client=GuardedSearchRobot(), vision_adapter=vision
+    )
+    monkeypatch.setattr(behavior_module.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(
+        behavior_module.time,
+        "sleep",
+        lambda seconds: clock.__setitem__(0, clock[0] + seconds),
+    )
+    result = manager._confirm_target_candidates_with_status(
+        "backpack",
+        minimum_timestamp="2026-09-13T21:42:19.795554+00:00",
+        return_diagnostics=True,
+    )
+    return result, vision
+
+
+def test_pre_cutoff_frame_does_not_consume_fresh_frame_quota(monkeypatch):
+    stale = candidate_detection("2026-09-13T21:42:19.745385+00:00")
+    fresh_b = candidate_detection("2026-09-13T21:42:20.034769+00:00")
+    fresh_c = candidate_detection("2026-09-13T21:42:20.309719+00:00")
+    fresh_d = candidate_detection("2026-09-13T21:42:20.559719+00:00")
+    (confirmed, status, diagnostics), vision = _run_timed_cutoff_confirmation(
+        monkeypatch,
+        [stale, fresh_b, fresh_c, fresh_d],
+        [0.10, 0.30, 0.55, 0.78],
+    )
+    assert vision.candidate_calls == 4
+    assert diagnostics["attempts"][0]["before_cutoff"] is True
+    assert diagnostics["distinct_fresh_timestamps"] == 3
+    assert confirmed is not None
+    assert status == "target_confirmed"
+
+
+def test_pre_cutoff_duplicates_do_not_consume_fresh_frame_quota(monkeypatch):
+    stale = candidate_detection("2026-09-13T21:42:19.745385+00:00")
+    fresh_b = candidate_detection("2026-09-13T21:42:20.034769+00:00")
+    fresh_c = candidate_detection("2026-09-13T21:42:20.309719+00:00")
+    fresh_d = candidate_detection("2026-09-13T21:42:20.559719+00:00")
+    (confirmed, status, diagnostics), vision = _run_timed_cutoff_confirmation(
+        monkeypatch,
+        [stale, stale, fresh_b, fresh_c, fresh_d],
+        [0.10, 0.15, 0.30, 0.50, 0.70],
+    )
+    assert vision.candidate_calls == 5
+    assert any(attempt["duplicate_timestamp"] for attempt in diagnostics["attempts"])
+    assert diagnostics["distinct_fresh_timestamps"] == 3
+    assert confirmed is not None
+    assert status == "target_confirmed"
+
+
+def test_three_fresh_frame_quota_still_limits_distinct_frames(monkeypatch):
+    payloads = [
+        candidate_detection("2026-09-13T21:42:19.745385+00:00"),
+        candidate_detection("2026-09-13T21:42:20.034769+00:00"),
+        candidate_detection("2026-09-13T21:42:20.309719+00:00"),
+        candidate_detection("2026-09-13T21:42:20.559719+00:00"),
+        candidate_detection("2026-09-13T21:42:20.809719+00:00"),
+    ]
+    (_confirmed, _status, diagnostics), vision = _run_timed_cutoff_confirmation(
+        monkeypatch,
+        payloads,
+        [0.10, 0.30, 0.50, 0.70, 0.85],
+    )
+    assert vision.candidate_calls == 4
+    assert diagnostics["distinct_fresh_timestamps"] == 3
+
+
+def test_pre_cutoff_duplicates_still_expire_confirmation_window(monkeypatch):
+    stale = candidate_detection("2026-09-13T21:42:19.745385+00:00")
+
+    class RepeatingStaleVision(CandidateVisionAdapter):
+        def fetch_target_candidates(self, target):
+            self.candidate_calls += 1
+            return dict(stale)
+
+    vision = RepeatingStaleVision([], [stale])
+    manager = BehaviorManager(
+        robot_client=GuardedSearchRobot(), vision_adapter=vision
+    )
+    clock = [0.0]
+    monkeypatch.setattr(behavior_module.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(
+        behavior_module.time,
+        "sleep",
+        lambda seconds: clock.__setitem__(0, clock[0] + seconds),
+    )
+    confirmed, status, diagnostics = manager._confirm_target_candidates_with_status(
+        "backpack",
+        minimum_timestamp="2026-09-13T21:42:19.795554+00:00",
+        return_diagnostics=True,
+    )
+    assert confirmed is None
+    assert status == "target_lost"
+    assert diagnostics["distinct_fresh_timestamps"] == 0
+    assert diagnostics["elapsed_seconds"] >= 0.90
+
+
 def _run_confirmation_mode(monkeypatch, payloads, *, diagnostics, minimum=None,
                            manager_factory=None):
     vision = CandidateVisionAdapter([], payloads)

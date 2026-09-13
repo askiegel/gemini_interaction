@@ -1473,7 +1473,7 @@ class BehaviorManager:
             )
 
         while (
-            len(seen_timestamps) < self.TARGET_CONFIRMATION_MAX_FRAMES
+            len(fresh_timestamps) < self.TARGET_CONFIRMATION_MAX_FRAMES
             and time.monotonic() - started
             <= self.TARGET_CONFIRMATION_WINDOW_SECONDS
         ):
