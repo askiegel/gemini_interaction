@@ -1794,6 +1794,155 @@ def test_centering_requires_new_confirmation_after_each_turn():
     assert vision.candidate_calls == 9
 
 
+def test_centering_stale_pre_turn_frame_cannot_confirm(monkeypatch):
+    stale = candidate_detection("-1")
+
+    class RepeatingStaleVision(CandidateVisionAdapter):
+        def fetch_target_candidates(self, target):
+            self.candidate_calls += 1
+            return dict(stale)
+
+    vision = RepeatingStaleVision([], [stale])
+    manager = BehaviorManager(
+        robot_client=GuardedSearchRobot(), vision_adapter=vision
+    )
+    manager.lidar_session = "session-1"
+    manager.execute_guarded_turn = lambda *args, **kwargs: {
+        "ok": True, "permitted": True, "reason": "completed"
+    }
+    clock = [0.0]
+    monkeypatch.setattr(behavior_module.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(
+        behavior_module.time,
+        "sleep",
+        lambda seconds: clock.__setitem__(0, clock[0] + seconds),
+    )
+    result = manager._center_acquired_target(
+        "backpack",
+        located_target(145),
+        {"behavior": "FIND_OBJECT", "turn_chunks_attempted": 0,
+         "turn_chunks_completed": 0},
+    )
+    assert result["state"] == "TARGET_LOST_DURING_CENTERING"
+    assert result["centering_turn_chunks_attempted"] == 1
+    assert result["confirmation_status"] == "target_lost"
+    diagnostics = result["confirmation_diagnostics"]
+    assert diagnostics["distinct_fresh_timestamps"] == 0
+    assert any(attempt["before_cutoff"] for attempt in diagnostics["attempts"])
+
+
+def test_centering_uses_fresh_post_turn_candidates_not_stale(monkeypatch):
+    payloads = [
+        candidate_detection("-1"),
+        candidate_detection("1"),
+        candidate_detection("2"),
+        candidate_detection("3"),
+    ]
+    vision = CandidateVisionAdapter([], payloads)
+    manager = BehaviorManager(
+        robot_client=GuardedSearchRobot(), vision_adapter=vision
+    )
+    manager.lidar_session = "session-1"
+    manager.execute_guarded_turn = lambda *args, **kwargs: {
+        "ok": True, "permitted": True, "reason": "completed"
+    }
+    selected = []
+    manager._promote_confirmed_target = lambda candidate: (
+        selected.append(candidate["source_timestamp"]) or located_target(320)
+    )
+    manager._execute_find_object_approach = lambda *args, **kwargs: {
+        "state": "CENTERED", "ok": True
+    }
+    result = manager._center_acquired_target(
+        "backpack",
+        located_target(145),
+        {"behavior": "FIND_OBJECT", "turn_chunks_attempted": 0,
+         "turn_chunks_completed": 0},
+    )
+    assert result["state"] == "CENTERED"
+    assert selected and selected[0] in {"1", "2", "3"}
+    assert selected[0] != "-1"
+    assert vision.candidate_calls == 4
+
+
+def test_centering_post_turn_confirmation_propagates_diagnostics():
+    class FailingVision(CandidateVisionAdapter):
+        def fetch_target_candidates(self, target):
+            self.candidate_calls += 1
+            return dict(candidate_detection("-1"))
+
+    vision = FailingVision([], [candidate_detection("-1")])
+    manager = BehaviorManager(
+        robot_client=GuardedSearchRobot(), vision_adapter=vision
+    )
+    manager.lidar_session = "session-1"
+    manager.execute_guarded_turn = lambda *args, **kwargs: {
+        "ok": True, "permitted": True, "reason": "completed"
+    }
+    clock = [0.0]
+    original_monotonic = behavior_module.time.monotonic
+    original_sleep = behavior_module.time.sleep
+    behavior_module.time.monotonic = lambda: clock[0]
+    behavior_module.time.sleep = lambda seconds: clock.__setitem__(
+        0, clock[0] + seconds
+    )
+    try:
+        result = manager._center_acquired_target(
+            "backpack",
+            located_target(145),
+            {"behavior": "FIND_OBJECT", "turn_chunks_attempted": 0,
+             "turn_chunks_completed": 0},
+        )
+    finally:
+        behavior_module.time.monotonic = original_monotonic
+        behavior_module.time.sleep = original_sleep
+    assert result["state"] == "TARGET_LOST_DURING_CENTERING"
+    assert result["confirmation_status"] == "target_lost"
+    assert isinstance(result["confirmation_diagnostics"], dict)
+    assert result["confirmation_diagnostics"]["attempts"]
+    assert result["confirmation_diagnostics"]["minimum_timestamp"] == "0"
+
+
+def test_centering_cutoff_is_created_after_turn_returns():
+    target = located_target(145)
+    target["last_seen"] = "2026-09-13T20:00:00+00:00"
+    events = []
+    manager = BehaviorManager(
+        robot_client=GuardedSearchRobot(), vision_adapter=SequencedVisionAdapter([])
+    )
+    manager.lidar_session = "session-1"
+
+    def turn(*args, **kwargs):
+        events.append("turn_returned")
+        return {"ok": True, "permitted": True, "reason": "completed"}
+
+    def confirm(target_name, *, minimum_timestamp, return_diagnostics):
+        events.append("confirmation_called")
+        assert events == ["turn_returned", "confirmation_called"]
+        assert behavior_module.BehaviorManager._vision_timestamp_is_iso(
+            minimum_timestamp
+        )
+        return target, "target_confirmed", {
+            "confirmation_status": "target_confirmed",
+            "minimum_timestamp": minimum_timestamp,
+            "attempts": [],
+        }
+
+    manager.execute_guarded_turn = turn
+    manager._confirm_target_candidates_with_status = confirm
+    manager._promote_confirmed_target = lambda _candidate: located_target(320)
+    manager._execute_find_object_approach = lambda *args, **kwargs: {
+        "state": "CENTERED", "ok": True
+    }
+    result = manager._center_acquired_target(
+        "backpack", target,
+        {"behavior": "FIND_OBJECT", "turn_chunks_attempted": 0,
+         "turn_chunks_completed": 0},
+    )
+    assert result["state"] == "CENTERED"
+    assert events == ["turn_returned", "confirmation_called"]
+
+
 def test_target_loss_after_centering_turn_stops_without_second_turn():
     manager, _vision, calls = make_centering_manager(
         [located_target(145)],

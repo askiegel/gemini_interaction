@@ -1891,13 +1891,30 @@ class BehaviorManager:
                 )
 
             centering_completed += 1
-            confirmed = self._confirm_target_candidates(target_name)
+            post_turn_cutoff = None
+            for key in ("source_timestamp", "timestamp", "last_seen"):
+                value = current.get(key)
+                if isinstance(value, str) and value.strip():
+                    post_turn_cutoff = value.strip()
+                    break
+            if self._vision_timestamp_is_iso(post_turn_cutoff):
+                # This is deliberately created only after the guarded turn
+                # returned, so cached pre-turn ISO frames cannot confirm the
+                # post-turn observation. Synthetic/non-ISO test timestamps
+                # retain their deterministic ordering semantics.
+                post_turn_cutoff = datetime.now(timezone.utc).isoformat()
+
+            (
+                confirmed,
+                confirmation_status,
+                confirmation_diagnostics,
+            ) = self._confirm_target_candidates_with_status(
+                target_name,
+                minimum_timestamp=post_turn_cutoff,
+                return_diagnostics=True,
+            )
+            self._last_target_confirmation_status = confirmation_status
             if confirmed is None:
-                confirmation_status = getattr(
-                    self,
-                    "_last_target_confirmation_status",
-                    "target_lost",
-                )
                 confirmation_failed = (
                     confirmation_status == "target_reconfirmation_failed"
                 )
@@ -1915,6 +1932,8 @@ class BehaviorManager:
                         if confirmation_failed
                         else "Target was not re-confirmed after centering turn."
                     ),
+                    confirmation_status=confirmation_status,
+                    confirmation_diagnostics=confirmation_diagnostics,
                     **telemetry,
                 )
             promoted = self._promote_confirmed_target(confirmed)
@@ -1925,6 +1944,8 @@ class BehaviorManager:
                     target_found=False,
                     state="TARGET_LOST_DURING_CENTERING",
                     reason="Target promotion failed after centering turn.",
+                    confirmation_status=confirmation_status,
+                    confirmation_diagnostics=confirmation_diagnostics,
                     **telemetry,
                 )
             current = promoted
