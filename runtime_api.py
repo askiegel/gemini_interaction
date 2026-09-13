@@ -15,6 +15,7 @@ from config.config_manager import (
     ConfigurationManager,
 )
 from runtime import CognitiveRuntime
+from tracking_state import build_tracking_state
 
 
 DEFAULT_HOST = "127.0.0.1"
@@ -171,6 +172,55 @@ class RuntimeAPIHandler(BaseHTTPRequestHandler):
                 200,
                 self.server.runtime.get_status(),
             )
+            return
+
+        if path == "/find-object/preview":
+            target_values = parse_qs(parsed_url.query).get("target", [])
+            target = target_values[0].strip() if target_values else ""
+            if not target:
+                self.send_json(
+                    400,
+                    {
+                        "ok": False,
+                        "preview": True,
+                        "error": "A non-empty target is required.",
+                    },
+                )
+                return
+
+            try:
+                result = self.server.runtime.behavior_manager.preview_find_object(
+                    target
+                )
+                tracking = build_tracking_state(result)
+                self.send_json(
+                    200,
+                    {
+                        "ok": bool(result.get("ok")),
+                        "preview": True,
+                        "authoritative": bool(result.get("authoritative")),
+                        "source": result.get("source"),
+                        "target": result.get("target", target.lower()),
+                        "reason": result.get("reason"),
+                        "tracking": tracking,
+                    },
+                )
+            except Exception as exc:
+                self.send_json(
+                    200,
+                    {
+                        "ok": False,
+                        "preview": True,
+                        "target": target.lower(),
+                        "reason": str(exc),
+                        "tracking": build_tracking_state({
+                            "behavior": "FIND_OBJECT",
+                            "state": "PREVIEW",
+                            "target": target.lower(),
+                            "target_found": False,
+                        }),
+                    },
+                )
             return
 
         if path == "/lidar/transient":

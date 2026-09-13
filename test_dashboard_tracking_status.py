@@ -139,6 +139,11 @@ def main():
     assert "tracking.bbox" in dashboard_source
     assert '"FIND_OBJECT"' in dashboard_source
     assert "drawTrackingOverlay(\n                detections,\n                activeTarget,\n                tracking" in dashboard_source
+    assert "findObjectPreviewButton" in dashboard_source
+    assert "/dashboard/find-object-preview?target=" in dashboard_source
+    assert "findObjectPreviewTracking" in dashboard_source
+    assert '"PREVIEW "' in dashboard_source
+    assert "Clear Preview" in dashboard_source
 
     print("PASS: dashboard status forwards tracking unchanged")
     print("PASS: tracking state is runtime authoritative")

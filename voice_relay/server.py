@@ -10,7 +10,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from threading import Lock
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, quote, urlparse
 
 
 PROJECT_DIR = Path(__file__).resolve().parents[1]
@@ -2585,6 +2585,40 @@ class VoiceRelayHandler(BaseHTTPRequestHandler):
                     "project_directory": (
                         str(PROJECT_DIR)
                     ),
+                },
+            )
+            return
+
+        if path == "/dashboard/find-object-preview":
+            target_values = parse_qs(urlparse(self.path).query).get(
+                "target",
+                [],
+            )
+            target = target_values[0].strip() if target_values else ""
+            if not target:
+                self.send_json(
+                    400,
+                    {
+                        "ok": False,
+                        "preview": True,
+                        "error": "A non-empty target is required.",
+                    },
+                )
+                return
+
+            response = request_json(
+                "GET",
+                f"{COGNITIVE_RUNTIME_URL}/find-object/preview"
+                f"?target={quote(target)}",
+                timeout=3.0,
+            )
+            self.send_json(
+                response["status_code"] or 503,
+                response["data"] or {
+                    "ok": False,
+                    "preview": True,
+                    "target": target.lower(),
+                    "error": response["error"] or "Preview unavailable.",
                 },
             )
             return

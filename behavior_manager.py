@@ -995,6 +995,134 @@ class BehaviorManager:
 
         return self._execute_guarded_find_search(target_name)
 
+    def preview_find_object(self, target_name):
+        """Preview FIND_OBJECT perception without promotion or motion."""
+        normalized_target = str(target_name or "").strip().lower()
+        base = {
+            "ok": False,
+            "preview": True,
+            "authoritative": False,
+            "executed": False,
+            "completed": True,
+            "behavior": "FIND_OBJECT",
+            "state": "PREVIEW",
+            "target": normalized_target,
+            "target_found": False,
+        }
+        if not normalized_target:
+            return dict(
+                base,
+                reason="FIND_OBJECT preview requires a target.",
+            )
+
+        observation = None
+        if (
+            self.world_model is not None
+            and hasattr(self.world_model, "find_latest_entity_by_label")
+        ):
+            try:
+                observation = self.world_model.find_latest_entity_by_label(
+                    normalized_target,
+                    max_age_seconds=self.TARGET_MAX_AGE_SECONDS,
+                    refresh=False,
+                )
+            except Exception:
+                observation = None
+
+        if self._target_is_fresh_and_acquired(observation):
+            return self._build_find_object_preview(
+                normalized_target,
+                observation,
+                source="world_model",
+                authoritative=True,
+            )
+
+        confirmed, confirmation_status = (
+            self._confirm_target_candidates_with_status(normalized_target)
+        )
+        if confirmed is None:
+            return dict(
+                base,
+                reason=(
+                    "Target candidates were not temporally confirmed."
+                    if confirmation_status == "target_reconfirmation_failed"
+                    else "No actionable target candidate is available."
+                ),
+            )
+
+        # Deliberately do not call _promote_confirmed_target() here. The
+        # candidate remains diagnostic and non-authoritative for preview.
+        return self._build_find_object_preview(
+            normalized_target,
+            confirmed,
+            source="vision_candidate",
+            authoritative=False,
+        )
+
+    def _build_find_object_preview(
+        self,
+        target_name,
+        observation,
+        *,
+        source,
+        authoritative,
+    ):
+        cx = observation.get("cx")
+        cy = observation.get("cy")
+        area = observation.get("area")
+        image_width = observation.get("image_width")
+        image_height = observation.get("image_height")
+        image_center_x = (
+            float(image_width) / 2.0
+            if isinstance(image_width, (int, float))
+            and not isinstance(image_width, bool)
+            and math.isfinite(image_width)
+            else None
+        )
+        horizontal_error = (
+            float(cx) - image_center_x
+            if image_center_x is not None
+            and isinstance(cx, (int, float))
+            and not isinstance(cx, bool)
+            and math.isfinite(cx)
+            else None
+        )
+        if horizontal_error is None:
+            direction = None
+        elif horizontal_error < -self.FIND_CENTER_TOLERANCE_PIXELS:
+            direction = "LEFT"
+        elif horizontal_error > self.FIND_CENTER_TOLERANCE_PIXELS:
+            direction = "RIGHT"
+        else:
+            direction = "CENTERED"
+
+        return {
+            "ok": True,
+            "preview": True,
+            "authoritative": bool(authoritative),
+            "source": source,
+            "executed": False,
+            "completed": True,
+            "behavior": "FIND_OBJECT",
+            "state": "PREVIEW",
+            "target": target_name,
+            "target_found": True,
+            "target_label": observation.get("label", target_name),
+            "target_confidence": observation.get("confidence"),
+            "target_center_x": cx,
+            "target_center_y": cy,
+            "target_area": area,
+            "image_width": image_width,
+            "image_height": image_height,
+            "image_center_x": image_center_x,
+            "horizontal_error": horizontal_error,
+            "horizontal_error_pixels": horizontal_error,
+            "center_tolerance_pixels": self.FIND_CENTER_TOLERANCE_PIXELS,
+            "steering_direction": direction,
+            "bbox": observation.get("bbox"),
+            "target_observation": observation,
+        }
+
     def _current_lidar_session(self):
         provider = getattr(self, "lidar_session_provider", None)
         if callable(provider):
@@ -1150,13 +1278,12 @@ class BehaviorManager:
 
         return cls._target_bbox_intersection_over_smaller(first, second) >= 0.50
 
-    def _confirm_target_candidates(self, target_name):
-        """Confirm a target across distinct cached Vision Server frames."""
-        self._last_target_confirmation_status = "target_lost"
+    def _confirm_target_candidates_with_status(self, target_name):
+        """Confirm a target and return its local confirmation status."""
         fetch = getattr(self.vision, "fetch_target_candidates", None)
         normalize = getattr(self.vision, "normalize_detection", None)
         if not callable(fetch) or not callable(normalize):
-            return None
+            return None, "target_lost"
 
         started = time.monotonic()
         seen_timestamps = set()
@@ -1171,21 +1298,28 @@ class BehaviorManager:
             try:
                 payload = fetch(target_name)
             except Exception:
-                self._last_target_confirmation_status = (
+                return None, (
                     "target_reconfirmation_failed"
-                    if candidate_seen
-                    else "target_lost"
+                    if candidate_seen else "target_lost"
                 )
-                return None
 
             if not isinstance(payload, dict):
-                return None
+                return None, (
+                    "target_reconfirmation_failed"
+                    if candidate_seen else "target_lost"
+                )
             if payload.get("camera_running") is not True:
-                return None
+                return None, (
+                    "target_reconfirmation_failed"
+                    if candidate_seen else "target_lost"
+                )
 
             timestamp = payload.get("timestamp")
             if not isinstance(timestamp, str) or not timestamp.strip():
-                return None
+                return None, (
+                    "target_reconfirmation_failed"
+                    if candidate_seen else "target_lost"
+                )
             if timestamp in seen_timestamps:
                 time.sleep(self.TARGET_CONFIRMATION_POLL_SECONDS)
                 continue
@@ -1258,12 +1392,10 @@ class BehaviorManager:
             >= self.TARGET_CONFIRMATION_MIN_SUPPORT
         ]
         if not eligible:
-            self._last_target_confirmation_status = (
+            return None, (
                 "target_reconfirmation_failed"
-                if candidate_seen
-                else "target_lost"
+                if candidate_seen else "target_lost"
             )
-            return None
 
         def cluster_key(cluster):
             observations = cluster["observations"]
@@ -1291,7 +1423,15 @@ class BehaviorManager:
                 float(item.get("confidence") or 0.0),
                 float(item.get("area") or 0.0),
             ),
+        ), "target_confirmed"
+
+    def _confirm_target_candidates(self, target_name):
+        """Compatibility wrapper for production FIND_OBJECT execution."""
+        confirmed, status = self._confirm_target_candidates_with_status(
+            target_name
         )
+        self._last_target_confirmation_status = status
+        return confirmed
 
     def _promote_confirmed_target(self, target):
         processor = getattr(self.vision, "process_detection_frame", None)

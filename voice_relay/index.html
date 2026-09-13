@@ -697,6 +697,32 @@
                 Live camera unavailable
             </div>
 
+            <div class="tracking-preview-controls">
+                <label for="findObjectPreviewTarget">
+                    FIND_OBJECT preview target
+                </label>
+                <input
+                    id="findObjectPreviewTarget"
+                    type="text"
+                    value="backpack"
+                    autocomplete="off"
+                >
+                <button
+                    id="findObjectPreviewButton"
+                    type="button"
+                >
+                    Preview Target
+                </button>
+                <button
+                    id="clearFindObjectPreviewButton"
+                    type="button"
+                    class="secondary-action"
+                >
+                    Clear Preview
+                </button>
+                <span id="findObjectPreviewStatus"></span>
+            </div>
+
             <div class="tracking-metrics">
                 <div class="tracking-metric">
                     <span class="tracking-metric-name">
@@ -1958,6 +1984,14 @@
             document.getElementById("cameraPlaceholder"),
         cameraCaption:
             document.getElementById("cameraCaption"),
+        findObjectPreviewTarget:
+            document.getElementById("findObjectPreviewTarget"),
+        findObjectPreviewButton:
+            document.getElementById("findObjectPreviewButton"),
+        clearFindObjectPreviewButton:
+            document.getElementById("clearFindObjectPreviewButton"),
+        findObjectPreviewStatus:
+            document.getElementById("findObjectPreviewStatus"),
         trackingTarget:
             document.getElementById("trackingTarget"),
         trackingState:
@@ -1977,6 +2011,8 @@
         detectionList:
             document.getElementById("detectionList")
     };
+
+    let findObjectPreviewTracking = null;
 
     function clearTrackingOverlay() {
         const canvas = elements.cameraOverlay;
@@ -2228,7 +2264,12 @@
                         Math.round(Number(tracking.horizontal_error)) +
                         "px";
             const text =
-                "FIND_OBJECT " +
+                (
+                    String(tracking.state || "").toUpperCase() ===
+                    "PREVIEW"
+                        ? "PREVIEW "
+                        : "FIND_OBJECT "
+                ) +
                 targetLabel +
                 targetConfidence +
                 horizontalError;
@@ -2650,23 +2691,39 @@
             const detections =
                 vision.detections || [];
 
+            const realFindObjectTracking =
+                missions.active &&
+                String(missions.active.mission_type || "").toUpperCase() ===
+                    "FIND_OBJECT" &&
+                String(tracking.behavior || "").toUpperCase() ===
+                    "FIND_OBJECT" &&
+                String(tracking.state || "").toUpperCase() !==
+                    "PREVIEW";
+            if (realFindObjectTracking) {
+                findObjectPreviewTracking = null;
+            }
+            const displayTracking =
+                realFindObjectTracking
+                    ? tracking
+                    : (findObjectPreviewTracking || tracking);
+
             const activeTarget =
-                tracking.target_label || null;
+                displayTracking.target_label || null;
 
             drawTrackingOverlay(
                 detections,
                 activeTarget,
-                tracking
+                displayTracking
             );
 
             elements.trackingTarget.textContent =
                 activeTarget || "None";
 
             elements.trackingState.textContent =
-                tracking.state || "None";
+                displayTracking.state || "None";
 
             const horizontalError =
-                tracking.horizontal_error;
+                displayTracking.horizontal_error;
 
             elements.trackingError.textContent =
                 horizontalError === undefined ||
@@ -2679,7 +2736,9 @@
                     );
 
             const targetArea =
-                tracking.target_area;
+                realFindObjectTracking
+                    ? tracking.target_area
+                    : displayTracking.target_area;
 
             elements.trackingArea.textContent =
                 targetArea === undefined ||
@@ -2749,6 +2808,65 @@
     elements.stopButton.addEventListener(
         "click",
         stopRobot
+    );
+
+    async function previewFindObject() {
+        const target =
+            elements.findObjectPreviewTarget.value.trim();
+        if (!target) {
+            elements.findObjectPreviewStatus.textContent =
+                "Enter a target label.";
+            return;
+        }
+
+        elements.findObjectPreviewButton.disabled = true;
+        elements.findObjectPreviewStatus.textContent =
+            "Requesting read-only preview...";
+        try {
+            const response = await fetch(
+                "/dashboard/find-object-preview?target=" +
+                    encodeURIComponent(target)
+            );
+            const result = await response.json();
+            if (!response.ok || result.ok !== true) {
+                findObjectPreviewTracking = null;
+                throw new Error(
+                    result.reason ||
+                    result.error ||
+                    "Target preview unavailable."
+                );
+            }
+            findObjectPreviewTracking = result.tracking || null;
+            elements.findObjectPreviewStatus.textContent =
+                "Preview ready: " +
+                String(result.target || target);
+            await refreshStatus();
+        }
+        catch (error) {
+            elements.findObjectPreviewStatus.textContent =
+                String(error.message || error);
+            clearTrackingOverlay();
+        }
+        finally {
+            elements.findObjectPreviewButton.disabled = false;
+        }
+    }
+
+    function clearFindObjectPreview() {
+        findObjectPreviewTracking = null;
+        elements.findObjectPreviewStatus.textContent =
+            "Preview cleared.";
+        refreshStatus();
+    }
+
+    elements.findObjectPreviewButton.addEventListener(
+        "click",
+        previewFindObject
+    );
+
+    elements.clearFindObjectPreviewButton.addEventListener(
+        "click",
+        clearFindObjectPreview
     );
 
     document.querySelectorAll(
