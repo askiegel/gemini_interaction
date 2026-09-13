@@ -246,6 +246,113 @@ def test_runtime_preview_endpoint_does_not_mutate_runtime_or_execute():
     assert handler.server.runtime._control_generation == 0
 
 
+def _call_runtime_preview(result):
+    class FakeBehavior:
+        def preview_find_object(self, _target):
+            return result
+
+    class Runtime:
+        behavior_manager = FakeBehavior()
+
+    handler = object.__new__(RuntimeAPIHandler)
+    handler.path = "/find-object/preview?target=backpack"
+    handler.server = SimpleNamespace(runtime=Runtime())
+    responses = []
+    handler.send_json = lambda code, payload: responses.append((code, payload))
+    handler.do_GET()
+    return responses[0]
+
+
+def test_runtime_preview_serializes_candidate_confirmation_diagnostics():
+    diagnostics = {
+        "confirmation_status": "target_confirmed",
+        "fetch_attempts": 2,
+        "attempts": [{"response_timestamp": "frame-1"}],
+    }
+    result = {
+        "ok": True,
+        "preview": True,
+        "authoritative": False,
+        "source": "vision_candidate",
+        "target": "backpack",
+        "state": "PREVIEW",
+        "behavior": "FIND_OBJECT",
+        "target_found": True,
+        "target_label": "backpack",
+        "target_center_x": 320,
+        "target_center_y": 300,
+        "target_area": 12000,
+        "image_width": 640,
+        "image_height": 480,
+        "target_observation": {
+            "label": "backpack",
+            "confidence": 0.12,
+            "cx": 320,
+            "cy": 300,
+            "area": 12000,
+            "image_width": 640,
+            "image_height": 480,
+            "bbox": {"x1": 260, "y1": 200, "x2": 380, "y2": 300},
+        },
+        "confirmation_diagnostics": diagnostics,
+    }
+    status, payload = _call_runtime_preview(result)
+    assert status == 200
+    assert payload["source"] == "vision_candidate"
+    assert payload["authoritative"] is False
+    assert payload["confirmation_diagnostics"] == diagnostics
+    assert "confirmation_diagnostics" not in payload["tracking"]
+
+
+def test_runtime_preview_authoritative_result_keeps_diagnostics_null():
+    result = {
+        "ok": True,
+        "preview": True,
+        "authoritative": True,
+        "source": "world_model",
+        "target": "backpack",
+        "state": "PREVIEW",
+        "behavior": "FIND_OBJECT",
+        "target_found": True,
+        "target_label": "backpack",
+        "target_center_x": 320,
+        "target_center_y": 300,
+        "target_area": 12000,
+        "image_width": 640,
+        "image_height": 480,
+        "target_observation": {},
+    }
+    status, payload = _call_runtime_preview(result)
+    assert status == 200
+    assert payload["authoritative"] is True
+    assert payload["confirmation_diagnostics"] is None
+    assert "confirmation_diagnostics" not in payload["tracking"]
+
+
+def test_runtime_preview_failed_result_preserves_supplied_diagnostics():
+    diagnostics = {
+        "confirmation_status": "target_reconfirmation_failed",
+        "terminal_reason": "insufficient_temporal_or_geometric_support",
+    }
+    result = {
+        "ok": False,
+        "preview": True,
+        "authoritative": False,
+        "source": "vision_candidate",
+        "target": "backpack",
+        "reason": "Target was not confirmed.",
+        "state": "PREVIEW",
+        "behavior": "FIND_OBJECT",
+        "target_found": False,
+        "confirmation_diagnostics": diagnostics,
+    }
+    status, payload = _call_runtime_preview(result)
+    assert status == 200
+    assert payload["ok"] is False
+    assert payload["confirmation_diagnostics"] == diagnostics
+    assert "confirmation_diagnostics" not in payload["tracking"]
+
+
 def test_voice_relay_preview_proxy_forwards_only_read_only_request():
     handler = object.__new__(VoiceRelayHandler)
     handler.path = "/dashboard/find-object-preview?target=backpack"

@@ -203,6 +203,9 @@ class RuntimeAPIHandler(BaseHTTPRequestHandler):
                         "target": result.get("target", target.lower()),
                         "reason": result.get("reason"),
                         "tracking": tracking,
+                        "confirmation_diagnostics": result.get(
+                            "confirmation_diagnostics"
+                        ),
                     },
                 )
             except Exception as exc:
