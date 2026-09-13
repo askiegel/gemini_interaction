@@ -1041,8 +1041,11 @@ class BehaviorManager:
                 authoritative=True,
             )
 
-        confirmed, confirmation_status = (
-            self._confirm_target_candidates_with_status(normalized_target)
+        confirmed, confirmation_status, confirmation_diagnostics = (
+            self._confirm_target_candidates_with_status(
+                normalized_target,
+                return_diagnostics=True,
+            )
         )
         if confirmed is None:
             return dict(
@@ -1052,6 +1055,7 @@ class BehaviorManager:
                     if confirmation_status == "target_reconfirmation_failed"
                     else "No actionable target candidate is available."
                 ),
+                confirmation_diagnostics=confirmation_diagnostics,
             )
 
         # Deliberately do not call _promote_confirmed_target() here. The
@@ -1061,6 +1065,7 @@ class BehaviorManager:
             confirmed,
             source="vision_candidate",
             authoritative=False,
+            confirmation_diagnostics=confirmation_diagnostics,
         )
 
     def _build_find_object_preview(
@@ -1070,6 +1075,7 @@ class BehaviorManager:
         *,
         source,
         authoritative,
+        confirmation_diagnostics=None,
     ):
         cx = observation.get("cx")
         cy = observation.get("cy")
@@ -1100,7 +1106,7 @@ class BehaviorManager:
         else:
             direction = "CENTERED"
 
-        return {
+        result = {
             "ok": True,
             "preview": True,
             "authoritative": bool(authoritative),
@@ -1126,6 +1132,9 @@ class BehaviorManager:
             "bbox": observation.get("bbox"),
             "target_observation": observation,
         }
+        if confirmation_diagnostics is not None:
+            result["confirmation_diagnostics"] = confirmation_diagnostics
+        return result
 
     def _current_lidar_session(self):
         provider = getattr(self, "lidar_session_provider", None)
@@ -1232,17 +1241,34 @@ class BehaviorManager:
     @classmethod
     def _target_observations_match(cls, first, second):
         """Return whether two same-label observations can share a cluster."""
+        return cls._target_observation_match_details(first, second)["matched"]
+
+    @classmethod
+    def _target_observation_match_details(cls, first, second):
+        """Explain the existing target-association decision."""
         first_label = first.get("label") if isinstance(first, dict) else None
         second_label = second.get("label") if isinstance(second, dict) else None
+        details = {
+            "matched": False,
+            "rule": None,
+            "iou": cls._target_bbox_iou(first, second),
+            "center_distance": None,
+            "area_ratio": None,
+            "intersection_over_smaller": cls._target_bbox_intersection_over_smaller(
+                first, second
+            ),
+        }
         if (
             not isinstance(first_label, str)
             or not isinstance(second_label, str)
             or first_label.casefold() != second_label.casefold()
         ):
-            return False
+            details["rejection_reason"] = "label_mismatch"
+            return details
 
-        if cls._target_bbox_iou(first, second) >= 0.50:
-            return True
+        if details["iou"] >= 0.50:
+            details.update(matched=True, rule="iou")
+            return details
 
         def finite_positive(value):
             return (
@@ -1265,7 +1291,8 @@ class BehaviorManager:
             second.get("image_height"),
         )
         if not all(finite_positive(value) for value in metrics):
-            return False
+            details["rejection_reason"] = "invalid_geometry"
+            return details
 
         # FIND_OBJECT turns on horizontal image error.  Associate detector
         # shape variants by horizontal center so changes in box height do not
@@ -1274,13 +1301,21 @@ class BehaviorManager:
         area_ratio = max(float(first["area"]), float(second["area"])) / min(
             float(first["area"]), float(second["area"])
         )
+        details["center_distance"] = center_distance
+        details["area_ratio"] = area_ratio
         if center_distance > 60.0:
-            return False
+            details["rejection_reason"] = "center_distance"
+            return details
 
         if area_ratio <= 2.0:
-            return True
+            details.update(matched=True, rule="center_and_area_ratio")
+            return details
 
-        return cls._target_bbox_intersection_over_smaller(first, second) >= 0.50
+        if details["intersection_over_smaller"] >= 0.50:
+            details.update(matched=True, rule="center_and_intersection_over_smaller")
+            return details
+        details["rejection_reason"] = "geometric_thresholds"
+        return details
 
     @staticmethod
     def _vision_timestamp_is_newer(timestamp, minimum_timestamp):
@@ -1329,61 +1364,164 @@ class BehaviorManager:
         target_name,
         *,
         minimum_timestamp=None,
+        return_diagnostics=False,
     ):
-        """Confirm a target and return its local confirmation status."""
+        """Confirm a target and optionally return bounded diagnostics."""
+        started = time.monotonic()
+        diagnostics = {
+            "confirmation_status": None,
+            "elapsed_seconds": 0.0,
+            "fetch_attempts": 0,
+            "distinct_fresh_timestamps": 0,
+            "actionable_frames": 0,
+            "maximum_frames": self.TARGET_CONFIRMATION_MAX_FRAMES,
+            "minimum_support": self.TARGET_CONFIRMATION_MIN_SUPPORT,
+            "confirmation_window_seconds": self.TARGET_CONFIRMATION_WINDOW_SECONDS,
+            "poll_seconds": self.TARGET_CONFIRMATION_POLL_SECONDS,
+            "minimum_timestamp": minimum_timestamp,
+            "attempts": [],
+            "terminal_reason": None,
+        }
+
+        def finish(candidate, status):
+            diagnostics["confirmation_status"] = status
+            diagnostics["elapsed_seconds"] = round(
+                max(0.0, time.monotonic() - started),
+                6,
+            )
+            diagnostics["distinct_fresh_timestamps"] = len(
+                fresh_timestamps
+            )
+            diagnostics["terminal_reason"] = (
+                diagnostics["attempts"][-1].get("fetch_error", {}).get(
+                    "type"
+                )
+                if diagnostics["attempts"]
+                and diagnostics["attempts"][-1].get("fetch_error")
+                else (
+                    "support_reached"
+                    if status == "target_confirmed"
+                    else (
+                        "insufficient_temporal_or_geometric_support"
+                        if status == "target_reconfirmation_failed"
+                        else status
+                    )
+                )
+            )
+            if return_diagnostics:
+                return candidate, status, diagnostics
+            return candidate, status
+
         fetch = getattr(self.vision, "fetch_target_candidates", None)
         normalize = getattr(self.vision, "normalize_detection", None)
         if not callable(fetch) or not callable(normalize):
-            return None, "target_lost"
+            fresh_timestamps = set()
+            return finish(None, "target_lost")
 
-        started = time.monotonic()
         seen_timestamps = set()
+        fresh_timestamps = set()
         clusters = []
-        candidate_seen = False
+        actionable_candidate_seen = False
 
         while (
             len(seen_timestamps) < self.TARGET_CONFIRMATION_MAX_FRAMES
             and time.monotonic() - started
             <= self.TARGET_CONFIRMATION_WINDOW_SECONDS
         ):
+            diagnostics["fetch_attempts"] += 1
+            attempt = {
+                "attempt_index": diagnostics["fetch_attempts"],
+                "elapsed_seconds": round(
+                    max(0.0, time.monotonic() - started),
+                    6,
+                ),
+                "response_timestamp": None,
+                "minimum_timestamp": minimum_timestamp,
+                "timestamp_newer_than_cutoff": None,
+                "before_cutoff": False,
+                "duplicate_timestamp": False,
+                "camera_running": None,
+                "raw_candidate_count": 0,
+                "actionable_candidate_count": 0,
+                "actionable_candidates": [],
+                "association_outcomes": [],
+                "cluster_count": len(clusters),
+                "cluster_support_counts": [
+                    len(cluster["timestamps"]) for cluster in clusters
+                ],
+                "cluster_reached_support": False,
+            }
+            diagnostics["attempts"].append(attempt)
             try:
                 payload = fetch(target_name)
-            except Exception:
-                return None, (
+            except Exception as exc:
+                attempt["fetch_error"] = {
+                    "type": type(exc).__name__,
+                    "message": str(exc),
+                }
+                return finish(
+                    None,
                     "target_reconfirmation_failed"
-                    if candidate_seen else "target_lost"
+                    if actionable_candidate_seen else "target_lost",
                 )
 
             if not isinstance(payload, dict):
-                return None, (
+                attempt["fetch_error"] = {
+                    "type": "invalid_payload",
+                    "message": "candidate response was not an object",
+                }
+                return finish(
+                    None,
                     "target_reconfirmation_failed"
-                    if candidate_seen else "target_lost"
+                    if actionable_candidate_seen else "target_lost",
                 )
+            attempt["response_timestamp"] = payload.get("timestamp")
+            attempt["camera_running"] = payload.get("camera_running")
             if payload.get("camera_running") is not True:
-                return None, (
+                attempt["fetch_error"] = {
+                    "type": "camera_not_running",
+                    "message": "camera_running was not true",
+                }
+                return finish(
+                    None,
                     "target_reconfirmation_failed"
-                    if candidate_seen else "target_lost"
+                    if actionable_candidate_seen else "target_lost",
                 )
 
             timestamp = payload.get("timestamp")
             if not isinstance(timestamp, str) or not timestamp.strip():
-                return None, (
+                attempt["fetch_error"] = {
+                    "type": "invalid_timestamp",
+                    "message": "candidate response had no timestamp",
+                }
+                return finish(
+                    None,
                     "target_reconfirmation_failed"
-                    if candidate_seen else "target_lost"
+                    if actionable_candidate_seen else "target_lost",
                 )
             if timestamp in seen_timestamps:
+                attempt["duplicate_timestamp"] = True
                 time.sleep(self.TARGET_CONFIRMATION_POLL_SECONDS)
                 continue
 
             seen_timestamps.add(timestamp)
-            if not self._vision_timestamp_is_newer(
+            timestamp_newer = self._vision_timestamp_is_newer(
                 timestamp,
                 minimum_timestamp,
-            ):
+            )
+            attempt["timestamp_newer_than_cutoff"] = timestamp_newer
+            attempt["before_cutoff"] = not timestamp_newer
+            if not timestamp_newer:
                 continue
+            fresh_timestamps.add(timestamp)
             raw_detections = payload.get("detections")
             if not isinstance(raw_detections, list):
+                attempt["fetch_error"] = {
+                    "type": "invalid_detections",
+                    "message": "detections was not a list",
+                }
                 continue
+            attempt["raw_candidate_count"] = len(raw_detections)
 
             observations = []
             for raw_detection in raw_detections:
@@ -1407,8 +1545,15 @@ class BehaviorManager:
                     self._target_is_fresh_and_acquired(normalized)
                     and self._target_bbox(normalized) is not None
                 ):
-                    candidate_seen = True
+                    actionable_candidate_seen = True
                     observations.append(normalized)
+                    attempt["actionable_candidate_count"] += 1
+                    attempt["actionable_candidates"].append(
+                        self._target_diagnostic_summary(normalized)
+                    )
+
+            if observations:
+                diagnostics["actionable_frames"] += 1
 
             for observation in sorted(
                 observations,
@@ -1421,11 +1566,20 @@ class BehaviorManager:
                 for index, cluster in enumerate(clusters):
                     if timestamp in cluster["timestamps"]:
                         continue
-                    if any(
-                        self._target_observations_match(observation, member)
-                        for member in cluster["observations"]
-                    ):
-                        matching.append((1.0, index))
+                    for member in cluster["observations"]:
+                        match_details = self._target_observation_match_details(
+                            observation, member
+                        )
+                        attempt["association_outcomes"].append({
+                            "observation": self._target_diagnostic_summary(
+                                observation
+                            ),
+                            "member": self._target_diagnostic_summary(member),
+                            **match_details,
+                        })
+                        if match_details["matched"]:
+                            matching.append((1.0, index))
+                            break
 
                 if matching:
                     _, cluster_index = max(
@@ -1441,6 +1595,15 @@ class BehaviorManager:
                         "timestamps": {timestamp},
                     })
 
+            attempt["cluster_count"] = len(clusters)
+            attempt["cluster_support_counts"] = [
+                len(cluster["timestamps"]) for cluster in clusters
+            ]
+            attempt["cluster_reached_support"] = any(
+                support >= self.TARGET_CONFIRMATION_MIN_SUPPORT
+                for support in attempt["cluster_support_counts"]
+            )
+
         eligible = [
             cluster
             for cluster in clusters
@@ -1448,10 +1611,10 @@ class BehaviorManager:
             >= self.TARGET_CONFIRMATION_MIN_SUPPORT
         ]
         if not eligible:
-            return None, (
+            return finish(None, (
                 "target_reconfirmation_failed"
-                if candidate_seen else "target_lost"
-            )
+                if actionable_candidate_seen else "target_lost"
+            ))
 
         def cluster_key(cluster):
             observations = cluster["observations"]
@@ -1473,13 +1636,43 @@ class BehaviorManager:
             eligible,
             key=cluster_key,
         )
-        return max(
+        return finish(max(
             winning["observations"],
             key=lambda item: (
                 float(item.get("confidence") or 0.0),
                 float(item.get("area") or 0.0),
             ),
-        ), "target_confirmed"
+        ), "target_confirmed")
+
+    @staticmethod
+    def _target_diagnostic_summary(observation):
+        """Return bounded, JSON-safe geometry for confirmation diagnostics."""
+        def number(value):
+            return (
+                value
+                if isinstance(value, (int, float))
+                and not isinstance(value, bool)
+                and math.isfinite(value)
+                else None
+            )
+
+        bbox = observation.get("bbox")
+        safe_bbox = None
+        if isinstance(bbox, dict):
+            safe_bbox = {
+                key: number(bbox.get(key))
+                for key in ("x1", "y1", "x2", "y2")
+            }
+            if any(value is None for value in safe_bbox.values()):
+                safe_bbox = None
+        return {
+            "label": observation.get("label"),
+            "confidence": number(observation.get("confidence")),
+            "center_x": number(observation.get("cx")),
+            "center_y": number(observation.get("cy")),
+            "area": number(observation.get("area")),
+            "bbox": safe_bbox,
+        }
 
     def _confirm_target_candidates(self, target_name):
         """Compatibility wrapper for production FIND_OBJECT execution."""
@@ -1932,10 +2125,11 @@ class BehaviorManager:
             # transport returned, while synthetic/non-ISO test clocks retain
             # their deterministic ordering semantics.
             post_motion_cutoff = datetime.now(timezone.utc).isoformat()
-        confirmed, confirmation_status = (
+        confirmed, confirmation_status, confirmation_diagnostics = (
             self._confirm_target_candidates_with_status(
                 target_name,
                 minimum_timestamp=post_motion_cutoff,
+                return_diagnostics=True,
             )
         )
         if confirmed is None:
@@ -1949,6 +2143,7 @@ class BehaviorManager:
                     "the bounded approach step."
                 ),
                 confirmation_status=confirmation_status,
+                confirmation_diagnostics=confirmation_diagnostics,
                 approach_result=approach_result,
                 **telemetry,
             )
@@ -1961,6 +2156,8 @@ class BehaviorManager:
                 target_found=False,
                 state="TARGET_LOST_AFTER_APPROACH",
                 reason="Target promotion failed after bounded approach step.",
+                confirmation_status=confirmation_status,
+                confirmation_diagnostics=confirmation_diagnostics,
                 approach_result=approach_result,
                 **telemetry,
             )
@@ -2015,6 +2212,8 @@ class BehaviorManager:
                 "One bounded approach step completed and the target was "
                 "freshly re-confirmed."
             ),
+            confirmation_status=confirmation_status,
+            confirmation_diagnostics=confirmation_diagnostics,
             **post_telemetry,
         )
 

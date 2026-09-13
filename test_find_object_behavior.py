@@ -353,6 +353,9 @@ def test_guarded_search_visible_before_turn_uses_zero_chunks():
     assert result["executed"] is True
     assert result["approach_chunks_attempted"] == 1
     assert result["approach_chunks_completed"] == 1
+    assert result["confirmation_diagnostics"]["confirmation_status"] == (
+        "target_confirmed"
+    )
 
 
 def test_guarded_search_rechecks_camera_after_first_chunk():
@@ -512,6 +515,389 @@ def test_same_candidate_timestamp_does_not_confirm(monkeypatch):
     monkeypatch.setattr(behavior_module.time, "sleep", lambda _seconds: None)
     assert manager._confirm_target_candidates("backpack") is None
     assert manager._last_target_confirmation_status == "target_reconfirmation_failed"
+
+
+def test_confirmation_diagnostics_mark_cutoff_and_duplicate_frames(monkeypatch):
+    cutoff = candidate_detection("frame-0")
+    fresh = candidate_detection("frame-1")
+    payloads = [cutoff, fresh, fresh, fresh]
+    vision = CandidateVisionAdapter([], payloads)
+    manager = BehaviorManager(
+        robot_client=GuardedSearchRobot(),
+        vision_adapter=vision,
+    )
+    clock = [0.0]
+    monkeypatch.setattr(behavior_module.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(
+        behavior_module.time,
+        "sleep",
+        lambda seconds: clock.__setitem__(0, clock[0] + seconds),
+    )
+    confirmed, status, diagnostics = (
+        manager._confirm_target_candidates_with_status(
+            "backpack",
+            minimum_timestamp="frame-0",
+            return_diagnostics=True,
+        )
+    )
+    assert confirmed is None
+    assert status == "target_reconfirmation_failed"
+    assert any(attempt["before_cutoff"] for attempt in diagnostics["attempts"])
+    assert any(attempt["duplicate_timestamp"] for attempt in diagnostics["attempts"])
+    assert diagnostics["distinct_fresh_timestamps"] == 1
+    assert diagnostics["actionable_frames"] == 1
+
+
+def test_confirmation_diagnostics_show_two_distinct_supporting_frames():
+    vision = CandidateVisionAdapter(
+        [],
+        [
+            candidate_detection("frame-1"),
+            candidate_detection("frame-2", confidence=0.12),
+            candidate_detection("frame-3", confidence=0.10),
+        ],
+    )
+    manager = BehaviorManager(robot_client=GuardedSearchRobot(), vision_adapter=vision)
+    confirmed, status, diagnostics = (
+        manager._confirm_target_candidates_with_status(
+            "backpack", return_diagnostics=True
+        )
+    )
+    assert confirmed is not None
+    assert status == "target_confirmed"
+    assert diagnostics["distinct_fresh_timestamps"] == 3
+    assert diagnostics["actionable_frames"] == 3
+    assert any(
+        attempt["cluster_reached_support"]
+        for attempt in diagnostics["attempts"]
+    )
+    assert diagnostics["confirmation_status"] == "target_confirmed"
+    assert all("raw_detection" not in attempt for attempt in diagnostics["attempts"])
+    json.dumps(diagnostics)
+
+
+def test_confirmation_diagnostics_identify_geometry_rejection():
+    vision = CandidateVisionAdapter(
+        [],
+        [
+            candidate_detection("frame-1", bbox=(0, 0, 100, 100)),
+            candidate_detection("frame-2", bbox=(300, 300, 400, 400)),
+            candidate_detection("frame-3", bbox=(500, 0, 600, 100)),
+        ],
+    )
+    manager = BehaviorManager(robot_client=GuardedSearchRobot(), vision_adapter=vision)
+    confirmed, status, diagnostics = (
+        manager._confirm_target_candidates_with_status(
+            "backpack", return_diagnostics=True
+        )
+    )
+    assert confirmed is None
+    assert status == "target_reconfirmation_failed"
+    outcomes = [
+        outcome
+        for attempt in diagnostics["attempts"]
+        for outcome in attempt["association_outcomes"]
+    ]
+    assert outcomes
+    assert any(
+        outcome["matched"] is False
+        and outcome["rejection_reason"] in {
+            "center_distance",
+            "geometric_thresholds",
+        }
+        for outcome in outcomes
+    )
+
+
+def test_confirmation_diagnostics_record_fetch_failure_after_actionable_frame():
+    class FailingVision(CandidateVisionAdapter):
+        def fetch_target_candidates(self, target):
+            if self.candidate_calls:
+                raise TimeoutError("candidate endpoint unavailable")
+            return super().fetch_target_candidates(target)
+
+    vision = FailingVision([], [candidate_detection("frame-1")])
+    manager = BehaviorManager(robot_client=GuardedSearchRobot(), vision_adapter=vision)
+    confirmed, status, diagnostics = (
+        manager._confirm_target_candidates_with_status(
+            "backpack", return_diagnostics=True
+        )
+    )
+    assert confirmed is None
+    assert status == "target_reconfirmation_failed"
+    assert diagnostics["attempts"][-1]["fetch_error"]["type"] == "TimeoutError"
+    assert diagnostics["actionable_frames"] == 1
+
+
+def _run_confirmation_mode(monkeypatch, payloads, *, diagnostics, minimum=None,
+                           manager_factory=None):
+    vision = CandidateVisionAdapter([], payloads)
+    manager = (
+        manager_factory(vision)
+        if manager_factory is not None
+        else BehaviorManager(robot_client=GuardedSearchRobot(), vision_adapter=vision)
+    )
+    clock = [0.0]
+    sleeps = []
+    monkeypatch.setattr(behavior_module.time, "monotonic", lambda: clock[0])
+
+    def fake_sleep(seconds):
+        sleeps.append(seconds)
+        clock[0] += seconds
+
+    monkeypatch.setattr(behavior_module.time, "sleep", fake_sleep)
+    result = manager._confirm_target_candidates_with_status(
+        "backpack",
+        minimum_timestamp=minimum,
+        return_diagnostics=diagnostics,
+    )
+    return result, vision.candidate_calls, sleeps
+
+
+def test_confirmation_diagnostics_on_off_are_behaviorally_equivalent(monkeypatch):
+    scenarios = [
+        (
+            "compatible",
+            [
+                candidate_detection("frame-1"),
+                candidate_detection("frame-2"),
+                candidate_detection("frame-3"),
+            ],
+            None,
+        ),
+        (
+            "cutoff_duplicate_one_support",
+            [
+                candidate_detection("frame-0"),
+                candidate_detection("frame-1"),
+                candidate_detection("frame-1"),
+                candidate_detection("frame-1"),
+            ],
+            "frame-0",
+        ),
+        (
+            "incompatible",
+            [
+                candidate_detection("frame-1", bbox=(0, 0, 100, 100)),
+                candidate_detection("frame-2", bbox=(300, 300, 400, 400)),
+                candidate_detection("frame-3", bbox=(500, 0, 600, 100)),
+            ],
+            None,
+        ),
+    ]
+    for _name, payloads, minimum in scenarios:
+        off, off_fetches, off_sleeps = _run_confirmation_mode(
+            monkeypatch,
+            payloads,
+            diagnostics=False,
+            minimum=minimum,
+        )
+        on, on_fetches, on_sleeps = _run_confirmation_mode(
+            monkeypatch,
+            payloads,
+            diagnostics=True,
+            minimum=minimum,
+        )
+        assert (off[0] is not None) == (on[0] is not None)
+        assert off[1] == on[1]
+        assert off_fetches == on_fetches
+        assert off_sleeps == on_sleeps
+
+
+def test_confirmation_diagnostics_on_off_equivalence_for_fetch_failure(monkeypatch):
+    class FailingVision(CandidateVisionAdapter):
+        def fetch_target_candidates(self, target):
+            if self.candidate_calls:
+                raise TimeoutError("candidate endpoint unavailable")
+            return super().fetch_target_candidates(target)
+
+    def factory(vision):
+        return FailingVision([], [candidate_detection("frame-1")])
+
+    # Use equivalent failing adapters for each run while retaining the same
+    # deterministic clock and observable call/sleep comparison.
+    def run(diagnostics):
+        vision = factory(None)
+        manager = BehaviorManager(
+            robot_client=GuardedSearchRobot(), vision_adapter=vision
+        )
+        clock = [0.0]
+        sleeps = []
+        monkeypatch.setattr(behavior_module.time, "monotonic", lambda: clock[0])
+        monkeypatch.setattr(
+            behavior_module.time,
+            "sleep",
+            lambda seconds: (sleeps.append(seconds), clock.__setitem__(0, clock[0] + seconds)),
+        )
+        return (
+            manager._confirm_target_candidates_with_status(
+                "backpack", return_diagnostics=diagnostics
+            ),
+            vision.candidate_calls,
+            sleeps,
+        )
+
+    off, off_fetches, off_sleeps = run(False)
+    on, on_fetches, on_sleeps = run(True)
+    assert off[0] is None and on[0] is None
+    assert off[1] == on[1] == "target_reconfirmation_failed"
+    assert off_fetches == on_fetches == 1
+    assert off_sleeps == on_sleeps == []
+
+
+def test_confirmation_diagnostics_are_independent_of_track_id_and_entity_id():
+    class MetadataVision(CandidateVisionAdapter):
+        @staticmethod
+        def normalize_detection(detection):
+            normalized = CandidateVisionAdapter.normalize_detection(detection)
+            normalized["track_id"] = detection.get("track_id")
+            normalized["entity_id"] = detection.get("entity_id")
+            return normalized
+
+    payloads = [
+        candidate_detection("frame-1"),
+        candidate_detection("frame-2"),
+        candidate_detection("frame-3"),
+    ]
+    payloads[0]["detections"][0].update(track_id=101, entity_id="backpack-001")
+    payloads[1]["detections"][0].update(track_id=202, entity_id="backpack-002")
+    vision = MetadataVision([], payloads)
+    manager = BehaviorManager(robot_client=GuardedSearchRobot(), vision_adapter=vision)
+    confirmed, status, diagnostics = manager._confirm_target_candidates_with_status(
+        "backpack", return_diagnostics=True
+    )
+    assert confirmed is not None
+    assert status == "target_confirmed"
+    assert max(
+        attempt["cluster_support_counts"]
+        and max(attempt["cluster_support_counts"])
+        for attempt in diagnostics["attempts"]
+    ) >= 2
+
+
+def test_confirmation_diagnostics_are_recursively_bounded_and_json_safe():
+    vision = CandidateVisionAdapter(
+        [],
+        [candidate_detection("frame-1"), candidate_detection("frame-2")],
+    )
+    manager = BehaviorManager(robot_client=GuardedSearchRobot(), vision_adapter=vision)
+    _confirmed, _status, diagnostics = manager._confirm_target_candidates_with_status(
+        "backpack", return_diagnostics=True
+    )
+    json.dumps(diagnostics)
+    forbidden = {"raw_detection", "image", "image_bytes", "frame_bytes"}
+    summary_fields = {
+        "label", "confidence", "center_x", "center_y", "area", "bbox"
+    }
+
+    def walk(value):
+        if isinstance(value, dict):
+            assert not forbidden.intersection(value)
+            if "label" in value and "bbox" in value:
+                assert set(value).issubset(summary_fields)
+            for child in value.values():
+                walk(child)
+        elif isinstance(value, list):
+            for child in value:
+                walk(child)
+
+    walk(diagnostics)
+    assert len(diagnostics["attempts"]) == diagnostics["fetch_attempts"]
+    assert diagnostics["fetch_attempts"] <= 3
+
+
+@pytest.mark.parametrize(
+    "first,second",
+    [
+        (
+            {"label": "backpack", "cx": 250, "cy": 250, "area": 10000,
+             "image_width": 640, "image_height": 480,
+             "bbox": {"x1": 200, "y1": 200, "x2": 300, "y2": 300}},
+            {"label": "backpack", "cx": 250, "cy": 250, "area": 10000,
+             "image_width": 640, "image_height": 480,
+             "bbox": {"x1": 205, "y1": 205, "x2": 305, "y2": 305}},
+        ),
+        (
+            {"label": "backpack", "cx": 250, "cy": 250, "area": 10000,
+             "image_width": 640, "image_height": 480,
+             "bbox": {"x1": 200, "y1": 200, "x2": 300, "y2": 300}},
+            {"label": "backpack", "cx": 290, "cy": 250, "area": 15000,
+             "image_width": 640, "image_height": 480,
+             "bbox": {"x1": 240, "y1": 200, "x2": 340, "y2": 350}},
+        ),
+        (
+            {"label": "backpack", "cx": 220, "cy": 300, "area": 50000,
+             "image_width": 640, "image_height": 480,
+             "bbox": {"x1": 80, "y1": 220, "x2": 350, "y2": 450}},
+            {"label": "backpack", "cx": 230, "cy": 275, "area": 17000,
+             "image_width": 640, "image_height": 480,
+             "bbox": {"x1": 150, "y1": 220, "x2": 315, "y2": 330}},
+        ),
+        (
+            {"label": "backpack", "cx": 250, "cy": 250, "area": 10000,
+             "image_width": 640, "image_height": 480,
+             "bbox": {"x1": 200, "y1": 200, "x2": 300, "y2": 300}},
+            {"label": "backpack", "cx": 350, "cy": 250, "area": 10000,
+             "image_width": 640, "image_height": 480,
+             "bbox": {"x1": 300, "y1": 200, "x2": 400, "y2": 300}},
+        ),
+        (
+            {"label": "backpack", "cx": 250, "cy": 250, "area": 10000,
+             "image_width": 640, "image_height": 480,
+             "bbox": {"x1": 200, "y1": 200, "x2": 300, "y2": 300}},
+            {"label": "backpack", "cx": 250, "cy": 250, "area": 50000,
+             "image_width": 640, "image_height": 480,
+             "bbox": {"x1": 400, "y1": 400, "x2": 500, "y2": 500}},
+        ),
+        (
+            {"label": "backpack", "cx": 250, "cy": 250, "area": 10000,
+             "image_width": 640, "image_height": 480,
+             "bbox": {"x1": 200, "y1": 200, "x2": 300, "y2": 300}},
+            {"label": "suitcase", "cx": 250, "cy": 250, "area": 10000,
+             "image_width": 640, "image_height": 480,
+             "bbox": {"x1": 200, "y1": 200, "x2": 300, "y2": 300}},
+        ),
+        (
+            {"label": "backpack", "cx": 250, "cy": 250, "area": float("nan"),
+             "image_width": 640, "image_height": 480, "bbox": None},
+            {"label": "backpack", "cx": 250, "cy": 250, "area": 10000,
+             "image_width": 640, "image_height": 480,
+             "bbox": {"x1": 200, "y1": 200, "x2": 300, "y2": 300}},
+        ),
+    ],
+)
+def test_match_details_preserves_association_decision(first, second):
+    assert BehaviorManager._target_observations_match(first, second) == (
+        BehaviorManager._target_observation_match_details(first, second)["matched"]
+    )
+
+
+def test_confirmation_diagnostics_terminal_reasons(monkeypatch):
+    compatible = CandidateVisionAdapter(
+        [], [
+            candidate_detection("frame-1"),
+            candidate_detection("frame-2"),
+            candidate_detection("frame-3"),
+        ]
+    )
+    manager = BehaviorManager(robot_client=GuardedSearchRobot(), vision_adapter=compatible)
+    _confirmed, status, diagnostics = manager._confirm_target_candidates_with_status(
+        "backpack", return_diagnostics=True
+    )
+    assert status == "target_confirmed"
+    assert diagnostics["terminal_reason"] == "support_reached"
+
+    camera_off = candidate_detection("frame-1")
+    camera_off["camera_running"] = False
+    manager = BehaviorManager(
+        robot_client=GuardedSearchRobot(),
+        vision_adapter=CandidateVisionAdapter([], [camera_off]),
+    )
+    _confirmed, status, diagnostics = manager._confirm_target_candidates_with_status(
+        "backpack", return_diagnostics=True
+    )
+    assert status == "target_lost"
+    assert diagnostics["terminal_reason"] == "camera_not_running"
 
 
 def test_malformed_same_label_candidates_are_target_lost():
