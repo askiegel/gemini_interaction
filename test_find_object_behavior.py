@@ -883,7 +883,7 @@ def test_left_target_uses_guarded_centering_constants():
     assert result["state"] == "CENTERED"
     assert result["centering_turn_chunks_attempted"] == 1
     assert result["centering_turn_chunks_completed"] == 1
-    assert calls == [("LEFT", 0.20, 0.25, "session-1")]
+    assert calls == [("LEFT", 0.20, 0.50, "session-1")]
 
 
 def test_right_target_uses_right_guarded_centering_direction():
@@ -893,7 +893,7 @@ def test_right_target_uses_right_guarded_centering_direction():
     )
     result = manager.execute(_mission())
     assert result["state"] == "CENTERED"
-    assert calls[0] == ("RIGHT", 0.20, 0.25, "session-1")
+    assert calls[0] == ("RIGHT", 0.20, 0.50, "session-1")
 
 
 def test_centering_requires_new_confirmation_after_each_turn():
