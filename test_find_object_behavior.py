@@ -3008,7 +3008,8 @@ def test_blocked_front_without_unambiguous_clear_side_does_not_turn(snapshot_kwa
 
 def test_target_loss_after_avoidance_turn_never_forwards():
     manager, robot, _vision = _make_avoidance_manager(
-        [_avoidance_lidar_snapshot()], [{"camera_running": True, "detections": []}]
+        [_avoidance_lidar_snapshot(), _avoidance_lidar_snapshot(front="CLEAR")],
+        [{"camera_running": True, "detections": []}],
     )
     turns = []
     manager.execute_guarded_turn = (
@@ -3023,7 +3024,7 @@ def test_target_loss_after_avoidance_turn_never_forwards():
 
 def test_camera_off_after_avoidance_turn_never_forwards():
     manager, robot, _vision = _make_avoidance_manager(
-        [_avoidance_lidar_snapshot()],
+        [_avoidance_lidar_snapshot(), _avoidance_lidar_snapshot(front="CLEAR")],
         [{"camera_running": False, "timestamp": "camera-off"}],
     )
     turns = []
@@ -3053,9 +3054,10 @@ def test_preemption_before_avoidance_turn_blocks_turn_and_forward():
 
 def test_preemption_after_avoidance_turn_blocks_followup_action():
     manager, robot, _vision = _make_avoidance_manager(
-        [_avoidance_lidar_snapshot()], centered_candidate_payloads("reacquire")
+        [_avoidance_lidar_snapshot(), _avoidance_lidar_snapshot(front="CLEAR")],
+        centered_candidate_payloads("reacquire")
     )
-    checks = [True, True, True, False]
+    checks = [True, True, True, True, False]
     manager._execution_is_current = lambda: checks.pop(0) if checks else False
     turns = []
     manager.execute_guarded_turn = (
@@ -3070,7 +3072,11 @@ def test_preemption_after_avoidance_turn_blocks_followup_action():
 
 def test_avoidance_limit_prevents_second_obstacle_turn():
     manager, robot, _vision = _make_avoidance_manager(
-        [_avoidance_lidar_snapshot(), _avoidance_lidar_snapshot()],
+        [
+            _avoidance_lidar_snapshot(),
+            _avoidance_lidar_snapshot(front="CLEAR"),
+            _avoidance_lidar_snapshot(),
+        ],
         centered_candidate_payloads("after-avoidance"),
         interlock_results=[False, False],
     )
@@ -3097,6 +3103,244 @@ def test_stale_or_mismatched_lidar_blocks_avoidance_without_turn():
     result = manager.execute(_mission())
     assert result["state"] == "APPROACH_BLOCKED"
     assert _move_calls(robot) == []
+
+
+def _turn_forward_manager(lidar_states, payloads, *, interlock_results,
+                          max_chunks=1, move_result=None):
+    robot = GuardedSearchRobot(
+        interlock=_SequenceInterlock(interlock_results),
+        move_result=move_result,
+    )
+    vision = CandidateVisionAdapter([], payloads)
+    manager = BehaviorManager(robot_client=robot, vision_adapter=vision)
+    manager.world_model = _AvoidanceWorldModel(
+        located_target(320), lidar_states
+    )
+    manager.lidar_session = "session-1"
+    manager.FIND_APPROACH_MAX_CHUNKS = max_chunks
+    manager._promote_confirmed_target = lambda _candidate: located_target(320)
+    return manager, robot, vision
+
+
+@pytest.mark.parametrize(
+    "required_turns",
+    [1, 2, 3],
+    ids=["one_turn", "two_turns", "three_turns"],
+)
+def test_turn_and_forward_bypass_stops_on_clear_heading(required_turns):
+    lidar_states = [
+        _avoidance_lidar_snapshot(front="BLOCKED", left="CLEAR", right="BLOCKED")
+    ]
+    lidar_states.extend(
+        _avoidance_lidar_snapshot(front="BLOCKED", left="CLEAR", right="BLOCKED")
+        for _ in range(required_turns - 1)
+    )
+    lidar_states.append(
+        _avoidance_lidar_snapshot(front="CLEAR", left="CLEAR", right="BLOCKED")
+    )
+    manager, robot, _vision = _turn_forward_manager(
+        lidar_states,
+        centered_candidate_payloads("z-bypass")
+        + centered_candidate_payloads("z-after"),
+        interlock_results=[False, True],
+    )
+    turns = []
+    manager.execute_guarded_turn = (
+        lambda direction, speed, duration, **kwargs: turns.append(
+            (direction, speed, duration)
+        ) or {"ok": True, "permitted": True, "reason": "completed"}
+    )
+
+    result = manager.execute(_mission())
+
+    assert result["state"] == "APPROACH_STEP_COMPLETE"
+    assert len(turns) == required_turns
+    assert all(turn == ("LEFT", 0.20, 0.50) for turn in turns)
+    assert len(_move_calls(robot)) == 1
+    step = result["avoidance_steps"][0]
+    assert step["avoidance_turn_chunks_attempted"] == required_turns
+    assert step["avoidance_turn_chunks_completed"] == required_turns
+    assert len(step["turn_chunks"]) == required_turns
+
+
+def test_turn_budget_exhaustion_blocks_without_bypass_forward():
+    manager, robot, _vision = _turn_forward_manager(
+        [
+            _avoidance_lidar_snapshot(front="BLOCKED", left="CLEAR", right="BLOCKED")
+            for _ in range(4)
+        ],
+        [],
+        interlock_results=[False],
+    )
+    turns = []
+    manager.execute_guarded_turn = (
+        lambda *args, **kwargs: turns.append(args)
+        or {"ok": True, "permitted": True}
+    )
+
+    result = manager.execute(_mission())
+
+    assert result["state"] == "APPROACH_BLOCKED"
+    assert result["reason"] == "avoidance_turn_limit_reached"
+    assert len(turns) == 3
+    assert _move_calls(robot) == []
+
+
+def test_chosen_avoidance_side_becoming_unsafe_blocks_without_switching():
+    manager, robot, _vision = _turn_forward_manager(
+        [
+            _avoidance_lidar_snapshot(front="BLOCKED", left="CLEAR", right="BLOCKED"),
+            _avoidance_lidar_snapshot(front="BLOCKED", left="BLOCKED", right="CLEAR"),
+        ],
+        [],
+        interlock_results=[False],
+    )
+    turns = []
+    manager.execute_guarded_turn = (
+        lambda *args, **kwargs: turns.append(args)
+        or {"ok": True, "permitted": True}
+    )
+
+    result = manager.execute(_mission())
+
+    assert result["state"] == "APPROACH_BLOCKED"
+    assert result["reason"] == "chosen_avoidance_side_no_longer_clear"
+    assert len(turns) == 1
+    assert turns[0][0] == "LEFT"
+    assert _move_calls(robot) == []
+
+
+def test_off_center_bypass_target_is_not_recentered_before_translation():
+    manager, robot, _vision = _turn_forward_manager(
+        [
+            _avoidance_lidar_snapshot(front="BLOCKED", left="CLEAR", right="BLOCKED"),
+            _avoidance_lidar_snapshot(front="CLEAR", left="CLEAR", right="BLOCKED"),
+        ],
+        centered_candidate_payloads("z-bypass")
+        + centered_candidate_payloads("z-after"),
+        interlock_results=[False, True],
+    )
+    promoted = [located_target(145), located_target(320)]
+    manager._promote_confirmed_target = lambda _candidate: promoted.pop(0)
+    turns = []
+    manager.execute_guarded_turn = (
+        lambda direction, speed, duration, **kwargs: turns.append(direction)
+        or {"ok": True, "permitted": True, "reason": "completed"}
+    )
+
+    result = manager.execute(_mission())
+
+    assert result["state"] == "APPROACH_STEP_COMPLETE"
+    assert turns == ["LEFT"]
+    assert len(_move_calls(robot)) == 1
+    assert result["approach_steps"][0]["bypass_forward"] is True
+    assert result["centering_turn_chunks_attempted"] == 0
+
+
+def test_bypass_forward_interlock_denial_is_fail_closed():
+    manager, robot, _vision = _turn_forward_manager(
+        [
+            _avoidance_lidar_snapshot(front="BLOCKED", left="CLEAR", right="BLOCKED"),
+            _avoidance_lidar_snapshot(front="CLEAR", left="CLEAR", right="BLOCKED"),
+            _avoidance_lidar_snapshot(front="CLEAR", left="CLEAR", right="BLOCKED"),
+        ],
+        centered_candidate_payloads("z-bypass"),
+        interlock_results=[False, False],
+    )
+    turns = []
+    manager.execute_guarded_turn = (
+        lambda *args, **kwargs: turns.append(args)
+        or {"ok": True, "permitted": True}
+    )
+
+    result = manager.execute(_mission())
+
+    assert result["state"] == "APPROACH_BLOCKED"
+    assert len(turns) == 1
+    assert _move_calls(robot) == []
+
+
+def test_bypass_forward_transport_uncertainty_stops_without_retry():
+    manager, robot, _vision = _turn_forward_manager(
+        [
+            _avoidance_lidar_snapshot(front="BLOCKED", left="CLEAR", right="BLOCKED"),
+            _avoidance_lidar_snapshot(front="CLEAR", left="CLEAR", right="BLOCKED"),
+        ],
+        centered_candidate_payloads("z-bypass"),
+        interlock_results=[False, True],
+        move_result={
+            "ok": False,
+            "forwarded": True,
+            "delivery_uncertain": True,
+            "error": "timeout",
+        },
+    )
+    manager.execute_guarded_turn = lambda *args, **kwargs: {
+        "ok": True, "permitted": True, "reason": "completed"
+    }
+
+    result = manager.execute(_mission())
+
+    assert result["state"] == "APPROACH_FAILED"
+    assert result["approach_chunks_attempted"] == 1
+    assert result["approach_chunks_completed"] == 0
+    assert len(_move_calls(robot)) == 1
+
+
+def test_second_obstacle_after_bypass_does_not_start_second_episode():
+    manager, robot, _vision = _turn_forward_manager(
+        [
+            _avoidance_lidar_snapshot(front="BLOCKED", left="CLEAR", right="BLOCKED"),
+            _avoidance_lidar_snapshot(front="CLEAR", left="CLEAR", right="BLOCKED"),
+            _avoidance_lidar_snapshot(front="BLOCKED", left="CLEAR", right="BLOCKED"),
+        ],
+        centered_candidate_payloads("z-bypass")
+        + centered_candidate_payloads("z-after"),
+        interlock_results=[False, True, False],
+        max_chunks=2,
+    )
+    turns = []
+    manager.execute_guarded_turn = (
+        lambda *args, **kwargs: turns.append(args)
+        or {"ok": True, "permitted": True, "reason": "completed"}
+    )
+
+    result = manager.execute(_mission())
+
+    assert result["state"] == "APPROACH_BLOCKED"
+    assert len(turns) == 1
+    assert len(_move_calls(robot)) == 1
+    assert result["avoidance_maneuvers_attempted"] == 1
+
+
+def test_total_forward_budget_includes_bypass_translation():
+    payloads = centered_candidate_payloads("z-first")
+    payloads.extend(centered_candidate_payloads("z-bypass"))
+    payloads.extend(centered_candidate_payloads("z-second"))
+    payloads.extend(centered_candidate_payloads("z-third"))
+    payloads.extend(centered_candidate_payloads("z-fourth"))
+    manager, robot, _vision = _multi_step_manager(
+        payloads,
+        interlock=_SequenceInterlock([True, False, True, True, True]),
+    )
+    manager.world_model = _AvoidanceWorldModel(
+        located_target(320),
+        [
+            _avoidance_lidar_snapshot(front="BLOCKED", left="CLEAR", right="BLOCKED"),
+            _avoidance_lidar_snapshot(front="CLEAR", left="CLEAR", right="BLOCKED"),
+        ],
+    )
+    manager._promote_confirmed_target = lambda _candidate: located_target(320)
+    manager.execute_guarded_turn = lambda *args, **kwargs: {
+        "ok": True, "permitted": True, "reason": "completed"
+    }
+
+    result = manager.execute(_mission())
+
+    assert result["state"] == "APPROACH_SEQUENCE_COMPLETE"
+    assert result["approach_chunks_attempted"] == 4
+    assert result["approach_chunks_completed"] == 4
+    assert len(_move_calls(robot)) == 4
 
     mismatched = _avoidance_lidar_snapshot(session="other-session")
     manager, robot, _vision = _make_avoidance_manager([mismatched], [])
