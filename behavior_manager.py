@@ -390,7 +390,10 @@ class BehaviorManager:
     TARGET_CONFIRMATION_MIN_SUPPORT = 2
     TARGET_CONFIRMATION_WINDOW_SECONDS = 0.90
     TARGET_CONFIRMATION_POLL_SECONDS = 0.05
-    FIND_POST_MOTION_CONFIRMATION_WINDOW_SECONDS = 1.50
+    FIND_OBJECT_CONFIRMATION_WINDOW_SECONDS = 1.50
+    FIND_POST_MOTION_CONFIRMATION_WINDOW_SECONDS = (
+        FIND_OBJECT_CONFIRMATION_WINDOW_SECONDS
+    )
 
     FIND_CENTER_TOLERANCE_PIXELS = 50.0
     FIND_CENTER_TURN_SPEED = 0.20
@@ -1059,6 +1062,9 @@ class BehaviorManager:
             self._confirm_target_candidates_with_status(
                 normalized_target,
                 return_diagnostics=True,
+                confirmation_window_seconds=(
+                    self.FIND_OBJECT_CONFIRMATION_WINDOW_SECONDS
+                ),
             )
         )
         if confirmed is None:
@@ -1732,7 +1738,10 @@ class BehaviorManager:
     def _confirm_target_candidates(self, target_name):
         """Compatibility wrapper for production FIND_OBJECT execution."""
         confirmed, status = self._confirm_target_candidates_with_status(
-            target_name
+            target_name,
+            confirmation_window_seconds=(
+                self.FIND_OBJECT_CONFIRMATION_WINDOW_SECONDS
+            ),
         )
         self._last_target_confirmation_status = status
         return confirmed

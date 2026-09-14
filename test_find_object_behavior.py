@@ -1019,6 +1019,79 @@ def test_post_forward_confirmation_uses_extended_window_and_returns_early():
     assert diagnostics["evidence_frames_evaluated"] == 3
 
 
+def test_initial_preview_recovers_after_long_empty_detector_gap(monkeypatch):
+    class ClockedVision(CandidateVisionAdapter):
+        def fetch_target_candidates(self, target):
+            clock[0] += 0.10
+            return super().fetch_target_candidates(target)
+
+    clock = [0.0]
+    payloads = []
+    for index in range(10):
+        empty = candidate_detection(f"initial-empty-{index}")
+        empty["detections"] = []
+        payloads.append(empty)
+    payloads.extend(
+        candidate_detection(f"initial-target-{index}")
+        for index in range(3)
+    )
+    vision = ClockedVision([], payloads)
+    manager = BehaviorManager(robot_client=GuardedSearchRobot(), vision_adapter=vision)
+    monkeypatch.setattr(behavior_module.time, "monotonic", lambda: clock[0])
+
+    result = manager.preview_find_object("backpack")
+
+    assert result["ok"] is True
+    assert result["source"] == "vision_candidate"
+    diagnostics = result["confirmation_diagnostics"]
+    assert diagnostics["confirmation_window_seconds"] == 1.50
+    assert diagnostics["fetch_attempts"] == 13
+    assert diagnostics["elapsed_seconds"] < 1.50
+    assert diagnostics["qualified_support_reached"] is True
+
+
+def test_initial_preview_empty_stream_remains_bounded_at_extended_window(monkeypatch):
+    class EmptyVision(CandidateVisionAdapter):
+        def fetch_target_candidates(self, target):
+            self.candidate_calls += 1
+            clock[0] += 0.10
+            return {
+                "timestamp": f"initial-empty-{self.candidate_calls}",
+                "camera_running": True,
+                "detections": [],
+            }
+
+    clock = [0.0]
+    vision = EmptyVision([], [])
+    manager = BehaviorManager(robot_client=GuardedSearchRobot(), vision_adapter=vision)
+    monkeypatch.setattr(behavior_module.time, "monotonic", lambda: clock[0])
+
+    result = manager.preview_find_object("backpack")
+
+    assert result["ok"] is False
+    assert result["confirmation_diagnostics"]["confirmation_window_seconds"] == 1.50
+    assert result["confirmation_diagnostics"]["elapsed_seconds"] >= 1.50
+    assert manager.robot.calls == []
+
+
+def test_initial_preview_fast_confirmation_returns_before_extended_bound(monkeypatch):
+    class ClockedVision(CandidateVisionAdapter):
+        def fetch_target_candidates(self, target):
+            clock[0] += 0.05
+            return super().fetch_target_candidates(target)
+
+    clock = [0.0]
+    vision = ClockedVision([], centered_candidate_payloads("initial-fast"))
+    manager = BehaviorManager(robot_client=GuardedSearchRobot(), vision_adapter=vision)
+    monkeypatch.setattr(behavior_module.time, "monotonic", lambda: clock[0])
+
+    result = manager.preview_find_object("backpack")
+
+    assert result["ok"] is True
+    assert result["confirmation_diagnostics"]["confirmation_window_seconds"] == 1.50
+    assert result["confirmation_diagnostics"]["elapsed_seconds"] < 1.50
+
+
 def _run_confirmation_mode(monkeypatch, payloads, *, diagnostics, minimum=None,
                            manager_factory=None):
     vision = CandidateVisionAdapter([], payloads)
