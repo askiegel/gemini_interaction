@@ -404,7 +404,7 @@ class BehaviorManager:
     FIND_FORWARD_SECONDS = 0.80
     FIND_APPROACH_FORWARD_SPEED = 0.08
     FIND_APPROACH_FORWARD_SECONDS = 0.50
-    FIND_APPROACH_MAX_CHUNKS = 1
+    FIND_APPROACH_MAX_CHUNKS = 4
     FIND_ARRIVAL_AREA = 75000.0
 
     FOLLOW_SEARCH_TURN_SPEED = 0.50
@@ -488,6 +488,10 @@ class BehaviorManager:
         # Optional runtime-owned hook for live, dashboard-facing telemetry.
         # BehaviorManager remains usable without a runtime callback.
         self.tracking_state_callback = None
+        # Runtime-owned execution-generation hook.  A missing hook preserves
+        # direct/offline BehaviorManager use; CognitiveRuntime installs it so
+        # STOP can invalidate a multi-action FIND_OBJECT execution.
+        self.execution_authorization_provider = None
 
     def _publish_tracking_state(self, result):
         callback = getattr(self, "tracking_state_callback", None)
@@ -498,6 +502,16 @@ class BehaviorManager:
         except Exception:
             # Telemetry must never affect guarded behavior or motion safety.
             return
+
+    def _execution_is_current(self):
+        """Return whether the runtime still authorizes this execution."""
+        provider = getattr(self, "execution_authorization_provider", None)
+        if not callable(provider):
+            return True
+        try:
+            return bool(provider())
+        except Exception:
+            return False
 
     def simulate(self, mission):
         """
@@ -963,11 +977,10 @@ class BehaviorManager:
 
     def _execute_find_object(self, mission):
         """
-        Execute exactly one bounded FIND_OBJECT cycle.
+        Execute one bounded FIND_OBJECT acquisition and approach sequence.
 
-        The CognitiveRuntime owns repetition. If the returned result contains
-        completed=False, the active mission remains active and this method is
-        called again during a later runtime cycle.
+        The sequence itself owns its bounded forward-step limit and returns a
+        terminal result after completion or any safety/perception failure.
         """
         target_name = str(
             mission.target or ""
@@ -1740,7 +1753,14 @@ class BehaviorManager:
             return None
         return promoted if self._target_is_fresh_and_acquired(promoted) else None
 
-    def _center_acquired_target(self, target_name, observation, base):
+    def _center_acquired_target(
+        self,
+        target_name,
+        observation,
+        base,
+        *,
+        continue_to_approach=True,
+    ):
         """Center an acquired FIND_OBJECT target in bounded guarded chunks."""
         centering_attempted = 0
         centering_completed = 0
@@ -1767,6 +1787,15 @@ class BehaviorManager:
             return value
 
         while True:
+            if not self._execution_is_current():
+                return result(
+                    ok=False,
+                    completed=True,
+                    target_found=False,
+                    state="PREEMPTED",
+                    reason="FIND_OBJECT execution was preempted.",
+                    target_observation=current,
+                )
             if not self._target_is_fresh_and_acquired(current):
                 return result(
                     ok=False,
@@ -1826,6 +1855,14 @@ class BehaviorManager:
             ))
 
             if abs(horizontal_error) <= self.FIND_CENTER_TOLERANCE_PIXELS:
+                if not continue_to_approach:
+                    return result(
+                        ok=True,
+                        completed=False,
+                        state="CENTERED",
+                        reason="Target centered after bounded correction.",
+                        **telemetry,
+                    )
                 return self._execute_find_object_approach(
                     target_name,
                     current,
@@ -1857,6 +1894,16 @@ class BehaviorManager:
                     completed=False,
                     state="CENTERING_BLOCKED",
                     reason="LiDAR producer session is unavailable.",
+                    **telemetry,
+                )
+
+            if not self._execution_is_current():
+                return result(
+                    ok=False,
+                    completed=True,
+                    target_found=False,
+                    state="PREEMPTED",
+                    reason="FIND_OBJECT execution was preempted.",
                     **telemetry,
                 )
 
@@ -1976,18 +2023,72 @@ class BehaviorManager:
         last_guarded_result,
         telemetry,
     ):
-        """Execute one guarded forward step, then terminate FIND_OBJECT."""
+        """Execute a bounded, independently guarded FIND_OBJECT approach."""
         approach_attempted = 0
         approach_completed = 0
         approach_result = None
+        approach_steps = []
+        centering_total_attempted = centering_attempted
+        centering_total_completed = centering_completed
+        current = observation
+
+        def target_telemetry(target, previous=None):
+            value = dict(previous or {})
+            image_width = target.get("image_width")
+            center_x = target.get("cx")
+            image_center_x = None
+            horizontal_error = None
+            if (
+                isinstance(image_width, (int, float))
+                and not isinstance(image_width, bool)
+                and math.isfinite(image_width)
+                and image_width > 0
+                and isinstance(center_x, (int, float))
+                and not isinstance(center_x, bool)
+                and math.isfinite(center_x)
+            ):
+                image_center_x = float(image_width) / 2.0
+                horizontal_error = float(center_x) - image_center_x
+            direction = (
+                "LEFT"
+                if horizontal_error is not None
+                and horizontal_error < -self.FIND_CENTER_TOLERANCE_PIXELS
+                else (
+                    "RIGHT"
+                    if horizontal_error is not None
+                    and horizontal_error > self.FIND_CENTER_TOLERANCE_PIXELS
+                    else "CENTERED"
+                )
+            )
+            value.update({
+                "target_label": target_name,
+                "target_confidence": target.get("confidence"),
+                "target_center_x": target.get("cx"),
+                "target_center_y": target.get("cy"),
+                "target_area": target.get("area"),
+                "image_width": image_width,
+                "image_height": target.get("image_height"),
+                "image_center_x": image_center_x,
+                "horizontal_error": horizontal_error,
+                "horizontal_error_pixels": horizontal_error,
+                "steering_direction": direction,
+                "centering_direction": direction,
+                "bbox": target.get("bbox"),
+                "target_observation": target,
+            })
+            return value
 
         def result(**fields):
             value = dict(base)
             value.update({
                 "target": target_name,
                 "target_found": fields.pop("target_found", True),
-                "centering_turn_chunks_attempted": centering_attempted,
-                "centering_turn_chunks_completed": centering_completed,
+                "centering_turn_chunks_attempted": (
+                    centering_total_attempted
+                ),
+                "centering_turn_chunks_completed": (
+                    centering_total_completed
+                ),
                 "maximum_centering_turn_chunks": (
                     self.FIND_CENTER_MAX_TURN_CHUNKS
                 ),
@@ -1999,200 +2100,314 @@ class BehaviorManager:
                 "approach_forward_speed": self.FIND_APPROACH_FORWARD_SPEED,
                 "approach_forward_duration": self.FIND_APPROACH_FORWARD_SECONDS,
                 "approach_result": fields.pop(
-                    "approach_result",
-                    approach_result,
+                    "approach_result", approach_result
                 ),
+                "approach_steps": list(approach_steps),
             })
             value.update(fields)
             self._publish_tracking_state(value)
             return value
 
-        telemetry = dict(telemetry)
-        telemetry["approach_forward_speed"] = (
-            self.FIND_APPROACH_FORWARD_SPEED
-        )
-        telemetry["approach_forward_duration"] = (
-            self.FIND_APPROACH_FORWARD_SECONDS
-        )
-        telemetry["approach_chunks_attempted"] = 0
-        telemetry["approach_chunks_completed"] = 0
-
-        # The RobotBridgeClient owns the interlock. Refresh that same object
-        # immediately before the bounded request when it is available.
-        interlock = getattr(self.robot, "forward_interlock", None)
-        if interlock is None:
-            approach_result = {
-                "ok": False,
-                "permitted": False,
-                "reason": "forward_interlock_not_configured",
-            }
-            return result(
-                ok=False,
-                completed=True,
-                state="APPROACH_BLOCKED",
-                reason="forward_interlock_not_configured",
-                approach_result=approach_result,
-                **telemetry,
-            )
-        refresh = getattr(interlock, "refresh", None)
-        if not callable(refresh):
-            approach_result = {
-                "ok": False,
-                "error": "forward_interlock_refresh_unavailable",
-            }
-            return result(
-                ok=False,
-                completed=True,
-                state="APPROACH_BLOCKED",
-                reason="forward_interlock_refresh_unavailable",
-                approach_result=approach_result,
-                **telemetry,
-            )
-        try:
-            permitted, reason = refresh()
-        except Exception as exc:
-            approach_result = {
-                "ok": False,
-                "error": str(exc),
-                "error_type": type(exc).__name__,
-            }
-            return result(
-                ok=False,
-                completed=True,
-                state="APPROACH_BLOCKED",
-                reason="forward_interlock_refresh_failed",
-                approach_result=approach_result,
-                **telemetry,
-            )
-        if permitted is not True:
-            approach_result = {
-                "ok": False,
-                "permitted": False,
-                "reason": reason,
-            }
-            return result(
-                ok=False,
-                completed=True,
-                state="APPROACH_BLOCKED",
-                reason=reason,
-                approach_result=approach_result,
-                **telemetry,
-            )
-
-        session = self._current_lidar_session()
-        if session is None:
-            approach_result = {
-                "ok": False,
-                "permitted": False,
-                "reason": "LiDAR producer session is unavailable.",
-            }
-            return result(
-                ok=False,
-                completed=True,
-                state="APPROACH_BLOCKED",
-                reason="LiDAR producer session is unavailable.",
-                approach_result=approach_result,
-                **telemetry,
-            )
-
-        cutoff = None
-        for key in ("source_timestamp", "timestamp", "last_seen"):
-            value = observation.get(key)
-            if isinstance(value, str) and value.strip():
-                cutoff = value.strip()
-                break
-
-        # Without a source timestamp we cannot prove that post-motion camera
-        # evidence is newer than the observation authorizing this step.
-        if cutoff is None:
-            approach_result = {
-                "ok": False,
-                "permitted": False,
-                "reason": "target_timestamp_unavailable",
-            }
-            return result(
-                ok=False,
-                completed=True,
-                state="APPROACH_BLOCKED",
-                reason="target_timestamp_unavailable",
-                approach_result=approach_result,
-                **telemetry,
-            )
-
-        approach_attempted = 1
+        telemetry = target_telemetry(current, telemetry)
+        telemetry["approach_forward_speed"] = self.FIND_APPROACH_FORWARD_SPEED
+        telemetry["approach_forward_duration"] = self.FIND_APPROACH_FORWARD_SECONDS
         base["executed"] = True
-        telemetry["approach_chunks_attempted"] = approach_attempted
-        self._publish_tracking_state(dict(
-            base,
-            **telemetry,
-            target=target_name,
-            target_found=True,
-            state="APPROACHING",
-            ok=True,
-            completed=False,
-            centering_turn_chunks_attempted=centering_attempted,
-            centering_turn_chunks_completed=centering_completed,
-            maximum_centering_turn_chunks=self.FIND_CENTER_MAX_TURN_CHUNKS,
-            last_guarded_turn_result=last_guarded_result,
-            approach_result=None,
-        ))
 
-        try:
-            approach_result = self.robot.move_forward(
-                speed=self.FIND_APPROACH_FORWARD_SPEED,
-                seconds=self.FIND_APPROACH_FORWARD_SECONDS,
-            )
-        except Exception as exc:
-            approach_result = {
-                "ok": False,
-                "error": str(exc),
-                "error_type": type(exc).__name__,
-                "transport_attempted": True,
-            }
-            return result(
-                ok=False,
-                completed=True,
-                state="APPROACH_FAILED",
-                reason="bounded forward transport exception",
-                error=str(exc),
-                error_type=type(exc).__name__,
-                approach_result=approach_result,
-                **telemetry,
-            )
+        while approach_completed < self.FIND_APPROACH_MAX_CHUNKS:
+            if not self._execution_is_current():
+                return result(
+                    ok=False,
+                    completed=True,
+                    target_found=False,
+                    state="PREEMPTED",
+                    reason="FIND_OBJECT execution was preempted.",
+                    **telemetry,
+                )
+            if not self._target_is_fresh_and_acquired(current):
+                return result(
+                    ok=False,
+                    completed=True,
+                    target_found=False,
+                    state="TARGET_LOST_AFTER_APPROACH",
+                    reason="Target observation is no longer actionable.",
+                    **telemetry,
+                )
 
-        if not isinstance(approach_result, dict):
-            approach_result = {
-                "ok": False,
-                "error": "invalid_bounded_forward_result",
-            }
-        if approach_result.get("ok") is not True:
-            blocked = bool(
-                approach_result.get("bounded_forward_invalidated")
-                or approach_result.get("forwarded") is False
-            )
-            return result(
-                ok=False,
-                completed=True,
-                state="APPROACH_BLOCKED" if blocked else "APPROACH_FAILED",
-                reason=approach_result.get(
-                    "reason",
-                    approach_result.get("error", "bounded forward failed"),
+            telemetry = target_telemetry(current, telemetry)
+            horizontal_error = telemetry.get("horizontal_error")
+            if (
+                horizontal_error is not None
+                and abs(horizontal_error) > self.FIND_CENTER_TOLERANCE_PIXELS
+            ):
+                centered_result = self._center_acquired_target(
+                    target_name,
+                    current,
+                    base,
+                    continue_to_approach=False,
+                )
+                centering_total_attempted += centered_result.get(
+                    "centering_turn_chunks_attempted", 0
+                )
+                centering_total_completed += centered_result.get(
+                    "centering_turn_chunks_completed", 0
+                )
+                last_guarded_result = centered_result.get(
+                    "last_guarded_turn_result", last_guarded_result
+                )
+                if centered_result.get("state") != "CENTERED":
+                    failure_telemetry = dict(telemetry)
+                    for key in failure_telemetry:
+                        if key in centered_result:
+                            failure_telemetry[key] = centered_result[key]
+                    failure_telemetry["target_observation"] = (
+                        centered_result.get("target_observation", current)
+                    )
+                    return result(
+                        ok=bool(centered_result.get("ok")),
+                        completed=bool(centered_result.get("completed")),
+                        target_found=bool(
+                            centered_result.get("target_found", False)
+                        ),
+                        state=centered_result.get(
+                            "state", "CENTERING_BLOCKED"
+                        ),
+                        reason=centered_result.get(
+                            "reason", "Target centering failed."
+                        ),
+                        confirmation_status=centered_result.get(
+                            "confirmation_status"
+                        ),
+                        confirmation_diagnostics=centered_result.get(
+                            "confirmation_diagnostics"
+                        ),
+                        **failure_telemetry,
+                    )
+                current = centered_result.get("target_observation")
+                if not isinstance(current, dict):
+                    return result(
+                        ok=False,
+                        completed=False,
+                        target_found=False,
+                        state="TARGET_LOST_DURING_CENTERING",
+                        reason="Centered target observation is unavailable.",
+                        **telemetry,
+                    )
+                telemetry = target_telemetry(current, telemetry)
+                continue
+
+            interlock = getattr(self.robot, "forward_interlock", None)
+            if interlock is None:
+                approach_result = {
+                    "ok": False,
+                    "permitted": False,
+                    "reason": "forward_interlock_not_configured",
+                }
+                return result(
+                    ok=False,
+                    completed=True,
+                    state="APPROACH_BLOCKED",
+                    reason="forward_interlock_not_configured",
+                    approach_result=approach_result,
+                    **telemetry,
+                )
+            refresh = getattr(interlock, "refresh", None)
+            if not callable(refresh):
+                approach_result = {
+                    "ok": False,
+                    "error": "forward_interlock_refresh_unavailable",
+                }
+                return result(
+                    ok=False,
+                    completed=True,
+                    state="APPROACH_BLOCKED",
+                    reason="forward_interlock_refresh_unavailable",
+                    approach_result=approach_result,
+                    **telemetry,
+                )
+            try:
+                permitted, reason = refresh()
+            except Exception as exc:
+                approach_result = {
+                    "ok": False,
+                    "error": str(exc),
+                    "error_type": type(exc).__name__,
+                }
+                return result(
+                    ok=False,
+                    completed=True,
+                    state="APPROACH_BLOCKED",
+                    reason="forward_interlock_refresh_failed",
+                    approach_result=approach_result,
+                    **telemetry,
+                )
+            if permitted is not True:
+                approach_result = {
+                    "ok": False,
+                    "permitted": False,
+                    "reason": reason,
+                }
+                return result(
+                    ok=False,
+                    completed=True,
+                    state="APPROACH_BLOCKED",
+                    reason=reason,
+                    approach_result=approach_result,
+                    **telemetry,
+                )
+
+            session = self._current_lidar_session()
+            if session is None:
+                approach_result = {
+                    "ok": False,
+                    "permitted": False,
+                    "reason": "LiDAR producer session is unavailable.",
+                }
+                return result(
+                    ok=False,
+                    completed=True,
+                    state="APPROACH_BLOCKED",
+                    reason="LiDAR producer session is unavailable.",
+                    approach_result=approach_result,
+                    **telemetry,
+                )
+
+            cutoff = None
+            for key in ("source_timestamp", "timestamp", "last_seen"):
+                value = current.get(key)
+                if isinstance(value, str) and value.strip():
+                    cutoff = value.strip()
+                    break
+            if cutoff is None:
+                approach_result = {
+                    "ok": False,
+                    "permitted": False,
+                    "reason": "target_timestamp_unavailable",
+                }
+                return result(
+                    ok=False,
+                    completed=True,
+                    state="APPROACH_BLOCKED",
+                    reason="target_timestamp_unavailable",
+                    approach_result=approach_result,
+                    **telemetry,
+                )
+
+            approach_attempted += 1
+            step = {
+                "step_index": approach_attempted,
+                "pre_forward_horizontal_error": horizontal_error,
+                "centering_chunks_before_step": (
+                    centering_total_attempted
                 ),
-                approach_result=approach_result,
+                "forward_result": None,
+                "post_motion_confirmation_status": None,
+                "post_motion_confirmation_diagnostics": None,
+            }
+            approach_steps.append(step)
+            self._publish_tracking_state(dict(
+                base,
                 **telemetry,
-            )
+                target=target_name,
+                target_found=True,
+                state="APPROACHING",
+                ok=True,
+                completed=False,
+                centering_turn_chunks_attempted=centering_total_attempted,
+                centering_turn_chunks_completed=centering_total_completed,
+                maximum_centering_turn_chunks=self.FIND_CENTER_MAX_TURN_CHUNKS,
+                approach_chunks_attempted=approach_attempted,
+                approach_chunks_completed=approach_completed,
+                maximum_approach_chunks=self.FIND_APPROACH_MAX_CHUNKS,
+                approach_steps=list(approach_steps),
+                last_guarded_turn_result=last_guarded_result,
+                approach_result=None,
+            ))
 
-        approach_completed = 1
-        telemetry["approach_chunks_completed"] = approach_completed
-        post_motion_cutoff = cutoff
-        if self._vision_timestamp_is_iso(cutoff):
-            # World Model/Vision timestamps use wall-clock ISO values.  A
-            # completion-time cutoff rejects frames cached before the bounded
-            # transport returned, while synthetic/non-ISO test clocks retain
-            # their deterministic ordering semantics.
-            post_motion_cutoff = datetime.now(timezone.utc).isoformat()
-        confirmed, confirmation_status, confirmation_diagnostics = (
-            self._confirm_target_candidates_with_status(
+            if not self._execution_is_current():
+                return result(
+                    ok=False,
+                    completed=True,
+                    target_found=False,
+                    state="PREEMPTED",
+                    reason="FIND_OBJECT execution was preempted.",
+                    **telemetry,
+                )
+
+            try:
+                approach_result = self.robot.move_forward(
+                    speed=self.FIND_APPROACH_FORWARD_SPEED,
+                    seconds=self.FIND_APPROACH_FORWARD_SECONDS,
+                )
+            except Exception as exc:
+                approach_result = {
+                    "ok": False,
+                    "error": str(exc),
+                    "error_type": type(exc).__name__,
+                    "transport_attempted": True,
+                }
+                step["forward_result"] = approach_result
+                return result(
+                    ok=False,
+                    completed=True,
+                    state="APPROACH_FAILED",
+                    reason="bounded forward transport exception",
+                    error=str(exc),
+                    error_type=type(exc).__name__,
+                    approach_result=approach_result,
+                    **telemetry,
+                )
+
+            if not isinstance(approach_result, dict):
+                approach_result = {
+                    "ok": False,
+                    "error": "invalid_bounded_forward_result",
+                }
+            step["forward_result"] = approach_result
+            bounded_invalidated = bool(
+                approach_result.get("bounded_forward_invalidated")
+            )
+            delivery_uncertain = bool(
+                approach_result.get("delivery_uncertain")
+            )
+            confirmed_forward_failed = (
+                "confirmed_forwarded" in approach_result
+                and approach_result.get("confirmed_forwarded") is not True
+            )
+            if (
+                approach_result.get("ok") is not True
+                or bounded_invalidated
+                or delivery_uncertain
+                or confirmed_forward_failed
+            ):
+                blocked = bool(
+                    bounded_invalidated
+                    or approach_result.get("forwarded") is False
+                )
+                return result(
+                    ok=False,
+                    completed=True,
+                    state=(
+                        "APPROACH_BLOCKED" if blocked else "APPROACH_FAILED"
+                    ),
+                    reason=approach_result.get(
+                        "reason",
+                        approach_result.get(
+                            "error", "bounded forward failed"
+                        ),
+                    ),
+                    approach_result=approach_result,
+                    **telemetry,
+                )
+
+            approach_completed += 1
+            post_motion_cutoff = cutoff
+            if self._vision_timestamp_is_iso(cutoff):
+                post_motion_cutoff = datetime.now(timezone.utc).isoformat()
+            (
+                confirmed,
+                confirmation_status,
+                confirmation_diagnostics,
+            ) = self._confirm_target_candidates_with_status(
                 target_name,
                 minimum_timestamp=post_motion_cutoff,
                 return_diagnostics=True,
@@ -2200,90 +2415,75 @@ class BehaviorManager:
                     self.FIND_POST_MOTION_CONFIRMATION_WINDOW_SECONDS
                 ),
             )
-        )
-        if confirmed is None:
-            return result(
-                ok=False,
-                completed=True,
-                target_found=False,
-                state="TARGET_LOST_AFTER_APPROACH",
-                reason=(
-                    "Target candidates were not freshly re-confirmed after "
-                    "the bounded approach step."
-                ),
-                confirmation_status=confirmation_status,
-                confirmation_diagnostics=confirmation_diagnostics,
-                approach_result=approach_result,
-                **telemetry,
+            step["post_motion_confirmation_status"] = confirmation_status
+            step["post_motion_confirmation_diagnostics"] = (
+                confirmation_diagnostics
             )
+            if confirmed is None:
+                return result(
+                    ok=False,
+                    completed=True,
+                    target_found=False,
+                    state="TARGET_LOST_AFTER_APPROACH",
+                    reason=(
+                        "Target candidates were not freshly re-confirmed "
+                        "after the bounded approach step."
+                    ),
+                    confirmation_status=confirmation_status,
+                    confirmation_diagnostics=confirmation_diagnostics,
+                    approach_result=approach_result,
+                    **telemetry,
+                )
 
-        promoted = self._promote_confirmed_target(confirmed)
-        if promoted is None:
-            return result(
-                ok=False,
-                completed=True,
-                target_found=False,
-                state="TARGET_LOST_AFTER_APPROACH",
-                reason="Target promotion failed after bounded approach step.",
-                confirmation_status=confirmation_status,
-                confirmation_diagnostics=confirmation_diagnostics,
-                approach_result=approach_result,
-                **telemetry,
-            )
+            promoted = self._promote_confirmed_target(confirmed)
+            if promoted is None:
+                return result(
+                    ok=False,
+                    completed=True,
+                    target_found=False,
+                    state="TARGET_LOST_AFTER_APPROACH",
+                    reason="Target promotion failed after bounded approach step.",
+                    confirmation_status=confirmation_status,
+                    confirmation_diagnostics=confirmation_diagnostics,
+                    approach_result=approach_result,
+                    **telemetry,
+                )
 
-        post_telemetry = dict(telemetry)
-        image_width = promoted.get("image_width")
-        center_x = promoted.get("cx")
-        horizontal_error = None
-        image_center_x = None
-        if (
-            isinstance(image_width, (int, float))
-            and not isinstance(image_width, bool)
-            and math.isfinite(image_width)
-            and image_width > 0
-            and isinstance(center_x, (int, float))
-            and not isinstance(center_x, bool)
-            and math.isfinite(center_x)
-        ):
-            image_center_x = float(image_width) / 2.0
-            horizontal_error = float(center_x) - image_center_x
-        post_direction = (
-            "LEFT"
-            if horizontal_error is not None
-            and horizontal_error < -self.FIND_CENTER_TOLERANCE_PIXELS
-            else (
-                "RIGHT"
-                if horizontal_error is not None
-                and horizontal_error > self.FIND_CENTER_TOLERANCE_PIXELS
-                else "CENTERED"
-            )
-        )
-        post_telemetry.update({
-            "target_confidence": promoted.get("confidence"),
-            "target_center_x": promoted.get("cx"),
-            "target_center_y": promoted.get("cy"),
-            "target_area": promoted.get("area"),
-            "image_width": image_width,
-            "image_height": promoted.get("image_height"),
-            "image_center_x": image_center_x,
-            "horizontal_error": horizontal_error,
-            "horizontal_error_pixels": horizontal_error,
-            "steering_direction": post_direction,
-            "centering_direction": post_direction,
-            "bbox": promoted.get("bbox"),
-            "target_observation": promoted,
-        })
+            current = promoted
+            telemetry = target_telemetry(current, telemetry)
+            if approach_completed >= self.FIND_APPROACH_MAX_CHUNKS:
+                terminal_state = (
+                    "APPROACH_STEP_COMPLETE"
+                    if self.FIND_APPROACH_MAX_CHUNKS == 1
+                    else "APPROACH_SEQUENCE_COMPLETE"
+                )
+                terminal_reason = (
+                    "One bounded approach step completed and the target was "
+                    "freshly re-confirmed."
+                    if self.FIND_APPROACH_MAX_CHUNKS == 1
+                    else (
+                        "Bounded approach sequence completed and the target "
+                        "was freshly re-confirmed."
+                    )
+                )
+                return result(
+                    ok=True,
+                    completed=True,
+                    state=terminal_state,
+                    reason=terminal_reason,
+                    confirmation_status=confirmation_status,
+                    confirmation_diagnostics=confirmation_diagnostics,
+                    approach_result=approach_result,
+                    **telemetry,
+                )
+
         return result(
             ok=True,
             completed=True,
-            state="APPROACH_STEP_COMPLETE",
-            reason=(
-                "One bounded approach step completed and the target was "
-                "freshly re-confirmed."
-            ),
-            confirmation_status=confirmation_status,
-            confirmation_diagnostics=confirmation_diagnostics,
-            **post_telemetry,
+            state="APPROACH_SEQUENCE_COMPLETE",
+            reason="Bounded approach sequence completed.",
+            approach_result=approach_result,
+            **telemetry,
         )
 
     def _execute_guarded_find_search(self, target_name):

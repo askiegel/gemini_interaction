@@ -171,7 +171,7 @@ class SequencedVisionAdapter:
                 found=True,
                 stale=False,
                 target=detection.get("label"),
-                last_seen="post-promotion",
+                last_seen=f"post-{self.calls}-{self.candidate_calls}",
             )
             self.last_result = normalized
         return detections
@@ -315,6 +315,9 @@ def guarded_search_manager(observations, turn_results=None):
     robot = GuardedSearchRobot()
     vision = SequencedVisionAdapter(observations)
     manager = BehaviorManager(robot_client=robot, vision_adapter=vision)
+    # These search/centering tests exercise the historical one-step result
+    # contract.  Multi-step behavior is covered explicitly below.
+    manager.FIND_APPROACH_MAX_CHUNKS = 1
     manager.lidar_session = "session-1"
     calls = []
     results = list(turn_results or [])
@@ -932,6 +935,7 @@ def test_post_centering_empty_frames_allow_later_fresh_confirmation(monkeypatch)
     vision = CandidateVisionAdapter([], payloads)
     manager = BehaviorManager(robot_client=GuardedSearchRobot(), vision_adapter=vision)
     manager.lidar_session = "session-1"
+    manager.FIND_APPROACH_MAX_CHUNKS = 1
     manager.execute_guarded_turn = lambda *args, **kwargs: {
         "ok": True, "permitted": True, "reason": "completed"
     }
@@ -966,6 +970,7 @@ def test_post_centering_empty_recovery_uses_extended_bounded_window(monkeypatch)
     vision = EmptyVision([], [])
     manager = BehaviorManager(robot_client=GuardedSearchRobot(), vision_adapter=vision)
     manager.lidar_session = "session-1"
+    manager.FIND_APPROACH_MAX_CHUNKS = 1
     manager.execute_guarded_turn = lambda *args, **kwargs: {
         "ok": True, "permitted": True, "reason": "completed"
     }
@@ -1004,6 +1009,7 @@ def test_post_forward_confirmation_uses_extended_window_and_returns_early():
     vision = ClockedVision([located_target(320)], payloads)
     manager = BehaviorManager(robot_client=GuardedSearchRobot(), vision_adapter=vision)
     manager.lidar_session = "session-1"
+    manager.FIND_APPROACH_MAX_CHUNKS = 1
     manager._promote_confirmed_target = lambda _candidate: located_target(320)
     result = manager.execute(_mission())
     assert result["state"] == "APPROACH_STEP_COMPLETE"
@@ -1513,6 +1519,7 @@ def test_candidate_endpoint_failure_does_not_promote_or_acquire():
     vision = CandidateVisionAdapter([not_found()], [])
     manager = BehaviorManager(robot_client=GuardedSearchRobot(), vision_adapter=vision)
     manager.lidar_session = "session-1"
+    manager.FIND_APPROACH_MAX_CHUNKS = 1
     calls = []
     manager.execute_guarded_turn = lambda *args, **kwargs: calls.append(args) or {
         "ok": True,
@@ -1554,6 +1561,7 @@ def test_confirmed_candidate_is_promoted_without_turn():
     )
     manager = BehaviorManager(robot_client=GuardedSearchRobot(), vision_adapter=vision)
     manager.lidar_session = "session-1"
+    manager.FIND_APPROACH_MAX_CHUNKS = 1
     calls = []
     manager.execute_guarded_turn = lambda *args, **kwargs: calls.append(args) or {
         "ok": True,
@@ -1588,6 +1596,7 @@ def test_confirmed_candidate_after_one_turn_stops_search():
     )
     manager = BehaviorManager(robot_client=GuardedSearchRobot(), vision_adapter=vision)
     manager.lidar_session = "session-1"
+    manager.FIND_APPROACH_MAX_CHUNKS = 1
     calls = []
 
     def turn(*args, **kwargs):
@@ -1631,6 +1640,7 @@ def make_centering_manager(observations, candidate_payloads, turn_results=None):
         robot_client=GuardedSearchRobot(),
         vision_adapter=vision,
     )
+    manager.FIND_APPROACH_MAX_CHUNKS = 1
     manager.lidar_session = "session-1"
     calls = []
     results = list(turn_results or [])
@@ -1645,12 +1655,305 @@ def make_centering_manager(observations, candidate_payloads, turn_results=None):
     return manager, vision, calls
 
 
+def _multi_step_manager(candidate_payloads, *, initial_cx=320.0, interlock=None):
+    vision = CandidateVisionAdapter(
+        [located_target(initial_cx)],
+        candidate_payloads,
+    )
+    robot = GuardedSearchRobot(interlock=interlock)
+    manager = BehaviorManager(robot_client=robot, vision_adapter=vision)
+    manager.lidar_session = "session-1"
+    manager.FIND_APPROACH_MAX_CHUNKS = 4
+    return manager, robot, vision
+
+
+def _move_calls(robot):
+    return [call for call in robot.calls if call[0] == "move_forward"]
+
+
+def test_four_step_approach_sequence_is_bounded_and_uses_fixed_forward_pulses():
+    payloads = []
+    for step in range(4):
+        payloads.extend(centered_candidate_payloads(f"step-{step}"))
+    manager, robot, vision = _multi_step_manager(payloads)
+
+    result = manager.execute(_mission())
+
+    assert result["state"] == "APPROACH_SEQUENCE_COMPLETE"
+    assert result["ok"] is True
+    assert result["completed"] is True
+    assert result["approach_chunks_attempted"] == 4
+    assert result["approach_chunks_completed"] == 4
+    assert result["maximum_approach_chunks"] == 4
+    assert len(_move_calls(robot)) == 4
+    assert all(call == ("move_forward", 0.08, 0.50) for call in _move_calls(robot))
+    assert len(result["approach_steps"]) == 4
+    assert all(
+        step["post_motion_confirmation_diagnostics"][
+            "confirmation_window_seconds"
+        ] == 1.50
+        for step in result["approach_steps"]
+    )
+    assert vision.candidate_calls == 12
+
+
+def test_approach_recenters_between_forward_steps():
+    payloads = []
+    # Four post-forward confirmations plus one post-centering confirmation.
+    for step in range(5):
+        payloads.extend(centered_candidate_payloads(f"recenter-{step}"))
+    manager, robot, vision = _multi_step_manager(payloads)
+    promotions = [0]
+
+    def promote(_candidate):
+        promotions[0] += 1
+        return located_target(145.0 if promotions[0] == 1 else 320.0)
+
+    manager._promote_confirmed_target = promote
+    turns = []
+    manager.execute_guarded_turn = (
+        lambda direction, speed, duration, **kwargs: turns.append(
+            (direction, speed, duration)
+        ) or {"ok": True, "permitted": True, "reason": "completed"}
+    )
+
+    result = manager.execute(_mission())
+
+    assert result["state"] == "APPROACH_SEQUENCE_COMPLETE"
+    assert len(_move_calls(robot)) == 4
+    assert turns == [("LEFT", 0.20, 0.50)]
+    assert result["centering_turn_chunks_attempted"] == 1
+    assert result["centering_turn_chunks_completed"] == 1
+    assert vision.candidate_calls == 15
+
+
+class _SequenceInterlock(AlwaysPermittedInterlock):
+    def __init__(self, permissions):
+        super().__init__()
+        self.permissions = list(permissions)
+
+    def refresh(self):
+        self.refresh_calls += 1
+        permitted = self.permissions.pop(0) if self.permissions else False
+        return permitted, "fresh_clear" if permitted else "front_not_clear"
+
+
+def test_lidar_blocks_second_approach_step_without_retry():
+    payloads = centered_candidate_payloads("first")
+    payloads.extend(centered_candidate_payloads("unused"))
+    interlock = _SequenceInterlock([True, False])
+    manager, robot, _vision = _multi_step_manager(payloads, interlock=interlock)
+
+    result = manager.execute(_mission())
+
+    assert result["state"] == "APPROACH_BLOCKED"
+    assert result["ok"] is False
+    assert result["completed"] is True
+    assert result["approach_chunks_attempted"] == 1
+    assert result["approach_chunks_completed"] == 1
+    assert len(_move_calls(robot)) == 1
+    assert interlock.refresh_calls == 2
+
+
+def test_target_loss_after_second_step_stops_without_third_forward():
+    payloads = centered_candidate_payloads("first")
+    manager, robot, _vision = _multi_step_manager(payloads)
+
+    result = manager.execute(_mission())
+
+    assert result["state"] == "TARGET_LOST_AFTER_APPROACH"
+    assert result["ok"] is False
+    assert result["completed"] is True
+    assert result["approach_chunks_attempted"] == 2
+    assert result["approach_chunks_completed"] == 2
+    assert len(_move_calls(robot)) == 2
+
+
+def test_camera_off_after_a_forward_step_stops_without_retry():
+    camera_off = candidate_detection("camera-off")
+    camera_off["camera_running"] = False
+    payloads = [camera_off]
+    manager, robot, _vision = _multi_step_manager(payloads)
+
+    result = manager.execute(_mission())
+
+    assert result["state"] == "TARGET_LOST_AFTER_APPROACH"
+    assert result["completed"] is True
+    assert result["approach_chunks_attempted"] == 1
+    assert result["approach_chunks_completed"] == 1
+    assert len(_move_calls(robot)) == 1
+
+
+def test_centering_failure_between_steps_prevents_next_forward():
+    manager, robot, _vision = _multi_step_manager(
+        centered_candidate_payloads("first")
+    )
+    manager._promote_confirmed_target = lambda _candidate: located_target(145)
+    turns = []
+
+    def deny_turn(direction, speed, duration, **kwargs):
+        turns.append((direction, speed, duration))
+        return {"ok": False, "permitted": False, "reason": "front_not_clear"}
+
+    manager.execute_guarded_turn = deny_turn
+    result = manager.execute(_mission())
+
+    assert result["state"] == "CENTERING_BLOCKED"
+    assert result["completed"] is False
+    assert result["approach_chunks_attempted"] == 1
+    assert result["approach_chunks_completed"] == 1
+    assert len(_move_calls(robot)) == 1
+    assert turns == [("LEFT", 0.20, 0.50)]
+
+
+class _TwoResultRobot(GuardedSearchRobot):
+    def __init__(self):
+        super().__init__()
+        self.forward_results = [
+            {"ok": True, "automatic_stop": True},
+            {"ok": False, "error": "transport_failed"},
+        ]
+
+    def move_forward(self, speed, seconds):
+        self.calls.append(("move_forward", speed, seconds))
+        return dict(self.forward_results.pop(0))
+
+
+def test_forward_transport_failure_between_steps_is_terminal():
+    payloads = centered_candidate_payloads("first")
+    manager, _robot, _vision = _multi_step_manager(payloads)
+    robot = _TwoResultRobot()
+    manager.robot = robot
+
+    result = manager.execute(_mission())
+
+    assert result["state"] == "APPROACH_FAILED"
+    assert result["ok"] is False
+    assert result["completed"] is True
+    assert result["approach_chunks_attempted"] == 2
+    assert result["approach_chunks_completed"] == 1
+    assert len(_move_calls(robot)) == 2
+
+
+def test_detector_metadata_changes_between_steps_do_not_break_continuity():
+    payloads = []
+    for step in range(4):
+        payloads.extend(centered_candidate_payloads(f"metadata-{step}"))
+    manager, robot, _vision = _multi_step_manager(payloads)
+    promotions = [0]
+
+    def promote(_candidate):
+        promotions[0] += 1
+        target = located_target(320)
+        target["track_id"] = 100 + promotions[0]
+        target["entity_id"] = f"backpack-{promotions[0]:03d}"
+        return target
+
+    manager._promote_confirmed_target = promote
+    result = manager.execute(_mission())
+
+    assert result["state"] == "APPROACH_SEQUENCE_COMPLETE"
+    assert result["ok"] is True
+    assert len(_move_calls(robot)) == 4
+
+
+def test_preemption_between_approach_steps_blocks_all_followup_actions():
+    manager, robot, _vision = _multi_step_manager(
+        centered_candidate_payloads("preempt-first")
+    )
+    authorized = [True]
+    manager.execution_authorization_provider = lambda: authorized[0]
+
+    def promote(_candidate):
+        authorized[0] = False
+        return located_target(145.0)
+
+    manager._promote_confirmed_target = promote
+    turns = []
+    manager.execute_guarded_turn = (
+        lambda *args, **kwargs: turns.append(args)
+        or {"ok": True, "permitted": True}
+    )
+
+    result = manager.execute(_mission())
+
+    assert result["state"] == "PREEMPTED"
+    assert result["completed"] is True
+    assert result["approach_chunks_attempted"] == 1
+    assert result["approach_chunks_completed"] == 1
+    assert len(_move_calls(robot)) == 1
+    assert turns == []
+
+
+def test_uncertain_forward_delivery_stops_multi_step_sequence_without_retry():
+    robot = GuardedSearchRobot(
+        move_result={
+            "ok": True,
+            "delivery_uncertain": True,
+            "confirmed_forwarded": False,
+            "forwarded": True,
+        }
+    )
+    vision = CandidateVisionAdapter([located_target(320)], [])
+    manager = BehaviorManager(robot_client=robot, vision_adapter=vision)
+    manager.lidar_session = "session-1"
+    manager.FIND_APPROACH_MAX_CHUNKS = 4
+
+    result = manager.execute(_mission())
+
+    assert result["state"] == "APPROACH_FAILED"
+    assert result["ok"] is False
+    assert result["completed"] is True
+    assert result["approach_chunks_attempted"] == 1
+    assert result["approach_chunks_completed"] == 0
+    assert len(_move_calls(robot)) == 1
+
+
+def test_post_motion_cutoff_is_new_for_each_forward_step():
+    payloads = []
+    for step in range(4):
+        payloads.extend(centered_candidate_payloads(f"z-step-{step}"))
+    manager, robot, _vision = _multi_step_manager(payloads)
+    cutoffs = []
+    original = manager._confirm_target_candidates_with_status
+
+    def record_cutoff(*args, **kwargs):
+        cutoffs.append(kwargs.get("minimum_timestamp"))
+        return original(*args, **kwargs)
+
+    manager._confirm_target_candidates_with_status = record_cutoff
+    result = manager.execute(_mission())
+
+    assert result["state"] == "APPROACH_SEQUENCE_COMPLETE"
+    assert len(_move_calls(robot)) == 4
+    assert len(cutoffs) == 4
+    assert len(set(cutoffs)) == 4
+    assert all(cutoff is not None for cutoff in cutoffs)
+
+
+def test_empty_frames_recover_between_multiple_approach_steps():
+    payloads = []
+    for step in range(4):
+        empty = candidate_detection(f"empty-{step}")
+        empty["detections"] = []
+        payloads.append(empty)
+        payloads.extend(centered_candidate_payloads(f"recover-{step}"))
+    manager, robot, _vision = _multi_step_manager(payloads)
+
+    result = manager.execute(_mission())
+
+    assert result["state"] == "APPROACH_SEQUENCE_COMPLETE"
+    assert result["approach_chunks_completed"] == 4
+    assert len(_move_calls(robot)) == 4
+
+
 def test_already_centered_target_completes_without_turn():
     manager = BehaviorManager(
         robot_client=GuardedSearchRobot(),
         vision_adapter=SequencedVisionAdapter([located_target(320)]),
     )
     manager.lidar_session = "session-1"
+    manager.FIND_APPROACH_MAX_CHUNKS = 1
     manager.execute_guarded_turn = lambda *args, **kwargs: pytest.fail(
         "centered target must not turn"
     )
@@ -1681,6 +1984,7 @@ def test_approach_refreshes_existing_interlock_once_before_dispatch():
         vision_adapter=SequencedVisionAdapter([located_target(320)]),
     )
     manager.lidar_session = "session-1"
+    manager.FIND_APPROACH_MAX_CHUNKS = 1
     result = manager.execute(_mission())
     assert result["state"] == "APPROACH_STEP_COMPLETE"
     assert interlock.refresh_calls == 1
@@ -1695,6 +1999,7 @@ def test_approach_interlock_denial_is_terminal_without_transport():
         vision_adapter=SequencedVisionAdapter([located_target(320)]),
     )
     manager.lidar_session = "session-1"
+    manager.FIND_APPROACH_MAX_CHUNKS = 1
     result = manager.execute(_mission())
     assert result["state"] == "APPROACH_BLOCKED"
     assert result["ok"] is False
@@ -1724,6 +2029,7 @@ def test_approach_failure_is_terminal_and_never_replayed(move_result, state):
         vision_adapter=SequencedVisionAdapter([located_target(320)]),
     )
     manager.lidar_session = "session-1"
+    manager.FIND_APPROACH_MAX_CHUNKS = 1
     result = manager.execute(_mission())
     assert result["state"] == state
     assert result["ok"] is False
@@ -1740,6 +2046,7 @@ def test_approach_transport_exception_is_terminal_without_replay():
         vision_adapter=SequencedVisionAdapter([located_target(320)]),
     )
     manager.lidar_session = "session-1"
+    manager.FIND_APPROACH_MAX_CHUNKS = 1
     result = manager.execute(_mission())
     assert result["state"] == "APPROACH_FAILED"
     assert result["ok"] is False
@@ -1763,6 +2070,7 @@ def test_approach_requires_post_motion_candidate_timestamp():
         vision_adapter=CandidateVisionAdapter([target], payloads),
     )
     manager.lidar_session = "session-1"
+    manager.FIND_APPROACH_MAX_CHUNKS = 1
     result = manager.execute(_mission())
     assert result["state"] == "TARGET_LOST_AFTER_APPROACH"
     assert result["completed"] is True
@@ -1807,6 +2115,7 @@ def test_approach_allows_post_motion_track_id_change():
     robot = GuardedSearchRobot()
     manager = BehaviorManager(robot_client=robot, vision_adapter=vision)
     manager.lidar_session = "session-1"
+    manager.FIND_APPROACH_MAX_CHUNKS = 1
     turn_calls = []
     manager.execute_guarded_turn = lambda *args, **kwargs: turn_calls.append(
         (args, kwargs)
@@ -1835,6 +2144,7 @@ def test_approach_allows_post_motion_entity_id_change():
     robot = GuardedSearchRobot()
     manager = BehaviorManager(robot_client=robot, vision_adapter=vision)
     manager.lidar_session = "session-1"
+    manager.FIND_APPROACH_MAX_CHUNKS = 1
     turn_calls = []
     manager.execute_guarded_turn = lambda *args, **kwargs: turn_calls.append(
         (args, kwargs)
@@ -1992,6 +2302,7 @@ def test_centering_stale_pre_turn_frame_cannot_confirm(monkeypatch):
         robot_client=GuardedSearchRobot(), vision_adapter=vision
     )
     manager.lidar_session = "session-1"
+    manager.FIND_APPROACH_MAX_CHUNKS = 1
     manager.execute_guarded_turn = lambda *args, **kwargs: {
         "ok": True, "permitted": True, "reason": "completed"
     }
@@ -2028,6 +2339,7 @@ def test_centering_uses_fresh_post_turn_candidates_not_stale(monkeypatch):
         robot_client=GuardedSearchRobot(), vision_adapter=vision
     )
     manager.lidar_session = "session-1"
+    manager.FIND_APPROACH_MAX_CHUNKS = 1
     manager.execute_guarded_turn = lambda *args, **kwargs: {
         "ok": True, "permitted": True, "reason": "completed"
     }
@@ -2061,6 +2373,7 @@ def test_centering_post_turn_confirmation_propagates_diagnostics():
         robot_client=GuardedSearchRobot(), vision_adapter=vision
     )
     manager.lidar_session = "session-1"
+    manager.FIND_APPROACH_MAX_CHUNKS = 1
     manager.execute_guarded_turn = lambda *args, **kwargs: {
         "ok": True, "permitted": True, "reason": "completed"
     }
@@ -2096,6 +2409,7 @@ def test_centering_cutoff_is_created_after_turn_returns():
         robot_client=GuardedSearchRobot(), vision_adapter=SequencedVisionAdapter([])
     )
     manager.lidar_session = "session-1"
+    manager.FIND_APPROACH_MAX_CHUNKS = 1
 
     def turn(*args, **kwargs):
         events.append("turn_returned")

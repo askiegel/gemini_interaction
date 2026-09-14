@@ -98,6 +98,9 @@ class CognitiveRuntime:
         self.behavior_manager.tracking_state_callback = (
             self._publish_behavior_tracking
         )
+        self.behavior_manager.execution_authorization_provider = (
+            self._behavior_execution_is_current
+        )
         try:
             factory = lidar_worker_factory or LidarPerceptionWorker
             self.lidar_worker = factory(
@@ -149,6 +152,15 @@ class CognitiveRuntime:
             self.tracking_state = build_tracking_state(
                 result,
                 previous=self.tracking_state,
+            )
+
+    def _behavior_execution_is_current(self):
+        """Report whether the active behavior generation is still valid."""
+        with self._state_lock:
+            return (
+                self._behavior_execution_generation is not None
+                and self._behavior_execution_generation
+                == self._control_generation
             )
 
     def _stop_lidar(self):
