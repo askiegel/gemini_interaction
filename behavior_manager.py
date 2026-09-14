@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 
 from robot_bridge.client import RobotBridgeClient
 from guarded_turn_policy import validate_guarded_turn
+from local_obstacle_policy import recommend_local_avoidance
 from target_lock import TargetLock
 
 
@@ -399,6 +400,9 @@ class BehaviorManager:
     FIND_CENTER_TURN_SPEED = 0.20
     FIND_CENTER_TURN_SECONDS = 0.50
     FIND_CENTER_MAX_TURN_CHUNKS = 8
+    FIND_AVOIDANCE_MAX_MANEUVERS = 1
+    FIND_AVOIDANCE_TURN_SPEED = FIND_CENTER_TURN_SPEED
+    FIND_AVOIDANCE_TURN_SECONDS = FIND_CENTER_TURN_SECONDS
 
     CENTER_TURN_SPEED = 0.60
     CENTER_TURN_SECONDS = 0.40
@@ -2037,6 +2041,9 @@ class BehaviorManager:
         approach_completed = 0
         approach_result = None
         approach_steps = []
+        avoidance_attempted = 0
+        avoidance_completed = 0
+        avoidance_steps = []
         centering_total_attempted = centering_attempted
         centering_total_completed = centering_completed
         current = observation
@@ -2087,6 +2094,17 @@ class BehaviorManager:
             })
             return value
 
+        def post_motion_cutoff(target):
+            cutoff = None
+            for key in ("source_timestamp", "timestamp", "last_seen"):
+                value = target.get(key)
+                if isinstance(value, str) and value.strip():
+                    cutoff = value.strip()
+                    break
+            if self._vision_timestamp_is_iso(cutoff):
+                return datetime.now(timezone.utc).isoformat()
+            return cutoff
+
         def result(**fields):
             value = dict(base)
             value.update({
@@ -2112,6 +2130,12 @@ class BehaviorManager:
                     "approach_result", approach_result
                 ),
                 "approach_steps": list(approach_steps),
+                "avoidance_maneuvers_attempted": avoidance_attempted,
+                "avoidance_maneuvers_completed": avoidance_completed,
+                "maximum_avoidance_maneuvers": (
+                    self.FIND_AVOIDANCE_MAX_MANEUVERS
+                ),
+                "avoidance_steps": list(avoidance_steps),
             })
             value.update(fields)
             self._publish_tracking_state(value)
@@ -2249,21 +2273,6 @@ class BehaviorManager:
                     approach_result=approach_result,
                     **telemetry,
                 )
-            if permitted is not True:
-                approach_result = {
-                    "ok": False,
-                    "permitted": False,
-                    "reason": reason,
-                }
-                return result(
-                    ok=False,
-                    completed=True,
-                    state="APPROACH_BLOCKED",
-                    reason=reason,
-                    approach_result=approach_result,
-                    **telemetry,
-                )
-
             session = self._current_lidar_session()
             if session is None:
                 approach_result = {
@@ -2279,6 +2288,203 @@ class BehaviorManager:
                     approach_result=approach_result,
                     **telemetry,
                 )
+
+            if permitted is not True:
+                # Local avoidance is only a recovery for the interlock's
+                # explicit front-clearance denial.  A separately readable
+                # blocked LiDAR snapshot must not turn unrelated fail-closed
+                # denials (stale data, session mismatch, monitor failure,
+                # etc.) into a maneuver authorization.
+                if reason != "front_not_clear":
+                    approach_result = {
+                        "ok": False,
+                        "permitted": False,
+                        "reason": reason,
+                    }
+                    return result(
+                        ok=False,
+                        completed=True,
+                        state="APPROACH_BLOCKED",
+                        reason=reason,
+                        approach_result=approach_result,
+                        **telemetry,
+                    )
+                recommendation = None
+                if self.world_model is not None:
+                    try:
+                        lidar_state = self.world_model.get_lidar_obstacles(
+                            expected_session=session
+                        )
+                        recommendation = recommend_local_avoidance(
+                            lidar_state,
+                            expected_session=session,
+                        )
+                    except Exception as exc:
+                        recommendation = {
+                            "recommendation": "HOLD",
+                            "reason": "avoidance_lidar_read_failed",
+                            "error": str(exc),
+                        }
+
+                direction = (
+                    {
+                        "TURN_LEFT": "LEFT",
+                        "TURN_RIGHT": "RIGHT",
+                    }.get(
+                        recommendation.get("recommendation")
+                        if isinstance(recommendation, dict)
+                        else None
+                    )
+                )
+                recommendation_usable = bool(
+                    isinstance(recommendation, dict)
+                    and recommendation.get("trusted") is True
+                    and recommendation.get("fresh") is True
+                    and recommendation.get("producer_session") == session
+                    and recommendation.get("front_state") in {
+                        "CAUTION", "BLOCKED"
+                    }
+                    and direction is not None
+                    and recommendation.get("reason")
+                    != "clearance_near_tie_left_preferred"
+                )
+                if (
+                    avoidance_attempted
+                    >= self.FIND_AVOIDANCE_MAX_MANEUVERS
+                    or not recommendation_usable
+                ):
+                    approach_result = {
+                        "ok": False,
+                        "permitted": False,
+                        "reason": reason,
+                        "avoidance_recommendation": recommendation,
+                    }
+                    return result(
+                        ok=False,
+                        completed=True,
+                        state="APPROACH_BLOCKED",
+                        reason=(
+                            "avoidance_maneuver_limit_reached"
+                            if avoidance_attempted
+                            >= self.FIND_AVOIDANCE_MAX_MANEUVERS
+                            else (
+                                recommendation.get("reason")
+                                if isinstance(recommendation, dict)
+                                else reason
+                            )
+                        ),
+                        approach_result=approach_result,
+                        **telemetry,
+                    )
+
+                if not self._execution_is_current():
+                    return result(
+                        ok=False,
+                        completed=True,
+                        target_found=False,
+                        state="PREEMPTED",
+                        reason="FIND_OBJECT execution was preempted.",
+                        **telemetry,
+                    )
+
+                avoidance_attempted += 1
+                avoidance_step = {
+                    "maneuver_index": avoidance_attempted,
+                    "trigger_reason": reason,
+                    "front_state": recommendation.get("front_state"),
+                    "left_state": recommendation.get("front_left_state"),
+                    "right_state": recommendation.get("front_right_state"),
+                    "chosen_direction": direction,
+                    "turn_result": None,
+                    "post_turn_confirmation_status": None,
+                    "post_turn_confirmation_diagnostics": None,
+                }
+                avoidance_steps.append(avoidance_step)
+                try:
+                    turn_result = self.execute_guarded_turn(
+                        direction,
+                        self.FIND_AVOIDANCE_TURN_SPEED,
+                        self.FIND_AVOIDANCE_TURN_SECONDS,
+                        expected_lidar_session=session,
+                    )
+                except Exception as exc:
+                    turn_result = {
+                        "ok": False,
+                        "permitted": False,
+                        "reason": "avoidance_turn_exception",
+                        "error": str(exc),
+                        "error_type": type(exc).__name__,
+                    }
+                avoidance_step["turn_result"] = turn_result
+                if (
+                    not isinstance(turn_result, dict)
+                    or turn_result.get("ok") is not True
+                    or turn_result.get("permitted") is not True
+                ):
+                    return result(
+                        ok=False,
+                        completed=True,
+                        state="APPROACH_BLOCKED",
+                        reason=(
+                            turn_result.get("reason", "avoidance_turn_failed")
+                            if isinstance(turn_result, dict)
+                            else "avoidance_turn_failed"
+                        ),
+                        approach_result=turn_result,
+                        **telemetry,
+                    )
+
+                avoidance_completed += 1
+                cutoff = post_motion_cutoff(current)
+                (
+                    confirmed,
+                    confirmation_status,
+                    confirmation_diagnostics,
+                ) = self._confirm_target_candidates_with_status(
+                    target_name,
+                    minimum_timestamp=cutoff,
+                    return_diagnostics=True,
+                    confirmation_window_seconds=(
+                        self.FIND_OBJECT_CONFIRMATION_WINDOW_SECONDS
+                    ),
+                )
+                avoidance_step["post_turn_confirmation_status"] = (
+                    confirmation_status
+                )
+                avoidance_step["post_turn_confirmation_diagnostics"] = (
+                    confirmation_diagnostics
+                )
+                if confirmed is None:
+                    return result(
+                        ok=False,
+                        completed=True,
+                        target_found=False,
+                        state="TARGET_LOST_AFTER_APPROACH",
+                        reason=(
+                            "Target was not re-confirmed after obstacle "
+                            "avoidance."
+                        ),
+                        confirmation_status=confirmation_status,
+                        confirmation_diagnostics=confirmation_diagnostics,
+                        approach_result=turn_result,
+                        **telemetry,
+                    )
+                promoted = self._promote_confirmed_target(confirmed)
+                if promoted is None:
+                    return result(
+                        ok=False,
+                        completed=True,
+                        target_found=False,
+                        state="TARGET_LOST_AFTER_APPROACH",
+                        reason="Target promotion failed after obstacle avoidance.",
+                        confirmation_status=confirmation_status,
+                        confirmation_diagnostics=confirmation_diagnostics,
+                        approach_result=turn_result,
+                        **telemetry,
+                    )
+                current = promoted
+                telemetry = target_telemetry(current, telemetry)
+                continue
 
             cutoff = None
             for key in ("source_timestamp", "timestamp", "last_seen"):
@@ -2409,16 +2615,16 @@ class BehaviorManager:
                 )
 
             approach_completed += 1
-            post_motion_cutoff = cutoff
+            post_forward_cutoff = cutoff
             if self._vision_timestamp_is_iso(cutoff):
-                post_motion_cutoff = datetime.now(timezone.utc).isoformat()
+                post_forward_cutoff = datetime.now(timezone.utc).isoformat()
             (
                 confirmed,
                 confirmation_status,
                 confirmation_diagnostics,
             ) = self._confirm_target_candidates_with_status(
                 target_name,
-                minimum_timestamp=post_motion_cutoff,
+                minimum_timestamp=post_forward_cutoff,
                 return_diagnostics=True,
                 confirmation_window_seconds=(
                     self.FIND_POST_MOTION_CONFIRMATION_WINDOW_SECONDS
