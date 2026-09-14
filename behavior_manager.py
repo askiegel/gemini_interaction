@@ -13,6 +13,10 @@ class _GuardedTurnMonitor:
     """Monitor one explicit bounded turn without owning transport locks."""
 
     INTERVAL_SECONDS = 0.05
+    # A short producer scheduling gap is tolerated only after the turn has
+    # already passed its initial LiDAR validation.  This does not change the
+    # global LiDAR freshness contract or any forward-motion authorization.
+    TRANSIENT_STALE_GRACE_SECONDS = 0.15
     # Allow the synchronous bounded Robot Bridge request to return after the
     # physical window.  This covers the bridge's documented post-zero delay
     # and ordinary scheduling/HTTP overhead; it never changes the requested
@@ -72,6 +76,10 @@ class _GuardedTurnMonitor:
         self._last_stop_error_type = None
         self._stop_count = 0
         self._stop_events = []
+        self._stale_started_monotonic = None
+        self._transient_stale_observed = False
+        self._transient_stale_recovered = False
+        self._transient_stale_max_duration_seconds = 0.0
 
     @property
     def running(self):
@@ -208,10 +216,37 @@ class _GuardedTurnMonitor:
                     and self._deadline is not None
                     and now_monotonic >= self._deadline
                 )
+                stale_transient = False
+                if validation.get("reason") == "stale":
+                    if self._stale_started_monotonic is None:
+                        self._stale_started_monotonic = now_monotonic
+                        self._transient_stale_observed = True
+                    stale_duration = (
+                        now_monotonic - self._stale_started_monotonic
+                    )
+                    self._transient_stale_max_duration_seconds = max(
+                        self._transient_stale_max_duration_seconds,
+                        stale_duration,
+                    )
+                    stale_transient = bool(
+                        not deadline_expired
+                        and stale_duration
+                        <= self.TRANSIENT_STALE_GRACE_SECONDS
+                    )
+                elif (
+                    validation.get("permitted")
+                    and self._stale_started_monotonic is not None
+                ):
+                    self._transient_stale_recovered = True
+                    self._stale_started_monotonic = None
                 if deadline_expired:
                     self._window_complete = True
                     self._physical_deadline_reached = True
-                if not validation.get("permitted"):
+                if stale_transient:
+                    # Keep the initial successful validation reason while a
+                    # single continuous stale interval is within grace.
+                    pass
+                elif not validation.get("permitted"):
                     if not self._invalidated:
                         self._reason = validation.get("reason")
                         self._inhibited = True
@@ -379,6 +414,11 @@ class _GuardedTurnMonitor:
                 "last_stop_error_type": self._last_stop_error_type,
                 "stop_count": self._stop_count,
                 "stop_events": list(self._stop_events),
+                "transient_stale_observed": self._transient_stale_observed,
+                "transient_stale_recovered": self._transient_stale_recovered,
+                "transient_stale_max_duration_seconds": (
+                    self._transient_stale_max_duration_seconds
+                ),
             }
 
 

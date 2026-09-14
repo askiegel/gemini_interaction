@@ -1,6 +1,7 @@
 """Offline tests for the explicit guarded bounded-turn execution boundary."""
 
 import json
+import copy
 import threading
 import time
 
@@ -47,6 +48,19 @@ class FakeWorldModel:
     def get_lidar_obstacles(self, *, expected_session, now=None):
         self.calls.append((expected_session, now))
         return self.state
+
+
+class SequenceWorldModel:
+    def __init__(self, states):
+        self.states = [copy.deepcopy(state) for state in states]
+        self.calls = []
+
+    def get_lidar_obstacles(self, *, expected_session, now=None):
+        self.calls.append((expected_session, now))
+        if self.states:
+            state = self.states.pop(0)
+            self.last_state = copy.deepcopy(state)
+        return copy.deepcopy(getattr(self, "last_state", snapshot()))
 
 
 class FakeRobot:
@@ -145,6 +159,8 @@ def test_valid_left_forwards_once_with_positive_angular_z():
         "streaming": False,
     }]
     assert robot.stop_calls == 0
+    assert result["transient_stale_observed"] is False
+    assert result["transient_stale_recovered"] is False
 
 
 def test_valid_right_forwards_once_with_negative_angular_z():
@@ -767,6 +783,111 @@ def test_stale_session_invalid_and_malformed_states_stop_during_turn():
         worker.join(timeout=1.0)
         result = result_box[0]
         assert result["generation_invalidated"] is True
+        assert robot.stop_calls == 2
+
+
+def _run_sequence_turn(states, robot=None, duration=0.4):
+    robot = robot or BlockingRobot()
+    world = SequenceWorldModel(states)
+    behavior = BehaviorManager(robot_client=robot, world_model=world)
+    result_box = []
+    worker = threading.Thread(
+        target=lambda: result_box.append(
+            behavior.execute_guarded_turn(
+                "LEFT", 0.5, duration,
+                expected_lidar_session=SESSION,
+                now=10.0,
+            )
+        )
+    )
+    worker.start()
+    assert robot.motion_started.wait(timeout=1.0)
+    return robot, world, behavior, worker, result_box
+
+
+def test_transient_stale_gap_recovers_without_stop():
+    stale = snapshot()
+    stale["age_at_receipt_seconds"] = 0.31
+    fresh = snapshot()
+    robot, world, _behavior, worker, result_box = _run_sequence_turn(
+        [snapshot(), snapshot(), stale, stale, fresh],
+    )
+    deadline = time.monotonic() + 1.0
+    while len(world.calls) < 5 and time.monotonic() < deadline:
+        time.sleep(0.005)
+    assert len(world.calls) >= 5
+    robot.release_motion.set()
+    worker.join(timeout=1.0)
+    result = result_box[0]
+    assert result["ok"] is True
+    assert result["generation_invalidated"] is False
+    assert result["transient_stale_observed"] is True
+    assert result["transient_stale_recovered"] is True
+    assert result["transient_stale_max_duration_seconds"] <= 0.15
+    assert robot.stop_calls == 0
+
+
+def test_fresh_lidar_resets_stale_grace_for_a_later_gap():
+    stale = snapshot()
+    stale["age_at_receipt_seconds"] = 0.31
+    fresh = snapshot()
+    robot, world, _behavior, worker, result_box = _run_sequence_turn(
+        [snapshot(), snapshot(), stale, fresh, stale, fresh],
+    )
+    deadline = time.monotonic() + 1.0
+    while len(world.calls) < 6 and time.monotonic() < deadline:
+        time.sleep(0.005)
+    assert len(world.calls) >= 6
+    robot.release_motion.set()
+    worker.join(timeout=1.0)
+    result = result_box[0]
+    assert result["ok"] is True
+    assert result["generation_invalidated"] is False
+    assert result["transient_stale_observed"] is True
+    assert result["transient_stale_recovered"] is True
+    assert robot.stop_calls == 0
+
+
+def test_persistent_stale_gap_stops_after_single_grace_window():
+    stale = snapshot()
+    stale["age_at_receipt_seconds"] = 0.31
+    robot, world, _behavior, worker, result_box = _run_sequence_turn(
+        [snapshot(), snapshot(), stale],
+    )
+    wait_for_stop(robot, 1)
+    robot.release_motion.set()
+    worker.join(timeout=1.0)
+    result = result_box[0]
+    assert result["ok"] is False
+    assert result["generation_invalidated"] is True
+    assert result["reason"] == "stale"
+    assert result["transient_stale_observed"] is True
+    assert result["transient_stale_recovered"] is False
+    assert result["transient_stale_max_duration_seconds"] > 0.15
+    assert robot.stop_calls == 2
+
+
+def test_non_stale_failures_are_not_granted_stale_grace():
+    stale = snapshot()
+    stale["age_at_receipt_seconds"] = 0.31
+    mismatched = snapshot()
+    mismatched["producer_session"] = "other"
+    unavailable = snapshot()
+    unavailable.update(available=False, valid=False, reason="unavailable")
+    unsafe = snapshot(left="BLOCKED")
+    for failure in (mismatched, unavailable, unsafe):
+        robot, world, _behavior, worker, result_box = _run_sequence_turn(
+            [snapshot(), snapshot(), stale, failure],
+        )
+        wait_for_stop(robot, 1)
+        robot.release_motion.set()
+        worker.join(timeout=1.0)
+        result = result_box[0]
+        assert result["ok"] is False
+        assert result["generation_invalidated"] is True
+        assert result["reason"] != "stale"
+        assert result["transient_stale_observed"] is True
+        assert result["transient_stale_recovered"] is False
         assert robot.stop_calls == 2
 
 
