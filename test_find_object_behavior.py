@@ -3237,6 +3237,404 @@ def test_off_center_bypass_target_is_not_recentered_before_translation():
     assert result["centering_turn_chunks_attempted"] == 0
 
 
+def _clearance_forward_fixture(
+    *, front="CLEAR", max_chunks=3, promoted_targets=None,
+    interlock_results=None,
+):
+    payloads = (
+        centered_candidate_payloads("bypass")
+        + centered_candidate_payloads("clearance")
+        + centered_candidate_payloads("normal")
+        + centered_candidate_payloads("extra")
+        + centered_candidate_payloads("final")
+    )
+    manager, robot, _vision = _turn_forward_manager(
+        [
+            _avoidance_lidar_snapshot(
+                front="BLOCKED", left="CLEAR", right="BLOCKED"
+            ),
+            _avoidance_lidar_snapshot(
+                front="CLEAR", left="CLEAR", right="BLOCKED"
+            ),
+            _avoidance_lidar_snapshot(
+                front=front, left="CLEAR", right="BLOCKED"
+            ),
+        ],
+        payloads,
+        interlock_results=interlock_results or [False, True, True, True],
+        max_chunks=max_chunks,
+    )
+    promoted = list(
+        promoted_targets
+        or [located_target(391), located_target(391), located_target(320)]
+    )
+    last_promoted = promoted[-1]
+
+    def promote(_candidate):
+        nonlocal last_promoted
+        if promoted:
+            last_promoted = promoted.pop(0)
+        return last_promoted
+
+    manager._promote_confirmed_target = promote
+    return manager, robot
+
+
+def test_post_bypass_blocked_right_centering_uses_one_clearance_forward():
+    manager, robot = _clearance_forward_fixture()
+    turns = []
+
+    def turn(direction, speed, duration, **kwargs):
+        turns.append((direction, speed, duration))
+        if len(turns) == 1:
+            return {"ok": True, "permitted": True, "reason": "completed"}
+        return {
+            "ok": False,
+            "permitted": True,
+            "reason": "turn_side_not_clear",
+            "transport_attempted": False,
+        }
+
+    manager.execute_guarded_turn = turn
+    result = manager.execute(_mission())
+
+    assert result["state"] == "APPROACH_SEQUENCE_COMPLETE"
+    assert result["clearance_forward_attempted"] is True
+    assert result["clearance_forward_completed"] is True
+    assert result["clearance_forward_trigger_reason"] == "turn_side_not_clear"
+    assert len(_move_calls(robot)) == 3
+    assert all(call == ("move_forward", 0.08, 0.50) for call in _move_calls(robot))
+    assert turns == [("LEFT", 0.20, 0.50), ("RIGHT", 0.20, 0.50)]
+    clearance_steps = [
+        step for step in result["approach_steps"]
+        if step.get("clearance_forward")
+    ]
+    assert len(clearance_steps) == 1
+    assert clearance_steps[0]["post_motion_confirmation_status"] == (
+        "target_confirmed"
+    )
+
+
+def test_post_bypass_blocked_left_centering_uses_one_clearance_forward():
+    manager, robot = _clearance_forward_fixture(
+        promoted_targets=[
+            located_target(249),
+            located_target(249),
+            located_target(320),
+        ]
+    )
+    turns = []
+
+    def turn(direction, speed, duration, **kwargs):
+        turns.append(direction)
+        if len(turns) == 1:
+            return {"ok": True, "permitted": True, "reason": "completed"}
+        return {"ok": False, "permitted": True, "reason": "turn_side_not_clear"}
+
+    manager.execute_guarded_turn = turn
+    result = manager.execute(_mission())
+
+    assert result["state"] == "APPROACH_SEQUENCE_COMPLETE"
+    assert turns == ["LEFT", "LEFT"]
+    assert len(_move_calls(robot)) == 3
+    assert result["clearance_forward_attempted"] is True
+
+
+def test_clearance_forward_requires_front_clear():
+    manager, robot = _clearance_forward_fixture(front="CAUTION", max_chunks=3)
+    turns = []
+
+    def turn(direction, speed, duration, **kwargs):
+        turns.append(direction)
+        if len(turns) == 1:
+            return {"ok": True, "permitted": True, "reason": "completed"}
+        return {"ok": False, "permitted": True, "reason": "turn_side_not_clear"}
+
+    manager.execute_guarded_turn = turn
+    result = manager.execute(_mission())
+
+    assert result["state"] == "CENTERING_BLOCKED"
+    assert result["reason"] == "turn_side_not_clear"
+    assert result["clearance_forward_attempted"] is False
+    assert len(_move_calls(robot)) == 1
+
+
+def test_clearance_forward_blocked_centering_does_not_retry_fallback():
+    # The flag is scoped to this FIND_OBJECT execution; with the existing
+    # one-avoidance-episode limit, that is also one fallback per episode.
+    manager, robot = _clearance_forward_fixture(
+        max_chunks=3,
+        promoted_targets=[
+            located_target(391),
+            located_target(391),
+            located_target(391),
+        ],
+    )
+    turns = []
+
+    def turn(direction, speed, duration, **kwargs):
+        turns.append(direction)
+        if len(turns) == 1:
+            return {"ok": True, "permitted": True, "reason": "completed"}
+        return {"ok": False, "permitted": True, "reason": "turn_side_not_clear"}
+
+    manager.execute_guarded_turn = turn
+    result = manager.execute(_mission())
+
+    assert result["clearance_forward_attempted"] is True
+    assert len(_move_calls(robot)) == 2
+    assert turns == ["LEFT", "RIGHT", "RIGHT"]
+    assert result["state"] == "CENTERING_BLOCKED"
+    assert result["reason"] == "turn_side_not_clear"
+
+
+def test_clearance_forward_interlock_denial_is_fail_closed():
+    manager, robot = _clearance_forward_fixture(
+        interlock_results=[False, True, False],
+    )
+    turns = []
+
+    def turn(direction, speed, duration, **kwargs):
+        turns.append(direction)
+        if len(turns) == 1:
+            return {"ok": True, "permitted": True, "reason": "completed"}
+        return {
+            "ok": False,
+            "permitted": True,
+            "reason": "turn_side_not_clear",
+            "transport_attempted": False,
+        }
+
+    manager.execute_guarded_turn = turn
+    result = manager.execute(_mission())
+
+    assert result["state"] == "CENTERING_BLOCKED"
+    assert result["clearance_forward_attempted"] is False
+    assert len(_move_calls(robot)) == 1
+    assert turns == ["LEFT", "RIGHT"]
+
+
+@pytest.mark.parametrize(
+    "turn_reason",
+    [
+        "stale",
+        "producer_session_mismatch",
+        "unavailable",
+        "invalid_freshness",
+    ],
+)
+def test_non_matching_centering_failure_never_triggers_clearance_forward(
+    turn_reason,
+):
+    manager, robot = _clearance_forward_fixture()
+    turns = []
+
+    def turn(direction, speed, duration, **kwargs):
+        turns.append(direction)
+        if len(turns) == 1:
+            return {"ok": True, "permitted": True, "reason": "completed"}
+        return {"ok": False, "permitted": True, "reason": turn_reason}
+
+    manager.execute_guarded_turn = turn
+    result = manager.execute(_mission())
+
+    assert result["state"] == "CENTERING_BLOCKED"
+    assert result["reason"] == turn_reason
+    assert result["clearance_forward_attempted"] is False
+    assert len(_move_calls(robot)) == 1
+    assert turns == ["LEFT", "RIGHT"]
+
+
+def test_guarded_turn_exception_never_triggers_clearance_forward():
+    manager, robot = _clearance_forward_fixture()
+    turns = []
+
+    def turn(direction, speed, duration, **kwargs):
+        turns.append(direction)
+        if len(turns) == 1:
+            return {"ok": True, "permitted": True, "reason": "completed"}
+        raise RuntimeError("turn transport failed")
+
+    manager.execute_guarded_turn = turn
+    result = manager.execute(_mission())
+
+    assert result["state"] == "CENTERING_BLOCKED"
+    assert result["reason"] == "guarded_turn_exception"
+    assert result["clearance_forward_attempted"] is False
+    assert len(_move_calls(robot)) == 1
+    assert turns == ["LEFT", "RIGHT"]
+
+
+def test_clearance_forward_can_be_exact_fourth_chunk_without_a_fifth():
+    manager, robot = _clearance_forward_fixture(
+        max_chunks=4,
+        promoted_targets=[
+            located_target(320),
+            located_target(320),
+            located_target(320),
+            located_target(391),
+            located_target(320),
+        ],
+        interlock_results=[False, True, True, True, True],
+    )
+    turns = []
+
+    def turn(direction, speed, duration, **kwargs):
+        turns.append(direction)
+        if len(turns) == 1:
+            return {"ok": True, "permitted": True, "reason": "completed"}
+        return {
+            "ok": False,
+            "permitted": True,
+            "reason": "turn_side_not_clear",
+            "transport_attempted": False,
+        }
+
+    manager.execute_guarded_turn = turn
+    result = manager.execute(_mission())
+
+    assert result["state"] == "APPROACH_SEQUENCE_COMPLETE"
+    assert result["clearance_forward_attempted"] is True
+    assert result["clearance_forward_completed"] is True
+    assert result["approach_chunks_attempted"] == 4
+    assert result["approach_chunks_completed"] == 4
+    assert len(_move_calls(robot)) == 4
+    assert turns == ["LEFT", "RIGHT"]
+    assert len(result["approach_steps"]) == 4
+    assert sum(
+        step.get("clearance_forward", False)
+        for step in result["approach_steps"]
+    ) == 1
+
+
+def test_clearance_forward_budget_exhaustion_sends_no_fallback_or_fifth_chunk():
+    manager, robot = _clearance_forward_fixture(
+        max_chunks=3,
+        promoted_targets=[
+            located_target(320),
+            located_target(320),
+            located_target(320),
+        ],
+        interlock_results=[False, True, True, True],
+    )
+    manager.execute_guarded_turn = lambda *args, **kwargs: {
+        "ok": True,
+        "permitted": True,
+        "reason": "completed",
+    }
+
+    result = manager.execute(_mission())
+
+    # Once the shared approach quota is exhausted, the loop terminates before
+    # another centering/fallback opportunity can dispatch physical motion.
+    assert result["approach_chunks_attempted"] == 3
+    assert result["approach_chunks_completed"] == 3
+    assert result["clearance_forward_attempted"] is False
+    assert len(_move_calls(robot)) == 3
+    assert result["state"] == "APPROACH_SEQUENCE_COMPLETE"
+
+
+def test_clearance_forward_transport_uncertainty_does_not_retry():
+    manager, robot = _clearance_forward_fixture(
+        promoted_targets=[
+            located_target(391),
+            located_target(391),
+            located_target(320),
+        ],
+    )
+    original_move = robot.move_forward
+
+    def move_once_then_uncertain(speed, seconds):
+        if len(_move_calls(robot)) == 0:
+            return original_move(speed, seconds)
+        robot.calls.append(("move_forward", speed, seconds))
+        return {
+            "ok": False,
+            "forwarded": True,
+            "delivery_uncertain": True,
+            "error": "timeout",
+        }
+
+    robot.move_forward = move_once_then_uncertain
+    turns = []
+
+    def turn(direction, speed, duration, **kwargs):
+        turns.append(direction)
+        if len(turns) == 1:
+            return {"ok": True, "permitted": True, "reason": "completed"}
+        return {
+            "ok": False,
+            "permitted": True,
+            "reason": "turn_side_not_clear",
+            "transport_attempted": False,
+        }
+
+    manager.execute_guarded_turn = turn
+    result = manager.execute(_mission())
+
+    assert result["state"] == "APPROACH_FAILED"
+    assert result["clearance_forward_attempted"] is True
+    assert result["clearance_forward_completed"] is False
+    assert result["approach_chunks_attempted"] == 2
+    assert result["approach_chunks_completed"] == 1
+    assert result["clearance_forward_result"]["delivery_uncertain"] is True
+    assert len(_move_calls(robot)) == 2
+
+
+def test_target_loss_after_clearance_forward_stops_without_later_motion():
+    manager, robot = _clearance_forward_fixture(
+        max_chunks=3,
+        promoted_targets=[located_target(391), located_target(391)],
+    )
+    # The first two confirmations establish the bypass and post-bypass
+    # target.  Camera loss is an immediate hard failure for the clearance
+    # forward's required post-motion confirmation.
+    manager.vision.candidate_payloads = (
+        centered_candidate_payloads("bypass")
+        + centered_candidate_payloads("post-bypass")
+        + [{"timestamp": "camera-off", "camera_running": False}]
+    )
+    turns = []
+
+    def turn(direction, speed, duration, **kwargs):
+        turns.append(direction)
+        if len(turns) == 1:
+            return {"ok": True, "permitted": True, "reason": "completed"}
+        return {
+            "ok": False,
+            "permitted": True,
+            "reason": "turn_side_not_clear",
+            "transport_attempted": False,
+        }
+
+    manager.execute_guarded_turn = turn
+    result = manager.execute(_mission())
+
+    assert result["state"] == "TARGET_LOST_AFTER_APPROACH"
+    assert result["clearance_forward_attempted"] is True
+    assert result["clearance_forward_completed"] is True
+    assert len(_move_calls(robot)) == 2
+    assert turns == ["LEFT", "RIGHT"]
+
+
+def test_preemption_after_bypass_turn_prevents_clearance_forward():
+    manager, robot = _clearance_forward_fixture()
+    turns = []
+
+    def turn(direction, speed, duration, **kwargs):
+        turns.append(direction)
+        manager._execution_is_current = lambda: False
+        return {"ok": True, "permitted": True, "reason": "completed"}
+
+    manager.execute_guarded_turn = turn
+    result = manager.execute(_mission())
+
+    assert result["state"] == "PREEMPTED"
+    assert result["clearance_forward_attempted"] is False
+    assert len(_move_calls(robot)) == 0
+    assert turns == ["LEFT"]
+
+
 def test_bypass_forward_interlock_denial_is_fail_closed():
     manager, robot, _vision = _turn_forward_manager(
         [

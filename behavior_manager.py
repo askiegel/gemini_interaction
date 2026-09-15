@@ -2087,6 +2087,12 @@ class BehaviorManager:
         avoidance_steps = []
         bypass_pending = False
         pending_avoidance_step = None
+        clearance_forward_attempted = False
+        clearance_forward_completed = False
+        clearance_forward_trigger_reason = None
+        clearance_forward_result = None
+        clearance_forward_post_confirmation_status = None
+        clearance_forward_post_confirmation_diagnostics = None
         centering_total_attempted = centering_attempted
         centering_total_completed = centering_completed
         current = observation
@@ -2179,6 +2185,18 @@ class BehaviorManager:
                     self.FIND_AVOIDANCE_MAX_MANEUVERS
                 ),
                 "avoidance_steps": list(avoidance_steps),
+                "clearance_forward_attempted": clearance_forward_attempted,
+                "clearance_forward_completed": clearance_forward_completed,
+                "clearance_forward_trigger_reason": (
+                    clearance_forward_trigger_reason
+                ),
+                "clearance_forward_result": clearance_forward_result,
+                "clearance_forward_post_confirmation_status": (
+                    clearance_forward_post_confirmation_status
+                ),
+                "clearance_forward_post_confirmation_diagnostics": (
+                    clearance_forward_post_confirmation_diagnostics
+                ),
             })
             value.update(fields)
             self._publish_tracking_state(value)
@@ -2232,6 +2250,240 @@ class BehaviorManager:
                     "last_guarded_turn_result", last_guarded_result
                 )
                 if centered_result.get("state") != "CENTERED":
+                    centered_target = centered_result.get(
+                        "target_observation", current
+                    )
+                    can_clearance_forward = bool(
+                        centered_result.get("reason") == "turn_side_not_clear"
+                        and avoidance_completed > 0
+                        and not clearance_forward_attempted
+                        and approach_attempted < self.FIND_APPROACH_MAX_CHUNKS
+                        and isinstance(centered_target, dict)
+                        and self._target_is_fresh_and_acquired(centered_target)
+                    )
+                    if can_clearance_forward:
+                        fallback_interlock = getattr(
+                            self.robot, "forward_interlock", None
+                        )
+                        fallback_session = self._current_lidar_session()
+                        fallback_lidar = None
+                        if (
+                            fallback_interlock is not None
+                            and fallback_session is not None
+                            and self.world_model is not None
+                        ):
+                            try:
+                                fallback_lidar = (
+                                    self.world_model.get_lidar_obstacles(
+                                        expected_session=fallback_session
+                                    )
+                                )
+                                expected_session = getattr(
+                                    fallback_interlock,
+                                    "expected_session",
+                                    fallback_session,
+                                )
+                                permitted, interlock_reason = (
+                                    fallback_interlock.refresh()
+                                )
+                                front = (
+                                    fallback_lidar.get("sectors", {})
+                                    .get("front", {})
+                                    if isinstance(fallback_lidar, dict)
+                                    else {}
+                                )
+                                can_clearance_forward = bool(
+                                    expected_session == fallback_session
+                                    and permitted is True
+                                    and interlock_reason == "fresh_clear"
+                                    and isinstance(fallback_lidar, dict)
+                                    and fallback_lidar.get("available") is True
+                                    and fallback_lidar.get("valid") is True
+                                    and fallback_lidar.get("reason") == "fresh"
+                                    and front.get("state") == "CLEAR"
+                                )
+                            except Exception:
+                                can_clearance_forward = False
+                        else:
+                            can_clearance_forward = False
+
+                    if can_clearance_forward:
+                        if not self._execution_is_current():
+                            return result(
+                                ok=False,
+                                completed=True,
+                                target_found=False,
+                                state="PREEMPTED",
+                                reason="FIND_OBJECT execution was preempted.",
+                                **telemetry,
+                            )
+
+                        clearance_forward_attempted = True
+                        clearance_forward_trigger_reason = (
+                            "turn_side_not_clear"
+                        )
+                        approach_attempted += 1
+                        clearance_step = {
+                            "step_index": approach_attempted,
+                            "pre_forward_horizontal_error": (
+                                centered_result.get("horizontal_error")
+                            ),
+                            "centering_chunks_before_step": (
+                                centering_total_attempted
+                            ),
+                            "bypass_forward": False,
+                            "clearance_forward": True,
+                            "forward_result": None,
+                            "post_motion_confirmation_status": None,
+                            "post_motion_confirmation_diagnostics": None,
+                        }
+                        approach_steps.append(clearance_step)
+                        self._publish_tracking_state(dict(
+                            base,
+                            **target_telemetry(centered_target, telemetry),
+                            target=target_name,
+                            target_found=True,
+                            state="APPROACHING",
+                            ok=True,
+                            completed=False,
+                            approach_chunks_attempted=approach_attempted,
+                            approach_chunks_completed=approach_completed,
+                            approach_steps=list(approach_steps),
+                            clearance_forward_attempted=True,
+                            clearance_forward_completed=False,
+                            clearance_forward_trigger_reason=(
+                                clearance_forward_trigger_reason
+                            ),
+                        ))
+                        try:
+                            clearance_forward_result = self.robot.move_forward(
+                                speed=self.FIND_APPROACH_FORWARD_SPEED,
+                                seconds=self.FIND_APPROACH_FORWARD_SECONDS,
+                            )
+                        except Exception as exc:
+                            clearance_forward_result = {
+                                "ok": False,
+                                "error": str(exc),
+                                "error_type": type(exc).__name__,
+                                "transport_attempted": True,
+                            }
+                        if not isinstance(clearance_forward_result, dict):
+                            clearance_forward_result = {
+                                "ok": False,
+                                "error": "invalid_bounded_forward_result",
+                            }
+                        clearance_step["forward_result"] = (
+                            clearance_forward_result
+                        )
+                        bounded_invalidated = bool(
+                            clearance_forward_result.get(
+                                "bounded_forward_invalidated"
+                            )
+                        )
+                        delivery_uncertain = bool(
+                            clearance_forward_result.get("delivery_uncertain")
+                        )
+                        confirmed_forward_failed = (
+                            "confirmed_forwarded" in clearance_forward_result
+                            and clearance_forward_result.get(
+                                "confirmed_forwarded"
+                            ) is not True
+                        )
+                        if (
+                            clearance_forward_result.get("ok") is not True
+                            or bounded_invalidated
+                            or delivery_uncertain
+                            or confirmed_forward_failed
+                        ):
+                            blocked = bool(
+                                bounded_invalidated
+                                or clearance_forward_result.get("forwarded")
+                                is False
+                            )
+                            return result(
+                                ok=False,
+                                completed=True,
+                                state=(
+                                    "APPROACH_BLOCKED"
+                                    if blocked
+                                    else "APPROACH_FAILED"
+                                ),
+                                reason=clearance_forward_result.get(
+                                    "reason",
+                                    clearance_forward_result.get(
+                                        "error", "bounded forward failed"
+                                    ),
+                                ),
+                                approach_result=clearance_forward_result,
+                                **telemetry,
+                            )
+
+                        approach_completed += 1
+                        # The bounded transport completed successfully; keep
+                        # this physical completion visible even if the
+                        # required post-motion target confirmation later
+                        # fails.
+                        clearance_forward_completed = True
+                        cutoff = post_motion_cutoff(centered_target)
+                        (
+                            confirmed,
+                            confirmation_status,
+                            confirmation_diagnostics,
+                        ) = self._confirm_target_candidates_with_status(
+                            target_name,
+                            minimum_timestamp=cutoff,
+                            return_diagnostics=True,
+                            confirmation_window_seconds=(
+                                self.FIND_POST_MOTION_CONFIRMATION_WINDOW_SECONDS
+                            ),
+                        )
+                        clearance_forward_post_confirmation_status = (
+                            confirmation_status
+                        )
+                        clearance_forward_post_confirmation_diagnostics = (
+                            confirmation_diagnostics
+                        )
+                        clearance_step[
+                            "post_motion_confirmation_status"
+                        ] = confirmation_status
+                        clearance_step[
+                            "post_motion_confirmation_diagnostics"
+                        ] = confirmation_diagnostics
+                        if confirmed is None:
+                            return result(
+                                ok=False,
+                                completed=True,
+                                target_found=False,
+                                state="TARGET_LOST_AFTER_APPROACH",
+                                reason=(
+                                    "Target candidates were not freshly "
+                                    "re-confirmed after clearance forward."
+                                ),
+                                confirmation_status=confirmation_status,
+                                confirmation_diagnostics=confirmation_diagnostics,
+                                approach_result=clearance_forward_result,
+                                **telemetry,
+                            )
+                        promoted = self._promote_confirmed_target(confirmed)
+                        if promoted is None:
+                            return result(
+                                ok=False,
+                                completed=True,
+                                target_found=False,
+                                state="TARGET_LOST_AFTER_APPROACH",
+                                reason=(
+                                    "Target promotion failed after clearance "
+                                    "forward."
+                                ),
+                                confirmation_status=confirmation_status,
+                                confirmation_diagnostics=confirmation_diagnostics,
+                                approach_result=clearance_forward_result,
+                                **telemetry,
+                            )
+                        current = promoted
+                        telemetry = target_telemetry(current, telemetry)
+                        continue
+
                     failure_telemetry = dict(telemetry)
                     for key in failure_telemetry:
                         if key in centered_result:
