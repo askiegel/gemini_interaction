@@ -116,15 +116,56 @@ def test_duplicate_frozen_and_new_scan(setup):
     clock.now += 0.08
     second = worker.run_once()
     assert second["valid"]
+    assert "scan_stamp_previous_seconds" not in second
     assert second["age_at_receipt_seconds"] > first["age_at_receipt_seconds"]
     source["telemetry"]["age_seconds"] = 0  # Broken upstream age cannot rejuvenate.
     clock.now += 0.25
     frozen = worker.run_once()
     assert not frozen["valid"] and frozen["reason"] == "stale"
     source["telemetry"]["scan"]["stamp_seconds"] += 0.1
-    assert worker.run_once()["valid"]
+    increased = worker.run_once()
+    assert increased["valid"]
+    assert "scan_stamp_previous_seconds" not in increased
     source["telemetry"]["scan"]["stamp_seconds"] -= 1
-    assert worker.run_once()["reason"] == "scan_stamp_regressed"
+    regressed = worker.run_once()
+    assert regressed["reason"] == "scan_stamp_regressed"
+    assert "scan_stamp_previous_seconds" in regressed
+
+
+def test_scan_stamp_regression_publishes_bounded_diagnostics_and_recovers(setup):
+    world, worker, clock, source = setup
+    accepted = worker.run_once()
+    assert accepted["source"]["stamp_seconds"] == 100
+    source["telemetry"]["scan"]["stamp_seconds"] = 99.5
+    clock.now += 0.02
+    regressed = worker.run_once()
+    assert regressed["valid"] is False
+    assert regressed["reason"] == "scan_stamp_regressed"
+    assert regressed["scan_stamp_previous_seconds"] == 100
+    assert regressed["scan_stamp_received_seconds"] == 99.5
+    assert regressed["scan_stamp_delta_seconds"] == -0.5
+    assert regressed["acquisition_sequence"] == (
+        accepted["acquisition_sequence"] + 1
+    )
+    assert worker._stamp == 100
+
+    source["telemetry"]["scan"]["stamp_seconds"] = 100
+    recovered = worker.run_once()
+    assert recovered["valid"] is True
+    assert recovered["reason"] == "fresh"
+    assert recovered["source"]["stamp_seconds"] == 100
+
+
+def test_scan_stamp_regression_missing_optional_source_metadata_is_json_safe(setup):
+    _, worker, _, source = setup
+    worker.run_once()
+    source["telemetry"]["scan"]["stamp_seconds"] = 99.5
+    source["telemetry"].pop("received_at", None)
+    regressed = worker.run_once()
+    assert regressed["reason"] == "scan_stamp_regressed"
+    assert regressed["source_received_at"] is None
+    assert regressed["source_frame_id"] == "lidar_link"
+    assert json.dumps(regressed)
 
 
 def test_session_restart_and_unrelated_updates(setup):

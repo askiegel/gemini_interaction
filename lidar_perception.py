@@ -105,6 +105,9 @@ class LidarPerceptionWorker:
             state = unavailable_state("acquisition_error", self.session, self.sequence)
             started = self._monotonic()
             state["acquisition_started_at"] = self._wall_clock()
+            source = {}
+            stamp = None
+            previous_stamp = self._stamp
             try:
                 raw = self._get_telemetry()
                 received = self._monotonic()
@@ -136,6 +139,32 @@ class LidarPerceptionWorker:
                 state = read_lidar_state(state, expected_session=self.session, now=received)
             except Exception as error:
                 state.update(available=False, valid=False, reason=str(error))
+                if str(error) == "scan_stamp_regressed":
+                    received_stamp = stamp if finite_number(stamp) else None
+                    previous = (
+                        previous_stamp
+                        if finite_number(previous_stamp)
+                        else None
+                    )
+                    state.update(
+                        scan_stamp_previous_seconds=previous,
+                        scan_stamp_received_seconds=received_stamp,
+                        scan_stamp_delta_seconds=(
+                            received_stamp - previous
+                            if received_stamp is not None and previous is not None
+                            else None
+                        ),
+                        source_received_at=(
+                            source.get("received_at")
+                            if isinstance(source, dict)
+                            else None
+                        ),
+                        source_frame_id=(
+                            source.get("frame_id")
+                            if isinstance(source, dict)
+                            else None
+                        ),
+                    )
             state["completed_at"] = self._wall_clock()
             with self._publication_lock:
                 if self._stop.is_set():
