@@ -69,6 +69,7 @@ class _GuardedTurnMonitor:
         self._transport_accepted = False
         self._inhibited = False
         self._invalidated = False
+        self._first_invalidating_validation = None
         self._reason = initial_validation.get("reason")
         self._validation = dict(initial_validation)
         self._last_stop_result = None
@@ -248,6 +249,7 @@ class _GuardedTurnMonitor:
                     pass
                 elif not validation.get("permitted"):
                     if not self._invalidated:
+                        self._first_invalidating_validation = dict(validation)
                         self._reason = validation.get("reason")
                         self._inhibited = True
                     if not self._invalidated and (self._pending or self._active):
@@ -299,6 +301,8 @@ class _GuardedTurnMonitor:
                 "error_type": error_type,
                 "source": source,
             }
+            if self._first_invalidating_validation is not None:
+                event["monitor_validation"] = dict(self._first_invalidating_validation)
             self._stop_events.append(event)
             if source == "deadline":
                 self._deadline_stop_result = result
@@ -402,6 +406,10 @@ class _GuardedTurnMonitor:
                 "generation": self.generation,
                 "generation_invalidated": self._invalidated,
                 "reason": self._reason,
+                "monitor_validation": (
+                    dict(self._first_invalidating_validation)
+                    if self._first_invalidating_validation is not None else None
+                ),
                 "producer_session": validation.get("producer_session"),
                 "effective_age_seconds": validation.get("effective_age_seconds"),
                 "front_state": validation.get("front_state", "UNKNOWN"),
@@ -701,6 +709,11 @@ class BehaviorManager:
                 if not isinstance(turn, dict) or (
                     turn.get("ok") is not True or turn.get("permitted") is not True
                 ):
+                    if isinstance(turn, dict):
+                        telemetry["semantic_reacquisition_failure_reason"] = turn.get("reason")
+                        telemetry["semantic_reacquisition_monitor_reason"] = turn.get("monitor_reason")
+                        if turn.get("monitor_validation") is not None:
+                            telemetry["semantic_reacquisition_monitor_validation"] = dict(turn["monitor_validation"])
                     raise ValueError("semantic_guarded_turn_denied")
                 episode["turn_completions"] += 1
         except _SemanticPreempted:

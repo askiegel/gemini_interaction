@@ -453,6 +453,28 @@ def test_unsafe_transition_during_transport_completion_wait_stops_and_reasserts(
     assert robot.stop_calls == 3
 
 
+def test_left_turn_right_side_caution_does_not_invalidate_and_first_snapshot_is_retained():
+    robot = BlockingRobot()
+    state = snapshot(right="CAUTION", front_right="CAUTION")
+    world, behavior, worker, result_box = run_blocked_turn(state, robot)
+    state["sectors"]["left"]["state"] = "CAUTION"
+    wait_for_stop(robot, 1)
+    state["sectors"]["left"]["state"] = "BLOCKED"
+    state["sectors"]["front_left"]["state"] = "UNKNOWN"
+    robot.release_motion.set()
+    worker.join(timeout=1.0)
+    result = result_box[0]
+    assert result["permitted"] is True
+    assert result["transport_result"]["ok"] is True
+    assert result["ok"] is False
+    assert result["monitor_validation"]["reason"] == "turn_side_not_clear"
+    assert result["monitor_validation"]["left_state"] == "CAUTION"
+    assert result["monitor_validation"]["front_left_state"] == "CLEAR"
+    assert result["monitor_validation"]["right_state"] == "CAUTION"
+    assert result["monitor_validation"]["front_right_state"] == "CAUTION"
+    assert result["stop_events"][-1]["monitor_validation"]["left_state"] == "CAUTION"
+
+
 def test_operator_stop_during_transport_completion_wait_reasserts():
     robot = BlockingRobot()
     state = snapshot()

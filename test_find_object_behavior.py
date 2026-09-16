@@ -3922,6 +3922,31 @@ def test_semantic_guard_denial_has_no_alternate_or_forward(monkeypatch):
     assert not _move_calls(manager.robot) and not vision.promotions
 
 
+def test_semantic_guard_denial_preserves_underlying_turn_diagnostics(monkeypatch):
+    manager, vision, turns = semantic_manager(monkeypatch, turn_ok=False)
+    turn = {
+        "ok": False,
+        "permitted": True,
+        "reason": "turn_side_not_clear",
+        "monitor_reason": "turn_side_not_clear",
+        "monitor_validation": {
+            "permitted": False,
+            "reason": "turn_side_not_clear",
+            "direction": "LEFT",
+            "left_state": "CAUTION",
+            "front_left_state": "CLEAR",
+        },
+    }
+    manager.execute_guarded_turn = lambda *args, **kwargs: dict(turn)
+    result = manager.execute(_mission())
+    assert result["state"] == "TARGET_LOST"
+    assert result["semantic_reacquisition_error"] == "ValueError"
+    assert result["semantic_reacquisition_failure_reason"] == "turn_side_not_clear"
+    assert result["semantic_reacquisition_monitor_reason"] == "turn_side_not_clear"
+    assert result["semantic_reacquisition_monitor_validation"]["left_state"] == "CAUTION"
+    assert not _move_calls(manager.robot)
+
+
 @pytest.mark.parametrize('reacquire', [True, False])
 def test_semantic_after_forward_is_bounded_and_requires_yolo(monkeypatch, reacquire):
     manager, vision, turns = semantic_manager(monkeypatch, initial_found=True, reacquire=reacquire)
