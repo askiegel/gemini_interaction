@@ -174,6 +174,20 @@ def test_direction_and_status_fields_are_structured():
     assert result["front_left_state"] == "CLEAR"
     assert result["producer_session"] == "session-1"
     assert result["effective_age_seconds"] == pytest.approx(0.05)
+    for name in ("front", "left", "front_left", "right", "front_right"):
+        assert result[f"{name}_minimum_clearance_m"] == 1.0
+
+
+def test_minimum_clearance_can_drive_caution_with_clear_robust_metric():
+    state = snapshot()
+    state["sectors"]["left"].update(
+        state="CAUTION", robust_clearance_m=1.287, minimum_clearance_m=0.55
+    )
+    result = turn("LEFT", state)
+    assert result["permitted"] is False
+    assert result["reason"] == "turn_side_not_clear"
+    assert result["left_robust_clearance_m"] == pytest.approx(1.287)
+    assert result["left_minimum_clearance_m"] == pytest.approx(0.55)
 
 
 def test_no_physical_execution_interface_is_used():

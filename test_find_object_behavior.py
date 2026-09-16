@@ -3935,6 +3935,7 @@ def test_semantic_guard_denial_preserves_underlying_turn_diagnostics(monkeypatch
             "direction": "LEFT",
             "left_state": "CAUTION",
             "front_left_state": "CLEAR",
+            "left_minimum_clearance_m": 0.55,
         },
     }
     manager.execute_guarded_turn = lambda *args, **kwargs: dict(turn)
@@ -3944,6 +3945,7 @@ def test_semantic_guard_denial_preserves_underlying_turn_diagnostics(monkeypatch
     assert result["semantic_reacquisition_failure_reason"] == "turn_side_not_clear"
     assert result["semantic_reacquisition_monitor_reason"] == "turn_side_not_clear"
     assert result["semantic_reacquisition_monitor_validation"]["left_state"] == "CAUTION"
+    assert result["semantic_reacquisition_monitor_validation"]["left_minimum_clearance_m"] == 0.55
     assert not _move_calls(manager.robot)
 
 

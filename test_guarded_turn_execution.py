@@ -457,7 +457,9 @@ def test_left_turn_right_side_caution_does_not_invalidate_and_first_snapshot_is_
     robot = BlockingRobot()
     state = snapshot(right="CAUTION", front_right="CAUTION")
     world, behavior, worker, result_box = run_blocked_turn(state, robot)
-    state["sectors"]["left"]["state"] = "CAUTION"
+    state["sectors"]["left"].update(
+        state="CAUTION", robust_clearance_m=1.287, minimum_clearance_m=0.55
+    )
     wait_for_stop(robot, 1)
     state["sectors"]["left"]["state"] = "BLOCKED"
     state["sectors"]["front_left"]["state"] = "UNKNOWN"
@@ -472,7 +474,10 @@ def test_left_turn_right_side_caution_does_not_invalidate_and_first_snapshot_is_
     assert result["monitor_validation"]["front_left_state"] == "CLEAR"
     assert result["monitor_validation"]["right_state"] == "CAUTION"
     assert result["monitor_validation"]["front_right_state"] == "CAUTION"
+    assert result["monitor_validation"]["left_robust_clearance_m"] == 1.287
+    assert result["monitor_validation"]["left_minimum_clearance_m"] == 0.55
     assert result["stop_events"][-1]["monitor_validation"]["left_state"] == "CAUTION"
+    assert result["stop_events"][-1]["monitor_validation"]["left_minimum_clearance_m"] == 0.55
 
 
 def test_operator_stop_during_transport_completion_wait_reasserts():

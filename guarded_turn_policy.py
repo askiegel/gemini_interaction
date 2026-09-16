@@ -21,7 +21,7 @@ def _finite(value):
 
 def _sector_status(sector):
     if not isinstance(sector, dict):
-        return "UNKNOWN", None, False
+        return "UNKNOWN", None, False, None
     state = sector.get("state", "UNKNOWN")
     clearance = sector.get("robust_clearance_m")
     minimum = sector.get("minimum_clearance_m")
@@ -31,13 +31,18 @@ def _sector_status(sector):
         and _finite(clearance)
         and _finite(minimum)
     )
-    return state, clearance if _finite(clearance) else None, trusted
+    return (
+        state,
+        clearance if _finite(clearance) else None,
+        trusted,
+        minimum if _finite(minimum) else None,
+    )
 
 
 def _front_status(sector):
-    state, clearance, _ = _sector_status(sector)
+    state, clearance, _, minimum = _sector_status(sector)
     if not isinstance(sector, dict):
-        return state, clearance, False
+        return state, clearance, False, minimum
     trustworthy = (
         sector.get("available") is True
         and isinstance(state, str)
@@ -45,12 +50,12 @@ def _front_status(sector):
         and _finite(sector.get("robust_clearance_m"))
         and _finite(sector.get("minimum_clearance_m"))
     )
-    return state, clearance, trustworthy
+    return state, clearance, trustworthy, minimum
 
 
 def _result(*, permitted, reason, direction, angular_z, duration,
             state, relevant):
-    unknown = ("UNKNOWN", None, False)
+    unknown = ("UNKNOWN", None, False, None)
     return {
         "permitted": permitted,
         "reason": reason,
@@ -68,6 +73,11 @@ def _result(*, permitted, reason, direction, angular_z, duration,
         "front_left_robust_clearance_m": relevant.get("front_left", unknown)[1],
         "right_robust_clearance_m": relevant.get("right", unknown)[1],
         "front_right_robust_clearance_m": relevant.get("front_right", unknown)[1],
+        "front_minimum_clearance_m": relevant.get("front", unknown)[3],
+        "left_minimum_clearance_m": relevant.get("left", unknown)[3],
+        "front_left_minimum_clearance_m": relevant.get("front_left", unknown)[3],
+        "right_minimum_clearance_m": relevant.get("right", unknown)[3],
+        "front_right_minimum_clearance_m": relevant.get("front_right", unknown)[3],
     }
 
 
