@@ -16,6 +16,7 @@ from provider_factory import create_provider
 from robot_bridge.client import RobotBridgeClient
 from tracking_state import build_tracking_state, empty_tracking_state
 from vision_adapter import VisionAdapter
+from semantic_vision import SemanticVisionClient
 from world_model import WorldModel
 
 
@@ -49,6 +50,7 @@ class CognitiveRuntime:
         behavior_manager=None,
         loop_interval=None,
         lidar_worker_factory=None,
+        semantic_vision=None,
     ):
         self.config = None
 
@@ -64,6 +66,9 @@ class CognitiveRuntime:
             world_model=self.world_model,
         )
 
+        if semantic_vision is None and self.config is not None:
+            semantic_vision = SemanticVisionClient.from_config(self.config)
+
         self.robot_client = robot_client or RobotBridgeClient(
             timeout=15.0,
         )
@@ -72,6 +77,7 @@ class CognitiveRuntime:
             robot_client=self.robot_client,
             vision_adapter=self.vision_adapter,
             world_model=self.world_model,
+            semantic_vision=semantic_vision,
         )
 
         self.loop_interval = (

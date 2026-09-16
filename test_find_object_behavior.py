@@ -3748,3 +3748,297 @@ def test_total_forward_budget_includes_bypass_translation():
     result = manager.execute(_mission())
     assert result["state"] == "APPROACH_BLOCKED"
     assert _move_calls(robot) == []
+
+# Semantic fallback tests use the real temporal YOLO confirmation and promotion
+# paths, with deterministic offline frame/model and guarded-turn transports.
+class SemanticFake:
+    def __init__(self, direction='RIGHT', found=True):
+        self.direction = direction
+        self.found = found
+        self.frame_calls = 0
+        self.calls = 0
+        self.on_frame = lambda: None
+        self.on_describe = lambda: None
+
+    def fetch_frame(self):
+        self.frame_calls += 1
+        self.on_frame()
+        return object()
+
+    def describe(self, target, frame):
+        self.calls += 1
+        self.on_describe()
+        return dict(target=target, found=self.found, coarse_direction=self.direction,
+                    source='gemini_semantic', geometry_quality='coarse')
+
+
+def semantic_manager(monkeypatch, *, direction='RIGHT', found=True, reacquire=True,
+                     initial_found=False, turn_ok=True):
+    # A malformed fetch ends each miss window deterministically.
+    misses = [None]
+    recovery = centered_candidate_payloads('recovery') if reacquire else [None]
+    payloads = misses + recovery
+    payloads += centered_candidate_payloads('after-forward')
+    manager, vision, turns = make_centering_manager(
+        [located_target(320) if initial_found else not_found()], payloads,
+        turn_results=[{'ok': turn_ok, 'permitted': turn_ok, 'reason': 'test_guard'}],
+    )
+    manager.TARGET_CONFIRMATION_POLL_SECONDS = 0
+    from datetime import datetime, timezone
+    original_fetch = vision.fetch_target_candidates
+    def fetch(target):
+        value = original_fetch(target)
+        value['timestamp'] = datetime.now(timezone.utc).isoformat()
+        vision.semantic_test_timestamp = value['timestamp']
+        return value
+    vision.fetch_target_candidates = fetch
+    original_process = vision.process_detection_frame
+    def process(detections):
+        value = original_process(detections)
+        vision.last_result['last_seen'] = vision.semantic_test_timestamp
+        return value
+    vision.process_detection_frame = process
+    if initial_found:
+        vision.results[0]['last_seen'] = '2000-01-01T00:00:00+00:00'
+    manager.robot.forward_interlock.status = lambda: {
+        'active_forward': False, 'pending_forward': False, 'front_state': 'CLEAR'}
+    manager.semantic_vision = SemanticFake(direction, found)
+    return manager, vision, turns
+
+
+@pytest.mark.parametrize('direction', ['RIGHT', 'LEFT', 'CENTER', 'UNKNOWN'])
+def test_semantic_hint_requires_real_fresh_yolo_before_promotion(monkeypatch, direction):
+    manager, vision, turns = semantic_manager(monkeypatch, direction=direction)
+    result = manager.execute(_mission())
+    assert manager.semantic_vision.calls == 1
+    assert len(turns) == (direction in {'RIGHT', 'LEFT'})
+    if turns:
+        assert turns[0][:3] == (direction, manager.FIND_CENTER_TURN_SPEED, manager.FIND_CENTER_TURN_SECONDS)
+    assert result['state'] == 'APPROACH_STEP_COMPLETE'
+    assert result['semantic_reacquisition_post_yolo_status'] == 'target_confirmed'
+    assert result['semantic_reacquisition_post_yolo_diagnostics']['minimum_timestamp']
+    assert len(_move_calls(manager.robot)) == 1
+    assert vision.promotions
+    assert all(item['label'] == 'backpack' and 'confidence' in item for item in vision.promotions)
+    assert all(item.get('source') != 'gemini_semantic' for item in vision.promotions)
+
+
+def test_semantic_not_called_when_initial_yolo_confirms(monkeypatch):
+    manager, vision, turns = semantic_manager(monkeypatch)
+    vision.candidate_payloads = centered_candidate_payloads('initial') + centered_candidate_payloads('post')
+    result = manager.execute(_mission())
+    assert result['ok'] is True
+    assert manager.semantic_vision.calls == manager.semantic_vision.frame_calls == 0
+    assert not turns
+
+
+@pytest.mark.parametrize('direction,found', [('CENTER', True), ('UNKNOWN', True), ('UNKNOWN', False), ('LEFT', True), ('RIGHT', True)])
+def test_gemini_only_evidence_never_promotes_or_moves_forward(monkeypatch, direction, found):
+    from unittest.mock import Mock
+    manager, vision, turns = semantic_manager(monkeypatch, direction=direction, found=found, reacquire=False)
+    manager._promote_confirmed_target = Mock(side_effect=AssertionError('semantic promotion'))
+    vision.process_detection_frame = Mock(side_effect=AssertionError('semantic frame promotion'))
+    result = manager.execute(_mission())
+    assert result['state'] == 'TARGET_LOST'
+    assert manager.semantic_vision.calls == 1
+    assert len(turns) == (found and direction in {'LEFT', 'RIGHT'})
+    assert not _move_calls(manager.robot)
+    manager._promote_confirmed_target.assert_not_called()
+    vision.process_detection_frame.assert_not_called()
+    assert not vision.promotions
+
+
+@pytest.mark.parametrize('phase', ['before_frame', 'during_frame', 'during_gemini', 'before_turn', 'during_post_yolo'])
+def test_semantic_preemption_prevents_later_motion_and_promotion(monkeypatch, phase):
+    manager, vision, turns = semantic_manager(monkeypatch)
+    current = [phase != 'before_frame']
+    manager.execution_authorization_provider = lambda: current[0]
+    def preempt():
+        current[0] = False
+    if phase == 'during_frame':
+        manager.semantic_vision.on_frame = preempt
+    if phase == 'during_gemini':
+        manager.semantic_vision.on_describe = preempt
+    if phase == 'before_turn':
+        manager._current_lidar_session = lambda: preempt() or 'session-1'
+    if phase == 'during_post_yolo':
+        manager.semantic_vision.direction = 'CENTER'
+        original = vision.fetch_target_candidates
+        def fetch(target):
+            if manager.semantic_vision.calls:
+                preempt()
+            return original(target)
+        vision.fetch_target_candidates = fetch
+    result = manager.execute(_mission())
+    assert result['state'] == 'PREEMPTED'
+    assert manager.semantic_vision.calls == (phase in {'during_gemini', 'before_turn', 'during_post_yolo'})
+    if phase == 'before_frame':
+        assert manager.semantic_vision.frame_calls == 0
+    assert not turns and not _move_calls(manager.robot) and not vision.promotions
+
+
+@pytest.mark.parametrize('phase', ['frame', 'gemini'])
+def test_semantic_deadline_discards_late_results(monkeypatch, phase):
+    manager, vision, turns = semantic_manager(monkeypatch)
+    release = threading.Event()
+    finished = threading.Event()
+    def block():
+        try:
+            release.wait(2)
+        finally:
+            finished.set()
+    manager.SEMANTIC_FRAME_TIMEOUT_SECONDS = .03
+    manager.SEMANTIC_IMAGE_TIMEOUT_SECONDS = .03
+    if phase == 'frame':
+        manager.semantic_vision.on_frame = block
+    else:
+        manager.semantic_vision.on_describe = block
+    try:
+        result = manager.execute(_mission())
+        assert result['state'] == 'TARGET_LOST'
+        assert result['semantic_reacquisition_error'] == 'TimeoutError'
+    finally:
+        release.set()
+        assert finished.wait(1)
+    assert manager.semantic_vision.calls == (phase == 'gemini')
+    assert not turns and not _move_calls(manager.robot) and not vision.promotions
+
+
+def test_semantic_malformed_response_fails_closed(monkeypatch):
+    manager, vision, turns = semantic_manager(monkeypatch)
+    def malformed():
+        raise ValueError('malformed schema')
+    manager.semantic_vision.on_describe = malformed
+    result = manager.execute(_mission())
+    assert result['semantic_reacquisition_error'] == 'ValueError'
+    assert not turns and not _move_calls(manager.robot) and not vision.promotions
+
+
+def test_semantic_guard_denial_has_no_alternate_or_forward(monkeypatch):
+    manager, vision, turns = semantic_manager(monkeypatch, turn_ok=False)
+    result = manager.execute(_mission())
+    assert result['state'] == 'TARGET_LOST'
+    assert len(turns) == manager.semantic_vision.calls == 1
+    assert not _move_calls(manager.robot) and not vision.promotions
+
+
+@pytest.mark.parametrize('reacquire', [True, False])
+def test_semantic_after_forward_is_bounded_and_requires_yolo(monkeypatch, reacquire):
+    manager, vision, turns = semantic_manager(monkeypatch, initial_found=True, reacquire=reacquire)
+    result = manager.execute(_mission())
+    assert result['state'] == ('APPROACH_STEP_COMPLETE' if reacquire else 'TARGET_LOST_AFTER_APPROACH')
+    assert len(_move_calls(manager.robot)) == 1
+    assert manager.semantic_vision.calls == len(turns) == 1
+    assert bool(vision.promotions) == reacquire
+
+
+def test_semantic_budget_survives_success_then_second_post_motion_miss(monkeypatch):
+    manager, vision, turns = semantic_manager(monkeypatch, initial_found=True)
+    manager.FIND_APPROACH_MAX_CHUNKS = 4
+    vision.candidate_payloads = vision.candidate_payloads[:4] + [None]
+    result = manager.execute(_mission())
+    assert result['state'] == 'TARGET_LOST_AFTER_APPROACH'
+    assert len(_move_calls(manager.robot)) == 2
+    assert manager.semantic_vision.calls == len(turns) == 1
+
+
+@pytest.mark.parametrize('busy', ['active_forward', 'pending_forward', 'turn'])
+def test_semantic_not_requested_with_motion_active_or_pending(monkeypatch, busy):
+    manager, vision, turns = semantic_manager(monkeypatch, initial_found=True)
+    if busy == 'turn':
+        manager._guarded_turn_owner_generation = 1
+    else:
+        manager.robot.forward_interlock.status = lambda: {'active_forward': busy == 'active_forward', 'pending_forward': busy == 'pending_forward'}
+    result = manager.execute(_mission())
+    assert result['state'] == 'TARGET_LOST_AFTER_APPROACH'
+    assert manager.semantic_vision.calls == manager.semantic_vision.frame_calls == 0
+    assert not turns
+
+
+@pytest.mark.parametrize('limit', [1, 2])
+def test_semantic_centering_turn_respects_existing_total_bound(monkeypatch, limit):
+    manager, vision, turns = semantic_manager(monkeypatch, initial_found=True)
+    vision.results[0] = located_target(100)
+    vision.results[0]['last_seen'] = '2000-01-01T00:00:00+00:00'
+    manager.FIND_CENTER_MAX_TURN_CHUNKS = limit
+    result = manager.execute(_mission())
+    assert manager.semantic_vision.calls == 1
+    assert len(turns) == limit
+    assert result['centering_turn_chunks_attempted'] == limit
+    if limit == 1:
+        assert result['completed'] is True
+        assert not _move_calls(manager.robot)
+    else:
+        assert result['state'] == 'APPROACH_STEP_COMPLETE'
+
+
+def test_semantic_cannot_expand_initial_search_turn_limit(monkeypatch):
+    manager, vision, turns = semantic_manager(monkeypatch)
+    manager.SEARCH_MAX_TURN_CHUNKS = 0
+    result = manager.execute(_mission())
+    assert manager.semantic_vision.calls == 1
+    assert not turns and not _move_calls(manager.robot)
+    assert result['turn_chunks_attempted'] == 0
+
+
+def test_semantic_cannot_reuse_pre_hint_yolo_frames(monkeypatch):
+    manager, vision, turns = semantic_manager(monkeypatch, direction='CENTER')
+    fetch = vision.fetch_target_candidates
+    def stale_fetch(target):
+        value = fetch(target)
+        if manager.semantic_vision.calls:
+            value['timestamp'] = '2000-01-01T00:00:00+00:00'
+        return value
+    vision.fetch_target_candidates = stale_fetch
+    result = manager.execute(_mission())
+    assert result['state'] == 'TARGET_LOST'
+    assert not _move_calls(manager.robot) and not vision.promotions
+
+
+@pytest.mark.parametrize('phase', ['frame', 'gemini'])
+def test_semantic_preemption_returns_while_io_is_still_blocked(monkeypatch, phase):
+    manager, vision, turns = semantic_manager(monkeypatch)
+    started, release = threading.Event(), threading.Event()
+    current = [True]
+    manager.execution_authorization_provider = lambda: current[0]
+    def block():
+        started.set()
+        release.wait(2)
+    if phase == 'frame':
+        manager.semantic_vision.on_frame = block
+    else:
+        manager.semantic_vision.on_describe = block
+    results = []
+    thread = threading.Thread(target=lambda: results.append(manager.execute(_mission())))
+    thread.start()
+    try:
+        assert started.wait(1)
+        current[0] = False
+        thread.join(1)
+        assert not thread.is_alive()
+        assert results[0]['state'] == 'PREEMPTED'
+    finally:
+        release.set()
+        thread.join(1)
+    assert manager.semantic_vision.calls == (phase == 'gemini')
+    assert not turns and not _move_calls(manager.robot) and not vision.promotions
+
+
+def test_semantic_camera_unhealthy_does_not_request_frame(monkeypatch):
+    manager, vision, turns = semantic_manager(monkeypatch, initial_found=True)
+    vision.candidate_payloads[0] = dict(camera_running=False, timestamp='offline', detections=[])
+    manager.execute(_mission())
+    assert manager.semantic_vision.frame_calls == manager.semantic_vision.calls == 0
+    assert not turns
+
+
+def test_semantic_only_does_not_mutate_authoritative_world(monkeypatch, tmp_path):
+    from world_model import WorldModel
+    manager, vision, turns = semantic_manager(monkeypatch, direction='CENTER', reacquire=False)
+    world = WorldModel(str(tmp_path / 'world.json'))
+    manager.world_model = world
+    manager._get_target_observation = lambda _: not_found()
+    before = world.get_entities()
+    manager.execute(_mission())
+    assert world.get_entities() == before == []
+    assert not vision.promotions and not _move_calls(manager.robot)

@@ -422,6 +422,10 @@ class _GuardedTurnMonitor:
             }
 
 
+class _SemanticPreempted(Exception):
+    """Unwind FIND_OBJECT without promoting late perception or issuing motion."""
+
+
 class BehaviorManager:
     SEARCH_TURN_SPEED = 0.30
     SEARCH_TURN_SECONDS = 1.0
@@ -511,6 +515,7 @@ class BehaviorManager:
         robot_client=None,
         vision_adapter=None,
         world_model=None,
+        semantic_vision=None,
     ):
         self.robot = robot_client or RobotBridgeClient()
         self.vision = vision_adapter
@@ -518,6 +523,9 @@ class BehaviorManager:
             world_model
             or getattr(vision_adapter, "world_model", None)
         )
+
+        self.semantic_vision = semantic_vision
+        self._semantic_episode = None
 
         self.target_lock = (
             TargetLock(
@@ -560,6 +568,159 @@ class BehaviorManager:
             return bool(provider())
         except Exception:
             return False
+
+    SEMANTIC_FRAME_TIMEOUT_SECONDS = 5.0
+    SEMANTIC_IMAGE_TIMEOUT_SECONDS = 5.0
+
+    def _semantic_motion_idle(self):
+        # These are local snapshots; never query the Robot Bridge over HTTP.
+        with self._guarded_turn_slot_lock:
+            if self._guarded_turn_owner_generation is not None:
+                return False
+        interlock = getattr(self.robot, "forward_interlock", None)
+        if interlock is None:
+            return True
+        try:
+            state = interlock.status()
+            return (
+                isinstance(state, dict)
+                and state.get("active_forward") is False
+                and state.get("pending_forward") is False
+            )
+        except Exception:
+            return False
+
+    def _semantic_check_current(self, episode):
+        if self._semantic_episode is not episode or not self._execution_is_current():
+            raise _SemanticPreempted()
+
+    def _semantic_bounded_call(self, callback, timeout, episode):
+        """Bound caller latency; late I/O can never schedule followup work.
+
+        Each worker owns only one I/O operation, never motion or promotion.
+        The helper additionally applies transport timeouts and disables retries.
+        """
+        done = threading.Event()
+        outcome = []
+        deadline = time.monotonic() + timeout
+
+        def run():
+            try:
+                self._semantic_check_current(episode)
+                if time.monotonic() >= deadline:
+                    raise TimeoutError("semantic_deadline_expired")
+                outcome.append((True, callback()))
+            except Exception as exc:
+                outcome.append((False, exc))
+            finally:
+                done.set()
+
+        self._semantic_check_current(episode)
+        threading.Thread(target=run, daemon=True, name="semantic-one-shot").start()
+        while True:
+            self._semantic_check_current(episode)
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError("semantic_deadline_expired")
+            if done.wait(min(remaining, 0.02)):
+                self._semantic_check_current(episode)
+                if time.monotonic() >= deadline:
+                    raise TimeoutError("semantic_deadline_expired")
+                ok, value = outcome[0]
+                if not ok:
+                    raise value
+                return value
+
+    def _confirm_find_target_with_semantic(
+        self, target_name, *, semantic_turn_budget=1, **kwargs
+    ):
+        """Return only normal YOLO confirmation, optionally after one hint.
+
+        The episode spans the entire FIND_OBJECT execution (including approach).
+        No recovery path resets its request or turn budget.
+        """
+        confirmed, status, diagnostics = self._confirm_target_candidates_with_status(
+            target_name, **kwargs
+        )
+        episode = self._semantic_episode
+        if episode is None:
+            return confirmed, status, diagnostics
+        self._semantic_check_current(episode)
+        if confirmed is not None or episode["used"] or self.semantic_vision is None:
+            return confirmed, status, diagnostics
+        label = str(target_name or "").strip().lower()
+        if not label or not self._semantic_motion_idle():
+            return confirmed, status, diagnostics
+        if any(
+            attempt.get("camera_running") is False
+            for attempt in diagnostics.get("attempts", [])
+            if isinstance(attempt, dict)
+        ):
+            return confirmed, status, diagnostics
+
+        # Reserve before any I/O, including unsuccessful frame retrieval.
+        episode["used"] = True
+        telemetry = episode["telemetry"]
+        telemetry["semantic_reacquisition_attempted"] = True
+        try:
+            frame = self._semantic_bounded_call(
+                self.semantic_vision.fetch_frame,
+                self.SEMANTIC_FRAME_TIMEOUT_SECONDS, episode,
+            )
+            self._semantic_check_current(episode)
+            if not self._semantic_motion_idle():
+                raise ValueError("semantic_motion_busy")
+            semantic = self._semantic_bounded_call(
+                lambda: self.semantic_vision.describe(label, frame),
+                self.SEMANTIC_IMAGE_TIMEOUT_SECONDS, episode,
+            )
+            self._semantic_check_current(episode)
+            telemetry.update(
+                semantic_reacquisition_completed=True,
+                semantic_reacquisition_found=semantic["found"],
+                semantic_reacquisition_direction=semantic["coarse_direction"],
+                semantic_reacquisition_result=semantic,
+            )
+            direction = semantic["coarse_direction"]
+            if semantic["found"] is True and direction in {"LEFT", "RIGHT"}:
+                if semantic_turn_budget <= 0:
+                    raise ValueError("semantic_turn_budget_exhausted")
+                session = self._current_lidar_session()
+                if session is None or not self._semantic_motion_idle():
+                    raise ValueError("semantic_turn_unavailable")
+                self._semantic_check_current(episode)
+                # One call site, reached at most once per reserved episode.
+                episode["turn_attempts"] += 1
+                turn = self.execute_guarded_turn(
+                    direction, self.FIND_CENTER_TURN_SPEED,
+                    self.FIND_CENTER_TURN_SECONDS,
+                    expected_lidar_session=session,
+                )
+                self._semantic_check_current(episode)
+                telemetry["semantic_reacquisition_turn_result"] = turn
+                if not isinstance(turn, dict) or (
+                    turn.get("ok") is not True or turn.get("permitted") is not True
+                ):
+                    raise ValueError("semantic_guarded_turn_denied")
+                episode["turn_completions"] += 1
+        except _SemanticPreempted:
+            raise
+        except Exception as exc:
+            self._semantic_check_current(episode)
+            telemetry["semantic_reacquisition_error"] = type(exc).__name__
+            return None, status, diagnostics
+
+        # Even CENTER/UNKNOWN/absent hints require a new temporal YOLO window.
+        # Gemini geometry never enters this return value or the World Model.
+        self._semantic_check_current(episode)
+        fresh_kwargs = dict(kwargs, minimum_timestamp=datetime.now(timezone.utc).isoformat())
+        confirmed, status, diagnostics = self._confirm_target_candidates_with_status(
+            label, **fresh_kwargs
+        )
+        self._semantic_check_current(episode)
+        telemetry["semantic_reacquisition_post_yolo_status"] = status
+        telemetry["semantic_reacquisition_post_yolo_diagnostics"] = diagnostics
+        return confirmed, status, diagnostics
 
     def simulate(self, mission):
         """
@@ -1059,7 +1220,31 @@ class BehaviorManager:
                 ),
             }
 
-        return self._execute_guarded_find_search(target_name)
+        episode = {
+            "used": False,
+            "turn_attempts": 0,
+            "turn_completions": 0,
+            "telemetry": {
+                "semantic_reacquisition_attempted": False,
+                "semantic_reacquisition_completed": False,
+            },
+        }
+        self._semantic_episode = episode
+        try:
+            outcome = self._execute_guarded_find_search(target_name)
+        except _SemanticPreempted:
+            outcome = {
+                "ok": False, "completed": True, "target_found": False,
+                "behavior": "FIND_OBJECT", "target": target_name,
+                "state": "PREEMPTED",
+                "reason": "FIND_OBJECT execution was preempted.",
+            }
+        finally:
+            self._semantic_episode = None
+        if episode["used"] and outcome.get("ok") is not True:
+            outcome["completed"] = True
+        outcome.update(episode["telemetry"])
+        return outcome
 
     def preview_find_object(self, target_name):
         """Preview FIND_OBJECT perception without promotion or motion."""
@@ -2017,18 +2202,24 @@ class BehaviorManager:
                 # retain their deterministic ordering semantics.
                 post_turn_cutoff = datetime.now(timezone.utc).isoformat()
 
+            episode = self._semantic_episode or {}
+            semantic_attempts_before = episode.get("turn_attempts", 0)
+            semantic_completions_before = episode.get("turn_completions", 0)
             (
                 confirmed,
                 confirmation_status,
                 confirmation_diagnostics,
-            ) = self._confirm_target_candidates_with_status(
+            ) = self._confirm_find_target_with_semantic(
                 target_name,
+                semantic_turn_budget=self.FIND_CENTER_MAX_TURN_CHUNKS - centering_attempted,
                 minimum_timestamp=post_turn_cutoff,
                 return_diagnostics=True,
                 confirmation_window_seconds=(
                     self.FIND_POST_MOTION_CONFIRMATION_WINDOW_SECONDS
                 ),
             )
+            centering_attempted += episode.get("turn_attempts", 0) - semantic_attempts_before
+            centering_completed += episode.get("turn_completions", 0) - semantic_completions_before
             self._last_target_confirmation_status = confirmation_status
             if confirmed is None:
                 confirmation_failed = (
@@ -2429,7 +2620,7 @@ class BehaviorManager:
                             confirmed,
                             confirmation_status,
                             confirmation_diagnostics,
-                        ) = self._confirm_target_candidates_with_status(
+                        ) = self._confirm_find_target_with_semantic(
                             target_name,
                             minimum_timestamp=cutoff,
                             return_diagnostics=True,
@@ -2931,7 +3122,7 @@ class BehaviorManager:
                     confirmed,
                     confirmation_status,
                     confirmation_diagnostics,
-                ) = self._confirm_target_candidates_with_status(
+                ) = self._confirm_find_target_with_semantic(
                     target_name,
                     minimum_timestamp=cutoff,
                     return_diagnostics=True,
@@ -3127,7 +3318,7 @@ class BehaviorManager:
                 confirmed,
                 confirmation_status,
                 confirmation_diagnostics,
-            ) = self._confirm_target_candidates_with_status(
+            ) = self._confirm_find_target_with_semantic(
                 target_name,
                 minimum_timestamp=post_forward_cutoff,
                 return_diagnostics=True,
@@ -3288,7 +3479,19 @@ class BehaviorManager:
                     base,
                 )
 
-            confirmed = self._confirm_target_candidates(target_name)
+            episode = self._semantic_episode or {}
+            semantic_attempts_before = episode.get("turn_attempts", 0)
+            semantic_completions_before = episode.get("turn_completions", 0)
+            confirmed, status, _diagnostics = self._confirm_find_target_with_semantic(
+                target_name,
+                semantic_turn_budget=self.SEARCH_MAX_TURN_CHUNKS - base["turn_chunks_attempted"],
+                return_diagnostics=True,
+                confirmation_window_seconds=self.FIND_OBJECT_CONFIRMATION_WINDOW_SECONDS,
+            )
+            base["turn_chunks_attempted"] += episode.get("turn_attempts", 0) - semantic_attempts_before
+            base["turn_chunks_completed"] += episode.get("turn_completions", 0) - semantic_completions_before
+            base["executed"] = base["executed"] or base["turn_chunks_attempted"] > 0
+            self._last_target_confirmation_status = status
             if confirmed is not None:
                 promoted = self._promote_confirmed_target(confirmed)
                 if promoted is not None:
@@ -3297,6 +3500,16 @@ class BehaviorManager:
                         promoted,
                         base,
                     )
+
+            # A failed semantic episode is terminal; do not start another
+            # search cycle or expand the existing initial search-turn budget.
+            if self._semantic_episode and self._semantic_episode["used"]:
+                return dict(
+                    base, completed=True, state="TARGET_LOST",
+                    reason="Target was not freshly confirmed after semantic reacquisition.",
+                    confirmation_status=status,
+                    confirmation_diagnostics=_diagnostics,
+                )
 
             if base["turn_chunks_attempted"] >= self.SEARCH_MAX_TURN_CHUNKS:
                 return dict(
