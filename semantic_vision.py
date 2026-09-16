@@ -10,7 +10,8 @@ import time
 import requests
 
 
-DEFAULT_TIMEOUT_SECONDS = 5.0
+DEFAULT_TIMEOUT_SECONDS = 5.0  # Camera/JPEG fetch only.
+GEMINI_REQUEST_TIMEOUT_SECONDS = 12.0
 DEFAULT_MAX_IMAGE_BYTES = 5 * 1024 * 1024
 
 
@@ -150,7 +151,7 @@ class SemanticVisionClient:
             config=types.GenerateContentConfig(
                 response_mime_type="application/json", response_schema=schema,
                 http_options=types.HttpOptions(
-                    timeout=max(1, int(self.timeout_seconds * 1000)),
+                    timeout=int(GEMINI_REQUEST_TIMEOUT_SECONDS * 1000),
                     retry_options=types.HttpRetryOptions(attempts=1),
                 ),
                 automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),

@@ -4042,3 +4042,22 @@ def test_semantic_only_does_not_mutate_authoritative_world(monkeypatch, tmp_path
     manager.execute(_mission())
     assert world.get_entities() == before == []
     assert not vision.promotions and not _move_calls(manager.robot)
+
+
+def test_semantic_dispatch_uses_separate_frame_and_image_deadlines(monkeypatch):
+    manager, vision, turns = semantic_manager(
+        monkeypatch, direction='CENTER', reacquire=False,
+    )
+    deadlines = []
+    bounded_call = manager._semantic_bounded_call
+
+    def record_deadline(callback, timeout, episode):
+        deadlines.append(timeout)
+        return bounded_call(callback, timeout, episode)
+
+    manager._semantic_bounded_call = record_deadline
+    result = manager.execute(_mission())
+    assert deadlines == [5.0, 13.0]
+    assert manager.semantic_vision.frame_calls == manager.semantic_vision.calls == 1
+    assert result['state'] == 'TARGET_LOST'
+    assert not turns and not _move_calls(manager.robot) and not vision.promotions

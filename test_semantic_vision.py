@@ -6,6 +6,7 @@ from unittest.mock import Mock
 import pytest
 import requests
 
+from behavior_manager import BehaviorManager
 from semantic_vision import JpegFrame, SemanticVisionClient
 
 # Minimal SOF header fixture: parser tests do not perform image decoding.
@@ -38,7 +39,14 @@ def test_one_jpeg_prompt_schema_and_sdk_request_bounds():
     config = call['config']
     assert config.response_mime_type == 'application/json'
     assert config.response_schema['required']
-    assert config.http_options.timeout == 5000
+    assert config.http_options.timeout == 12000
+    assert value.timeout_seconds == 5.0
+    assert BehaviorManager.SEMANTIC_FRAME_TIMEOUT_SECONDS == 5.0
+    assert BehaviorManager.SEMANTIC_IMAGE_TIMEOUT_SECONDS == 13.0
+    assert (
+        BehaviorManager.SEMANTIC_IMAGE_TIMEOUT_SECONDS
+        > config.http_options.timeout / 1000
+    )
     assert config.http_options.retry_options.attempts == 1
     assert config.automatic_function_calling.disable is True
     assert result['bbox'] == dict(x1=0, y1=10, x2=640, y2=480)
@@ -168,15 +176,20 @@ def test_missing_camera_configuration_fails_without_http(monkeypatch):
     get.assert_not_called()
 
 
-def test_slow_frame_stream_expires_and_closes(monkeypatch):
+@pytest.mark.parametrize('elapsed,expired', [(4.999, False), (5.0, True)])
+def test_slow_frame_stream_expires_and_closes(monkeypatch, elapsed, expired):
     response = Response()
     get = Mock(return_value=response)
     monkeypatch.setattr('semantic_vision.requests.get', get)
-    ticks = iter([0.0, 6.0])
+    ticks = iter([0.0, elapsed, elapsed])
     monkeypatch.setattr('semantic_vision.time.monotonic', lambda: next(ticks))
     instance, _ = helper()
-    with pytest.raises(TimeoutError):
-        instance.fetch_frame()
+    assert instance.timeout_seconds == 5.0
+    if expired:
+        with pytest.raises(TimeoutError):
+            instance.fetch_frame()
+    else:
+        assert instance.fetch_frame().data == JPEG
     assert get.call_count == 1 and response.closed
 
 

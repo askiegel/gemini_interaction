@@ -570,7 +570,7 @@ class BehaviorManager:
             return False
 
     SEMANTIC_FRAME_TIMEOUT_SECONDS = 5.0
-    SEMANTIC_IMAGE_TIMEOUT_SECONDS = 5.0
+    SEMANTIC_IMAGE_TIMEOUT_SECONDS = 13.0
 
     def _semantic_motion_idle(self):
         # These are local snapshots; never query the Robot Bridge over HTTP.
