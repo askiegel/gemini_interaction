@@ -81,7 +81,8 @@ def _result(*, permitted, reason, direction, angular_z, duration,
     }
 
 
-def validate_guarded_turn(direction, angular_speed, duration, state, *, expected_session, now=None):
+def validate_guarded_turn(direction, angular_speed, duration, state, *, expected_session, now=None,
+                          target_directed=False):
     """Validate a bounded turn without authorizing or executing it.
 
     STOP remains unconditional and is intentionally outside this policy.
@@ -112,7 +113,12 @@ def validate_guarded_turn(direction, angular_speed, duration, state, *, expected
                        direction=direction, angular_z=None, duration=duration_value,
                        state=validated, relevant={})
 
-    relevant_names = ("left", "front_left") if direction == "LEFT" else ("right", "front_right")
+    # Target-directed turns use the forward corridor while retaining a
+    # directional side veto for BLOCKED sectors. Broad side CLEAR requirements
+    # remain the policy for search/avoidance turns.
+    relevant_names = (
+        ("left", "front_left") if direction == "LEFT" else ("right", "front_right")
+    )
     relevant = {name: _sector_status(sectors.get(name)) for name in relevant_names}
     relevant["front"] = _front_status(sectors.get("front"))
     for name in ("left", "front_left", "right", "front_right"):
@@ -120,7 +126,22 @@ def validate_guarded_turn(direction, angular_speed, duration, state, *, expected
     if not relevant["front"][2]:
         return _result(permitted=False, reason="front_not_trustworthy", direction=direction,
                        angular_z=None, duration=duration_value, state=validated, relevant=relevant)
-    if not all(relevant[name][2] for name in relevant_names):
+    if target_directed and relevant["front"][0] != "CLEAR":
+        return _result(permitted=False, reason="front_not_clear", direction=direction,
+                       angular_z=None, duration=duration_value, state=validated, relevant=relevant)
+    if target_directed:
+        side_clear = all(
+            isinstance(sectors.get(name), dict)
+            and sectors[name].get("available") is True
+            and sectors[name].get("state") in {"CLEAR", "CAUTION"}
+            and _finite(sectors[name].get("robust_clearance_m"))
+            and _finite(sectors[name].get("minimum_clearance_m"))
+            for name in relevant_names
+        )
+        if not side_clear:
+            return _result(permitted=False, reason="turn_side_not_clear", direction=direction,
+                           angular_z=None, duration=duration_value, state=validated, relevant=relevant)
+    elif not all(relevant[name][2] for name in relevant_names):
         return _result(permitted=False, reason="turn_side_not_clear", direction=direction,
                        angular_z=None, duration=duration_value, state=validated, relevant=relevant)
 

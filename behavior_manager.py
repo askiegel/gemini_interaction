@@ -35,6 +35,7 @@ class _GuardedTurnMonitor:
         generation,
         initial_validation,
         now=None,
+        target_directed=None,
     ):
         self.world_model = world_model
         self.robot = robot
@@ -44,6 +45,7 @@ class _GuardedTurnMonitor:
         self.expected_session = expected_session
         self.generation = generation
         self.now = now
+        self.target_directed = bool(target_directed)
         self._lock = threading.RLock()
         self._stop = threading.Event()
         self._thread = None
@@ -188,6 +190,7 @@ class _GuardedTurnMonitor:
             state,
             expected_session=self.expected_session,
             now=self.now,
+            target_directed=self.target_directed,
         )
 
     def _run(self):
@@ -699,7 +702,7 @@ class BehaviorManager:
                 self._semantic_check_current(episode)
                 # One call site, reached at most once per reserved episode.
                 episode["turn_attempts"] += 1
-                turn = self.execute_guarded_turn(
+                turn = self._execute_target_directed_turn(
                     direction, self.FIND_CENTER_TURN_SPEED,
                     self.FIND_CENTER_TURN_SECONDS,
                     expected_lidar_session=session,
@@ -864,6 +867,21 @@ class BehaviorManager:
                 self._guarded_turn_monitor = None
                 self._guarded_turn_owner_generation = None
 
+    def _execute_target_directed_turn(
+        self, direction, angular_speed, duration, *, expected_lidar_session,
+    ):
+        previous = getattr(self, "_target_directed_turn_context", False)
+        self._target_directed_turn_context = True
+        try:
+            return self.execute_guarded_turn(
+                direction,
+                angular_speed,
+                duration,
+                expected_lidar_session=expected_lidar_session,
+            )
+        finally:
+            self._target_directed_turn_context = previous
+
     def execute_guarded_turn(
         self,
         direction,
@@ -872,6 +890,7 @@ class BehaviorManager:
         *,
         expected_lidar_session,
         now=None,
+        target_directed=None,
     ):
         """Validate and execute one explicit bounded turn request.
 
@@ -880,6 +899,10 @@ class BehaviorManager:
         single bounded angular-only Robot Bridge request is sent.  STOP
         remains independent and unconditional through ``execute``.
         """
+        if target_directed is None:
+            target_directed = bool(
+                getattr(self, "_target_directed_turn_context", False)
+            )
         state = None
         if self.world_model is not None:
             try:
@@ -897,6 +920,7 @@ class BehaviorManager:
             state,
             expected_session=expected_lidar_session,
             now=now,
+            target_directed=target_directed,
         )
         result = dict(validation)
         result.update(
@@ -962,6 +986,7 @@ class BehaviorManager:
                 generation=generation,
                 initial_validation=validation,
                 now=now,
+                target_directed=target_directed,
             )
             self._guarded_turn_owner_generation = generation
             self._guarded_turn_monitor = monitor
@@ -2161,7 +2186,7 @@ class BehaviorManager:
 
             centering_attempted += 1
             try:
-                guarded_result = self.execute_guarded_turn(
+                guarded_result = self._execute_target_directed_turn(
                     direction,
                     self.FIND_CENTER_TURN_SPEED,
                     self.FIND_CENTER_TURN_SECONDS,

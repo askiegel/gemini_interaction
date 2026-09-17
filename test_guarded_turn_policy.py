@@ -34,10 +34,12 @@ def snapshot(*, front="CLEAR", left="CLEAR", front_left="CLEAR",
 _DEFAULT_STATE = object()
 
 
-def turn(direction, state=_DEFAULT_STATE, speed=0.5, duration=0.4):
+def turn(direction, state=_DEFAULT_STATE, speed=0.5, duration=0.4,
+         target_directed=False):
     return validate_guarded_turn(
         direction, speed, duration, snapshot() if state is _DEFAULT_STATE else state,
         expected_session="session-1", now=10.0,
+        target_directed=target_directed,
     )
 
 
@@ -47,6 +49,46 @@ def test_valid_left_turn_is_permitted_with_clear_directional_sectors():
     assert result["angular_z"] == 0.5
     assert result["duration"] == 0.4
 
+
+
+
+def test_target_directed_turn_uses_front_corridor_and_ignores_unrelated_side_caution():
+    state = snapshot(left="CAUTION", front_left="CAUTION", right="CAUTION")
+    result = turn("LEFT", state, target_directed=True)
+    assert result["permitted"] is True
+    assert result["reason"] == "turn_side_clear_advisory"
+
+
+
+
+@pytest.mark.parametrize("direction,side", [("LEFT", "left"), ("RIGHT", "right")])
+def test_target_directed_turn_allows_relevant_side_caution(direction, side):
+    state = snapshot()
+    state["sectors"][side]["state"] = "CAUTION"
+    result = turn(direction, state, target_directed=True)
+    assert result["permitted"] is True
+
+
+@pytest.mark.parametrize("direction,side", [
+    ("LEFT", "left"), ("LEFT", "front_left"),
+    ("RIGHT", "right"), ("RIGHT", "front_right"),
+])
+def test_target_directed_turn_blocks_relevant_blocked_side(direction, side):
+    state = snapshot()
+    state["sectors"][side]["state"] = "BLOCKED"
+    result = turn(direction, state, target_directed=True)
+    assert result["permitted"] is False
+    assert result["reason"] == "turn_side_not_clear"
+
+
+def test_target_directed_turn_ignores_opposite_blocked_side():
+    state = snapshot(right="BLOCKED", front_right="BLOCKED")
+    assert turn("LEFT", state, target_directed=True)["permitted"] is True
+
+def test_target_directed_turn_denies_nonclear_forward_corridor():
+    result = turn("RIGHT", snapshot(front="CAUTION"), target_directed=True)
+    assert result["permitted"] is False
+    assert result["reason"] == "front_not_clear"
 
 def test_valid_right_turn_is_permitted_with_clear_directional_sectors():
     result = turn("RIGHT")

@@ -136,13 +136,15 @@ def manager(state, robot=None):
     )
 
 
-def execute(state, direction="LEFT", speed=0.5, duration=0.4, robot=None):
+def execute(state, direction="LEFT", speed=0.5, duration=0.4, robot=None,
+            target_directed=False):
     return manager(state, robot).execute_guarded_turn(
         direction,
         speed,
         duration,
         expected_lidar_session=SESSION,
         now=10.0,
+        target_directed=target_directed,
     )
 
 
@@ -320,7 +322,7 @@ def test_advisory_recommendation_does_not_execute_a_turn():
     assert robot.motion_calls == []
 
 
-def run_blocked_turn(state, robot, direction="LEFT"):
+def run_blocked_turn(state, robot, direction="LEFT", target_directed=False):
     world = FakeWorldModel(state)
     behavior = BehaviorManager(robot_client=robot, world_model=world)
     result_box = []
@@ -332,6 +334,7 @@ def run_blocked_turn(state, robot, direction="LEFT"):
                 0.4,
                 expected_lidar_session=SESSION,
                 now=10.0,
+                target_directed=target_directed,
             )
         )
     )
@@ -479,6 +482,73 @@ def test_left_turn_right_side_caution_does_not_invalidate_and_first_snapshot_is_
     assert result["stop_events"][-1]["monitor_validation"]["left_state"] == "CAUTION"
     assert result["stop_events"][-1]["monitor_validation"]["left_minimum_clearance_m"] == 0.55
 
+
+
+
+def test_target_directed_turn_allows_unrelated_side_caution():
+    robot = BlockingRobot()
+    state = snapshot(left="CAUTION", front_left="CAUTION", right="CAUTION")
+    _world, _behavior, worker, result_box = run_blocked_turn(
+        state, robot, target_directed=True
+    )
+    robot.release_motion.set()
+    worker.join(timeout=1.0)
+    result = result_box[0]
+    assert result["ok"] is True
+    assert result["transport_result"]["ok"] is True
+    assert robot.stop_calls == 0
+
+
+def test_target_directed_turn_stops_when_front_corridor_changes():
+    robot = BlockingRobot()
+    state = snapshot(left="CAUTION", front_left="CAUTION")
+    _world, _behavior, worker, result_box = run_blocked_turn(
+        state, robot, target_directed=True
+    )
+    state["sectors"]["front"]["state"] = "CAUTION"
+    wait_for_stop(robot, 1)
+    robot.release_motion.set()
+    worker.join(timeout=1.0)
+    result = result_box[0]
+    assert result["ok"] is False
+    assert result["generation_invalidated"] is True
+    assert result["reason"] == "front_not_clear"
+    assert result["transport_result"]["ok"] is True
+
+
+
+def test_target_directed_turn_stops_when_relevant_side_becomes_blocked():
+    robot = BlockingRobot()
+    state = snapshot()
+    _world, _behavior, worker, result_box = run_blocked_turn(
+        state, robot, direction="RIGHT", target_directed=True
+    )
+    state["sectors"]["front_right"]["state"] = "BLOCKED"
+    wait_for_stop(robot, 1)
+    robot.release_motion.set()
+    worker.join(timeout=1.0)
+    result = result_box[0]
+    assert result["ok"] is False
+    assert result["generation_invalidated"] is True
+    assert result["reason"] == "turn_side_not_clear"
+    assert result["transport_result"]["ok"] is True
+
+
+def test_target_directed_turn_ignores_dynamic_relevant_side_caution():
+    robot = BlockingRobot()
+    state = snapshot()
+    _world, _behavior, worker, result_box = run_blocked_turn(
+        state, robot, direction="RIGHT", target_directed=True
+    )
+    state["sectors"]["right"]["state"] = "CAUTION"
+    state["sectors"]["front_right"]["state"] = "CAUTION"
+    time.sleep(0.08)
+    robot.release_motion.set()
+    worker.join(timeout=1.0)
+    result = result_box[0]
+    assert result["ok"] is True
+    assert result["generation_invalidated"] is False
+    assert robot.stop_calls == 0
 
 def test_operator_stop_during_transport_completion_wait_reasserts():
     robot = BlockingRobot()
