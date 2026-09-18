@@ -452,9 +452,10 @@ class BehaviorManager:
     )
 
     FIND_CENTER_TOLERANCE_PIXELS = 50.0
+    FIND_CENTER_NO_PROGRESS_MAX_OBSERVATIONS = 5
+    FIND_CENTER_MIN_PROGRESS_PIXELS = 2.0
     FIND_CENTER_TURN_SPEED = 0.20
     FIND_CENTER_TURN_SECONDS = 0.50
-    FIND_CENTER_MAX_TURN_CHUNKS = 8
     FIND_AVOIDANCE_MAX_MANEUVERS = 1
     FIND_AVOIDANCE_MAX_TURN_CHUNKS = 3
     FIND_AVOIDANCE_TURN_SPEED = FIND_CENTER_TURN_SPEED
@@ -2041,6 +2042,8 @@ class BehaviorManager:
         """Center an acquired FIND_OBJECT target in bounded guarded chunks."""
         centering_attempted = 0
         centering_completed = 0
+        centering_best_abs_error = None
+        centering_stagnant_observations = 0
         current = observation
         last_guarded_result = base.get("last_guarded_turn_result")
 
@@ -2051,8 +2054,8 @@ class BehaviorManager:
                 target_found=fields.pop("target_found", True),
                 centering_turn_chunks_attempted=centering_attempted,
                 centering_turn_chunks_completed=centering_completed,
-                maximum_centering_turn_chunks=(
-                    self.FIND_CENTER_MAX_TURN_CHUNKS
+                centering_no_progress_max_observations=(
+                    self.FIND_CENTER_NO_PROGRESS_MAX_OBSERVATIONS
                 ),
                 center_tolerance_pixels=(
                     self.FIND_CENTER_TOLERANCE_PIXELS
@@ -2119,6 +2122,18 @@ class BehaviorManager:
                 "target_observation": current,
             }
 
+            absolute_error = abs(horizontal_error)
+            if centering_best_abs_error is None:
+                centering_best_abs_error = absolute_error
+                centering_stagnant_observations = 0
+            elif absolute_error <= (
+                centering_best_abs_error - self.FIND_CENTER_MIN_PROGRESS_PIXELS
+            ):
+                centering_best_abs_error = absolute_error
+                centering_stagnant_observations = 0
+            else:
+                centering_stagnant_observations += 1
+
             # Publish the state before any guarded turn transport begins so
             # the runtime status endpoint reflects the action in progress.
             self._publish_tracking_state(dict(
@@ -2131,7 +2146,7 @@ class BehaviorManager:
                 completed=False,
             ))
 
-            if abs(horizontal_error) <= self.FIND_CENTER_TOLERANCE_PIXELS:
+            if absolute_error <= self.FIND_CENTER_TOLERANCE_PIXELS:
                 if not continue_to_approach:
                     return result(
                         ok=True,
@@ -2150,12 +2165,17 @@ class BehaviorManager:
                     telemetry=telemetry,
                 )
 
-            if centering_attempted >= self.FIND_CENTER_MAX_TURN_CHUNKS:
+            if (
+                centering_stagnant_observations
+                >= self.FIND_CENTER_NO_PROGRESS_MAX_OBSERVATIONS
+            ):
                 return result(
                     ok=False,
                     completed=False,
-                    state="CENTERING_EXHAUSTED",
-                    reason=f"{target_name} remained outside center tolerance.",
+                    state="CENTERING_NO_PROGRESS",
+                    reason=(
+                        f"{target_name} centering made no meaningful progress."
+                    ),
                     **telemetry,
                 )
 
@@ -2249,7 +2269,7 @@ class BehaviorManager:
                 confirmation_diagnostics,
             ) = self._confirm_find_target_with_semantic(
                 target_name,
-                semantic_turn_budget=self.FIND_CENTER_MAX_TURN_CHUNKS - centering_attempted,
+                semantic_turn_budget=1,
                 minimum_timestamp=post_turn_cutoff,
                 return_diagnostics=True,
                 confirmation_window_seconds=(
@@ -2394,8 +2414,8 @@ class BehaviorManager:
                 "centering_turn_chunks_completed": (
                     centering_total_completed
                 ),
-                "maximum_centering_turn_chunks": (
-                    self.FIND_CENTER_MAX_TURN_CHUNKS
+                "centering_no_progress_max_observations": (
+                    self.FIND_CENTER_NO_PROGRESS_MAX_OBSERVATIONS
                 ),
                 "center_tolerance_pixels": self.FIND_CENTER_TOLERANCE_PIXELS,
                 "last_guarded_turn_result": last_guarded_result,
@@ -3258,7 +3278,9 @@ class BehaviorManager:
                 completed=False,
                 centering_turn_chunks_attempted=centering_total_attempted,
                 centering_turn_chunks_completed=centering_total_completed,
-                maximum_centering_turn_chunks=self.FIND_CENTER_MAX_TURN_CHUNKS,
+                centering_no_progress_max_observations=(
+                    self.FIND_CENTER_NO_PROGRESS_MAX_OBSERVATIONS
+                ),
                 approach_chunks_attempted=approach_attempted,
                 approach_chunks_completed=approach_completed,
                 maximum_approach_chunks=self.FIND_APPROACH_MAX_CHUNKS,
@@ -3475,8 +3497,8 @@ class BehaviorManager:
             "search_direction": self.SEARCH_DIRECTION,
             "centering_turn_chunks_attempted": 0,
             "centering_turn_chunks_completed": 0,
-            "maximum_centering_turn_chunks": (
-                self.FIND_CENTER_MAX_TURN_CHUNKS
+            "centering_no_progress_max_observations": (
+                self.FIND_CENTER_NO_PROGRESS_MAX_OBSERVATIONS
             ),
             "center_tolerance_pixels": self.FIND_CENTER_TOLERANCE_PIXELS,
             "horizontal_error_pixels": None,

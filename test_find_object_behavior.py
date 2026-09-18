@@ -2624,20 +2624,80 @@ def test_guarded_centering_denial_stops_without_retry():
     assert len(calls) == 1
 
 
-def test_centering_exhausts_at_eight_chunks():
+def test_centering_stops_after_sustained_no_progress():
     observations = [located_target(145)] + [located_target(145)] * 8
     payloads = []
     for index in range(8):
         payloads.extend(centered_candidate_payloads(f"exhaust-{index}", 145))
     manager, _vision, calls = make_centering_manager(observations, payloads)
     result = manager.execute(_mission())
-    assert result["state"] == "CENTERING_EXHAUSTED"
+    assert result["state"] == "CENTERING_NO_PROGRESS"
     assert result["completed"] is False
     assert result["target_found"] is True
-    assert result["centering_turn_chunks_attempted"] == 8
-    assert result["centering_turn_chunks_completed"] == 8
-    assert len(calls) == 8
+    assert result["centering_turn_chunks_attempted"] == 5
+    assert result["centering_turn_chunks_completed"] == 5
+    assert len(calls) == 5
 
+
+
+
+def test_centering_can_converge_after_more_than_eight_turns():
+    errors = [170, 155, 140, 125, 110, 95, 80, 70, 60, 55, 48]
+    observations = [located_target(320 - errors[0])]
+    payloads = []
+    for index, error in enumerate(errors[1:], 1):
+        payloads.extend(centered_candidate_payloads(f"z-converge-{index}", 320 - error))
+    manager, _vision, calls = make_centering_manager(observations, payloads)
+    manager.FIND_POST_MOTION_CONFIRMATION_WINDOW_SECONDS = 10.0
+    result = manager._center_acquired_target(
+        "backpack", observations[0],
+        {"behavior": "FIND_OBJECT", "turn_chunks_attempted": 0,
+         "turn_chunks_completed": 0},
+        continue_to_approach=False,
+    )
+    assert result["state"] == "CENTERED"
+    assert result["centering_turn_chunks_attempted"] == 10
+    assert result["centering_turn_chunks_completed"] == 10
+    assert len(calls) == 10
+
+
+
+
+def test_centering_oscillation_stops_with_no_progress_watchdog():
+    errors = [175, 176, 174, 177, 175, 176]
+    observations = [located_target(320 - errors[0])]
+    payloads = []
+    for index, error in enumerate(errors[1:], 1):
+        payloads.extend(centered_candidate_payloads(f"z-oscillation-{index}", 320 - error))
+    manager, _vision, calls = make_centering_manager(observations, payloads)
+    manager.FIND_POST_MOTION_CONFIRMATION_WINDOW_SECONDS = 10.0
+    result = manager._center_acquired_target(
+        "backpack", observations[0],
+        {"behavior": "FIND_OBJECT", "turn_chunks_attempted": 0,
+         "turn_chunks_completed": 0},
+        continue_to_approach=False,
+    )
+    assert result["state"] == "CENTERING_NO_PROGRESS"
+    assert result["centering_turn_chunks_attempted"] == 5
+    assert len(calls) == 5
+
+def test_centering_live_failure_shape_gets_one_more_turn_and_centers():
+    errors = [70, 58, 42]
+    observations = [located_target(320 - errors[0])]
+    payloads = []
+    for index, error in enumerate(errors[1:], 1):
+        payloads.extend(centered_candidate_payloads(f"z-live-shape-{index}", 320 - error))
+    manager, _vision, calls = make_centering_manager(observations, payloads)
+    result = manager._center_acquired_target(
+        "backpack", observations[0],
+        {"behavior": "FIND_OBJECT", "turn_chunks_attempted": 0,
+         "turn_chunks_completed": 0},
+        continue_to_approach=False,
+    )
+    assert result["state"] == "CENTERED"
+    assert result["centering_turn_chunks_attempted"] == 2
+    assert result["centering_turn_chunks_completed"] == 2
+    assert len(calls) == 2
 
 def test_search_and_centering_counters_remain_separate():
     failed_search = [
@@ -3982,21 +4042,15 @@ def test_semantic_not_requested_with_motion_active_or_pending(monkeypatch, busy)
     assert not turns
 
 
-@pytest.mark.parametrize('limit', [1, 2])
-def test_semantic_centering_turn_respects_existing_total_bound(monkeypatch, limit):
+def test_semantic_centering_does_not_use_legacy_total_bound(monkeypatch):
     manager, vision, turns = semantic_manager(monkeypatch, initial_found=True)
     vision.results[0] = located_target(100)
     vision.results[0]['last_seen'] = '2000-01-01T00:00:00+00:00'
-    manager.FIND_CENTER_MAX_TURN_CHUNKS = limit
     result = manager.execute(_mission())
     assert manager.semantic_vision.calls == 1
-    assert len(turns) == limit
-    assert result['centering_turn_chunks_attempted'] == limit
-    if limit == 1:
-        assert result['completed'] is True
-        assert not _move_calls(manager.robot)
-    else:
-        assert result['state'] == 'APPROACH_STEP_COMPLETE'
+    assert len(turns) == 2
+    assert result['centering_turn_chunks_attempted'] == 2
+    assert result['state'] == 'APPROACH_STEP_COMPLETE'
 
 
 def test_semantic_cannot_expand_initial_search_turn_limit(monkeypatch):
