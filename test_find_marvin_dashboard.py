@@ -165,6 +165,7 @@ def test_camera_and_read_only_lidar_are_responsive_companions():
     assert 'const LIDAR_URL = "/dashboard/lidar";' in JS
     assert "LiDAR is stale, invalid, or unavailable. Scan points hidden." in JS
     assert 'context.fillText("FORWARD ↑"' in JS
+    assert ".mission-lidar-message[hidden] {\n    display: none;\n}" in CSS
 
 
 def test_companion_lidar_geometry_matches_production_sector_convention():
