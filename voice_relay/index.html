@@ -2088,11 +2088,8 @@
             && lidar.available === true
             && lidar.valid === true
             && lidar.reason === "fresh"
-            && lidar.front_state === "CLEAR"
             && interlock.configured === true
             && interlock.monitor_running === true
-            && interlock.forward_permitted === true
-            && interlock.reason === "fresh_clear"
             && interlock.active_forward === false
             && interlock.pending_forward === false
             && robot.connected === true
@@ -2102,11 +2099,20 @@
             && motion.angular_z === 0
             && motion.streaming === false
         );
+        const forwardMotionInhibited = (
+            lidar.front_state !== "CLEAR"
+            || interlock.forward_permitted !== true
+            || interlock.reason !== "fresh_clear"
+        );
         return {
             safe,
             reason: safe
-                ? "Safety preflight passed. Ready to find Marvin."
-                : "Disabled: runtime, mission, LiDAR, interlock, or stopped-state preflight is not satisfied."
+                ? (
+                    forwardMotionInhibited
+                        ? "Ready to find Marvin. Forward motion currently inhibited by LiDAR."
+                        : "Ready to find Marvin."
+                )
+                : "Disabled: mission submission readiness is not satisfied."
         };
     }
 
