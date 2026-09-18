@@ -450,6 +450,7 @@ class BehaviorManager:
     FIND_POST_MOTION_CONFIRMATION_WINDOW_SECONDS = (
         FIND_OBJECT_CONFIRMATION_WINDOW_SECONDS
     )
+    FIND_STALE_RECOVERY_WINDOW_SECONDS = 0.50
 
     FIND_CENTER_TOLERANCE_PIXELS = 50.0
     FIND_CENTER_NO_PROGRESS_MAX_OBSERVATIONS = 5
@@ -1433,6 +1434,88 @@ class BehaviorManager:
             except Exception:
                 return None
         return getattr(self, "lidar_session", None)
+
+    def _wait_for_find_stale_recovery(self, interlock, expected_session):
+        """Wait briefly for a stopped FIND_OBJECT forward's LiDAR to recover."""
+        deadline = time.monotonic() + self.FIND_STALE_RECOVERY_WINDOW_SECONDS
+
+        while True:
+            if not self._execution_is_current():
+                return False, "preempted"
+            if self._current_lidar_session() != expected_session:
+                return False, "producer_session_mismatch"
+
+            status = getattr(interlock, "status", None)
+            refresh = getattr(interlock, "refresh", None)
+            if not callable(status) or not callable(refresh):
+                return False, "forward_interlock_status_unavailable"
+            before = status()
+            if (
+                not isinstance(before, dict)
+                or before.get("active_forward") is not False
+                or before.get("pending_forward") is not False
+            ):
+                return False, "forward_motion_not_stopped"
+
+            try:
+                permitted, interlock_reason = refresh()
+                lidar = self.world_model.get_lidar_obstacles(
+                    expected_session=expected_session
+                )
+            except Exception:
+                return False, "stale_recovery_state_unavailable"
+
+            after = status()
+            if (
+                not isinstance(after, dict)
+                or after.get("active_forward") is not False
+                or after.get("pending_forward") is not False
+            ):
+                return False, "forward_motion_not_stopped"
+            if self._current_lidar_session() != expected_session:
+                return False, "producer_session_mismatch"
+
+            front = (
+                lidar.get("sectors", {}).get("front", {})
+                if isinstance(lidar, dict)
+                else {}
+            )
+            recovered = bool(
+                isinstance(lidar, dict)
+                and lidar.get("producer_session") == expected_session
+                and lidar.get("available") is True
+                and lidar.get("valid") is True
+                and lidar.get("reason") == "fresh"
+                and isinstance(front, dict)
+                and front.get("state") == "CLEAR"
+                and permitted is True
+                and interlock_reason == "fresh_clear"
+                and after.get("producer_session") == expected_session
+                and after.get("forward_permitted") is True
+                and after.get("reason") == "fresh_clear"
+                and after.get("front_state") == "CLEAR"
+            )
+            if recovered:
+                return True, "fresh_clear"
+
+            lidar_reason = (
+                lidar.get("reason") if isinstance(lidar, dict) else None
+            )
+            stale = bool(
+                lidar_reason == "stale"
+                or (
+                    lidar_reason == "fresh"
+                    and interlock_reason in {
+                        "stale", "stale_lidar", "not_fresh"
+                    }
+                )
+            )
+            if not stale:
+                return False, interlock_reason or lidar_reason or "unknown"
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return False, "stale_recovery_timeout"
+            time.sleep(min(self.TARGET_CONFIRMATION_POLL_SECONDS, remaining))
 
     @staticmethod
     def _target_is_fresh_and_acquired(target):
@@ -3255,6 +3338,15 @@ class BehaviorManager:
                     **telemetry,
                 )
 
+            if approach_attempted >= self.FIND_APPROACH_MAX_CHUNKS:
+                return result(
+                    ok=False,
+                    completed=True,
+                    state="APPROACH_BLOCKED",
+                    reason="approach_budget_exhausted_after_stale",
+                    approach_result=approach_result,
+                    **telemetry,
+                )
             approach_attempted += 1
             step = {
                 "step_index": approach_attempted,
@@ -3350,6 +3442,99 @@ class BehaviorManager:
                 or delivery_uncertain
                 or confirmed_forward_failed
             ):
+                recoverable_stale = bool(
+                    bounded_invalidated
+                    and approach_result.get("reason") == "stale"
+                    and approach_result.get("transport_attempted") is True
+                    and approach_result.get("forwarded") is True
+                    and not delivery_uncertain
+                    and isinstance(approach_result.get("transport_result"), dict)
+                    and approach_result["transport_result"].get("ok") is True
+                )
+                if recoverable_stale:
+                    recovery_cutoff = datetime.now(timezone.utc).isoformat()
+                    if approach_attempted >= self.FIND_APPROACH_MAX_CHUNKS:
+                        return result(
+                            ok=False,
+                            completed=True,
+                            state="APPROACH_BLOCKED",
+                            reason="approach_budget_exhausted_after_stale",
+                            approach_result=approach_result,
+                            **telemetry,
+                        )
+                    recovered, recovery_reason = (
+                        self._wait_for_find_stale_recovery(interlock, session)
+                    )
+                    step["stale_recovery_reason"] = recovery_reason
+                    if not recovered:
+                        return result(
+                            ok=False,
+                            completed=True,
+                            target_found=False,
+                            state=(
+                                "PREEMPTED"
+                                if recovery_reason == "preempted"
+                                else "APPROACH_BLOCKED"
+                            ),
+                            reason=recovery_reason,
+                            approach_result=approach_result,
+                            **telemetry,
+                        )
+                    (
+                        confirmed,
+                        confirmation_status,
+                        confirmation_diagnostics,
+                    ) = self._confirm_find_target_with_semantic(
+                        target_name,
+                        minimum_timestamp=recovery_cutoff,
+                        return_diagnostics=True,
+                        confirmation_window_seconds=(
+                            self.FIND_POST_MOTION_CONFIRMATION_WINDOW_SECONDS
+                        ),
+                    )
+                    step["post_motion_confirmation_status"] = (
+                        confirmation_status
+                    )
+                    step["post_motion_confirmation_diagnostics"] = (
+                        confirmation_diagnostics
+                    )
+                    if confirmed is None or not self._execution_is_current():
+                        preempted = not self._execution_is_current()
+                        return result(
+                            ok=False,
+                            completed=True,
+                            target_found=False,
+                            state=(
+                                "PREEMPTED"
+                                if preempted
+                                else "TARGET_LOST_AFTER_APPROACH"
+                            ),
+                            reason=(
+                                "FIND_OBJECT execution was preempted."
+                                if preempted
+                                else "Target was not freshly re-confirmed after stale recovery."
+                            ),
+                            confirmation_status=confirmation_status,
+                            confirmation_diagnostics=confirmation_diagnostics,
+                            approach_result=approach_result,
+                            **telemetry,
+                        )
+                    promoted = self._promote_confirmed_target(confirmed)
+                    if promoted is None:
+                        return result(
+                            ok=False,
+                            completed=True,
+                            target_found=False,
+                            state="TARGET_LOST_AFTER_APPROACH",
+                            reason="Target promotion failed after stale recovery.",
+                            confirmation_status=confirmation_status,
+                            confirmation_diagnostics=confirmation_diagnostics,
+                            approach_result=approach_result,
+                            **telemetry,
+                        )
+                    current = promoted
+                    telemetry = target_telemetry(current, telemetry)
+                    continue
                 blocked = bool(
                     bounded_invalidated
                     or approach_result.get("forwarded") is False

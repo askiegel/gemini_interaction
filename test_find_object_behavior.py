@@ -2205,6 +2205,269 @@ def test_approach_transport_exception_is_terminal_without_replay():
     assert len(robot.calls) == 1
 
 
+def _recovery_lidar(*, reason="fresh", front="CLEAR", session="session-1",
+                    available=True, valid=True):
+    return {
+        "available": available,
+        "valid": valid,
+        "reason": reason,
+        "producer_session": session,
+        "sectors": {"front": {"available": True, "state": front}},
+    }
+
+
+class _RecoveryInterlock:
+    def __init__(self, states):
+        self.states = list(states)
+        self.current = self.states[0]
+        self.refresh_calls = 0
+
+    def refresh(self):
+        self.refresh_calls += 1
+        if self.states:
+            self.current = self.states.pop(0)
+        return self.current[0], self.current[1]
+
+    def status(self):
+        permitted, reason, lidar = self.current
+        front = lidar.get("sectors", {}).get("front", {}).get("state", "UNKNOWN")
+        return {
+            "active_forward": False,
+            "pending_forward": False,
+            "producer_session": "session-1",
+            "forward_permitted": permitted,
+            "reason": reason,
+            "front_state": front if lidar.get("valid") is True else "UNKNOWN",
+        }
+
+
+class _RecoveryWorldModel:
+    def __init__(self, interlock):
+        self.interlock = interlock
+
+    def get_lidar_obstacles(self, *, expected_session):
+        assert expected_session == "session-1"
+        return dict(self.interlock.current[2])
+
+
+def _recovery_manager(states):
+    interlock = _RecoveryInterlock(states)
+    manager = BehaviorManager(world_model=_RecoveryWorldModel(interlock))
+    manager.lidar_session = "session-1"
+    manager.FIND_STALE_RECOVERY_WINDOW_SECONDS = 0.0
+    return manager, interlock
+
+
+def test_find_stale_recovery_accepts_only_stopped_fresh_clear_same_session():
+    stale = (False, "stale_lidar", _recovery_lidar(reason="stale"))
+    fresh = (True, "fresh_clear", _recovery_lidar())
+    manager, interlock = _recovery_manager([stale, fresh])
+    manager.FIND_STALE_RECOVERY_WINDOW_SECONDS = 0.1
+    manager.TARGET_CONFIRMATION_POLL_SECONDS = 0.0
+
+    assert manager._wait_for_find_stale_recovery(
+        interlock, "session-1"
+    ) == (True, "fresh_clear")
+    assert interlock.refresh_calls == 2
+
+
+def test_find_stale_recovery_timeout_fails_closed():
+    stale = (False, "stale_lidar", _recovery_lidar(reason="stale"))
+    manager, interlock = _recovery_manager([stale])
+
+    assert manager._wait_for_find_stale_recovery(
+        interlock, "session-1"
+    ) == (False, "stale_recovery_timeout")
+
+
+def test_find_stale_recovery_session_change_fails_closed():
+    fresh = (True, "fresh_clear", _recovery_lidar())
+    manager, interlock = _recovery_manager([fresh])
+    manager.lidar_session_provider = lambda: "other-session"
+
+    assert manager._wait_for_find_stale_recovery(
+        interlock, "session-1"
+    ) == (False, "producer_session_mismatch")
+    assert interlock.refresh_calls == 0
+
+
+@pytest.mark.parametrize("front", ["CAUTION", "BLOCKED"])
+def test_find_stale_recovery_nonclear_path_fails_closed(front):
+    denied = (False, "front_not_clear", _recovery_lidar(front=front))
+    manager, interlock = _recovery_manager([denied])
+
+    assert manager._wait_for_find_stale_recovery(
+        interlock, "session-1"
+    ) == (False, "front_not_clear")
+
+
+@pytest.mark.parametrize("reason", [
+    "unavailable", "invalid_freshness", "scan_stamp_regressed"
+])
+def test_find_stale_recovery_invalid_lidar_is_terminal(reason):
+    invalid = (
+        False,
+        reason,
+        _recovery_lidar(reason=reason, available=False, valid=False),
+    )
+    manager, interlock = _recovery_manager([invalid])
+
+    assert manager._wait_for_find_stale_recovery(
+        interlock, "session-1"
+    ) == (False, reason)
+
+
+def test_find_stale_recovery_requires_motion_already_stopped():
+    fresh = (True, "fresh_clear", _recovery_lidar())
+    manager, interlock = _recovery_manager([fresh])
+    original_status = interlock.status
+    interlock.status = lambda: dict(original_status(), active_forward=True)
+
+    assert manager._wait_for_find_stale_recovery(
+        interlock, "session-1"
+    ) == (False, "forward_motion_not_stopped")
+    assert interlock.refresh_calls == 0
+
+
+def test_find_stale_recovery_preemption_fails_before_reassessment():
+    fresh = (True, "fresh_clear", _recovery_lidar())
+    manager, interlock = _recovery_manager([fresh])
+    manager.execution_authorization_provider = lambda: False
+
+    assert manager._wait_for_find_stale_recovery(
+        interlock, "session-1"
+    ) == (False, "preempted")
+    assert interlock.refresh_calls == 0
+
+
+class _SequencedForwardRobot(GuardedSearchRobot):
+    def __init__(self, results):
+        super().__init__()
+        self.results = list(results)
+
+    def move_forward(self, speed, seconds):
+        self.calls.append(("move_forward", speed, seconds))
+        return dict(self.results.pop(0))
+
+
+def _stale_forward_result(**updates):
+    result = {
+        "ok": False,
+        "forwarded": True,
+        "confirmed_forwarded": False,
+        "transport_attempted": True,
+        "bounded_forward_invalidated": True,
+        "transport_result": {"ok": True, "linear_x": 0.08, "duration": 0.5},
+        "error": "bounded_forward_invalidated",
+        "reason": "stale",
+    }
+    result.update(updates)
+    return result
+
+
+def test_stale_interrupted_attempt_is_not_replayed_and_next_is_attempt_four():
+    payloads = []
+    for name in ("z-after-1", "z-after-2", "z-after-stale", "z-after-4"):
+        payloads.extend(centered_candidate_payloads(name))
+    robot = _SequencedForwardRobot([
+        {"ok": True}, {"ok": True}, _stale_forward_result(), {"ok": True}
+    ])
+    vision = CandidateVisionAdapter([located_target(320)], payloads)
+    manager = BehaviorManager(robot_client=robot, vision_adapter=vision)
+    manager.lidar_session = "session-1"
+    manager._wait_for_find_stale_recovery = lambda *_: (True, "fresh_clear")
+
+    result = manager.execute(_mission())
+
+    assert result["reason"] == "approach_budget_exhausted_after_stale"
+    assert result["approach_chunks_attempted"] == 4
+    assert result["approach_chunks_completed"] == 3
+    assert [step["step_index"] for step in result["approach_steps"]] == [1, 2, 3, 4]
+    assert result["approach_steps"][2]["stale_recovery_reason"] == "fresh_clear"
+    assert len(_move_calls(robot)) == 4
+
+
+def test_stale_recovery_requires_fresh_target_confirmation_before_motion():
+    robot = _SequencedForwardRobot([_stale_forward_result()])
+    manager = BehaviorManager(
+        robot_client=robot,
+        vision_adapter=SequencedVisionAdapter([located_target(320)]),
+    )
+    manager.lidar_session = "session-1"
+    manager._wait_for_find_stale_recovery = lambda *_: (True, "fresh_clear")
+    manager._confirm_find_target_with_semantic = lambda *a, **k: (
+        None, "target_reconfirmation_failed", {}
+    )
+
+    result = manager.execute(_mission())
+
+    assert result["state"] == "TARGET_LOST_AFTER_APPROACH"
+    assert len(_move_calls(robot)) == 1
+
+
+def test_stale_transport_uncertainty_is_terminal_without_recovery():
+    robot = _SequencedForwardRobot([
+        _stale_forward_result(delivery_uncertain=True)
+    ])
+    manager = BehaviorManager(
+        robot_client=robot,
+        vision_adapter=SequencedVisionAdapter([located_target(320)]),
+    )
+    manager.lidar_session = "session-1"
+    manager._wait_for_find_stale_recovery = lambda *_: pytest.fail(
+        "transport uncertainty must not enter stale recovery"
+    )
+
+    result = manager.execute(_mission())
+
+    assert result["state"] == "APPROACH_BLOCKED"
+    assert len(_move_calls(robot)) == 1
+
+
+def test_dynamic_obstacle_invalidation_is_not_stale_recovery():
+    robot = _SequencedForwardRobot([
+        _stale_forward_result(reason="front_not_clear")
+    ])
+    manager = BehaviorManager(
+        robot_client=robot,
+        vision_adapter=SequencedVisionAdapter([located_target(320)]),
+    )
+    manager.lidar_session = "session-1"
+    manager._wait_for_find_stale_recovery = lambda *_: pytest.fail(
+        "dynamic obstacle must remain an immediate terminal STOP"
+    )
+
+    result = manager.execute(_mission())
+
+    assert result["state"] == "APPROACH_BLOCKED"
+    assert result["reason"] == "front_not_clear"
+    assert len(_move_calls(robot)) == 1
+
+
+def test_stale_on_attempt_four_never_creates_fifth_attempt():
+    payloads = []
+    for name in ("z-after-1", "z-after-2", "z-after-3"):
+        payloads.extend(centered_candidate_payloads(name))
+    robot = _SequencedForwardRobot([
+        {"ok": True}, {"ok": True}, {"ok": True}, _stale_forward_result()
+    ])
+    manager = BehaviorManager(
+        robot_client=robot,
+        vision_adapter=CandidateVisionAdapter([located_target(320)], payloads),
+    )
+    manager.lidar_session = "session-1"
+    manager._wait_for_find_stale_recovery = lambda *_: pytest.fail(
+        "exhausted approach budget must not enter recovery"
+    )
+
+    result = manager.execute(_mission())
+
+    assert result["reason"] == "approach_budget_exhausted_after_stale"
+    assert result["approach_chunks_attempted"] == 4
+    assert result["approach_chunks_completed"] == 3
+    assert len(_move_calls(robot)) == 4
+
+
 def test_approach_requires_post_motion_candidate_timestamp():
     target = located_target(320)
     target["last_seen"] = "z-cutoff"

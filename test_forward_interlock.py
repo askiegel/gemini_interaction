@@ -134,7 +134,13 @@ def test_bounded_forward_denied_before_transport(front, reason):
     interlock.stop()
 
 
-def test_bounded_forward_pending_invalidation_stops_and_does_not_replay():
+@pytest.mark.parametrize(("invalidation", "reason"), [
+    ("front", "front_not_clear"),
+    ("stale", "stale_lidar"),
+])
+def test_bounded_forward_pending_invalidation_stops_and_does_not_replay(
+    invalidation, reason
+):
     current = state()
     entered = threading.Event()
     release = threading.Event()
@@ -166,7 +172,10 @@ def test_bounded_forward_pending_invalidation_stops_and_does_not_replay():
     )
     thread.start()
     assert entered.wait(1)
-    current["sectors"]["front"]["state"] = "CAUTION"
+    if invalidation == "front":
+        current["sectors"]["front"]["state"] = "CAUTION"
+    else:
+        current["effective_age_seconds"] = 0.31
     interlock.refresh()
     assert interlock.status()["inhibited"] is True
     assert events == ["/motion", "/stop"]
@@ -179,7 +188,7 @@ def test_bounded_forward_pending_invalidation_stops_and_does_not_replay():
     assert interlock.status()["active_forward"] is False
     assert result["value"]["ok"] is False
     assert result["value"]["bounded_forward_invalidated"] is True
-    assert result["value"]["reason"] == "front_not_clear"
+    assert result["value"]["reason"] == reason
     assert result["value"]["transport_result"]["ok"] is True
     interlock.stop()
 
