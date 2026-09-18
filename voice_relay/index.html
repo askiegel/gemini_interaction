@@ -640,6 +640,15 @@
             </button>
 
             <div class="command-grid">
+                <button
+                    id="findMarvinButton"
+                    class="motion-capable-control"
+                    type="button"
+                    disabled
+                >
+                    Find Marvin
+                </button>
+
                 <button data-command="Find my backpack">
                     Find Backpack
                 </button>
@@ -664,11 +673,21 @@
                     Return Home
                 </button>
             </div>
+
+            <div class="find-marvin-status" aria-live="polite">
+                <strong>Motion-capable control · Marvin (teddy bear)</strong>
+                <span id="findMarvinPreflight">Waiting for safety telemetry.</span>
+                <span id="findMarvinMission">No Find Marvin mission submitted.</span>
+                <span id="findMarvinProgress">Centering —/— · Approach —/—</span>
+            </div>
         </div>
 
         <div class="card">
             <h2>Perception</h2>
 
+            <div class="camera-lidar-pair">
+            <div class="camera-live-panel">
+            <h3>Live Camera</h3>
             <div class="camera-stage">
                 <img
                     id="cameraImage"
@@ -695,6 +714,34 @@
                 class="camera-caption"
             >
                 Live camera unavailable
+            </div>
+            </div>
+
+            <aside class="mission-lidar-panel" aria-label="Live LiDAR beside camera">
+                <div class="mission-lidar-heading">
+                    <h3>Live LiDAR</h3>
+                    <strong id="missionLidarState">Unavailable</strong>
+                </div>
+                <div class="mission-lidar-stage">
+                    <canvas
+                        id="missionLidarCanvas"
+                        width="640"
+                        height="480"
+                        aria-label="Read-only robot-relative LiDAR scan; forward is up"
+                    ></canvas>
+                    <div id="missionLidarMessage" class="mission-lidar-message">
+                        Waiting for fresh LiDAR telemetry.
+                    </div>
+                </div>
+                <div class="mission-lidar-telemetry">
+                    <span>Session <strong id="missionLidarSession">—</strong></span>
+                    <span>Sequence <strong id="missionLidarSequence">—</strong></span>
+                    <span>Reason <strong id="missionLidarReason">unavailable</strong></span>
+                    <span>Front <strong id="missionLidarFront">UNKNOWN</strong></span>
+                    <span>Age <strong id="missionLidarAge">—</strong></span>
+                </div>
+                <p class="small-text">Read-only robot-relative scan. Forward is up.</p>
+            </aside>
             </div>
 
             <div class="tracking-preview-controls">
@@ -1976,6 +2023,14 @@
             document.getElementById("historyCount"),
         queueList:
             document.getElementById("queueList"),
+        findMarvinButton:
+            document.getElementById("findMarvinButton"),
+        findMarvinPreflight:
+            document.getElementById("findMarvinPreflight"),
+        findMarvinMission:
+            document.getElementById("findMarvinMission"),
+        findMarvinProgress:
+            document.getElementById("findMarvinProgress"),
         cameraImage:
             document.getElementById("cameraImage"),
         cameraOverlay:
@@ -2013,6 +2068,47 @@
     };
 
     let findObjectPreviewTracking = null;
+    let findMarvinMissionId = null;
+    let findMarvinSubmitting = false;
+
+    function findMarvinPreflight(status) {
+        const runtime = status.runtime || {};
+        const missions = status.missions || {};
+        const lidar = runtime.lidar || {};
+        const interlock = runtime.forward_interlock || {};
+        const robot = status.robot || {};
+        const motion = robot.motion || {};
+        const safe = (
+            runtime.connected === true
+            && runtime.running === true
+            && !missions.active
+            && missions.queue_count === 0
+            && runtime.last_error === null
+            && lidar.running === true
+            && lidar.available === true
+            && lidar.valid === true
+            && lidar.reason === "fresh"
+            && lidar.front_state === "CLEAR"
+            && interlock.configured === true
+            && interlock.monitor_running === true
+            && interlock.forward_permitted === true
+            && interlock.reason === "fresh_clear"
+            && interlock.active_forward === false
+            && interlock.pending_forward === false
+            && robot.connected === true
+            && robot.status === "READY"
+            && robot.ros_ready === true
+            && motion.linear_x === 0
+            && motion.angular_z === 0
+            && motion.streaming === false
+        );
+        return {
+            safe,
+            reason: safe
+                ? "Safety preflight passed. Ready to find Marvin."
+                : "Disabled: runtime, mission, LiDAR, interlock, or stopped-state preflight is not satisfied."
+        };
+    }
 
     function clearTrackingOverlay() {
         const canvas = elements.cameraOverlay;
@@ -2578,9 +2674,15 @@
 
             const active = missions.active;
 
+            const marvinActive = Boolean(
+                active
+                && String(active.mission_type || "").toUpperCase() === "FIND_OBJECT"
+                && String(active.target || "").toLowerCase() === "teddy bear"
+            );
+
             elements.activeMission.textContent =
                 active
-                    ? active.mission_type
+                    ? (marvinActive ? "Marvin (teddy bear)" : active.mission_type)
                     : "None";
 
             elements.runtimeState.textContent =
@@ -2596,6 +2698,38 @@
 
             const lastResult =
                 missions.last_result || {};
+
+            const preflight = findMarvinPreflight(status);
+            elements.findMarvinButton.disabled = (
+                findMarvinSubmitting || !preflight.safe
+            );
+            elements.findMarvinPreflight.textContent = preflight.reason;
+
+            const marvinResult = (
+                String(lastResult.behavior || "").toUpperCase() === "FIND_OBJECT"
+                && String(lastResult.target || "").toLowerCase() === "teddy bear"
+            ) ? lastResult : null;
+            const marvinTelemetry = marvinActive ? tracking : (marvinResult || {});
+            if (marvinActive || marvinResult) {
+                const state = marvinTelemetry.state
+                    || (active ? active.status : null)
+                    || "ACCEPTED";
+                const reason = marvinTelemetry.reason
+                    ? " · " + marvinTelemetry.reason
+                    : "";
+                elements.findMarvinMission.textContent =
+                    "Marvin (teddy bear) · " + state + reason
+                    + (findMarvinMissionId ? " · " + findMarvinMissionId : "");
+                elements.findMarvinProgress.textContent =
+                    "Centering "
+                    + String(marvinTelemetry.centering_turn_chunks_attempted ?? "—")
+                    + "/"
+                    + String(marvinTelemetry.centering_turn_chunks_completed ?? "—")
+                    + " · Approach "
+                    + String(marvinTelemetry.approach_chunks_attempted ?? "—")
+                    + "/"
+                    + String(marvinTelemetry.approach_chunks_completed ?? "—");
+            }
 
             elements.behaviorState.textContent =
                 tracking.state ||
@@ -2868,6 +3002,33 @@
         "click",
         clearFindObjectPreview
     );
+
+    elements.findMarvinButton.addEventListener("click", async () => {
+        if (elements.findMarvinButton.disabled || findMarvinSubmitting) return;
+        findMarvinSubmitting = true;
+        elements.findMarvinButton.disabled = true;
+        elements.findMarvinMission.textContent = "Submitting guarded Find Marvin mission...";
+        try {
+            const response = await fetch("/dashboard/find-marvin", {
+                method: "POST",
+                headers: {"Content-Type": "application/json"},
+                body: JSON.stringify({}),
+            });
+            const payload = await response.json();
+            if (!response.ok || payload.accepted !== true || !payload.mission) {
+                throw new Error(payload.error || (payload.reasons || []).join("; ") || "Mission rejected.");
+            }
+            findMarvinMissionId = payload.mission.mission_id || null;
+            elements.findMarvinMission.textContent =
+                "Accepted Marvin (teddy bear)"
+                + (findMarvinMissionId ? " · " + findMarvinMissionId : "");
+        } catch (error) {
+            elements.findMarvinMission.textContent = "Find Marvin rejected · " + error.message;
+        } finally {
+            findMarvinSubmitting = false;
+            refreshStatus();
+        }
+    });
 
     document.querySelectorAll(
         "[data-command]"

@@ -644,6 +644,162 @@
     }
 })();
 
+/* Mission camera companion: read-only robot-relative LiDAR */
+(function () {
+    "use strict";
+    const LIDAR_URL = "/dashboard/lidar";
+    const STATUS_URL = "/dashboard/status";
+    // Mirrors voice_relay/lidar_sectors.py: raw lidar_link angles require
+    // +90 degrees to become robot bearings (0 forward, positive left).
+    const SCAN_TO_ROBOT_ROTATION_RADIANS = Math.PI / 2;
+    // Visualization-only mirror of production front sector [-20, +20).
+    const FRONT_SECTOR_HALF_RADIANS = 20 * Math.PI / 180;
+    let requestInFlight = false;
+
+    function byId(id) { return document.getElementById(id); }
+    function setText(id, value) {
+        const node = byId(id);
+        if (node) node.textContent = value;
+    }
+    function visible() {
+        const page = byId("missionPage");
+        return Boolean(page && !page.hidden && page.classList.contains("active"));
+    }
+    function clear(message, state) {
+        const canvas = byId("missionLidarCanvas");
+        if (canvas) {
+            const context = canvas.getContext("2d");
+            context.fillStyle = "#020617";
+            context.fillRect(0, 0, canvas.width, canvas.height);
+        }
+        const overlay = byId("missionLidarMessage");
+        if (overlay) {
+            overlay.textContent = message;
+            overlay.hidden = false;
+        }
+        setText("missionLidarState", state || "Unavailable");
+    }
+    function robotRelativePoint(centerX, centerY, bearing, range, scale) {
+        return {
+            // Positive robot bearings are left, so screen X decreases.
+            x: centerX - Math.sin(bearing) * range * scale,
+            y: centerY - Math.cos(bearing) * range * scale,
+        };
+    }
+    function draw(scan, frontState) {
+        const canvas = byId("missionLidarCanvas");
+        if (!canvas) return;
+        const context = canvas.getContext("2d");
+        const width = canvas.width;
+        const height = canvas.height;
+        const centerX = width / 2;
+        const centerY = height / 2;
+        const scale = Math.min(width, height) / 10;
+        context.fillStyle = "#020617";
+        context.fillRect(0, 0, width, height);
+
+        context.fillStyle = frontState === "CLEAR"
+            ? "rgba(34,197,94,.15)"
+            : "rgba(239,68,68,.20)";
+        context.beginPath();
+        context.moveTo(centerX, centerY);
+        context.arc(
+            centerX,
+            centerY,
+            4 * scale,
+            -Math.PI / 2 - FRONT_SECTOR_HALF_RADIANS,
+            -Math.PI / 2 + FRONT_SECTOR_HALF_RADIANS
+        );
+        context.closePath();
+        context.fill();
+
+        context.strokeStyle = "rgba(148,163,184,.3)";
+        for (let meters = 1; meters <= 4; meters += 1) {
+            context.beginPath();
+            context.arc(centerX, centerY, meters * scale, 0, Math.PI * 2);
+            context.stroke();
+        }
+        context.fillStyle = "#e2e8f0";
+        context.textAlign = "center";
+        context.fillText("FORWARD ↑", centerX, 18);
+
+        let rawAngle = Number(scan.angle_min);
+        const increment = Number(scan.angle_increment);
+        const minimum = Number(scan.range_min);
+        const maximum = Math.min(Number(scan.range_max), 4);
+        context.fillStyle = "#38bdf8";
+        (scan.ranges || []).forEach(function (raw) {
+            const range = Number(raw);
+            if (raw !== null && Number.isFinite(range)
+                && range >= minimum && range <= maximum) {
+                const robotBearing = (
+                    rawAngle + SCAN_TO_ROBOT_ROTATION_RADIANS
+                );
+                const point = robotRelativePoint(
+                    centerX, centerY, robotBearing, range, scale
+                );
+                context.fillRect(point.x - 1.5, point.y - 1.5, 3, 3);
+            }
+            rawAngle += increment;
+        });
+        context.fillStyle = "#f59e0b";
+        context.beginPath();
+        context.moveTo(centerX, centerY - 14);
+        context.lineTo(centerX + 11, centerY + 11);
+        context.lineTo(centerX - 11, centerY + 11);
+        context.closePath();
+        context.fill();
+    }
+    async function refresh() {
+        if (!visible() || requestInFlight) return;
+        requestInFlight = true;
+        try {
+            const responses = await Promise.all([
+                fetch(STATUS_URL, {cache: "no-store"}),
+                fetch(LIDAR_URL, {cache: "no-store"}),
+            ]);
+            const status = await responses[0].json();
+            const scanPayload = await responses[1].json();
+            const lidar = (status.runtime || {}).lidar || {};
+            setText("missionLidarSession", lidar.producer_session || "—");
+            setText("missionLidarSequence", String(lidar.acquisition_sequence ?? "—"));
+            setText("missionLidarReason", lidar.reason || "unavailable");
+            setText("missionLidarFront", lidar.front_state || "UNKNOWN");
+            const age = Number(lidar.effective_age_seconds);
+            setText("missionLidarAge", Number.isFinite(age) ? age.toFixed(3) + " s" : "—");
+            const fresh = responses[0].ok && responses[1].ok
+                && lidar.running === true && lidar.available === true
+                && lidar.valid === true && lidar.reason === "fresh"
+                && scanPayload.ok === true && scanPayload.telemetry
+                && scanPayload.telemetry.available === true
+                && scanPayload.telemetry.scan;
+            if (!fresh) {
+                clear("LiDAR is stale, invalid, or unavailable. Scan points hidden.", lidar.reason || "Unavailable");
+                return;
+            }
+            draw(scanPayload.telemetry.scan, lidar.front_state);
+            setText("missionLidarState", lidar.front_state || "Fresh");
+            const overlay = byId("missionLidarMessage");
+            if (overlay) overlay.hidden = true;
+        } catch (error) {
+            clear("LiDAR unavailable: " + error.message, "Unavailable");
+        } finally {
+            requestInFlight = false;
+        }
+    }
+    function initialize() {
+        if (!byId("missionLidarCanvas")) return;
+        clear("Waiting for fresh LiDAR telemetry.", "Unavailable");
+        refresh();
+        window.setInterval(refresh, 500);
+    }
+    if (document.readyState === "loading") {
+        document.addEventListener("DOMContentLoaded", initialize);
+    } else {
+        initialize();
+    }
+})();
+
 /* =========================================================
  * Operator Console v3 page navigation
  * ========================================================= */

@@ -2121,6 +2121,16 @@ class VoiceRelayHandler(BaseHTTPRequestHandler):
                     if runtime
                     else runtime_response["error"]
                 ),
+                "lidar": (
+                    runtime.get("lidar_perception", {})
+                    if runtime
+                    else {}
+                ),
+                "forward_interlock": (
+                    runtime.get("forward_interlock", {})
+                    if runtime
+                    else {}
+                ),
             },
             "missions": {
                 "active": active_mission,
@@ -2176,6 +2186,11 @@ class VoiceRelayHandler(BaseHTTPRequestHandler):
                     if robot
                     else False
                 ),
+                "motion": (
+                    robot.get("motion", {})
+                    if robot
+                    else {}
+                ),
                 "last_error": (
                     robot.get("ros_error")
                     if robot
@@ -2183,6 +2198,86 @@ class VoiceRelayHandler(BaseHTTPRequestHandler):
                 ),
             },
         }
+
+    def submit_find_marvin(self):
+        """Fail closed, then submit the one fixed FIND_OBJECT shortcut."""
+        status = self.dashboard_status()
+        runtime = status.get("runtime", {})
+        missions = status.get("missions", {})
+        lidar_value = runtime.get("lidar", {})
+        lidar = lidar_value if isinstance(lidar_value, dict) else {}
+        interlock_value = runtime.get("forward_interlock", {})
+        interlock = interlock_value if isinstance(interlock_value, dict) else {}
+        robot = status.get("robot", {})
+        motion_value = robot.get("motion", {})
+        motion = motion_value if isinstance(motion_value, dict) else {}
+        failures = []
+
+        def stopped_number(value):
+            return bool(
+                isinstance(value, (int, float))
+                and not isinstance(value, bool)
+                and math.isfinite(value)
+                and value == 0
+            )
+
+        requirements = (
+            (runtime.get("connected") is True, "runtime status unavailable"),
+            (runtime.get("running") is True, "runtime is not running"),
+            (missions.get("active") is None, "another mission is active"),
+            (missions.get("queue_count") == 0, "mission queue is not empty"),
+            (runtime.get("last_error") is None, "runtime reports an error"),
+            (lidar.get("running") is True, "LiDAR worker is not running"),
+            (lidar.get("available") is True, "LiDAR is unavailable"),
+            (lidar.get("valid") is True, "LiDAR is invalid"),
+            (lidar.get("reason") == "fresh", "LiDAR is not fresh"),
+            (lidar.get("front_state") == "CLEAR", "LiDAR front is not clear"),
+            (interlock.get("configured") is True, "forward interlock is not configured"),
+            (interlock.get("monitor_running") is True, "forward interlock monitor is not running"),
+            (interlock.get("forward_permitted") is True, "forward motion is not permitted"),
+            (interlock.get("reason") == "fresh_clear", "forward interlock is not fresh_clear"),
+            (interlock.get("active_forward") is False, "forward motion is active"),
+            (interlock.get("pending_forward") is False, "forward motion is pending"),
+            (robot.get("connected") is True, "Robot Bridge status unavailable"),
+            (robot.get("status") == "READY", "Robot Bridge is not READY"),
+            (robot.get("ros_ready") is True, "Robot Bridge ROS is not ready"),
+            (isinstance(motion_value, dict), "Robot Bridge motion telemetry is unavailable"),
+            (stopped_number(motion.get("linear_x")), "Robot Bridge linear motion is not zero"),
+            (stopped_number(motion.get("angular_z")), "Robot Bridge angular motion is not zero"),
+            (motion.get("streaming") is False, "Robot Bridge streaming motion is active"),
+        )
+        failures.extend(reason for safe, reason in requirements if not safe)
+
+        if failures:
+            return 409, {
+                "ok": False,
+                "accepted": False,
+                "error": "Find Marvin preflight failed.",
+                "reasons": failures,
+            }
+
+        payload = {
+            "source_text": "Find Marvin.",
+            "intent": {
+                "intent": "FIND_OBJECT",
+                "speech": "Find Marvin.",
+                "target": "teddy bear",
+            },
+        }
+        response = request_json(
+            "POST",
+            f"{COGNITIVE_RUNTIME_URL}/missions",
+            payload=payload,
+            timeout=15.0,
+        )
+        return (
+            response["status_code"] or 503,
+            response["data"] or {
+                "ok": False,
+                "accepted": False,
+                "error": response["error"] or "Runtime mission submission failed.",
+            },
+        )
 
     def relay_runtime_json(
         self,
@@ -3090,6 +3185,23 @@ class VoiceRelayHandler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         path = urlparse(self.path).path
+
+        if path == "/dashboard/find-marvin":
+            try:
+                payload = self.read_json_body()
+            except ValueError as exc:
+                self.send_json(400, {"ok": False, "error": str(exc)})
+                return
+            if payload != {}:
+                self.send_json(400, {
+                    "ok": False,
+                    "accepted": False,
+                    "error": "Find Marvin accepts no browser-supplied mission fields.",
+                })
+                return
+            status_code, response = self.submit_find_marvin()
+            self.send_json(status_code, response)
+            return
 
         if path == "/dashboard/lidar-sectors":
             self.send_json(405, {
