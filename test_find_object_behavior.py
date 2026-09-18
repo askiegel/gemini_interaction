@@ -1624,12 +1624,20 @@ def test_confirmed_candidate_is_promoted_without_turn():
     vision = CandidateVisionAdapter(
         [not_found(), found_target()],
         [
-            candidate_detection("frame-1"),
-            candidate_detection("frame-2", confidence=0.12),
-            candidate_detection("frame-3", confidence=0.10),
-            candidate_detection("post-1"),
-            candidate_detection("post-2", confidence=0.12),
-            candidate_detection("post-3", confidence=0.10),
+            candidate_detection("frame-1", bbox=(200, 160, 440, 460)),
+            candidate_detection(
+                "frame-2", bbox=(200, 160, 440, 460), confidence=0.12
+            ),
+            candidate_detection(
+                "frame-3", bbox=(200, 160, 440, 460), confidence=0.10
+            ),
+            candidate_detection("post-1", bbox=(200, 160, 440, 460)),
+            candidate_detection(
+                "post-2", bbox=(200, 160, 440, 460), confidence=0.12
+            ),
+            candidate_detection(
+                "post-3", bbox=(200, 160, 440, 460), confidence=0.10
+            ),
         ],
     )
     manager = BehaviorManager(robot_client=GuardedSearchRobot(), vision_adapter=vision)
@@ -1650,21 +1658,29 @@ def test_confirmed_candidate_is_promoted_without_turn():
 
 def test_confirmed_candidate_after_one_turn_stops_search():
     first_attempt = [
-        candidate_detection("a-1"),
+        candidate_detection("a-1", bbox=(200, 160, 440, 460)),
         candidate_detection("a-2", bbox=(20, 20, 120, 120)),
         candidate_detection("a-3", bbox=(350, 20, 450, 120)),
     ]
     second_attempt = [
-        candidate_detection("b-1"),
-        candidate_detection("b-2", confidence=0.11),
-        candidate_detection("b-3", confidence=0.10),
+        candidate_detection("b-1", bbox=(200, 160, 440, 460)),
+        candidate_detection(
+            "b-2", bbox=(200, 160, 440, 460), confidence=0.11
+        ),
+        candidate_detection(
+            "b-3", bbox=(200, 160, 440, 460), confidence=0.10
+        ),
     ]
     vision = CandidateVisionAdapter(
         [not_found(), not_found(), found_target()],
         first_attempt + second_attempt + [
-            candidate_detection("post-1"),
-            candidate_detection("post-2", confidence=0.11),
-            candidate_detection("post-3", confidence=0.10),
+            candidate_detection("post-1", bbox=(200, 160, 440, 460)),
+            candidate_detection(
+                "post-2", bbox=(200, 160, 440, 460), confidence=0.11
+            ),
+            candidate_detection(
+                "post-3", bbox=(200, 160, 440, 460), confidence=0.10
+            ),
         ],
     )
     manager = BehaviorManager(robot_client=GuardedSearchRobot(), vision_adapter=vision)
@@ -1707,6 +1723,27 @@ def centered_candidate_payloads(prefix, cx=320):
     ]
 
 
+def close_candidate_payloads(prefix, cx=320):
+    bbox = (cx - 150, 90, cx + 150, 390)
+    return [
+        candidate_detection(f"{prefix}-1", bbox=bbox, confidence=0.12),
+        candidate_detection(f"{prefix}-2", bbox=bbox, confidence=0.11),
+        candidate_detection(f"{prefix}-3", bbox=bbox, confidence=0.10),
+    ]
+
+
+def close_located_target(cx=320):
+    target = located_target(cx)
+    target["area"] = 90000.0
+    target["bbox"] = {
+        "x1": float(cx) - 150.0,
+        "y1": 90.0,
+        "x2": float(cx) + 150.0,
+        "y2": 390.0,
+    }
+    return target
+
+
 def make_centering_manager(observations, candidate_payloads, turn_results=None):
     vision = CandidateVisionAdapter(observations, candidate_payloads)
     manager = BehaviorManager(
@@ -1742,6 +1779,214 @@ def _multi_step_manager(candidate_payloads, *, initial_cx=320.0, interlock=None)
 
 def _move_calls(robot):
     return [call for call in robot.calls if call[0] == "move_forward"]
+
+
+def test_cached_close_target_requires_fresh_temporal_arrival_confirmation():
+    payloads = centered_candidate_payloads("not-close-initial")
+    payloads.extend(centered_candidate_payloads("not-close-after-forward"))
+    vision = CandidateVisionAdapter([close_located_target()], payloads)
+    robot = GuardedSearchRobot()
+    manager = BehaviorManager(robot_client=robot, vision_adapter=vision)
+    manager.lidar_session = "session-1"
+    manager.FIND_APPROACH_MAX_CHUNKS = 1
+
+    result = manager.execute(_mission())
+
+    assert result["state"] != "TARGET_REACHED"
+    assert len(_move_calls(robot)) == 1
+
+
+def test_fresh_close_initial_cluster_reaches_without_forward_motion():
+    vision = CandidateVisionAdapter(
+        [close_located_target()], close_candidate_payloads("close-initial")
+    )
+    robot = GuardedSearchRobot()
+    manager = BehaviorManager(robot_client=robot, vision_adapter=vision)
+    manager.lidar_session = "session-1"
+
+    result = manager.execute(_mission())
+
+    assert result["state"] == "TARGET_REACHED"
+    assert result["ok"] is True
+    assert result["executed"] is True
+    assert result["completed"] is True
+    assert result["target_found"] is True
+    assert result["approach_chunks_attempted"] == 0
+    assert result["approach_chunks_completed"] == 0
+    assert result["arrival_area_fraction_threshold"] == 0.244140625
+    assert result["arrival_support_required"] == 2
+    assert result["arrival_support_count"] == 3
+    assert result["arrival_area_fractions"] == pytest.approx(
+        [90000.0 / (640.0 * 480.0)] * 3
+    )
+    assert result["confirmation_diagnostics"]["winning_cluster_support"] == 3
+    assert _move_calls(robot) == []
+
+
+def test_one_anomalously_large_frame_does_not_declare_arrival():
+    payloads = [close_candidate_payloads("anomaly")[0]]
+    payloads.extend(centered_candidate_payloads("support")[1:])
+    vision = CandidateVisionAdapter([], payloads)
+    manager = BehaviorManager(
+        robot_client=GuardedSearchRobot(), vision_adapter=vision
+    )
+
+    confirmed = manager._confirm_target_candidates("backpack")
+
+    assert confirmed is not None
+    assert confirmed["_find_arrival_evidence"]["arrival_support_count"] == 1
+
+
+def test_duplicate_timestamp_does_not_count_twice_for_arrival():
+    close = close_candidate_payloads("duplicate")
+    close[1]["timestamp"] = close[0]["timestamp"]
+    close[2] = centered_candidate_payloads("distinct")[0]
+    vision = CandidateVisionAdapter([], close)
+    manager = BehaviorManager(
+        robot_client=GuardedSearchRobot(), vision_adapter=vision
+    )
+
+    confirmed = manager._confirm_target_candidates("backpack")
+
+    assert confirmed is not None
+    assert confirmed["_find_arrival_evidence"]["arrival_support_count"] == 1
+
+
+def test_multiple_close_detections_in_one_frame_count_as_one_arrival_support():
+    manager = BehaviorManager(
+        robot_client=GuardedSearchRobot(),
+        vision_adapter=CandidateVisionAdapter([], []),
+    )
+
+    def close_observation(timestamp, confidence):
+        raw = candidate_detection(
+            timestamp, bbox=(170, 90, 470, 390), confidence=confidence
+        )["detections"][0]
+        observation = CandidateVisionAdapter.normalize_detection(raw)
+        observation["source_timestamp"] = timestamp
+        return observation
+
+    observations = [
+        close_observation("same-frame", 0.9),
+        close_observation("same-frame", 0.8),
+    ]
+    one_frame = manager._find_arrival_evidence_for_cluster(
+        observations, {"same-frame"}
+    )
+
+    assert one_frame["arrival_support_count"] == 1
+    assert one_frame["arrival_support_timestamps"] == ["same-frame"]
+    assert one_frame["arrival_support_count"] < manager.FIND_ARRIVAL_SUPPORT_REQUIRED
+
+    observations.append(close_observation("second-frame", 0.7))
+    two_frames = manager._find_arrival_evidence_for_cluster(
+        observations, {"same-frame", "second-frame"}
+    )
+
+    assert two_frames["arrival_support_count"] == 2
+    assert set(two_frames["arrival_support_timestamps"]) == {
+        "same-frame", "second-frame"
+    }
+
+
+def test_arrival_evidence_cannot_combine_mismatched_target_clusters():
+    payloads = [
+        close_candidate_payloads("left", cx=170)[0],
+        close_candidate_payloads("right", cx=470)[0],
+        centered_candidate_payloads("left-support", cx=170)[0],
+    ]
+    vision = CandidateVisionAdapter([], payloads)
+    manager = BehaviorManager(
+        robot_client=GuardedSearchRobot(), vision_adapter=vision
+    )
+
+    confirmed = manager._confirm_target_candidates("backpack")
+
+    assert confirmed is not None
+    assert confirmed["cx"] == 170.0
+    assert confirmed["_find_arrival_evidence"]["arrival_support_count"] == 1
+
+
+@pytest.mark.parametrize(
+    "observation",
+    [
+        {"area": None, "image_width": 640, "image_height": 480},
+        {"area": "90000", "image_width": 640, "image_height": 480},
+        {"area": 90000, "image_width": None, "image_height": 480},
+        {"area": 90000, "image_width": 0, "image_height": 480},
+        {"area": 90000, "image_width": 640, "image_height": float("nan")},
+        {"area": float("inf"), "image_width": 640, "image_height": 480},
+    ],
+)
+def test_invalid_arrival_geometry_is_nonqualifying(observation):
+    assert BehaviorManager._find_target_area_fraction(observation) is None
+
+
+def test_arrival_area_fraction_accepts_one_and_rejects_above_one():
+    assert BehaviorManager._find_target_area_fraction({
+        "area": 640 * 480,
+        "image_width": 640,
+        "image_height": 480,
+    }) == 1.0
+    assert BehaviorManager._find_target_area_fraction({
+        "area": (640 * 480) + 1,
+        "image_width": 640,
+        "image_height": 480,
+    }) is None
+
+
+@pytest.mark.parametrize("arrival_step", [1, 2, 3])
+def test_arrival_after_bounded_chunk_stops_before_next_forward(arrival_step):
+    manager, robot, _vision = _multi_step_manager([])
+    confirmations = []
+    for step in range(1, arrival_step + 1):
+        raw = centered_candidate_payloads(f"confirmed-{step}")[0][
+            "detections"
+        ][0]
+        target = CandidateVisionAdapter.normalize_detection(raw)
+        target.update({
+            "target": "backpack",
+            "source_timestamp": f"confirmed-{step}",
+            "raw_detection": dict(raw),
+        })
+        if step == arrival_step:
+            target["_find_arrival_evidence"] = {
+                "arrival_support_count": 2,
+                "arrival_area_fractions": [0.25, 0.26],
+            }
+            target["_find_confirmation_diagnostics"] = {
+                "winning_cluster_support": 2,
+            }
+        confirmations.append((target, "target_confirmed", {}))
+    manager._confirm_find_target_with_semantic = (
+        lambda *args, **kwargs: confirmations.pop(0)
+    )
+
+    result = manager.execute(_mission())
+
+    assert result["state"] == "TARGET_REACHED"
+    assert result["approach_chunks_attempted"] == arrival_step
+    assert result["approach_chunks_completed"] == arrival_step
+    assert len(_move_calls(robot)) == arrival_step
+
+
+def test_post_centering_confirmation_can_declare_target_reached():
+    manager, robot, _vision = _multi_step_manager(
+        close_candidate_payloads("after-centering"), initial_cx=145
+    )
+    turns = []
+    manager.execute_guarded_turn = (
+        lambda direction, speed, duration, **kwargs: turns.append(direction)
+        or {"ok": True, "permitted": True, "reason": "completed"}
+    )
+
+    result = manager.execute(_mission())
+
+    assert result["state"] == "TARGET_REACHED"
+    assert result["centering_turn_chunks_attempted"] == 1
+    assert result["centering_turn_chunks_completed"] == 1
+    assert turns == ["LEFT"]
+    assert _move_calls(robot) == []
 
 
 def test_four_step_approach_sequence_is_bounded_and_uses_fixed_forward_pulses():
@@ -2405,6 +2650,23 @@ def test_stale_recovery_requires_fresh_target_confirmation_before_motion():
     assert len(_move_calls(robot)) == 1
 
 
+def test_stale_recovery_fresh_confirmation_can_declare_target_reached():
+    robot = _SequencedForwardRobot([_stale_forward_result()])
+    vision = CandidateVisionAdapter(
+        [located_target(320)], close_candidate_payloads("stale-recovered")
+    )
+    manager = BehaviorManager(robot_client=robot, vision_adapter=vision)
+    manager.lidar_session = "session-1"
+    manager._wait_for_find_stale_recovery = lambda *_: (True, "fresh_clear")
+
+    result = manager.execute(_mission())
+
+    assert result["state"] == "TARGET_REACHED"
+    assert result["approach_chunks_attempted"] == 1
+    assert result["approach_chunks_completed"] == 0
+    assert len(_move_calls(robot)) == 1
+
+
 def test_stale_transport_uncertainty_is_terminal_without_recovery():
     robot = _SequencedForwardRobot([
         _stale_forward_result(delivery_uncertain=True)
@@ -2511,7 +2773,9 @@ class IdentityChangingCandidateVision(CandidateVisionAdapter):
 def _identity_change_payloads(track_ids):
     payloads = []
     for index, track_id in enumerate(track_ids, start=1):
-        payload = candidate_detection(f"identity-frame-{index}")
+        payload = candidate_detection(
+            f"identity-frame-{index}", bbox=(200, 160, 440, 460)
+        )
         payload["detections"][0]["track_id"] = track_id
         payloads.append(payload)
     return payloads
@@ -3306,6 +3570,31 @@ def test_front_blocked_right_clearer_turns_right_then_reacquires():
     assert len(_move_calls(robot)) == 1
 
 
+def test_post_avoidance_confirmation_can_declare_target_reached():
+    manager, robot, _vision = _make_avoidance_manager(
+        [_avoidance_lidar_snapshot()],
+        close_candidate_payloads("close-after-avoidance"),
+    )
+    manager._promote_confirmed_target = (
+        BehaviorManager._promote_confirmed_target.__get__(
+            manager, BehaviorManager
+        )
+    )
+    turns = []
+    manager.execute_guarded_turn = (
+        lambda direction, speed, duration, **kwargs: turns.append(direction)
+        or {"ok": True, "permitted": True, "reason": "completed"}
+    )
+
+    result = manager.execute(_mission())
+
+    assert result["state"] == "TARGET_REACHED"
+    assert result["avoidance_maneuvers_attempted"] == 1
+    assert result["avoidance_maneuvers_completed"] == 1
+    assert turns == ["LEFT"]
+    assert _move_calls(robot) == []
+
+
 @pytest.mark.parametrize(
     "snapshot_kwargs",
     [
@@ -3636,6 +3925,43 @@ def test_post_bypass_blocked_right_centering_uses_one_clearance_forward():
     assert clearance_steps[0]["post_motion_confirmation_status"] == (
         "target_confirmed"
     )
+
+
+def test_post_clearance_confirmation_can_declare_target_reached():
+    reached = close_located_target(320)
+    reached["_find_arrival_evidence"] = {
+        "arrival_support_count": 2,
+        "arrival_area_fractions": [0.25, 0.26],
+    }
+    reached["_find_confirmation_diagnostics"] = {
+        "winning_cluster_support": 2,
+    }
+    manager, robot = _clearance_forward_fixture(
+        promoted_targets=[located_target(391), located_target(391), reached]
+    )
+    turns = []
+
+    def turn(direction, speed, duration, **kwargs):
+        turns.append(direction)
+        if len(turns) == 1:
+            return {"ok": True, "permitted": True, "reason": "completed"}
+        return {
+            "ok": False,
+            "permitted": True,
+            "reason": "turn_side_not_clear",
+            "transport_attempted": False,
+        }
+
+    manager.execute_guarded_turn = turn
+
+    result = manager.execute(_mission())
+
+    assert result["state"] == "TARGET_REACHED"
+    assert result["clearance_forward_attempted"] is True
+    assert result["clearance_forward_completed"] is True
+    assert result["approach_chunks_attempted"] == 2
+    assert result["approach_chunks_completed"] == 2
+    assert len(_move_calls(robot)) == 2
 
 
 def test_post_bypass_blocked_left_centering_uses_one_clearance_forward():

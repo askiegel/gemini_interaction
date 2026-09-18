@@ -82,6 +82,23 @@ def test_centered_target():
     assert tracking["distance_state"] == "TOO_FAR"
 
 
+def test_target_reached_maps_to_existing_at_distance_state():
+    tracking = build_tracking_state({
+        "behavior": "FIND_OBJECT",
+        "state": "TARGET_REACHED",
+        "target": "backpack",
+        "target_area": 90000,
+    })
+    assert tracking["distance_state"] == "AT_DISTANCE"
+
+    arrived = build_tracking_state({
+        "behavior": "FIND_OBJECT",
+        "state": "ARRIVED",
+        "target": "backpack",
+    })
+    assert arrived["distance_state"] == "AT_DISTANCE"
+
+
 def test_stop_clears_tracking():
     previous = {
         **empty_tracking_state(),
@@ -192,6 +209,7 @@ def main():
     test_centering_left()
     test_centering_right()
     test_centered_target()
+    test_target_reached_maps_to_existing_at_distance_state()
     test_stop_clears_tracking()
     test_nonvisual_behavior_preserves_tracking()
     test_find_object_bbox_precedence_and_fallbacks()

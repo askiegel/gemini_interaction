@@ -227,12 +227,13 @@ def _distance_state(
 
     if state in {
         "ARRIVED",
+        "TARGET_REACHED",
         "MAINTAINING_DISTANCE",
         "TOO_CLOSE",
         "TOO_FAR",
         "AT_DISTANCE",
     }:
-        if state == "ARRIVED":
+        if state in {"ARRIVED", "TARGET_REACHED"}:
             return "AT_DISTANCE"
 
         if state == "MAINTAINING_DISTANCE":
