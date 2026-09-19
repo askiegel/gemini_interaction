@@ -438,6 +438,14 @@ class _SemanticPreempted(Exception):
     """Unwind FIND_OBJECT without promoting late perception or issuing motion."""
 
 
+class _MarvinProposalNotCentered(Exception):
+    """Carry the first-stage Marvin proposal geometry to finalization."""
+
+    def __init__(self, geometry):
+        super().__init__("marvin_yolo_proposal_not_centered")
+        self.geometry = dict(geometry)
+
+
 class BehaviorManager:
     MARVIN_SEMANTIC_TARGET = "marvin"
     # A seed spanning almost the whole image is a semantic region, not a
@@ -1461,159 +1469,165 @@ class BehaviorManager:
                 episode["used"] = True
                 telemetry = episode["telemetry"]
                 telemetry["semantic_reacquisition_attempted"] = True
-                frame = self._semantic_bounded_call(
-                    self.semantic_vision.fetch_frame,
-                    self.SEMANTIC_FRAME_TIMEOUT_SECONDS,
-                    episode,
-                )
-                self._semantic_check_current(episode)
-                semantic = self._semantic_bounded_call(
-                    lambda: self.semantic_vision.describe_marvin(frame),
-                    self.SEMANTIC_IMAGE_TIMEOUT_SECONDS,
-                    episode,
-                )
-                self._semantic_check_current(episode)
+                proposal_geometry = {}
+
+                def require_centered_yolo_bbox(bbox, width, _height):
+                    center_x = (bbox["x1"] + bbox["x2"]) / 2.0
+                    horizontal_error = center_x - width / 2.0
+                    proposal_geometry.update(
+                        yolo_seed_bbox=dict(bbox),
+                        yolo_center_x=center_x,
+                        yolo_horizontal_error_pixels=horizontal_error,
+                    )
+                    if abs(horizontal_error) > self.FIND_CENTER_TOLERANCE_PIXELS:
+                        raise ValueError("marvin_yolo_proposal_not_centered")
+
+                try:
+                    acquired = self._acquire_marvin_proposal_tracker_observation(
+                        execution_guard=lambda: self._semantic_check_current(episode),
+                        episode=episode,
+                        before_tracker_initialization=require_centered_yolo_bbox,
+                    )
+                except ValueError as exc:
+                    if str(exc) != "marvin_yolo_proposal_not_centered":
+                        raise
+                    raise _MarvinProposalNotCentered(proposal_geometry) from exc
                 telemetry.update(
                     semantic_reacquisition_completed=True,
-                    semantic_reacquisition_found=semantic.get("found"),
-                    semantic_reacquisition_direction=semantic.get("coarse_direction"),
-                    semantic_reacquisition_result=semantic,
+                    semantic_reacquisition_found=True,
+                    semantic_reacquisition_direction=None,
+                    semantic_reacquisition_result=None,
+                    marvin_proposal_acquisition=True,
                 )
-                semantic_source = semantic.get("source") if isinstance(semantic, dict) else None
-                geometry = self._marvin_semantic_geometry(semantic)
-                semantic_geometry = {
-                    "semantic_bbox": geometry["bbox"],
-                    "semantic_center_x": geometry["cx"],
-                    "semantic_horizontal_error_pixels": geometry["horizontal_error"],
-                    "semantic_bbox_direction": geometry["direction"],
-                }
+                confirmed = acquired
                 if not (
-                    isinstance(semantic, dict)
-                    and semantic.get("found") is True
-                    and semantic_source == "gemini_marvin"
-                    and semantic.get("coarse_direction") == "CENTER"
-                    and geometry["direction"] == "CENTER"
+                    isinstance(confirmed, dict)
+                    and confirmed.get("source") == "marvin_local_tracker"
+                    and self._vision_timestamp_is_iso(confirmed.get("source_timestamp"))
+                    and self._target_is_fresh_and_acquired(confirmed)
                 ):
                     outcome = finish(
-                        state="MARVIN_ONE_STEP_NOT_CENTERED",
-                        reason="marvin_semantic_center_required",
-                        semantic_source=semantic_source,
-                        horizontal_error_pixels=geometry["horizontal_error"],
-                        steering_direction=geometry["direction"],
-                        **semantic_geometry,
+                        state="MARVIN_ONE_STEP_TRACKER_UNCONFIRMED",
+                        reason="marvin_local_tracker_confirmation_required",
                     )
                 else:
-                    tracker = self.marvin_local_tracker_factory(frame, geometry["bbox"])
-                    episode["marvin_tracker"] = tracker
-                    confirmed = self._confirm_marvin_local_tracker(
-                        episode, minimum_timestamp=frame.received_at,
+                    horizontal_error = (
+                        float(confirmed["cx"])
+                        - float(confirmed["image_width"]) / 2.0
                     )
-                    if not (
-                        isinstance(confirmed, dict)
-                        and confirmed.get("source") == "marvin_local_tracker"
-                        and self._vision_timestamp_is_iso(confirmed.get("source_timestamp"))
-                        and self._target_is_fresh_and_acquired(confirmed)
-                    ):
+                    steering = (
+                        "CENTERED"
+                        if abs(horizontal_error) <= self.FIND_CENTER_TOLERANCE_PIXELS
+                        else ("LEFT" if horizontal_error < 0 else "RIGHT")
+                    )
+                    common = {
+                        "target_found": True,
+                        "authority_source": "marvin_local_tracker",
+                        "semantic_source": confirmed.get("identity_source"),
+                        "identity_source": confirmed.get("identity_source"),
+                        "identity_confirmed": confirmed.get("identity_confirmed"),
+                        "proposal_label": confirmed.get("proposal_label"),
+                        "proposal_confidence": confirmed.get("proposal_confidence"),
+                        "proposal_support": confirmed.get("proposal_support"),
+                        "geometry_source": confirmed.get("geometry_source"),
+                        "yolo_seed_bbox": confirmed.get("yolo_seed_bbox"),
+                        "tracker_seed_bbox": confirmed.get("tracker_seed_bbox"),
+                        "tracker_seed_source": confirmed.get("tracker_seed_source"),
+                        "confirmation_diagnostics": confirmed.get("confirmation_diagnostics"),
+                        "marvin_local_tracker_confirmed": True,
+                        "tracker_source_timestamp": confirmed["source_timestamp"],
+                        "tracker_bbox": confirmed["bbox"],
+                        "bbox": confirmed["bbox"],
+                        "tracker_cx": confirmed["cx"], "tracker_cy": confirmed["cy"],
+                        "tracker_area": confirmed["area"],
+                        "target_label": "marvin",
+                        "target_center_x": confirmed["cx"],
+                        "target_center_y": confirmed["cy"],
+                        "target_area": confirmed["area"],
+                        "image_width": confirmed["image_width"],
+                        "image_height": confirmed["image_height"],
+                        "steering_direction": steering,
+                        "horizontal_error_pixels": horizontal_error,
+                        **proposal_geometry,
+                    }
+                    if steering != "CENTERED":
                         outcome = finish(
-                            state="MARVIN_ONE_STEP_TRACKER_UNCONFIRMED",
-                            reason="marvin_local_tracker_confirmation_required",
-                            semantic_source=semantic_source,
+                            state="MARVIN_ONE_STEP_NOT_CENTERED",
+                            reason="marvin_local_tracker_not_centered",
+                            **common,
                         )
                     else:
-                        horizontal_error = (
-                            float(confirmed["cx"])
-                            - float(confirmed["image_width"]) / 2.0
-                        )
-                        steering = (
-                            "CENTERED"
-                            if abs(horizontal_error) <= self.FIND_CENTER_TOLERANCE_PIXELS
-                            else ("LEFT" if horizontal_error < 0 else "RIGHT")
-                        )
-                        common = {
-                            "target_found": True,
-                            "authority_source": "marvin_local_tracker",
-                            "semantic_source": semantic_source,
-                            "marvin_local_tracker_confirmed": True,
-                            "tracker_source_timestamp": confirmed["source_timestamp"],
-                            "tracker_bbox": confirmed["bbox"],
-                            "bbox": confirmed["bbox"],
-                            "tracker_cx": confirmed["cx"], "tracker_cy": confirmed["cy"],
-                            "tracker_area": confirmed["area"],
-                            "target_label": "marvin",
-                            "target_center_x": confirmed["cx"],
-                            "target_center_y": confirmed["cy"],
-                            "target_area": confirmed["area"],
-                            "image_width": confirmed["image_width"],
-                            "image_height": confirmed["image_height"],
-                            "steering_direction": steering,
-                            "horizontal_error_pixels": horizontal_error,
-                        }
-                        if steering != "CENTERED":
+                        interlock = getattr(self.robot, "forward_interlock", None)
+                        session = self._current_lidar_session()
+                        if interlock is None or session is None or self.world_model is None:
                             outcome = finish(
-                                state="MARVIN_ONE_STEP_NOT_CENTERED",
-                                reason="marvin_local_tracker_not_centered",
-                                **common,
+                                state="MARVIN_ONE_STEP_BLOCKED",
+                                reason="forward_guard_unavailable", **common,
                             )
                         else:
-                            interlock = getattr(self.robot, "forward_interlock", None)
-                            session = self._current_lidar_session()
-                            if interlock is None or session is None or self.world_model is None:
+                            permitted, interlock_reason = interlock.refresh()
+                            lidar = self.world_model.get_lidar_obstacles(expected_session=session)
+                            front = lidar.get("sectors", {}).get("front", {}) if isinstance(lidar, dict) else {}
+                            lidar_ok = bool(
+                                isinstance(lidar, dict)
+                                and lidar.get("producer_session") == session
+                                and lidar.get("available") is True
+                                and lidar.get("valid") is True
+                                and lidar.get("reason") == "fresh"
+                                and front.get("state") == "CLEAR"
+                            )
+                            guards = {
+                                "lidar_guard": lidar,
+                                "forward_interlock_result": {
+                                    "permitted": permitted, "reason": interlock_reason,
+                                    "producer_session": session,
+                                },
+                            }
+                            if permitted is not True or interlock_reason != "fresh_clear" or not lidar_ok:
                                 outcome = finish(
                                     state="MARVIN_ONE_STEP_BLOCKED",
-                                    reason="forward_guard_unavailable", **common,
+                                    reason="forward_guard_denied", **common, **guards,
+                                )
+                            elif not self._execution_is_current():
+                                outcome = finish(
+                                    state="PREEMPTED",
+                                    reason="FIND_OBJECT execution was preempted.",
+                                    **common, **guards,
                                 )
                             else:
-                                permitted, interlock_reason = interlock.refresh()
-                                lidar = self.world_model.get_lidar_obstacles(expected_session=session)
-                                front = lidar.get("sectors", {}).get("front", {}) if isinstance(lidar, dict) else {}
-                                lidar_ok = bool(
-                                    isinstance(lidar, dict)
-                                    and lidar.get("producer_session") == session
-                                    and lidar.get("available") is True
-                                    and lidar.get("valid") is True
-                                    and lidar.get("reason") == "fresh"
-                                    and front.get("state") == "CLEAR"
+                                forward_result = None
+                                try:
+                                    forward_result = self.robot.move_forward(
+                                        speed=self.FIND_APPROACH_FORWARD_SPEED,
+                                        seconds=self.FIND_APPROACH_FORWARD_SECONDS,
+                                    )
+                                except Exception as exc:
+                                    forward_result = {"ok": False, "error": str(exc), "error_type": type(exc).__name__}
+                                attempted = 1
+                                completed = int(isinstance(forward_result, dict) and forward_result.get("ok") is True)
+                                success = completed == 1 and self._execution_is_current()
+                                outcome = finish(
+                                    ok=success,
+                                    executed=True,
+                                    state=("MARVIN_ONE_STEP_COMPLETE" if success else "MARVIN_ONE_STEP_FAILED"),
+                                    reason=("One bounded Marvin forward step completed." if success else "marvin_one_step_forward_failed_or_preempted"),
+                                    approach_chunks_attempted=attempted,
+                                    approach_chunks_completed=completed,
+                                    forward_result=forward_result,
+                                    **common, **guards,
                                 )
-                                guards = {
-                                    "lidar_guard": lidar,
-                                    "forward_interlock_result": {
-                                        "permitted": permitted, "reason": interlock_reason,
-                                        "producer_session": session,
-                                    },
-                                }
-                                if permitted is not True or interlock_reason != "fresh_clear" or not lidar_ok:
-                                    outcome = finish(
-                                        state="MARVIN_ONE_STEP_BLOCKED",
-                                        reason="forward_guard_denied", **common, **guards,
-                                    )
-                                elif not self._execution_is_current():
-                                    outcome = finish(
-                                        state="PREEMPTED",
-                                        reason="FIND_OBJECT execution was preempted.",
-                                        **common, **guards,
-                                    )
-                                else:
-                                    forward_result = None
-                                    try:
-                                        forward_result = self.robot.move_forward(
-                                            speed=self.FIND_APPROACH_FORWARD_SPEED,
-                                            seconds=self.FIND_APPROACH_FORWARD_SECONDS,
-                                        )
-                                    except Exception as exc:
-                                        forward_result = {"ok": False, "error": str(exc), "error_type": type(exc).__name__}
-                                    attempted = 1
-                                    completed = int(isinstance(forward_result, dict) and forward_result.get("ok") is True)
-                                    success = completed == 1 and self._execution_is_current()
-                                    outcome = finish(
-                                        ok=success,
-                                        executed=True,
-                                        state=("MARVIN_ONE_STEP_COMPLETE" if success else "MARVIN_ONE_STEP_FAILED"),
-                                        reason=("One bounded Marvin forward step completed." if success else "marvin_one_step_forward_failed_or_preempted"),
-                                        approach_chunks_attempted=attempted,
-                                        approach_chunks_completed=completed,
-                                        forward_result=forward_result,
-                                        **common, **guards,
-                                    )
+        except _MarvinProposalNotCentered as exc:
+            geometry = exc.geometry
+            error = geometry["yolo_horizontal_error_pixels"]
+            outcome = finish(
+                state="MARVIN_ONE_STEP_NOT_CENTERED",
+                reason="marvin_yolo_proposal_not_centered",
+                yolo_seed_bbox=geometry["yolo_seed_bbox"],
+                yolo_center_x=geometry["yolo_center_x"],
+                yolo_horizontal_error_pixels=error,
+                horizontal_error_pixels=error,
+                steering_direction=("LEFT" if error < 0 else "RIGHT"),
+            )
         except _SemanticPreempted:
             outcome = finish(state="PREEMPTED", reason="FIND_OBJECT execution was preempted.")
         except Exception as exc:
@@ -1736,18 +1750,41 @@ class BehaviorManager:
         )
 
     def _preview_marvin_yolo_identity_observation(self):
-        """Select a stable YOLO proposal by identity, then locally track it."""
+        """Acquire Marvin perception for read-only Preview."""
+        return self._acquire_marvin_proposal_tracker_observation()
+
+    def _acquire_marvin_proposal_tracker_observation(
+        self,
+        *,
+        execution_guard=None,
+        episode=None,
+        before_tracker_initialization=None,
+    ):
+        """Acquire Marvin using proposals, identity selection, and tracking.
+
+        This core contains perception only.  Callers may provide an execution
+        guard for mission-bound preemption checks; Preview intentionally does
+        not provide one.
+        """
+        if execution_guard is not None:
+            execution_guard()
         semantic_vision = self.semantic_vision
         if semantic_vision is None or not callable(
             getattr(semantic_vision, "select_marvin_candidate", None)
         ):
             raise ValueError("marvin_candidate_selection_unavailable")
         candidates, status, diagnostics = (
-            self._confirm_marvin_proposal_candidates_with_status()
+            self._confirm_marvin_proposal_candidates_with_status(
+                execution_guard=execution_guard,
+            )
         )
         if not candidates:
             raise ValueError("marvin_yolo_proposal_" + str(status))
+        if execution_guard is not None:
+            execution_guard()
         frame = semantic_vision.fetch_frame()
+        if execution_guard is not None:
+            execution_guard()
         if any(
             frame.width != int(candidate["image_width"])
             or frame.height != int(candidate["image_height"])
@@ -1755,7 +1792,11 @@ class BehaviorManager:
         ):
             raise ValueError("marvin_yolo_frame_dimensions_changed")
         candidates = candidates[: self.MARVIN_PREVIEW_MAX_SEMANTIC_CANDIDATES]
+        if execution_guard is not None:
+            execution_guard()
         identity = semantic_vision.select_marvin_candidate(frame, candidates)
+        if execution_guard is not None:
+            execution_guard()
         if not isinstance(identity, dict) or identity.get("confirmed") is not True:
             raise ValueError("marvin_identity_not_confirmed")
         selected_index = identity.get("candidate_index")
@@ -1773,25 +1814,40 @@ class BehaviorManager:
             int(yolo_candidate["image_width"]),
             int(yolo_candidate["image_height"]),
         )
-        previous_episode = self._semantic_episode
-        episode = {
-            "used": True,
-            "turn_attempts": 0,
-            "turn_completions": 0,
-            "telemetry": {},
-            "marvin_tracker": self.marvin_local_tracker_factory(
-                frame, tracker_seed_bbox,
-            ),
-        }
-        self._semantic_episode = episode
+        if before_tracker_initialization is not None:
+            before_tracker_initialization(
+                yolo_bbox,
+                int(yolo_candidate["image_width"]),
+                int(yolo_candidate["image_height"]),
+            )
+        if execution_guard is not None:
+            execution_guard()
+        temporary_episode = episode is None
+        if temporary_episode:
+            previous_episode = self._semantic_episode
+            episode = {
+                "used": True,
+                "turn_attempts": 0,
+                "turn_completions": 0,
+                "telemetry": {},
+                "marvin_tracker": None,
+            }
+            self._semantic_episode = episode
+        episode["marvin_tracker"] = self.marvin_local_tracker_factory(
+            frame, tracker_seed_bbox,
+        )
         try:
             confirmed = self._confirm_marvin_local_tracker_frames(
                 episode["marvin_tracker"],
                 minimum_timestamp=frame.received_at,
                 fetch_frame=semantic_vision.fetch_frame,
+                check_current=execution_guard,
             )
         finally:
-            self._semantic_episode = previous_episode
+            if temporary_episode:
+                self._semantic_episode = previous_episode
+        if execution_guard is not None:
+            execution_guard()
         if confirmed is None:
             raise ValueError("marvin_local_tracker_confirmation_required")
         return dict(
@@ -1850,7 +1906,9 @@ class BehaviorManager:
             raise ValueError("marvin_tracker_seed_geometry_invalid")
         return expanded
 
-    def _confirm_marvin_proposal_candidates_with_status(self):
+    def _confirm_marvin_proposal_candidates_with_status(
+        self, *, execution_guard=None
+    ):
         """Cluster class-agnostic proposals by fresh geometry only."""
         fetch = getattr(self.vision, "fetch_detection_proposals", None)
         normalize = getattr(self.vision, "normalize_detection", None)
@@ -1898,6 +1956,8 @@ class BehaviorManager:
             and time.monotonic() - started
             <= self.MARVIN_PREVIEW_CONFIRMATION_WINDOW_SECONDS
         ):
+            if execution_guard is not None:
+                execution_guard()
             diagnostics["fetch_attempts"] += 1
             try:
                 payload = fetch()

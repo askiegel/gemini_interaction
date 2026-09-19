@@ -55,26 +55,80 @@ class World:
 
 
 class Semantic:
-    def __init__(self, direction="CENTER", found=True):
-        self.direction = direction
+    def __init__(self, found=True, candidate_index=0):
         self.found = found
-        self.calls = 0
+        self.candidate_index = candidate_index
+        self.calls = []
         self.frame = 0
 
     def fetch_frame(self):
         self.frame += 1
+        self.calls.append("frame")
         return SimpleNamespace(
             data=b"", width=640, height=480,
             received_at=f"2026-09-19T16:00:0{self.frame}+00:00",
         )
 
-    def describe_marvin(self, _frame):
-        self.calls += 1
+    def select_marvin_candidate(self, _frame, candidates):
+        self.calls.append("select_marvin_candidate")
+        if not self.found:
+            return {
+                "target": "marvin", "confirmed": False,
+                "candidate_index": None,
+                "source": "gemini_marvin_candidate_selection",
+            }
         return {
-            "found": self.found, "source": "gemini_marvin",
-            "coarse_direction": self.direction,
-            "bbox": {"x1": 260, "y1": 160, "x2": 380, "y2": 360},
-            "image_width": 640, "image_height": 480,
+            "target": "marvin", "confirmed": True,
+            "candidate_index": self.candidate_index,
+            "source": "gemini_marvin_candidate_selection",
+        }
+
+    def describe_marvin(self, _frame):
+        raise AssertionError("one-step must not call describe_marvin")
+
+
+class ProposalVision:
+    def __init__(self, *, boxes=None, labels=None):
+        bbox = (
+            boxes[0] if isinstance(boxes, list) else boxes
+        ) or {"x1": 260, "y1": 160, "x2": 380, "y2": 360}
+        labels = labels or ["chair", "toilet", "teddy bear"]
+        self.payloads = [
+            {
+                "timestamp": f"2026-09-19T16:00:0{index}+00:00",
+                "camera_running": True,
+                "image_width": 640,
+                "image_height": 480,
+                "detections": [{
+                    "label": labels[index % len(labels)],
+                    "confidence": 0.10,
+                    **bbox,
+                }],
+            }
+            for index in range(3)
+        ]
+        self.proposal_calls = 0
+        self.target_queries = []
+
+    def fetch_detection_proposals(self):
+        self.proposal_calls += 1
+        return self.payloads.pop(0)
+
+    def fetch_target_candidates(self, target):
+        self.target_queries.append(target)
+        raise AssertionError("one-step must not query target candidates")
+
+    @staticmethod
+    def normalize_detection(item):
+        return {
+            "label": item["label"],
+            "confidence": item["confidence"],
+            "cx": (item["x1"] + item["x2"]) / 2.0,
+            "cy": (item["y1"] + item["y2"]) / 2.0,
+            "area": (item["x2"] - item["x1"]) * (item["y2"] - item["y1"]),
+            "bbox": {key: item[key] for key in ("x1", "y1", "x2", "y2")},
+            "image_width": 640,
+            "image_height": 480,
         }
 
 
@@ -87,10 +141,14 @@ class Tracker:
         return dict(self.boxes.pop(0)) if self.boxes else None
 
 
-def manager(*, direction="CENTER", found=True, boxes=None, robot=None):
+def manager(*, found=True, boxes=None, robot=None, proposal_boxes=None, candidate_index=0):
     robot = robot or Robot()
-    instance = BehaviorManager(robot_client=robot, world_model=World())
-    instance.semantic_vision = Semantic(direction, found)
+    instance = BehaviorManager(
+        robot_client=robot,
+        world_model=World(),
+        vision_adapter=ProposalVision(boxes=proposal_boxes),
+    )
+    instance.semantic_vision = Semantic(found, candidate_index)
     instance.marvin_local_tracker_factory = lambda frame, bbox: Tracker(frame, bbox, boxes)
     instance.lidar_session = "one-step-session"
     return instance, robot
@@ -120,21 +178,44 @@ def test_centered_confirmed_tracker_allows_one_forward_then_stop():
     assert result["post_step_stop_result"]["ok"] is True
 
 
-@pytest.mark.parametrize("direction,found", [("LEFT", True), ("RIGHT", True), ("UNKNOWN", True), ("CENTER", False)])
-def test_semantic_noncenter_or_absent_never_forwards(direction, found):
-    instance, robot = manager(direction=direction, found=found)
+def test_unconfirmed_gemini_selection_never_forwards():
+    instance, robot = manager(found=False)
     result = instance.execute(mission())
 
     assert result["completed"] is True
     assert not [call for call in robot.calls if call[0] == "forward"]
     assert result["turn_chunks_attempted"] == 0
     assert result["post_step_stop_result"]["ok"] is True
+    assert instance.semantic_vision.calls == ["frame", "select_marvin_candidate"]
+
+
+def test_one_step_uses_proposals_and_selects_once_without_teddy_bear_query():
+    instance, robot = manager()
+    result = instance.execute(mission())
+    assert result["ok"] is True
+    assert instance.vision.proposal_calls == 3
+    assert instance.vision.target_queries == []
+    assert instance.semantic_vision.calls.count("select_marvin_candidate") == 1
+    assert "describe_marvin" not in instance.semantic_vision.calls
+    assert result["proposal_label"] == "chair"
+    assert result["geometry_source"] == "yolo_proposal"
+    assert result["identity_source"] == "gemini_marvin_candidate_selection"
+    assert result["proposal_support"] == 3
+    assert result["confirmation_diagnostics"]["maximum_frames"] == 3
+    assert result["confirmation_diagnostics"]["minimum_support"] == 2
+    assert result["confirmation_diagnostics"]["confirmation_window_seconds"] == 2.0
+    assert result["yolo_seed_bbox"] == {
+        "x1": 260, "y1": 160, "x2": 380, "y2": 360,
+    }
+    assert result["tracker_seed_bbox"] == {
+        "x1": 236, "y1": 150, "x2": 404, "y2": 370,
+    }
 
 
 def test_one_tracker_frame_or_noncentered_tracker_fails_closed():
     instance, robot = manager(boxes=[{"x1": 260, "y1": 160, "x2": 380, "y2": 360}])
     result = instance.execute(mission())
-    assert result["state"] == "MARVIN_ONE_STEP_TRACKER_UNCONFIRMED"
+    assert result["state"] == "MARVIN_ONE_STEP_BLOCKED"
     assert not [call for call in robot.calls if call[0] == "forward"]
 
     instance, robot = manager(boxes=[{"x1": 0, "y1": 160, "x2": 120, "y2": 360}] * 2)
@@ -144,30 +225,129 @@ def test_one_tracker_frame_or_noncentered_tracker_fails_closed():
     assert result["turn_chunks_attempted"] == result["centering_turn_chunks_attempted"] == 0
 
 
-def test_semantic_center_text_with_left_bbox_cannot_become_centered():
+def test_off_center_yolo_proposal_never_forwards():
+    seeds = []
     instance, robot = manager(
-        boxes=[{"x1": 0, "y1": 160, "x2": 120, "y2": 360}] * 2,
+        proposal_boxes={"x1": 0, "y1": 160, "x2": 120, "y2": 360},
     )
-    instance.semantic_vision.describe_marvin = lambda _frame: {
-        "found": True, "source": "gemini_marvin", "coarse_direction": "CENTER",
-        "bbox": {"x1": 0, "y1": 160, "x2": 120, "y2": 360},
-        "image_width": 640, "image_height": 480,
-    }
+    instance.world_model.get_lidar_obstacles = lambda **_kwargs: pytest.fail(
+        "off-center proposal must not reach LiDAR motion-stage check",
+    )
+    robot.forward_interlock.refresh = lambda: pytest.fail(
+        "off-center proposal must not reach interlock motion-stage check",
+    )
+    instance.marvin_local_tracker_factory = lambda frame, bbox: seeds.append(bbox)
     result = instance.execute(mission())
     assert result["state"] == "MARVIN_ONE_STEP_NOT_CENTERED"
-    assert result["horizontal_error_pixels"] < -50
+    assert result["reason"] == "marvin_yolo_proposal_not_centered"
+    assert result["horizontal_error_pixels"] == -260.0
+    assert result["steering_direction"] == "LEFT"
+    assert result["executed"] is False
+    assert result["completed"] is True
+    assert seeds == []
+    assert not [call for call in robot.calls if call[0] == "forward"]
+    assert robot.calls == [("stop",)]
+    assert result["post_step_stop_result"]["ok"] is True
+
+
+def test_positive_off_center_yolo_proposal_reports_right_without_motion():
+    seeds = []
+    instance, robot = manager(
+        proposal_boxes={"x1": 520, "y1": 160, "x2": 640, "y2": 360},
+    )
+    instance.world_model.get_lidar_obstacles = lambda **_kwargs: pytest.fail(
+        "off-center proposal must not reach LiDAR motion-stage check",
+    )
+    robot.forward_interlock.refresh = lambda: pytest.fail(
+        "off-center proposal must not reach interlock motion-stage check",
+    )
+    instance.marvin_local_tracker_factory = lambda frame, bbox: seeds.append(bbox)
+    result = instance.execute(mission())
+    assert result["state"] == "MARVIN_ONE_STEP_NOT_CENTERED"
+    assert result["reason"] == "marvin_yolo_proposal_not_centered"
+    assert result["horizontal_error_pixels"] == 260.0
+    assert result["steering_direction"] == "RIGHT"
+    assert result["executed"] is False
+    assert result["completed"] is True
+    assert seeds == []
+    assert not [call for call in robot.calls if call[0] == "forward"]
+    assert robot.calls == [("stop",)]
+    assert result["post_step_stop_result"]["ok"] is True
+
+
+def test_unrelated_acquisition_value_error_remains_generic_blocked():
+    instance, robot = manager()
+    instance._acquire_marvin_proposal_tracker_observation = lambda **_kwargs: (
+        (_ for _ in ()).throw(ValueError("different_acquisition_failure"))
+    )
+    result = instance.execute(mission())
+    assert result["state"] == "MARVIN_ONE_STEP_BLOCKED"
+    assert result["reason"] == "marvin_one_step_error"
+    assert not [call for call in robot.calls if call[0] == "forward"]
+    assert robot.calls == [("stop",)]
+    assert result["post_step_stop_result"]["ok"] is True
+
+
+def test_invalid_proposal_bbox_fails_closed():
+    instance, robot = manager(
+        proposal_boxes={"x1": 100, "y1": 100, "x2": 90, "y2": 480},
+    )
+    result = instance.execute(mission())
+    assert result["state"] == "MARVIN_ONE_STEP_BLOCKED"
     assert not [call for call in robot.calls if call[0] == "forward"]
 
 
-def test_implausibly_huge_marvin_semantic_bbox_fails_closed():
+def test_insufficient_proposal_support_fails_closed():
     instance, robot = manager()
-    instance.semantic_vision.describe_marvin = lambda _frame: {
-        "found": True, "source": "gemini_marvin", "coarse_direction": "CENTER",
-        "bbox": {"x1": 0, "y1": 0, "x2": 640, "y2": 480},
-        "image_width": 640, "image_height": 480,
-    }
+    instance.vision.payloads = instance.vision.payloads[:1]
     result = instance.execute(mission())
     assert result["state"] == "MARVIN_ONE_STEP_BLOCKED"
+    assert not [call for call in robot.calls if call[0] == "forward"]
+
+
+def test_invalid_candidate_selection_fails_closed():
+    instance, robot = manager(candidate_index=9)
+    result = instance.execute(mission())
+    assert result["state"] == "MARVIN_ONE_STEP_BLOCKED"
+    assert not [call for call in robot.calls if call[0] == "forward"]
+
+
+def test_preemption_during_proposal_acquisition_stops_without_forward():
+    instance, robot = manager()
+    checks = [0]
+
+    def authorization():
+        checks[0] += 1
+        return checks[0] < 4
+
+    instance.execution_authorization_provider = authorization
+    result = instance.execute(mission())
+    assert result["state"] == "PREEMPTED"
+    assert not [call for call in robot.calls if call[0] == "forward"]
+    assert robot.calls[-1] == ("stop",)
+
+
+def test_preemption_after_gemini_selection_stops_without_forward():
+    instance, robot = manager()
+
+    def authorization():
+        return "select_marvin_candidate" not in instance.semantic_vision.calls
+
+    instance.execution_authorization_provider = authorization
+    result = instance.execute(mission())
+    assert result["state"] == "PREEMPTED"
+    assert not [call for call in robot.calls if call[0] == "forward"]
+
+
+def test_preemption_during_tracker_confirmation_stops_without_forward():
+    instance, robot = manager()
+
+    def authorization():
+        return instance.semantic_vision.calls.count("frame") < 2
+
+    instance.execution_authorization_provider = authorization
+    result = instance.execute(mission())
+    assert result["state"] == "PREEMPTED"
     assert not [call for call in robot.calls if call[0] == "forward"]
 
 
@@ -177,13 +357,13 @@ def test_authoritative_tracker_geometry_is_published_not_semantic_seed():
     result = instance.execute(mission())
     assert result["authority_source"] == "marvin_local_tracker"
     assert result["bbox"] == tracker_bbox
-    assert result["bbox"] != result["semantic_reacquisition_result"]["bbox"]
+    assert result["bbox"] != result["yolo_seed_bbox"]
     assert build_tracking_state(result)["bbox"] == {
         key: float(value) for key, value in tracker_bbox.items()
     }
 
 
-def test_tracker_is_seeded_with_validated_marvin_semantic_bbox():
+def test_tracker_is_seeded_with_expanded_yolo_proposal_bbox():
     instance, _robot = manager()
     seeds = []
 
@@ -194,7 +374,11 @@ def test_tracker_is_seeded_with_validated_marvin_semantic_bbox():
     instance.marvin_local_tracker_factory = factory
     result = instance.execute(mission())
     assert result["ok"] is True
-    assert seeds == [{"x1": 260, "y1": 160, "x2": 380, "y2": 360}]
+    assert seeds == [{"x1": 236, "y1": 150, "x2": 404, "y2": 370}]
+    assert result["yolo_seed_bbox"] == {
+        "x1": 260, "y1": 160, "x2": 380, "y2": 360,
+    }
+    assert result["tracker_seed_bbox"] == seeds[0]
 
 
 @pytest.mark.parametrize("robot", [Robot(forward_result={"ok": False}), Robot(forward_error=RuntimeError("transport"))])
