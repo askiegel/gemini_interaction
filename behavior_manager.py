@@ -440,6 +440,10 @@ class _SemanticPreempted(Exception):
 
 class BehaviorManager:
     MARVIN_SEMANTIC_TARGET = "marvin"
+    # A seed spanning almost the whole image is a semantic region, not a
+    # usable local-template target. Keep this deliberately conservative for a
+    # legitimately close Marvin.
+    MARVIN_SEMANTIC_MAX_BBOX_AREA_FRACTION = 0.90
     MARVIN_DETECTOR_ALIAS = "teddy bear"
     MARVIN_LOCAL_TRACKER_MAX_FRAMES = 3
     MARVIN_LOCAL_TRACKER_MIN_SUPPORT = 2
@@ -714,7 +718,17 @@ class BehaviorManager:
             if label == self.MARVIN_SEMANTIC_TARGET:
                 if semantic.get("found") is not True:
                     return None, status, diagnostics
-                tracker = self.marvin_local_tracker_factory(frame, semantic["bbox"])
+                geometry = self._marvin_semantic_geometry(semantic)
+                # Gemini's direction is diagnostic only for Marvin. The
+                # locally derived bbox center controls any semantic turn hint.
+                direction = geometry["direction"]
+                telemetry.update(
+                    marvin_semantic_bbox=geometry["bbox"],
+                    marvin_semantic_center_x=geometry["cx"],
+                    marvin_semantic_horizontal_error_pixels=geometry["horizontal_error"],
+                    marvin_semantic_bbox_direction=direction,
+                )
+                tracker = self.marvin_local_tracker_factory(frame, geometry["bbox"])
                 episode["marvin_tracker"] = tracker
             if semantic["found"] is True and direction in {"LEFT", "RIGHT"}:
                 if semantic_turn_budget <= 0:
@@ -765,6 +779,31 @@ class BehaviorManager:
         telemetry["semantic_reacquisition_post_yolo_status"] = status
         telemetry["semantic_reacquisition_post_yolo_diagnostics"] = diagnostics
         return confirmed, status, diagnostics
+
+    def _marvin_semantic_geometry(self, semantic):
+        """Validate a Marvin-only semantic seed and derive its pixel geometry."""
+        if not isinstance(semantic, dict):
+            raise ValueError("marvin_semantic_result_invalid")
+        width = MarvinLocalTracker._valid_dimension(semantic.get("image_width"))
+        height = MarvinLocalTracker._valid_dimension(semantic.get("image_height"))
+        raw_bbox = semantic.get("bbox")
+        bbox_tuple = MarvinLocalTracker._validate_bbox(raw_bbox, width, height)
+        bbox = dict(zip(("x1", "y1", "x2", "y2"), bbox_tuple))
+        area = (bbox["x2"] - bbox["x1"]) * (bbox["y2"] - bbox["y1"])
+        if area > width * height * self.MARVIN_SEMANTIC_MAX_BBOX_AREA_FRACTION:
+            raise ValueError("marvin_semantic_bbox_implausibly_large")
+        cx = (bbox["x1"] + bbox["x2"]) / 2.0
+        horizontal_error = cx - width / 2.0
+        direction = (
+            "LEFT" if horizontal_error < -self.FIND_CENTER_TOLERANCE_PIXELS
+            else "RIGHT" if horizontal_error > self.FIND_CENTER_TOLERANCE_PIXELS
+            else "CENTER"
+        )
+        return {
+            "bbox": bbox, "cx": cx, "cy": (bbox["y1"] + bbox["y2"]) / 2.0,
+            "area": area, "horizontal_error": horizontal_error,
+            "direction": direction,
+        }
 
     def _confirm_marvin_local_tracker(self, episode, *, minimum_timestamp=None):
         """Require fresh, continuous local tracker support before motion use."""
@@ -1420,19 +1459,30 @@ class BehaviorManager:
                     semantic_reacquisition_result=semantic,
                 )
                 semantic_source = semantic.get("source") if isinstance(semantic, dict) else None
+                geometry = self._marvin_semantic_geometry(semantic)
+                semantic_geometry = {
+                    "semantic_bbox": geometry["bbox"],
+                    "semantic_center_x": geometry["cx"],
+                    "semantic_horizontal_error_pixels": geometry["horizontal_error"],
+                    "semantic_bbox_direction": geometry["direction"],
+                }
                 if not (
                     isinstance(semantic, dict)
                     and semantic.get("found") is True
                     and semantic_source == "gemini_marvin"
                     and semantic.get("coarse_direction") == "CENTER"
+                    and geometry["direction"] == "CENTER"
                 ):
                     outcome = finish(
                         state="MARVIN_ONE_STEP_NOT_CENTERED",
                         reason="marvin_semantic_center_required",
                         semantic_source=semantic_source,
+                        horizontal_error_pixels=geometry["horizontal_error"],
+                        steering_direction=geometry["direction"],
+                        **semantic_geometry,
                     )
                 else:
-                    tracker = self.marvin_local_tracker_factory(frame, semantic["bbox"])
+                    tracker = self.marvin_local_tracker_factory(frame, geometry["bbox"])
                     episode["marvin_tracker"] = tracker
                     confirmed = self._confirm_marvin_local_tracker(
                         episode, minimum_timestamp=frame.received_at,
@@ -1465,8 +1515,15 @@ class BehaviorManager:
                             "marvin_local_tracker_confirmed": True,
                             "tracker_source_timestamp": confirmed["source_timestamp"],
                             "tracker_bbox": confirmed["bbox"],
+                            "bbox": confirmed["bbox"],
                             "tracker_cx": confirmed["cx"], "tracker_cy": confirmed["cy"],
                             "tracker_area": confirmed["area"],
+                            "target_label": "marvin",
+                            "target_center_x": confirmed["cx"],
+                            "target_center_y": confirmed["cy"],
+                            "target_area": confirmed["area"],
+                            "image_width": confirmed["image_width"],
+                            "image_height": confirmed["image_height"],
                             "steering_direction": steering,
                             "horizontal_error_pixels": horizontal_error,
                         }

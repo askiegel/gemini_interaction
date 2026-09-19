@@ -4107,11 +4107,16 @@ class SemanticFake:
         self.calls += 1
         self.marvin_calls += 1
         self.on_describe()
+        bbox = dict(x1=260, y1=160, x2=380, y2=360)
+        if self.direction == 'LEFT':
+            bbox = dict(x1=80, y1=160, x2=200, y2=360)
+        elif self.direction == 'RIGHT':
+            bbox = dict(x1=440, y1=160, x2=560, y2=360)
         return dict(target='marvin', found=self.found,
                     coarse_direction=self.direction, source='gemini_marvin',
                     geometry_quality='coarse',
-                    bbox=(dict(x1=260, y1=160, x2=380, y2=360)
-                          if self.found else None))
+                    image_width=640, image_height=480,
+                    bbox=(bbox if self.found else None))
 
 
 def semantic_manager(monkeypatch, *, direction='RIGHT', found=True, reacquire=True,
@@ -4147,7 +4152,9 @@ def semantic_manager(monkeypatch, *, direction='RIGHT', found=True, reacquire=Tr
     manager.semantic_vision = SemanticFake(direction, found)
     class LocalTracker:
         def __init__(self, _frame, bbox):
-            self.bbox = dict(bbox)
+            # The semantic hint may be left/right; this fake models the fresh
+            # local observation after that bounded hint as centered.
+            self.bbox = dict(x1=260, y1=160, x2=380, y2=360)
 
         def update(self, _frame):
             return dict(self.bbox)

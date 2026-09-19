@@ -8,6 +8,7 @@ import pytest
 from behavior_manager import BehaviorManager
 from mission_manager import MissionManager
 from mission_types import create_mission
+from tracking_state import build_tracking_state
 from voice_relay.server import VoiceRelayHandler
 
 
@@ -73,6 +74,7 @@ class Semantic:
             "found": self.found, "source": "gemini_marvin",
             "coarse_direction": self.direction,
             "bbox": {"x1": 260, "y1": 160, "x2": 380, "y2": 360},
+            "image_width": 640, "image_height": 480,
         }
 
 
@@ -140,6 +142,59 @@ def test_one_tracker_frame_or_noncentered_tracker_fails_closed():
     assert result["state"] == "MARVIN_ONE_STEP_NOT_CENTERED"
     assert not [call for call in robot.calls if call[0] == "forward"]
     assert result["turn_chunks_attempted"] == result["centering_turn_chunks_attempted"] == 0
+
+
+def test_semantic_center_text_with_left_bbox_cannot_become_centered():
+    instance, robot = manager(
+        boxes=[{"x1": 0, "y1": 160, "x2": 120, "y2": 360}] * 2,
+    )
+    instance.semantic_vision.describe_marvin = lambda _frame: {
+        "found": True, "source": "gemini_marvin", "coarse_direction": "CENTER",
+        "bbox": {"x1": 0, "y1": 160, "x2": 120, "y2": 360},
+        "image_width": 640, "image_height": 480,
+    }
+    result = instance.execute(mission())
+    assert result["state"] == "MARVIN_ONE_STEP_NOT_CENTERED"
+    assert result["horizontal_error_pixels"] < -50
+    assert not [call for call in robot.calls if call[0] == "forward"]
+
+
+def test_implausibly_huge_marvin_semantic_bbox_fails_closed():
+    instance, robot = manager()
+    instance.semantic_vision.describe_marvin = lambda _frame: {
+        "found": True, "source": "gemini_marvin", "coarse_direction": "CENTER",
+        "bbox": {"x1": 0, "y1": 0, "x2": 640, "y2": 480},
+        "image_width": 640, "image_height": 480,
+    }
+    result = instance.execute(mission())
+    assert result["state"] == "MARVIN_ONE_STEP_BLOCKED"
+    assert not [call for call in robot.calls if call[0] == "forward"]
+
+
+def test_authoritative_tracker_geometry_is_published_not_semantic_seed():
+    tracker_bbox = {"x1": 270, "y1": 160, "x2": 390, "y2": 360}
+    instance, _robot = manager(boxes=[tracker_bbox, tracker_bbox])
+    result = instance.execute(mission())
+    assert result["authority_source"] == "marvin_local_tracker"
+    assert result["bbox"] == tracker_bbox
+    assert result["bbox"] != result["semantic_reacquisition_result"]["bbox"]
+    assert build_tracking_state(result)["bbox"] == {
+        key: float(value) for key, value in tracker_bbox.items()
+    }
+
+
+def test_tracker_is_seeded_with_validated_marvin_semantic_bbox():
+    instance, _robot = manager()
+    seeds = []
+
+    def factory(frame, bbox):
+        seeds.append(dict(bbox))
+        return Tracker(frame, bbox)
+
+    instance.marvin_local_tracker_factory = factory
+    result = instance.execute(mission())
+    assert result["ok"] is True
+    assert seeds == [{"x1": 260, "y1": 160, "x2": 380, "y2": 360}]
 
 
 @pytest.mark.parametrize("robot", [Robot(forward_result={"ok": False}), Robot(forward_error=RuntimeError("transport"))])

@@ -66,6 +66,9 @@ def test_marvin_preview_uses_physical_description_and_requires_geometry():
     prompt = client.models.generate_content.call_args.kwargs['contents'][0]
     assert MARVIN_DESCRIPTION in prompt
     assert "not by the YOLO 'teddy bear' class" in prompt
+    assert "tight rectangle around Marvin himself" in prompt
+    assert "exclude floor, chair, boxes, background" in prompt
+    assert "head, torso/body, arms, and legs/feet" in prompt
     assert result['source'] == 'gemini_marvin'
     assert result['bbox']['x2'] == 110
 
