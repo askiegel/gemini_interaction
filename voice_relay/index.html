@@ -649,6 +649,15 @@
                     Find Marvin
                 </button>
 
+                <button
+                    id="marvinOneStepTestButton"
+                    class="motion-capable-control"
+                    type="button"
+                    disabled
+                >
+                    Marvin One-Step Test
+                </button>
+
                 <button data-command="Find my backpack">
                     Find Backpack
                 </button>
@@ -2031,6 +2040,8 @@
             document.getElementById("findMarvinMission"),
         findMarvinProgress:
             document.getElementById("findMarvinProgress"),
+        marvinOneStepTestButton:
+            document.getElementById("marvinOneStepTestButton"),
         cameraImage:
             document.getElementById("cameraImage"),
         cameraOverlay:
@@ -2070,6 +2081,7 @@
     let findObjectPreviewTracking = null;
     let findMarvinMissionId = null;
     let findMarvinSubmitting = false;
+    let marvinOneStepSubmitting = false;
 
     function findMarvinPreflight(status) {
         const runtime = status.runtime || {};
@@ -2108,6 +2120,15 @@
                 ? "Safety preflight passed. Ready to find Marvin."
                 : "Disabled: runtime, mission, LiDAR, interlock, or stopped-state preflight is not satisfied."
         };
+    }
+
+    function marvinOneStepPreflight(status) {
+        const ordinary = findMarvinPreflight(status);
+        const runtime = status.runtime || {};
+        if (!ordinary.safe) return ordinary;
+        return runtime.state === "IDLE"
+            ? {safe: true, reason: "One-step Marvin test ready."}
+            : {safe: false, reason: "Runtime must be IDLE for one-step test."};
     }
 
     function clearTrackingOverlay() {
@@ -2711,6 +2732,10 @@
             elements.findMarvinButton.disabled = (
                 findMarvinSubmitting || !preflight.safe
             );
+            const oneStepPreflight = marvinOneStepPreflight(status);
+            elements.marvinOneStepTestButton.disabled = (
+                marvinOneStepSubmitting || !oneStepPreflight.safe
+            );
             elements.findMarvinPreflight.textContent = preflight.reason;
 
             const marvinResult = (
@@ -3064,6 +3089,30 @@
             elements.findMarvinMission.textContent = "Find Marvin rejected · " + error.message;
         } finally {
             findMarvinSubmitting = false;
+            refreshStatus();
+        }
+    });
+
+    elements.marvinOneStepTestButton.addEventListener("click", async () => {
+        if (elements.marvinOneStepTestButton.disabled || marvinOneStepSubmitting) return;
+        marvinOneStepSubmitting = true;
+        elements.marvinOneStepTestButton.disabled = true;
+        elements.findMarvinMission.textContent = "Submitting Marvin one-step test...";
+        try {
+            const response = await fetch("/dashboard/find-marvin-one-step", {
+                method: "POST",
+                headers: {"Content-Type": "application/json"},
+                body: JSON.stringify({execute: isLiveModeEnabled()}),
+            });
+            const payload = await response.json();
+            if (!response.ok) throw new Error(payload.error || (payload.reasons || []).join("; ") || "One-step test rejected.");
+            elements.findMarvinMission.textContent = payload.dry_run === true
+                ? "Dry-run: Marvin one-step test not submitted."
+                : "Marvin one-step test accepted.";
+        } catch (error) {
+            elements.findMarvinMission.textContent = "Marvin one-step test rejected · " + error.message;
+        } finally {
+            marvinOneStepSubmitting = false;
             refreshStatus();
         }
     });
