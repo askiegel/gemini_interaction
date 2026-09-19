@@ -3,6 +3,7 @@ import math
 import urllib.request
 import urllib.error
 
+from robot_bridge.forward_interlock import FORWARD_POLICY_STRICT
 
 
 
@@ -91,6 +92,7 @@ class RobotBridgeClient:
         duration=0.25,
         streaming=False,
         watchdog_timeout=0.50,
+        forward_policy=FORWARD_POLICY_STRICT,
     ):
         linear_x = float(linear_x)
         angular_z = float(angular_z)
@@ -128,7 +130,12 @@ class RobotBridgeClient:
                 return {"ok": False, "forwarded": False, "error": "forward_interlock_not_configured"}
             interlock = self.forward_interlock
             try:
-                generation = interlock.begin_positive_dispatch(streaming=streaming)
+                dispatch_options = {"streaming": streaming}
+                if forward_policy != FORWARD_POLICY_STRICT:
+                    dispatch_options["policy"] = forward_policy
+                generation = interlock.begin_positive_dispatch(
+                    **dispatch_options
+                )
             except PermissionError as exc:
                 return {"ok": False, "forwarded": False, "error": str(exc)}
             result = None
@@ -202,11 +209,18 @@ class RobotBridgeClient:
             watchdog_timeout=watchdog_timeout,
         )
 
-    def move_forward(self, speed=0.10, seconds=1.0):
+    def move_forward(
+        self,
+        speed=0.10,
+        seconds=1.0,
+        *,
+        forward_policy=FORWARD_POLICY_STRICT,
+    ):
         return self.motion(
             linear_x=speed,
             angular_z=0.0,
             duration=seconds,
+            forward_policy=forward_policy,
         )
 
     def move_backward(self, speed=0.10, seconds=1.0):

@@ -7,7 +7,11 @@ from unittest.mock import Mock
 import pytest
 
 from robot_bridge.client import RobotBridgeClient
-from robot_bridge.forward_interlock import ForwardMotionInterlock, evaluate_lidar_state
+from robot_bridge.forward_interlock import (
+    FORWARD_POLICY_TARGET_APPROACH,
+    ForwardMotionInterlock,
+    evaluate_lidar_state,
+)
 
 
 def state(*, front="CLEAR", age=0.1, available=True, valid=True, session="s"):
@@ -24,7 +28,8 @@ class FakeInterlock:
         self.active = False
         self.calls = []
 
-    def begin_positive_dispatch(self, *, streaming):
+    def begin_positive_dispatch(self, *, streaming, policy="strict"):
+        del policy
         self.calls.append(("gate", streaming))
         if not self.permitted:
             raise PermissionError("unsafe")
@@ -131,6 +136,199 @@ def test_bounded_forward_denied_before_transport(front, reason):
     assert result["ok"] is False
     assert result["error"] == reason
     client._request.assert_not_called()
+    interlock.stop()
+
+
+def test_target_approach_policy_allows_caution_but_never_blocked():
+    caution = evaluate_lidar_state(
+        state(front="CAUTION"),
+        "s",
+        policy=FORWARD_POLICY_TARGET_APPROACH,
+    )
+    blocked = evaluate_lidar_state(
+        state(front="BLOCKED"),
+        "s",
+        policy=FORWARD_POLICY_TARGET_APPROACH,
+    )
+
+    assert caution == (True, "fresh_target_caution")
+    assert blocked == (False, "front_not_clear")
+    assert evaluate_lidar_state(state(front="CAUTION"), "s") == (
+        False,
+        "front_not_clear",
+    )
+
+
+def test_target_approach_bounded_forward_can_complete_in_caution():
+    current = state(front="CAUTION")
+    stop = Mock(return_value={"ok": True})
+    interlock = ForwardMotionInterlock(
+        lambda **_: current,
+        expected_session="s",
+        stop_callback=stop,
+    )
+    client = RobotBridgeClient(
+        base_url="http://robot.invalid",
+        forward_interlock=interlock,
+    )
+    transport = Mock(return_value={"ok": True})
+
+    def request(method, path, payload=None):
+        assert interlock.refresh() == (True, "fresh_target_caution")
+        return transport(method, path, payload)
+
+    client._request = request
+
+    assert interlock.refresh(
+        policy=FORWARD_POLICY_TARGET_APPROACH
+    ) == (True, "fresh_target_caution")
+    result = client.move_forward(
+        speed=0.08,
+        seconds=0.50,
+        forward_policy=FORWARD_POLICY_TARGET_APPROACH,
+    )
+
+    assert result["ok"] is True
+    transport.assert_called_once()
+    stop.assert_not_called()
+    interlock.stop()
+
+
+def test_target_approach_policy_cannot_authorize_streaming_motion():
+    current = state(front="CAUTION")
+    interlock = ForwardMotionInterlock(
+        lambda **_: current,
+        expected_session="s",
+        stop_callback=Mock(return_value={"ok": True}),
+    )
+    client = RobotBridgeClient(
+        base_url="http://robot.invalid",
+        forward_interlock=interlock,
+    )
+    client._request = Mock(return_value={"ok": True})
+
+    assert interlock.refresh(policy=FORWARD_POLICY_TARGET_APPROACH)[0]
+    result = client.motion(
+        linear_x=0.08,
+        angular_z=0.0,
+        streaming=True,
+        forward_policy=FORWARD_POLICY_TARGET_APPROACH,
+    )
+
+    assert result["ok"] is False
+    assert result["error"] == "target_approach_requires_bounded_forward"
+    client._request.assert_not_called()
+    interlock.stop()
+
+
+def test_target_approach_clear_to_caution_does_not_stop_active_chunk():
+    current = state(front="CLEAR")
+    entered = threading.Event()
+    release = threading.Event()
+    stop = Mock(return_value={"ok": True})
+    interlock = ForwardMotionInterlock(
+        lambda **_: current,
+        expected_session="s",
+        stop_callback=stop,
+    )
+    client = RobotBridgeClient(
+        base_url="http://robot.invalid",
+        forward_interlock=interlock,
+    )
+
+    def transport(method, path, payload=None):
+        del method, payload
+        assert path == "/motion"
+        entered.set()
+        assert release.wait(2)
+        return {"ok": True}
+
+    client._request = transport
+    assert interlock.refresh(policy=FORWARD_POLICY_TARGET_APPROACH)[0]
+    result = {}
+    thread = threading.Thread(target=lambda: result.setdefault(
+        "value",
+        client.move_forward(
+            speed=0.08,
+            seconds=0.50,
+            forward_policy=FORWARD_POLICY_TARGET_APPROACH,
+        ),
+    ))
+    thread.start()
+    assert entered.wait(1)
+    current["sectors"]["front"]["state"] = "CAUTION"
+
+    assert interlock.refresh() == (True, "fresh_target_caution")
+    stop.assert_not_called()
+    release.set()
+    thread.join(2)
+
+    assert result["value"]["ok"] is True
+    interlock.stop()
+
+
+@pytest.mark.parametrize(
+    "change,reason",
+    [
+        ("blocked", "front_not_clear"),
+        ("stale", "stale_lidar"),
+        ("invalid", "invalid"),
+    ],
+)
+def test_target_approach_unsafe_transition_stops_and_invalidates(
+    change, reason
+):
+    current = state(front="CAUTION")
+    entered = threading.Event()
+    release = threading.Event()
+    stop = Mock(return_value={"ok": True})
+    interlock = ForwardMotionInterlock(
+        lambda **_: current,
+        expected_session="s",
+        stop_callback=stop,
+    )
+    client = RobotBridgeClient(
+        base_url="http://robot.invalid",
+        forward_interlock=interlock,
+    )
+
+    def transport(method, path, payload=None):
+        del method, payload
+        assert path == "/motion"
+        entered.set()
+        assert release.wait(2)
+        return {"ok": True}
+
+    client._request = transport
+    assert interlock.refresh(policy=FORWARD_POLICY_TARGET_APPROACH)[0]
+    result = {}
+    thread = threading.Thread(target=lambda: result.setdefault(
+        "value",
+        client.move_forward(
+            speed=0.08,
+            seconds=0.50,
+            forward_policy=FORWARD_POLICY_TARGET_APPROACH,
+        ),
+    ))
+    thread.start()
+    assert entered.wait(1)
+    if change == "blocked":
+        current["sectors"]["front"]["state"] = "BLOCKED"
+    elif change == "stale":
+        current["effective_age_seconds"] = 0.31
+    else:
+        current["valid"] = False
+        current["reason"] = "invalid"
+
+    assert interlock.refresh() == (False, reason)
+    assert stop.call_count == 1
+    release.set()
+    thread.join(2)
+
+    assert result["value"]["ok"] is False
+    assert result["value"]["bounded_forward_invalidated"] is True
+    assert result["value"]["reason"] == reason
+    assert stop.call_count == 2
     interlock.stop()
 
 
