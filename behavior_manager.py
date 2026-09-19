@@ -1,4 +1,3 @@
-import copy
 import math
 import threading
 import time
@@ -472,8 +471,6 @@ class BehaviorManager:
     FIND_APPROACH_FORWARD_SECONDS = 0.50
     FIND_APPROACH_MAX_CHUNKS = 4
     FIND_ARRIVAL_AREA = 75000.0
-    FIND_ARRIVAL_AREA_FRACTION = FIND_ARRIVAL_AREA / (640.0 * 480.0)
-    FIND_ARRIVAL_SUPPORT_REQUIRED = 2
 
     FOLLOW_SEARCH_TURN_SPEED = 0.50
     FOLLOW_SEARCH_TURN_SECONDS = 0.30
@@ -1765,8 +1762,6 @@ class BehaviorManager:
             "terminal_reason": None,
             "qualified_support_reached": False,
             "qualified_fallback_used": False,
-            "winning_cluster_support": 0,
-            "winning_cluster_arrival_area_fractions": [],
         }
 
         def finish(candidate, status, terminal_reason=None):
@@ -1794,11 +1789,6 @@ class BehaviorManager:
                     )
                 )
             )
-            if isinstance(candidate, dict):
-                candidate = dict(candidate)
-                candidate["_find_confirmation_diagnostics"] = copy.deepcopy(
-                    diagnostics
-                )
             if return_diagnostics:
                 return candidate, status, diagnostics
             return candidate, status
@@ -1841,25 +1831,13 @@ class BehaviorManager:
                 )
 
             winning = max(eligible, key=cluster_key)
-            selected = max(
+            return max(
                 winning["observations"],
                 key=lambda item: (
                     float(item.get("confidence") or 0.0),
                     float(item.get("area") or 0.0),
                 ),
             )
-            arrival_evidence = self._find_arrival_evidence_for_cluster(
-                winning["observations"], winning["timestamps"]
-            )
-            diagnostics["winning_cluster_support"] = len(
-                winning["timestamps"]
-            )
-            diagnostics["winning_cluster_arrival_area_fractions"] = list(
-                arrival_evidence["arrival_area_fractions"]
-            )
-            selected = dict(selected)
-            selected["_find_arrival_evidence"] = arrival_evidence
-            return selected
 
         def fallback_after_optional_failure():
             nonlocal qualified_support_reached
@@ -2109,69 +2087,6 @@ class BehaviorManager:
             "bbox": safe_bbox,
         }
 
-    @staticmethod
-    def _find_target_area_fraction(observation):
-        """Return finite positive bbox area as an image fraction, or None."""
-        if not isinstance(observation, dict):
-            return None
-        values = (
-            observation.get("area"),
-            observation.get("image_width"),
-            observation.get("image_height"),
-        )
-        if not all(
-            isinstance(value, (int, float))
-            and not isinstance(value, bool)
-            and math.isfinite(value)
-            and value > 0.0
-            for value in values
-        ):
-            return None
-        area, width, height = (float(value) for value in values)
-        fraction = area / (width * height)
-        return (
-            fraction
-            if math.isfinite(fraction) and 0.0 < fraction <= 1.0
-            else None
-        )
-
-    def _find_arrival_evidence_for_cluster(self, observations, timestamps):
-        """Count at most one qualifying arrival observation per timestamp."""
-        cluster_timestamps = {
-            value
-            for value in timestamps
-            if isinstance(value, str) and value.strip()
-        }
-        qualifying_by_timestamp = {}
-        for observation in observations:
-            if not isinstance(observation, dict):
-                continue
-            timestamp = observation.get("source_timestamp")
-            if timestamp not in cluster_timestamps:
-                continue
-            fraction = self._find_target_area_fraction(observation)
-            if (
-                fraction is not None
-                and fraction >= self.FIND_ARRIVAL_AREA_FRACTION
-            ):
-                qualifying_by_timestamp[timestamp] = max(
-                    fraction,
-                    qualifying_by_timestamp.get(timestamp, 0.0),
-                )
-        support_timestamps = sorted(qualifying_by_timestamp)
-        return {
-            "arrival_area_fraction_threshold": (
-                self.FIND_ARRIVAL_AREA_FRACTION
-            ),
-            "arrival_support_required": self.FIND_ARRIVAL_SUPPORT_REQUIRED,
-            "arrival_support_count": len(support_timestamps),
-            "arrival_support_timestamps": support_timestamps,
-            "arrival_area_fractions": [
-                qualifying_by_timestamp[timestamp]
-                for timestamp in support_timestamps
-            ],
-        }
-
     def _confirm_target_candidates(self, target_name):
         """Compatibility wrapper for production FIND_OBJECT execution."""
         confirmed, status = self._confirm_target_candidates_with_status(
@@ -2197,15 +2112,7 @@ class BehaviorManager:
             )
         except Exception:
             return None
-        if not self._target_is_fresh_and_acquired(promoted):
-            return None
-        for key in (
-            "_find_arrival_evidence",
-            "_find_confirmation_diagnostics",
-        ):
-            if key in target:
-                promoted[key] = copy.deepcopy(target[key])
-        return promoted
+        return promoted if self._target_is_fresh_and_acquired(promoted) else None
 
     def _center_acquired_target(
         self,
@@ -2521,15 +2428,9 @@ class BehaviorManager:
         centering_total_attempted = centering_attempted
         centering_total_completed = centering_completed
         current = observation
-        initial_arrival_confirmation_attempted = False
 
         def target_telemetry(target, previous=None):
             value = dict(previous or {})
-            public_target = {
-                key: item
-                for key, item in target.items()
-                if not key.startswith("_find_")
-            }
             image_width = target.get("image_width")
             center_x = target.get("cx")
             image_center_x = None
@@ -2570,7 +2471,7 @@ class BehaviorManager:
                 "steering_direction": direction,
                 "centering_direction": direction,
                 "bbox": target.get("bbox"),
-                "target_observation": public_target,
+                "target_observation": target,
             })
             return value
 
@@ -2633,47 +2534,6 @@ class BehaviorManager:
             self._publish_tracking_state(value)
             return value
 
-        def target_reached_result(target, telemetry_fields):
-            evidence = target.get("_find_arrival_evidence")
-            support = (
-                evidence.get("arrival_support_count")
-                if isinstance(evidence, dict)
-                else None
-            )
-            if (
-                not isinstance(support, int)
-                or isinstance(support, bool)
-                or support < self.FIND_ARRIVAL_SUPPORT_REQUIRED
-            ):
-                return None
-            diagnostics = target.get("_find_confirmation_diagnostics")
-            return result(
-                ok=True,
-                executed=True,
-                completed=True,
-                target_found=True,
-                state="TARGET_REACHED",
-                reason=(
-                    "Target reached from temporally confirmed visual area."
-                ),
-                arrival_area_fraction_threshold=(
-                    self.FIND_ARRIVAL_AREA_FRACTION
-                ),
-                arrival_support_required=(
-                    self.FIND_ARRIVAL_SUPPORT_REQUIRED
-                ),
-                arrival_support_count=support,
-                arrival_support_timestamps=list(
-                    evidence.get("arrival_support_timestamps", [])
-                ),
-                arrival_area_fractions=list(
-                    evidence.get("arrival_area_fractions", [])
-                ),
-                confirmation_status="target_confirmed",
-                confirmation_diagnostics=diagnostics,
-                **telemetry_fields,
-            )
-
         telemetry = target_telemetry(current, telemetry)
         telemetry["approach_forward_speed"] = self.FIND_APPROACH_FORWARD_SPEED
         telemetry["approach_forward_duration"] = self.FIND_APPROACH_FORWARD_SECONDS
@@ -2701,47 +2561,6 @@ class BehaviorManager:
 
             telemetry = target_telemetry(current, telemetry)
             horizontal_error = telemetry.get("horizontal_error")
-            reached = target_reached_result(current, telemetry)
-            if reached is not None:
-                return reached
-
-            current_area_fraction = self._find_target_area_fraction(current)
-            if (
-                not initial_arrival_confirmation_attempted
-                and current.get("_find_arrival_evidence") is None
-                and current_area_fraction is not None
-                and current_area_fraction >= self.FIND_ARRIVAL_AREA_FRACTION
-                and horizontal_error is not None
-                and abs(horizontal_error) <= self.FIND_CENTER_TOLERANCE_PIXELS
-            ):
-                # A cached close observation cannot declare arrival. Obtain
-                # the same fresh temporal YOLO support used elsewhere, but a
-                # failed optional arrival check preserves existing approach.
-                initial_arrival_confirmation_attempted = True
-                cutoff = post_motion_cutoff(current)
-                (
-                    close_confirmed,
-                    _close_status,
-                    _close_diagnostics,
-                ) = self._confirm_target_candidates_with_status(
-                    target_name,
-                    minimum_timestamp=cutoff,
-                    return_diagnostics=True,
-                    confirmation_window_seconds=(
-                        self.FIND_POST_MOTION_CONFIRMATION_WINDOW_SECONDS
-                    ),
-                )
-                if close_confirmed is not None:
-                    close_promoted = self._promote_confirmed_target(
-                        close_confirmed
-                    )
-                    if close_promoted is not None:
-                        current = close_promoted
-                        telemetry = target_telemetry(current, telemetry)
-                        horizontal_error = telemetry.get("horizontal_error")
-                        reached = target_reached_result(current, telemetry)
-                        if reached is not None:
-                            return reached
             if (
                 horizontal_error is not None
                 and abs(horizontal_error) > self.FIND_CENTER_TOLERANCE_PIXELS
@@ -2995,9 +2814,6 @@ class BehaviorManager:
                             )
                         current = promoted
                         telemetry = target_telemetry(current, telemetry)
-                        reached = target_reached_result(current, telemetry)
-                        if reached is not None:
-                            return reached
                         continue
 
                     failure_telemetry = dict(telemetry)
@@ -3497,9 +3313,6 @@ class BehaviorManager:
                     )
                 current = promoted
                 telemetry = target_telemetry(current, telemetry)
-                reached = target_reached_result(current, telemetry)
-                if reached is not None:
-                    return reached
                 bypass_pending = True
                 pending_avoidance_step = avoidance_step
                 continue
@@ -3721,9 +3534,6 @@ class BehaviorManager:
                         )
                     current = promoted
                     telemetry = target_telemetry(current, telemetry)
-                    reached = target_reached_result(current, telemetry)
-                    if reached is not None:
-                        return reached
                     continue
                 blocked = bool(
                     bounded_invalidated
@@ -3811,9 +3621,6 @@ class BehaviorManager:
 
             current = promoted
             telemetry = target_telemetry(current, telemetry)
-            reached = target_reached_result(current, telemetry)
-            if reached is not None:
-                return reached
             if pending_avoidance_step is not None:
                 pending_avoidance_step[
                     "post_bypass_confirmation_status"
