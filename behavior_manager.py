@@ -457,6 +457,7 @@ class BehaviorManager:
     MARVIN_LOCAL_TRACKER_MIN_SUPPORT = 2
     MARVIN_PREVIEW_CONFIRMATION_WINDOW_SECONDS = 2.0
     MARVIN_PREVIEW_MAX_SEMANTIC_CANDIDATES = 8
+    MARVIN_PROPOSAL_MAX_WIDTH_TO_HEIGHT_RATIO = 1.25
     MARVIN_TRACKER_HORIZONTAL_PADDING_FRACTION = 0.20
     MARVIN_TRACKER_VERTICAL_PADDING_FRACTION = 0.05
 
@@ -1780,6 +1781,11 @@ class BehaviorManager:
         )
         if not candidates:
             raise ValueError("marvin_yolo_proposal_" + str(status))
+        candidates = self._filter_marvin_proposal_geometry(
+            candidates, diagnostics,
+        )
+        if not candidates:
+            raise ValueError("marvin_yolo_proposal_geometry_invalid")
         if execution_guard is not None:
             execution_guard()
         frame = semantic_vision.fetch_frame()
@@ -1875,6 +1881,39 @@ class BehaviorManager:
             ),
             confirmation_diagnostics=diagnostics,
         )
+
+    @classmethod
+    def _filter_marvin_proposal_geometry(cls, candidates, diagnostics=None):
+        """Reject implausibly wide Marvin proposals without using labels."""
+        before = len(candidates)
+        plausible = []
+        for candidate in candidates:
+            bbox = candidate.get("bbox") if isinstance(candidate, dict) else None
+            try:
+                width = float(bbox["x2"]) - float(bbox["x1"])
+                height = float(bbox["y2"]) - float(bbox["y1"])
+                plausible_geometry = (
+                    math.isfinite(width)
+                    and math.isfinite(height)
+                    and width > 0.0
+                    and height > 0.0
+                    and width / height <= cls.MARVIN_PROPOSAL_MAX_WIDTH_TO_HEIGHT_RATIO
+                )
+            except (KeyError, TypeError, ValueError, ZeroDivisionError):
+                plausible_geometry = False
+            if plausible_geometry:
+                plausible.append(candidate)
+        if isinstance(diagnostics, dict):
+            diagnostics.update({
+                "marvin_geometry_filter_applied": True,
+                "marvin_geometry_max_width_height_ratio": (
+                    cls.MARVIN_PROPOSAL_MAX_WIDTH_TO_HEIGHT_RATIO
+                ),
+                "marvin_geometry_candidates_before": before,
+                "marvin_geometry_candidates_after": len(plausible),
+                "marvin_geometry_candidates_rejected": before - len(plausible),
+            })
+        return plausible
 
     @classmethod
     def _expand_marvin_tracker_seed_bbox(

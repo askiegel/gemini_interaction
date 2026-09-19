@@ -297,6 +297,18 @@ def test_invalid_proposal_bbox_fails_closed():
     assert not [call for call in robot.calls if call[0] == "forward"]
 
 
+def test_wide_centered_proposal_is_filtered_before_gemini():
+    instance, robot = manager(
+        proposal_boxes={"x1": 0, "y1": 0, "x2": 640, "y2": 480},
+    )
+    result = instance.execute(mission())
+    assert result["state"] == "MARVIN_ONE_STEP_BLOCKED"
+    assert result["reason"] == "marvin_one_step_error"
+    assert instance.semantic_vision.calls == []
+    assert not [call for call in robot.calls if call[0] == "forward"]
+    assert result["post_step_stop_result"]["ok"] is True
+
+
 def test_insufficient_proposal_support_fails_closed():
     instance, robot = manager()
     instance.vision.payloads = instance.vision.payloads[:1]

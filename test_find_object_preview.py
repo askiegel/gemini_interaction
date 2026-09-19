@@ -364,6 +364,83 @@ def test_marvin_tracker_seed_expansion_is_rounded_and_clamped():
         )
 
 
+@pytest.mark.parametrize("label", ["chair", "bed", "refrigerator", "teddy bear", "toilet"])
+def test_marvin_proposal_geometry_filter_ignores_label(label):
+    diagnostics = {}
+    candidate = {
+        "label": label,
+        "bbox": {"x1": 10, "y1": 20, "x2": 110, "y2": 100},
+    }
+    assert BehaviorManager._filter_marvin_proposal_geometry(
+        [candidate], diagnostics,
+    ) == [candidate]
+    assert diagnostics["marvin_geometry_candidates_after"] == 1
+
+
+@pytest.mark.parametrize("bbox,accepted", [
+    ({"x1": 303, "y1": 129, "x2": 398, "y2": 302}, True),
+    ({"x1": 381, "y1": 80, "x2": 533, "y2": 349}, True),
+    ({"x1": 13, "y1": 140, "x2": 446, "y2": 303}, False),
+    ({"x1": 2, "y1": 167, "x2": 456, "y2": 300}, False),
+])
+def test_marvin_proposal_geometry_filter_matches_live_bbox_examples(bbox, accepted):
+    candidate = {"label": "chair", "bbox": bbox}
+    assert bool(BehaviorManager._filter_marvin_proposal_geometry([candidate])) is accepted
+
+
+def test_marvin_proposal_geometry_filter_preserves_order_and_ratio_boundary():
+    candidates = [
+        {"label": "chair", "bbox": {"x1": 0, "y1": 0, "x2": 125, "y2": 100}},
+        {"label": "toilet", "bbox": {"x1": 10, "y1": 10, "x2": 30, "y2": 50}},
+        {"label": "bed", "bbox": {"x1": 0, "y1": 0, "x2": 126, "y2": 100}},
+    ]
+    diagnostics = {}
+    filtered = BehaviorManager._filter_marvin_proposal_geometry(candidates, diagnostics)
+    assert [item["label"] for item in filtered] == ["chair", "toilet"]
+    assert diagnostics["marvin_geometry_candidates_before"] == 3
+    assert diagnostics["marvin_geometry_candidates_after"] == 2
+    assert diagnostics["marvin_geometry_candidates_rejected"] == 1
+
+
+def test_marvin_geometry_filter_rejects_known_wide_proposals_before_gemini():
+    manager = BehaviorManager(
+        robot_client=ReadOnlyRobot(), vision_adapter=marvin_yolo_candidates(),
+    )
+    wide = [
+        {"label": "chair", "bbox": {"x1": 13, "y1": 140, "x2": 446, "y2": 303}},
+        {"label": "toilet", "bbox": {"x1": 2, "y1": 167, "x2": 456, "y2": 300}},
+    ]
+    diagnostics = {}
+    assert manager._filter_marvin_proposal_geometry(wide, diagnostics) == []
+    assert diagnostics["marvin_geometry_candidates_rejected"] == 2
+
+
+def test_marvin_preview_fails_closed_without_gemini_when_all_proposals_are_wide():
+    semantic = MarvinSemanticVision(marvin_result())
+    vision = marvin_yolo_candidates()
+    vision.payloads = [
+        {
+            "timestamp": f"frame-{index}",
+            "camera_running": True,
+            "detections": [{
+                "label": "chair", "confidence": 0.1,
+                "x1": 13, "y1": 140, "x2": 446, "y2": 303,
+                "center_x": 229.5, "center_y": 221.5, "area": 70579,
+                "image_width": 640, "image_height": 480,
+            }],
+        }
+        for index in range(1, 4)
+    ]
+    manager = BehaviorManager(
+        robot_client=ReadOnlyRobot(), vision_adapter=vision,
+        semantic_vision=semantic,
+    )
+    result = manager.preview_find_object("marvin")
+    assert result["ok"] is False
+    assert "geometry_invalid" in result["reason"]
+    assert semantic.calls == []
+
+
 def test_marvin_preview_tracker_confirmation_failure_has_no_authoritative_bbox():
     semantic = MarvinSemanticVision(marvin_result())
     manager = BehaviorManager(
