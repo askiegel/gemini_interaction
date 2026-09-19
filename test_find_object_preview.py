@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import json
+import inspect
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -8,7 +9,10 @@ from behavior_manager import BehaviorManager
 from mission_types import create_mission
 from runtime_api import RuntimeAPIHandler
 from tracking_state import build_tracking_state, empty_tracking_state
-from voice_relay.server import VoiceRelayHandler
+from voice_relay.server import (
+    FIND_OBJECT_PREVIEW_TIMEOUT_SECONDS,
+    VoiceRelayHandler,
+)
 from datetime import datetime, timezone
 
 
@@ -95,7 +99,7 @@ class MarvinSemanticVision:
 
     def fetch_frame(self):
         self.calls.append('frame')
-        return object()
+        return SimpleNamespace(received_at=self.timestamp)
 
     def describe(self, target, frame):
         assert target == 'marvin'
@@ -111,6 +115,7 @@ class MarvinSemanticVision:
             'image_width': 640, 'image_height': 480,
             'frame_received_at': self.timestamp,
             'source_timestamp': self.timestamp,
+            'semantic_completed_at': datetime.now(timezone.utc).isoformat(),
             'source': 'gemini_marvin',
         }
 
@@ -474,6 +479,13 @@ def test_voice_relay_preview_proxy_forwards_only_read_only_request():
     assert responses == [(200, {"ok": True, "preview": True, "target": "backpack"})]
     assert request.call_args.args[0] == "GET"
     assert "/find-object/preview?target=backpack" in request.call_args.args[1]
+    assert request.call_args.kwargs['timeout'] == FIND_OBJECT_PREVIEW_TIMEOUT_SECONDS
+
+
+def test_preview_proxy_timeout_covers_bounded_semantic_preview_only():
+    assert FIND_OBJECT_PREVIEW_TIMEOUT_SECONDS == 25.0
+    assert FIND_OBJECT_PREVIEW_TIMEOUT_SECONDS > 3.0
+    assert 'timeout=3.0' in inspect.getsource(VoiceRelayHandler.dashboard_status)
 
 
 if __name__ == "__main__":

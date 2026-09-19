@@ -592,7 +592,8 @@ class BehaviorManager:
 
     SEMANTIC_FRAME_TIMEOUT_SECONDS = 5.0
     SEMANTIC_IMAGE_TIMEOUT_SECONDS = 13.0
-    SEMANTIC_MAX_FRAME_AGE_SECONDS = 3.0
+    SEMANTIC_MAX_SOURCE_FRAME_AGE_SECONDS = 3.0
+    SEMANTIC_MAX_RESULT_AGE_SECONDS = 3.0
 
     def _semantic_motion_idle(self):
         # These are local snapshots; never query the Robot Bridge over HTTP.
@@ -653,22 +654,40 @@ class BehaviorManager:
                     raise value
                 return value
 
-    def _marvin_semantic_is_current(self, observation):
-        """Marvin geometry is usable only while tied to a fresh camera frame."""
+    @staticmethod
+    def _semantic_timestamp(value):
+        if not isinstance(value, str) or not value.strip():
+            return None
+        value = value.strip()
+        value = value[:-1] + "+00:00" if value.endswith("Z") else value
+        try:
+            parsed = datetime.fromisoformat(value)
+        except ValueError:
+            return None
+        return parsed if parsed.tzinfo is not None else None
+
+    def _marvin_source_frame_is_fresh(self, frame, *, now=None):
+        """Validate source-frame age before Gemini receives the JPEG."""
+        captured = self._semantic_timestamp(getattr(frame, "received_at", None))
+        current = now or datetime.now(timezone.utc)
+        if captured is None:
+            return False
+        age = (current - captured).total_seconds()
+        return 0.0 <= age <= self.SEMANTIC_MAX_SOURCE_FRAME_AGE_SECONDS
+
+    def _marvin_semantic_is_current(self, observation, *, now=None):
+        """Validate a completed result without re-aging its source frame."""
         if not isinstance(observation, dict):
             return False
-        timestamp = observation.get("source_timestamp") or observation.get("frame_received_at")
-        if not self._vision_timestamp_is_iso(timestamp):
+        source = self._semantic_timestamp(
+            observation.get("source_timestamp") or observation.get("frame_received_at")
+        )
+        completed = self._semantic_timestamp(observation.get("semantic_completed_at"))
+        current = now or datetime.now(timezone.utc)
+        if source is None or completed is None or source > completed:
             return False
-        value = timestamp[:-1] + "+00:00" if timestamp.endswith("Z") else timestamp
-        try:
-            captured = datetime.fromisoformat(value)
-        except ValueError:
-            return False
-        if captured.tzinfo is None:
-            return False
-        age = (datetime.now(timezone.utc) - captured).total_seconds()
-        return 0.0 <= age <= self.SEMANTIC_MAX_FRAME_AGE_SECONDS
+        age = (current - completed).total_seconds()
+        return 0.0 <= age <= self.SEMANTIC_MAX_RESULT_AGE_SECONDS
 
     def _confirm_find_target_with_semantic(
         self, target_name, *, semantic_turn_budget=1, **kwargs
@@ -707,6 +726,8 @@ class BehaviorManager:
                 self.SEMANTIC_FRAME_TIMEOUT_SECONDS, episode,
             )
             self._semantic_check_current(episode)
+            if semantic_target_spec(label) is not None and not self._marvin_source_frame_is_fresh(frame):
+                raise ValueError("semantic_source_frame_stale_or_invalid")
             if not self._semantic_motion_idle():
                 raise ValueError("semantic_motion_busy")
             semantic = self._semantic_bounded_call(
@@ -1369,6 +1390,8 @@ class BehaviorManager:
             if semantic_target_spec(normalized_target) is not None:
                 try:
                     frame = self.semantic_vision.fetch_frame() if self.semantic_vision else None
+                    if not self._marvin_source_frame_is_fresh(frame):
+                        raise ValueError("semantic_source_frame_stale_or_invalid")
                     semantic = (
                         self.semantic_vision.describe(normalized_target, frame)
                         if frame is not None else None

@@ -1,5 +1,6 @@
 """Offline tests: all camera and model transports are replaced."""
 import json
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -70,6 +71,8 @@ def test_marvin_uses_physical_semantic_specification_and_geometry():
     assert result['source'] == 'gemini_marvin'
     assert result['semantic_target'] == 'marvin'
     assert result['source_timestamp'] == FRAME.received_at
+    assert result['semantic_completed_at']
+    assert result['semantic_completed_at'] != result['source_timestamp']
     assert result['center_x'] == 60.0
     assert result['center_y'] == 120.0
 
@@ -100,6 +103,38 @@ def test_marvin_absence_requires_and_preserves_a_diagnostic_reason():
     ))
     with pytest.raises(ValueError, match='semantic_absent_reason_required'):
         instance.describe('marvin', FRAME)
+
+
+def test_marvin_source_freshness_is_checked_before_inference_and_result_age_afterward():
+    manager = BehaviorManager(robot_client=object())
+    source = datetime(2026, 9, 18, 12, 0, tzinfo=timezone.utc)
+    frame = SimpleNamespace(received_at=source.isoformat())
+    submitted = source + timedelta(seconds=2.9)
+    completed = source + timedelta(seconds=6.5)
+    result = {
+        'source_timestamp': source.isoformat(),
+        'semantic_completed_at': completed.isoformat(),
+    }
+    assert manager._marvin_source_frame_is_fresh(frame, now=submitted)
+    assert manager._marvin_semantic_is_current(
+        result, now=completed + timedelta(seconds=.1),
+    )
+
+
+def test_marvin_stale_missing_malformed_and_future_timestamps_fail_closed():
+    manager = BehaviorManager(robot_client=object())
+    now = datetime(2026, 9, 18, 12, 0, tzinfo=timezone.utc)
+    assert not manager._marvin_source_frame_is_fresh(
+        SimpleNamespace(received_at=(now - timedelta(seconds=3.1)).isoformat()), now=now,
+    )
+    for timestamp in (None, 'not-a-timestamp', (now + timedelta(seconds=1)).isoformat()):
+        assert not manager._marvin_source_frame_is_fresh(
+            SimpleNamespace(received_at=timestamp), now=now,
+        )
+    assert not manager._marvin_semantic_is_current({
+        'source_timestamp': now.isoformat(),
+        'semantic_completed_at': (now - timedelta(seconds=3.1)).isoformat(),
+    }, now=now)
 
 
 @pytest.mark.parametrize('value', [

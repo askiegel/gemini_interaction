@@ -201,10 +201,23 @@ class SemanticVisionClient:
         parsed = getattr(response, "parsed", None)
         if parsed is None:
             parsed = json.loads(response.text)
-        return self._validate(parsed, label, frame, marvin=spec is not None)
+        return self._validate(
+            parsed,
+            label,
+            frame,
+            marvin=spec is not None,
+            semantic_completed_at=datetime.now(timezone.utc).isoformat(),
+        )
 
     @staticmethod
-    def _validate(value, target_label, frame, *, marvin=False):
+    def _validate(
+        value,
+        target_label,
+        frame,
+        *,
+        marvin=False,
+        semantic_completed_at=None,
+    ):
         allowed = {"target", "found", "coarse_direction", "bbox", "image_width", "image_height", "reason"}
         if not isinstance(value, dict) or set(value) - allowed:
             raise ValueError("semantic_schema_invalid")
@@ -226,8 +239,10 @@ class SemanticVisionClient:
             not isinstance(value.get("reason"), str) or not value["reason"].strip()
         ):
             raise ValueError("semantic_absent_reason_required")
+        completed_at = semantic_completed_at or datetime.now(timezone.utc).isoformat()
         result = dict(value, frame_received_at=frame.received_at,
                       source_timestamp=frame.received_at,
+                      semantic_completed_at=completed_at,
                       source="gemini_marvin" if marvin else "gemini_semantic",
                       geometry_quality="coarse")
         if marvin:
