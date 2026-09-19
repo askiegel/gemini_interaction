@@ -2145,9 +2145,16 @@
         const canvas = elements.cameraOverlay;
         const context = canvas.getContext("2d");
 
+        const trackingImageWidth =
+            tracking ? Number(tracking.image_width) : NaN;
+
+        const trackingImageHeight =
+            tracking ? Number(tracking.image_height) : NaN;
+
         const imageWidth =
-            tracking && Number.isFinite(Number(tracking.image_width))
-                ? Number(tracking.image_width)
+            Number.isFinite(trackingImageWidth) &&
+            trackingImageWidth > 0
+                ? trackingImageWidth
                 : detections.length
                 ? Number(
                     detections[0].image_width || 640
@@ -2155,8 +2162,9 @@
                 : 640;
 
         const imageHeight =
-            tracking && Number.isFinite(Number(tracking.image_height))
-                ? Number(tracking.image_height)
+            Number.isFinite(trackingImageHeight) &&
+            trackingImageHeight > 0
+                ? trackingImageHeight
                 : detections.length
                 ? Number(
                     detections[0].image_height || 480
