@@ -2833,21 +2833,28 @@
             const detections =
                 vision.detections || [];
 
-            const realFindObjectTracking =
-                missions.active &&
-                String(missions.active.mission_type || "").toUpperCase() ===
-                    "FIND_OBJECT" &&
+            const statusFindObjectTracking =
                 String(tracking.behavior || "").toUpperCase() ===
                     "FIND_OBJECT" &&
                 String(tracking.state || "").toUpperCase() !==
                     "PREVIEW";
+            const realFindObjectTracking =
+                missions.active &&
+                String(missions.active.mission_type || "").toUpperCase() ===
+                    "FIND_OBJECT" &&
+                String(missions.active.status || "").toUpperCase() ===
+                    "ACTIVE" &&
+                statusFindObjectTracking;
             if (realFindObjectTracking) {
                 findObjectPreviewTracking = null;
             }
             const displayTracking =
                 realFindObjectTracking
                     ? tracking
-                    : (findObjectPreviewTracking || tracking);
+                    : (
+                        findObjectPreviewTracking ||
+                        (statusFindObjectTracking ? {} : tracking)
+                    );
 
             const activeTarget =
                 displayTracking.target_label || null;
