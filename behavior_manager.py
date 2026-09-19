@@ -438,6 +438,9 @@ class _SemanticPreempted(Exception):
 
 
 class BehaviorManager:
+    MARVIN_SEMANTIC_TARGET = "marvin"
+    MARVIN_DETECTOR_ALIAS = "teddy bear"
+
     SEARCH_TURN_SPEED = 0.30
     SEARCH_TURN_SECONDS = 1.0
     SEARCH_MAX_TURN_CHUNKS = 3
@@ -683,8 +686,13 @@ class BehaviorManager:
             self._semantic_check_current(episode)
             if not self._semantic_motion_idle():
                 raise ValueError("semantic_motion_busy")
+            semantic_call = (
+                (lambda: self.semantic_vision.describe_marvin(frame))
+                if label == self.MARVIN_SEMANTIC_TARGET
+                else (lambda: self.semantic_vision.describe(label, frame))
+            )
             semantic = self._semantic_bounded_call(
-                lambda: self.semantic_vision.describe(label, frame),
+                semantic_call,
                 self.SEMANTIC_IMAGE_TIMEOUT_SECONDS, episode,
             )
             self._semantic_check_current(episode)
@@ -1804,6 +1812,8 @@ class BehaviorManager:
         confirmation_window_seconds=None,
     ):
         """Confirm a target and optionally return bounded diagnostics."""
+        semantic_target = str(target_name or "").strip().lower()
+        detector_target = self._detector_target_label(semantic_target)
         started = time.monotonic()
         confirmation_window = (
             self.TARGET_CONFIRMATION_WINDOW_SECONDS
@@ -1826,6 +1836,7 @@ class BehaviorManager:
             "terminal_reason": None,
             "qualified_support_reached": False,
             "qualified_fallback_used": False,
+            "detector_target": detector_target,
         }
 
         def finish(candidate, status, terminal_reason=None):
@@ -1947,7 +1958,7 @@ class BehaviorManager:
             }
             diagnostics["attempts"].append(attempt)
             try:
-                payload = fetch(target_name)
+                payload = fetch(detector_target)
             except Exception as exc:
                 attempt["fetch_error"] = {
                     "type": type(exc).__name__,
@@ -2031,7 +2042,7 @@ class BehaviorManager:
                 if not isinstance(raw_detection, dict):
                     continue
                 label = str(raw_detection.get("label", ""))
-                if label.casefold() != str(target_name).casefold():
+                if label.casefold() != detector_target.casefold():
                     continue
                 try:
                     normalized = normalize(raw_detection)
@@ -2041,7 +2052,8 @@ class BehaviorManager:
                     continue
                 normalized["found"] = True
                 normalized["stale"] = False
-                normalized["target"] = target_name
+                normalized["target"] = semantic_target
+                normalized["detector_target"] = detector_target
                 normalized["source_timestamp"] = timestamp
                 normalized["raw_detection"] = dict(raw_detection)
                 if (
@@ -2172,7 +2184,7 @@ class BehaviorManager:
         try:
             processor([dict(raw_detection)])
             promoted = self._get_target_observation(
-                target.get("target", "")
+                target.get("detector_target", target.get("target", ""))
             )
         except Exception:
             return None
@@ -3895,6 +3907,8 @@ class BehaviorManager:
         The compatibility fallback is retained only for isolated legacy tests
         that construct BehaviorManager without a World Model.
         """
+        semantic_target = str(target_name or "").strip().lower()
+        detector_target = self._detector_target_label(semantic_target)
         if (
             self.world_model is not None
             and hasattr(
@@ -3903,7 +3917,7 @@ class BehaviorManager:
             )
         ):
             return self.world_model.find_latest_entity_by_label(
-                target_name,
+                semantic_target,
                 max_age_seconds=self.TARGET_MAX_AGE_SECONDS,
                 refresh=True,
             )
@@ -3912,10 +3926,20 @@ class BehaviorManager:
             self.vision is not None
             and hasattr(self.vision, "find_target")
         ):
-            return self.vision.find_target(target_name)
+            return self.vision.find_target(detector_target)
 
         raise RuntimeError(
             "No World Model perception source is available."
+        )
+
+    @classmethod
+    def _detector_target_label(cls, target_name):
+        """Map only the dedicated Marvin identity to its detector alias."""
+        target = str(target_name or "").strip().lower()
+        return (
+            cls.MARVIN_DETECTOR_ALIAS
+            if target == cls.MARVIN_SEMANTIC_TARGET
+            else target
         )
 
     def _execute_find_object_cycle(

@@ -30,6 +30,7 @@ def test_active_live_find_object_supersedes_preview_tracking():
         '                    "ACTIVE"'
     ) in HTML
     assert "if (realFindObjectTracking) {\n                findObjectPreviewTracking = null;" in HTML
+    assert 'String(active.target || "").toLowerCase() === "marvin"' in HTML
 
 
 def test_preview_bbox_uses_existing_find_object_target_box_style():

@@ -1,4 +1,5 @@
 from pathlib import Path
+from unittest.mock import patch
 
 from voice_relay.server import VoiceRelayHandler
 
@@ -28,7 +29,7 @@ def test_find_marvin_defaults_to_dry_run_without_touching_runtime():
     assert payload["accepted"] is False
     assert payload["executed"] is False
     assert payload["dry_run"] is True
-    assert payload["target"] == "teddy bear"
+    assert payload["target"] == "marvin"
     assert payload["mission"] is None
 
 
@@ -77,3 +78,37 @@ def test_find_marvin_http_rejects_non_boolean_execute():
         "if not isinstance(execute, bool):"
         in SERVER
     )
+
+
+def test_find_marvin_live_submission_carries_marvin_semantic_identity():
+    assert '"target": "marvin"' in SERVER
+
+
+def test_find_marvin_live_submission_posts_marvin_target_after_preflight():
+    handler = _handler()
+    handler.dashboard_status = lambda: {
+        "runtime": {
+            "connected": True, "running": True, "last_error": None,
+            "lidar": {
+                "running": True, "available": True, "valid": True,
+                "reason": "fresh", "front_state": "CLEAR",
+            },
+            "forward_interlock": {
+                "configured": True, "monitor_running": True,
+                "forward_permitted": True, "reason": "fresh_clear",
+                "active_forward": False, "pending_forward": False,
+            },
+        },
+        "missions": {"active": None, "queue_count": 0},
+        "robot": {
+            "connected": True, "status": "READY", "ros_ready": True,
+            "motion": {"linear_x": 0, "angular_z": 0, "streaming": False},
+        },
+    }
+    with patch("voice_relay.server.request_json", return_value={
+        "status_code": 200, "data": {"ok": True, "accepted": True},
+        "error": None,
+    }) as request:
+        status_code, _payload = handler.submit_find_marvin(execute=True)
+    assert status_code == 200
+    assert request.call_args.kwargs["payload"]["intent"]["target"] == "marvin"

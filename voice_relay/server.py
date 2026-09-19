@@ -2208,7 +2208,7 @@ class VoiceRelayHandler(BaseHTTPRequestHandler):
                 "accepted": False,
                 "executed": False,
                 "dry_run": True,
-                "target": "teddy bear",
+                "target": "marvin",
                 "mission": None,
                 "reason": (
                     "Dry-run mode: Find Marvin mission was not submitted."
@@ -2275,7 +2275,7 @@ class VoiceRelayHandler(BaseHTTPRequestHandler):
             "intent": {
                 "intent": "FIND_OBJECT",
                 "speech": "Find Marvin.",
-                "target": "teddy bear",
+                "target": "marvin",
             },
         }
         response = request_json(

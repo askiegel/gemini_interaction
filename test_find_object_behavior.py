@@ -4080,6 +4080,8 @@ class SemanticFake:
         self.found = found
         self.frame_calls = 0
         self.calls = 0
+        self.generic_targets = []
+        self.marvin_calls = 0
         self.on_frame = lambda: None
         self.on_describe = lambda: None
 
@@ -4090,9 +4092,18 @@ class SemanticFake:
 
     def describe(self, target, frame):
         self.calls += 1
+        self.generic_targets.append(target)
         self.on_describe()
         return dict(target=target, found=self.found, coarse_direction=self.direction,
                     source='gemini_semantic', geometry_quality='coarse')
+
+    def describe_marvin(self, frame):
+        self.calls += 1
+        self.marvin_calls += 1
+        self.on_describe()
+        return dict(target='marvin', found=self.found,
+                    coarse_direction=self.direction, source='gemini_marvin',
+                    geometry_quality='coarse')
 
 
 def semantic_manager(monkeypatch, *, direction='RIGHT', found=True, reacquire=True,
@@ -4144,6 +4155,56 @@ def test_semantic_hint_requires_real_fresh_yolo_before_promotion(monkeypatch, di
     assert vision.promotions
     assert all(item['label'] == 'backpack' and 'confidence' in item for item in vision.promotions)
     assert all(item.get('source') != 'gemini_semantic' for item in vision.promotions)
+    assert manager.semantic_vision.generic_targets == ['backpack']
+
+
+def test_marvin_semantic_reacquisition_uses_alias_then_fresh_yolo(monkeypatch):
+    manager, vision, turns = semantic_manager(monkeypatch, direction='RIGHT')
+    detector_queries = []
+    for payload in vision.candidate_payloads:
+        if isinstance(payload, dict):
+            for detection in payload.get('detections', []):
+                detection['label'] = 'teddy bear'
+    fetch = vision.fetch_target_candidates
+
+    def fetch_marvin_detector(target):
+        detector_queries.append(target)
+        return fetch(target)
+
+    vision.fetch_target_candidates = fetch_marvin_detector
+    mission = create_mission(
+        mission_type='FIND_OBJECT', target='marvin', speech='Find Marvin.',
+        status='ACTIVE',
+    )
+
+    result = manager.execute(mission)
+
+    assert result['state'] == 'APPROACH_STEP_COMPLETE'
+    assert manager.semantic_vision.marvin_calls == 1
+    assert manager.semantic_vision.generic_targets == []
+    assert detector_queries and set(detector_queries) == {'teddy bear'}
+    assert len(turns) == 1
+    assert result['semantic_reacquisition_post_yolo_status'] == 'target_confirmed'
+    assert result['semantic_reacquisition_post_yolo_diagnostics']['minimum_timestamp']
+    assert all(item['label'] == 'teddy bear' for item in vision.promotions)
+
+
+def test_marvin_alias_is_detector_only_and_normal_targets_are_unchanged():
+    class WorldModel:
+        def __init__(self):
+            self.labels = []
+
+        def find_latest_entity_by_label(self, label, **_kwargs):
+            self.labels.append(label)
+            return not_found(label)
+
+    world = WorldModel()
+    manager = BehaviorManager(robot_client=GuardedSearchRobot(), world_model=world)
+
+    assert manager._detector_target_label('marvin') == 'teddy bear'
+    assert manager._detector_target_label('backpack') == 'backpack'
+    manager._get_target_observation('marvin')
+    assert world.labels == ['marvin']
 
 
 def test_semantic_not_called_when_initial_yolo_confirms(monkeypatch):

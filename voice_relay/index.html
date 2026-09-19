@@ -2685,7 +2685,7 @@
             const marvinActive = Boolean(
                 active
                 && String(active.mission_type || "").toUpperCase() === "FIND_OBJECT"
-                && String(active.target || "").toLowerCase() === "teddy bear"
+                && String(active.target || "").toLowerCase() === "marvin"
             );
 
             elements.activeMission.textContent =
@@ -2715,7 +2715,7 @@
 
             const marvinResult = (
                 String(lastResult.behavior || "").toUpperCase() === "FIND_OBJECT"
-                && String(lastResult.target || "").toLowerCase() === "teddy bear"
+                && String(lastResult.target || "").toLowerCase() === "marvin"
             ) ? lastResult : null;
             const marvinTelemetry = marvinActive ? tracking : (marvinResult || {});
             if (marvinActive || marvinResult) {
