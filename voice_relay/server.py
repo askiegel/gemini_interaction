@@ -2258,7 +2258,7 @@ class VoiceRelayHandler(BaseHTTPRequestHandler):
             "intent": {
                 "intent": "FIND_OBJECT",
                 "speech": "Find Marvin.",
-                "target": "teddy bear",
+                "target": "marvin",
             },
         }
         response = request_json(

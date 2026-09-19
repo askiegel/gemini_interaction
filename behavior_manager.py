@@ -9,6 +9,7 @@ from robot_bridge.forward_interlock import (
     FORWARD_POLICY_STRICT,
     FORWARD_POLICY_TARGET_APPROACH,
 )
+from semantic_vision import semantic_target_spec
 from guarded_turn_policy import validate_guarded_turn
 from local_obstacle_policy import recommend_local_avoidance
 from target_lock import TargetLock
@@ -591,6 +592,7 @@ class BehaviorManager:
 
     SEMANTIC_FRAME_TIMEOUT_SECONDS = 5.0
     SEMANTIC_IMAGE_TIMEOUT_SECONDS = 13.0
+    SEMANTIC_MAX_FRAME_AGE_SECONDS = 3.0
 
     def _semantic_motion_idle(self):
         # These are local snapshots; never query the Robot Bridge over HTTP.
@@ -651,6 +653,23 @@ class BehaviorManager:
                     raise value
                 return value
 
+    def _marvin_semantic_is_current(self, observation):
+        """Marvin geometry is usable only while tied to a fresh camera frame."""
+        if not isinstance(observation, dict):
+            return False
+        timestamp = observation.get("source_timestamp") or observation.get("frame_received_at")
+        if not self._vision_timestamp_is_iso(timestamp):
+            return False
+        value = timestamp[:-1] + "+00:00" if timestamp.endswith("Z") else timestamp
+        try:
+            captured = datetime.fromisoformat(value)
+        except ValueError:
+            return False
+        if captured.tzinfo is None:
+            return False
+        age = (datetime.now(timezone.utc) - captured).total_seconds()
+        return 0.0 <= age <= self.SEMANTIC_MAX_FRAME_AGE_SECONDS
+
     def _confirm_find_target_with_semantic(
         self, target_name, *, semantic_turn_budget=1, **kwargs
     ):
@@ -695,6 +714,8 @@ class BehaviorManager:
                 self.SEMANTIC_IMAGE_TIMEOUT_SECONDS, episode,
             )
             self._semantic_check_current(episode)
+            if semantic_target_spec(label) is not None and not self._marvin_semantic_is_current(semantic):
+                raise ValueError("semantic_frame_stale_or_invalid")
             telemetry.update(
                 semantic_reacquisition_completed=True,
                 semantic_reacquisition_found=semantic["found"],
@@ -1345,6 +1366,33 @@ class BehaviorManager:
             )
         )
         if confirmed is None:
+            if semantic_target_spec(normalized_target) is not None:
+                try:
+                    frame = self.semantic_vision.fetch_frame() if self.semantic_vision else None
+                    semantic = (
+                        self.semantic_vision.describe(normalized_target, frame)
+                        if frame is not None else None
+                    )
+                    if not self._marvin_semantic_is_current(semantic):
+                        raise ValueError("semantic_frame_stale_or_invalid")
+                    if semantic.get("found") is True:
+                        bbox = semantic["bbox"]
+                        observation = dict(
+                            semantic,
+                            label="marvin",
+                            cx=semantic["center_x"], cy=semantic["center_y"],
+                            area=(bbox["x2"] - bbox["x1"]) * (bbox["y2"] - bbox["y1"]),
+                        )
+                        return self._build_find_object_preview(
+                            normalized_target, observation,
+                            source="gemini_marvin", authoritative=False,
+                            confirmation_diagnostics=confirmation_diagnostics,
+                        )
+                    semantic_reason = "Marvin was not found in the current camera frame."
+                except Exception as exc:
+                    semantic_reason = "Marvin semantic acquisition failed: " + str(exc)
+                return dict(base, reason=semantic_reason,
+                            confirmation_diagnostics=confirmation_diagnostics)
             return dict(
                 base,
                 reason=(
@@ -1813,6 +1861,10 @@ class BehaviorManager:
             fresh_timestamps = set()
             return finish(None, "target_lost")
 
+        spec = semantic_target_spec(target_name)
+        detector_label = spec.detector_aliases[0] if spec is not None else target_name
+        diagnostics["detector_label"] = detector_label
+
         seen_timestamps = set()
         fresh_timestamps = set()
         clusters = []
@@ -1909,7 +1961,7 @@ class BehaviorManager:
             }
             diagnostics["attempts"].append(attempt)
             try:
-                payload = fetch(target_name)
+                payload = fetch(detector_label)
             except Exception as exc:
                 attempt["fetch_error"] = {
                     "type": type(exc).__name__,
@@ -1993,7 +2045,7 @@ class BehaviorManager:
                 if not isinstance(raw_detection, dict):
                     continue
                 label = str(raw_detection.get("label", ""))
-                if label.casefold() != str(target_name).casefold():
+                if label.casefold() != str(detector_label).casefold():
                     continue
                 try:
                     normalized = normalize(raw_detection)
@@ -2003,6 +2055,9 @@ class BehaviorManager:
                     continue
                 normalized["found"] = True
                 normalized["stale"] = False
+                if spec is not None:
+                    normalized["detector_label"] = normalized.get("label")
+                    normalized["label"] = target_name
                 normalized["target"] = target_name
                 normalized["source_timestamp"] = timestamp
                 normalized["raw_detection"] = dict(raw_detection)

@@ -9,6 +9,7 @@ from mission_types import create_mission
 from runtime_api import RuntimeAPIHandler
 from tracking_state import build_tracking_state, empty_tracking_state
 from voice_relay.server import VoiceRelayHandler
+from datetime import datetime, timezone
 
 
 def detection(timestamp="frame-1", cx=145.0):
@@ -57,8 +58,10 @@ class CandidateVision:
     def __init__(self, payloads):
         self.payloads = list(payloads)
         self.process_calls = 0
+        self.targets = []
 
     def fetch_target_candidates(self, target):
+        self.targets.append(target)
         return dict(self.payloads.pop(0))
 
     @staticmethod
@@ -82,6 +85,34 @@ class CandidateVision:
     def process_detection_frame(self, _detections):
         self.process_calls += 1
         raise AssertionError("preview promoted a candidate")
+
+
+class MarvinSemanticVision:
+    def __init__(self, *, timestamp=None, found=True):
+        self.timestamp = timestamp or datetime.now(timezone.utc).isoformat()
+        self.found = found
+        self.calls = []
+
+    def fetch_frame(self):
+        self.calls.append('frame')
+        return object()
+
+    def describe(self, target, frame):
+        assert target == 'marvin'
+        assert frame is not None
+        self.calls.append('describe')
+        return {
+            'target': 'marvin', 'semantic_target': 'marvin', 'found': self.found,
+            'coarse_direction': 'RIGHT', 'bbox': {
+                'x1': 400, 'y1': 100, 'x2': 500, 'y2': 300,
+            } if self.found else None,
+            'center_x': 450.0 if self.found else None,
+            'center_y': 200.0 if self.found else None,
+            'image_width': 640, 'image_height': 480,
+            'frame_received_at': self.timestamp,
+            'source_timestamp': self.timestamp,
+            'source': 'gemini_marvin',
+        }
 
 
 def test_world_model_preview_is_read_only_and_actionable():
@@ -142,6 +173,78 @@ def test_preview_duplicate_frames_fail_closed_without_promotion():
     assert "confirmed" in result["reason"]
     assert vision.process_calls == 0
     assert manager._last_target_confirmation_status == "sentinel"
+
+
+def test_marvin_preview_uses_current_semantic_candidate_when_yolo_absent():
+    vision = CandidateVision([{
+        'timestamp': 'frame-1', 'camera_running': True, 'detections': [],
+    }])
+    semantic = MarvinSemanticVision()
+    manager = BehaviorManager(
+        robot_client=ReadOnlyRobot(), vision_adapter=vision,
+        semantic_vision=semantic,
+    )
+    manager.TARGET_CONFIRMATION_POLL_SECONDS = 0
+    result = manager.preview_find_object('Marvin')
+    assert result['ok'] is True
+    assert result['target'] == result['target_label'] == 'marvin'
+    assert result['source'] == 'gemini_marvin'
+    assert result['authoritative'] is False
+    assert result['bbox']['x1'] == 400
+    assert result['target_center_x'] == 450.0
+    assert result['target_observation']['source_timestamp'] == semantic.timestamp
+    assert semantic.calls == ['frame', 'describe']
+    assert vision.process_calls == 0
+
+
+def test_marvin_still_uses_teddy_bear_yolo_alias_when_available():
+    payloads = []
+    for timestamp, cx in [('one', 300), ('two', 301), ('three', 302)]:
+        item = detection(timestamp, cx)
+        item['detections'][0]['label'] = 'teddy bear'
+        payloads.append(item)
+    vision = CandidateVision(payloads)
+    manager = BehaviorManager(robot_client=ReadOnlyRobot(), vision_adapter=vision)
+    manager.TARGET_CONFIRMATION_POLL_SECONDS = 0
+    result = manager.preview_find_object('marvin')
+    assert result['ok'] is True
+    assert result['source'] == 'vision_candidate'
+    assert result['target_label'] == 'marvin'
+    assert len(vision.targets) >= 3
+    assert set(vision.targets) == {'teddy bear'}
+
+
+def test_person_yolo_detections_are_not_accepted_as_marvin():
+    payloads = []
+    for timestamp in ('one', 'two', 'three'):
+        item = detection(timestamp)
+        item['detections'][0]['label'] = 'person'
+        payloads.append(item)
+    vision = CandidateVision(payloads)
+    manager = BehaviorManager(robot_client=ReadOnlyRobot(), vision_adapter=vision)
+    manager.TARGET_CONFIRMATION_POLL_SECONDS = 0
+    confirmed, status, _diagnostics = manager._confirm_target_candidates_with_status(
+        'marvin', return_diagnostics=True,
+    )
+    assert confirmed is None
+    assert status == 'target_lost'
+    assert len(vision.targets) >= 3
+    assert set(vision.targets) == {'teddy bear'}
+
+
+def test_stale_marvin_semantic_preview_fails_closed_with_diagnostic():
+    vision = CandidateVision([{
+        'timestamp': 'frame-1', 'camera_running': True, 'detections': [],
+    }])
+    semantic = MarvinSemanticVision(timestamp='2000-01-01T00:00:00+00:00')
+    manager = BehaviorManager(
+        robot_client=ReadOnlyRobot(), vision_adapter=vision,
+        semantic_vision=semantic,
+    )
+    manager.TARGET_CONFIRMATION_POLL_SECONDS = 0
+    result = manager.preview_find_object('marvin')
+    assert result['ok'] is False
+    assert 'stale_or_invalid' in result['reason']
 
 
 def test_production_confirmation_wrapper_updates_shared_status():

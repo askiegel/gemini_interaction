@@ -76,7 +76,7 @@ def test_dedicated_route_constructs_one_fixed_find_object_mission():
             "intent": {
                 "intent": "FIND_OBJECT",
                 "speech": "Find Marvin.",
-                "target": "teddy bear",
+                "target": "marvin",
             },
         },
         timeout=15.0,
@@ -234,8 +234,8 @@ def test_route_and_browser_cannot_supply_arbitrary_mission_fields():
     assert "if payload != {}:" in SERVER
     assert "accepts no browser-supplied mission fields" in SERVER
     assert 'body: JSON.stringify({})' in HTML
-    assert '"target": "teddy bear"' in SERVER
-    assert '"target": "teddy bear"' not in HTML
+    assert '"target": "marvin"' in SERVER
+    assert '"target": "marvin"' not in HTML
 
     handler = object.__new__(VoiceRelayHandler)
     handler.path = "/dashboard/find-marvin"
@@ -261,7 +261,7 @@ def test_status_exposes_existing_safety_telemetry():
 def test_find_marvin_button_and_client_preflight_exist():
     assert 'id="findMarvinButton"' in HTML
     assert "Find Marvin" in HTML
-    assert "Marvin (teddy bear)" in HTML
+    assert "Marvin (semantic; detector alias teddy bear)" in HTML
     assert "function findMarvinPreflight(status)" in HTML
     assert "&& !missions.active" in HTML
     assert "findMarvinButton.disabled" in HTML

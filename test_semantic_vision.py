@@ -7,7 +7,7 @@ import pytest
 import requests
 
 from behavior_manager import BehaviorManager
-from semantic_vision import JpegFrame, SemanticVisionClient
+from semantic_vision import JpegFrame, MARVIN_DESCRIPTION, SemanticVisionClient
 
 # Minimal SOF header fixture: parser tests do not perform image decoding.
 JPEG = b'\xff\xd8\xff\xc0\x00\x0b\x08\x01\xe0\x02\x80\x01\x01\x11\x00\xff\xd9'
@@ -54,6 +54,52 @@ def test_one_jpeg_prompt_schema_and_sdk_request_bounds():
     assert result['source'] == 'gemini_semantic'
     assert result['geometry_quality'] == 'coarse'
     assert not {'confidence', 'track_id', 'entity_id', 'identity_id', 'data'} & result.keys()
+
+
+def test_marvin_uses_physical_semantic_specification_and_geometry():
+    value, client = helper(dict(
+        target='marvin', found=True, coarse_direction='LEFT',
+        bbox=dict(x1=10, y1=20, x2=110, y2=220),
+        image_width=640, image_height=480,
+    ))
+    result = value.describe('marvin', FRAME)
+    prompt = client.models.generate_content.call_args.kwargs['contents'][0]
+    assert MARVIN_DESCRIPTION in prompt
+    assert "not the text label 'teddy bear'" in prompt
+    assert 'Ignore humans in the frame.' in prompt
+    assert result['source'] == 'gemini_marvin'
+    assert result['semantic_target'] == 'marvin'
+    assert result['source_timestamp'] == FRAME.received_at
+    assert result['center_x'] == 60.0
+    assert result['center_y'] == 120.0
+
+
+@pytest.mark.parametrize('value', [
+    dict(target='marvin', found=True, coarse_direction='CENTER', bbox=None,
+         image_width=640, image_height=480),
+    dict(target='marvin', found=True, coarse_direction='CENTER',
+         bbox=dict(x1=20, y1=1, x2=2, y2=3), image_width=640, image_height=480),
+    dict(target='marvin', found=True, coarse_direction='CENTER',
+         bbox=dict(x1=-1, y1=1, x2=20, y2=30), image_width=640, image_height=480),
+])
+def test_marvin_invalid_or_missing_bbox_fails_closed(value):
+    instance, _ = helper(value)
+    with pytest.raises(ValueError):
+        instance.describe('marvin', FRAME)
+
+
+def test_marvin_absence_requires_and_preserves_a_diagnostic_reason():
+    instance, _ = helper(dict(
+        target='marvin', found=False, coarse_direction='UNKNOWN', bbox=None,
+        image_width=640, image_height=480, reason='marvin is absent',
+    ))
+    assert instance.describe('marvin', FRAME)['diagnostic_reason'] == 'marvin is absent'
+    instance, _ = helper(dict(
+        target='marvin', found=False, coarse_direction='UNKNOWN', bbox=None,
+        image_width=640, image_height=480,
+    ))
+    with pytest.raises(ValueError, match='semantic_absent_reason_required'):
+        instance.describe('marvin', FRAME)
 
 
 @pytest.mark.parametrize('value', [
