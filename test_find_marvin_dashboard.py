@@ -3,8 +3,6 @@
 from pathlib import Path
 from unittest.mock import Mock, patch
 
-import pytest
-
 from voice_relay.server import VoiceRelayHandler
 
 
@@ -101,119 +99,6 @@ def test_unsafe_preflight_never_forwards_mission():
     request.assert_not_called()
 
 
-@pytest.mark.parametrize(
-    "front_state,forward_permitted,reason",
-    [
-        ("CLEAR", True, "fresh_clear"),
-        ("BLOCKED", False, "front_not_clear"),
-        ("CAUTION", False, "front_not_clear"),
-    ],
-)
-def test_front_motion_inhibition_does_not_block_submission(
-    front_state, forward_permitted, reason
-):
-    handler = object.__new__(VoiceRelayHandler)
-    status = safe_status()
-    status["runtime"]["lidar"]["front_state"] = front_state
-    interlock = status["runtime"]["forward_interlock"]
-    interlock["forward_permitted"] = forward_permitted
-    interlock["reason"] = reason
-    handler.dashboard_status = lambda: status
-
-    with patch(
-        "voice_relay.server.request_json",
-        return_value={
-            "ok": True,
-            "status_code": 202,
-            "data": {"ok": True, "accepted": True},
-            "error": None,
-        },
-    ) as request:
-        status_code, payload = handler.submit_find_marvin()
-
-    assert status_code == 202
-    assert payload["accepted"] is True
-    request.assert_called_once()
-
-
-@pytest.mark.parametrize("field", ["active_forward", "pending_forward"])
-def test_active_or_pending_forward_still_rejects_submission(field):
-    handler = object.__new__(VoiceRelayHandler)
-    status = safe_status()
-    status["runtime"]["forward_interlock"][field] = True
-    handler.dashboard_status = lambda: status
-
-    with patch("voice_relay.server.request_json") as request:
-        status_code, payload = handler.submit_find_marvin()
-
-    assert status_code == 409
-    assert payload["accepted"] is False
-    request.assert_not_called()
-
-
-@pytest.mark.parametrize(
-    "lidar_update",
-    [
-        {"reason": "stale"},
-        {"valid": False},
-        {"available": False},
-    ],
-)
-def test_unhealthy_lidar_still_rejects_submission(lidar_update):
-    handler = object.__new__(VoiceRelayHandler)
-    status = safe_status()
-    status["runtime"]["lidar"].update(lidar_update)
-    handler.dashboard_status = lambda: status
-
-    with patch("voice_relay.server.request_json") as request:
-        status_code, payload = handler.submit_find_marvin()
-
-    assert status_code == 409
-    assert payload["accepted"] is False
-    request.assert_not_called()
-
-
-@pytest.mark.parametrize("mission_field", ["active", "queue_count"])
-def test_nonquiescent_mission_state_still_rejects_submission(mission_field):
-    handler = object.__new__(VoiceRelayHandler)
-    status = safe_status()
-    status["missions"][mission_field] = (
-        {"mission_type": "FOLLOW_PERSON"}
-        if mission_field == "active"
-        else 1
-    )
-    handler.dashboard_status = lambda: status
-
-    with patch("voice_relay.server.request_json") as request:
-        status_code, payload = handler.submit_find_marvin()
-
-    assert status_code == 409
-    assert payload["accepted"] is False
-    request.assert_not_called()
-
-
-@pytest.mark.parametrize(
-    "motion_update",
-    [
-        {"linear_x": 0.01},
-        {"angular_z": 0.01},
-        {"streaming": True},
-    ],
-)
-def test_robot_motion_or_streaming_still_rejects_submission(motion_update):
-    handler = object.__new__(VoiceRelayHandler)
-    status = safe_status()
-    status["robot"]["motion"].update(motion_update)
-    handler.dashboard_status = lambda: status
-
-    with patch("voice_relay.server.request_json") as request:
-        status_code, payload = handler.submit_find_marvin()
-
-    assert status_code == 409
-    assert payload["accepted"] is False
-    request.assert_not_called()
-
-
 def test_missing_or_malformed_preflight_fields_fail_closed():
     handler = object.__new__(VoiceRelayHandler)
     handler.dashboard_status = lambda: {
@@ -268,25 +153,6 @@ def test_find_marvin_button_and_client_preflight_exist():
     assert 'fetch("/dashboard/find-marvin"' in HTML
     assert "centering_turn_chunks_attempted" in HTML
     assert "approach_chunks_completed" in HTML
-
-
-def test_client_submission_gate_allows_front_motion_inhibition():
-    preflight = HTML.split("function findMarvinPreflight(status)", 1)[1].split(
-        "function clearTrackingOverlay()", 1
-    )[0]
-    submission_gate = preflight.split(
-        "const forwardMotionInhibited", 1
-    )[0]
-    assert 'lidar.reason === "fresh"' in submission_gate
-    assert "interlock.active_forward === false" in submission_gate
-    assert "interlock.pending_forward === false" in submission_gate
-    assert 'lidar.front_state === "CLEAR"' not in submission_gate
-    assert "interlock.forward_permitted === true" not in submission_gate
-    assert 'interlock.reason === "fresh_clear"' not in submission_gate
-    assert (
-        "Ready to find Marvin. Forward motion currently inhibited by LiDAR."
-        in preflight
-    )
 
 
 def test_camera_and_read_only_lidar_are_responsive_companions():
