@@ -7,7 +7,7 @@ import pytest
 import requests
 
 from behavior_manager import BehaviorManager
-from semantic_vision import JpegFrame, SemanticVisionClient
+from semantic_vision import MARVIN_DESCRIPTION, JpegFrame, SemanticVisionClient
 
 # Minimal SOF header fixture: parser tests do not perform image decoding.
 JPEG = b'\xff\xd8\xff\xc0\x00\x0b\x08\x01\xe0\x02\x80\x01\x01\x11\x00\xff\xd9'
@@ -54,6 +54,27 @@ def test_one_jpeg_prompt_schema_and_sdk_request_bounds():
     assert result['source'] == 'gemini_semantic'
     assert result['geometry_quality'] == 'coarse'
     assert not {'confidence', 'track_id', 'entity_id', 'identity_id', 'data'} & result.keys()
+
+
+def test_marvin_preview_uses_physical_description_and_requires_geometry():
+    instance, client = helper(dict(
+        target='marvin', found=True, coarse_direction='LEFT',
+        bbox=dict(x1=10, y1=20, x2=110, y2=220),
+        image_width=640, image_height=480,
+    ))
+    result = instance.describe_marvin(FRAME)
+    prompt = client.models.generate_content.call_args.kwargs['contents'][0]
+    assert MARVIN_DESCRIPTION in prompt
+    assert "not by the YOLO 'teddy bear' class" in prompt
+    assert result['source'] == 'gemini_marvin'
+    assert result['bbox']['x2'] == 110
+
+    missing_geometry, _ = helper(dict(
+        target='marvin', found=True, coarse_direction='CENTER', bbox=None,
+        image_width=640, image_height=480,
+    ))
+    with pytest.raises(ValueError, match='semantic_bbox_required'):
+        missing_geometry.describe_marvin(FRAME)
 
 
 @pytest.mark.parametrize('value', [

@@ -1338,6 +1338,32 @@ class BehaviorManager:
             )
         )
         if confirmed is None:
+            if normalized_target == "marvin":
+                try:
+                    observation, coarse_direction = (
+                        self._preview_marvin_semantic_observation()
+                    )
+                except Exception as exc:
+                    return dict(
+                        base,
+                        reason="Marvin semantic preview unavailable: " + str(exc),
+                        confirmation_diagnostics=confirmation_diagnostics,
+                    )
+                if observation is not None:
+                    result = self._build_find_object_preview(
+                        normalized_target,
+                        observation,
+                        source="gemini_marvin",
+                        authoritative=False,
+                        confirmation_diagnostics=confirmation_diagnostics,
+                    )
+                    result["coarse_direction"] = coarse_direction
+                    return result
+                return dict(
+                    base,
+                    reason="Marvin was not found in the current camera frame.",
+                    confirmation_diagnostics=confirmation_diagnostics,
+                )
             return dict(
                 base,
                 reason=(
@@ -1357,6 +1383,44 @@ class BehaviorManager:
             authoritative=False,
             confirmation_diagnostics=confirmation_diagnostics,
         )
+
+    def _preview_marvin_semantic_observation(self):
+        """Acquire one non-authoritative Marvin observation without robot action."""
+        semantic_vision = self.semantic_vision
+        if semantic_vision is None:
+            raise ValueError("semantic_vision_unavailable")
+        frame = semantic_vision.fetch_frame()
+        semantic = semantic_vision.describe_marvin(frame)
+        if not isinstance(semantic, dict):
+            raise ValueError("semantic_result_invalid")
+        if semantic.get("found") is False:
+            return None, None
+        if semantic.get("found") is not True:
+            raise ValueError("semantic_found_invalid")
+        direction = semantic.get("coarse_direction")
+        if direction not in {"LEFT", "CENTER", "RIGHT", "UNKNOWN"}:
+            raise ValueError("semantic_direction_invalid")
+        bbox = semantic.get("bbox")
+        width = semantic.get("image_width")
+        height = semantic.get("image_height")
+        if (
+            not isinstance(bbox, dict)
+            or set(bbox) != {"x1", "y1", "x2", "y2"}
+            or type(width) is not int or type(height) is not int
+            or width <= 0 or height <= 0
+            or any(type(value) not in (int, float) or not math.isfinite(value)
+                   for value in bbox.values())
+            or not (0 <= bbox["x1"] < bbox["x2"] <= width)
+            or not (0 <= bbox["y1"] < bbox["y2"] <= height)
+        ):
+            raise ValueError("semantic_bbox_invalid")
+        return dict(
+            semantic,
+            label="marvin",
+            cx=(bbox["x1"] + bbox["x2"]) / 2.0,
+            cy=(bbox["y1"] + bbox["y2"]) / 2.0,
+            area=(bbox["x2"] - bbox["x1"]) * (bbox["y2"] - bbox["y1"]),
+        ), direction
 
     def _build_find_object_preview(
         self,

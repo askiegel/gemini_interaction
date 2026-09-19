@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import json
+import inspect
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -8,7 +9,7 @@ from behavior_manager import BehaviorManager
 from mission_types import create_mission
 from runtime_api import RuntimeAPIHandler
 from tracking_state import build_tracking_state, empty_tracking_state
-from voice_relay.server import VoiceRelayHandler
+from voice_relay.server import FIND_OBJECT_PREVIEW_TIMEOUT_SECONDS, VoiceRelayHandler
 
 
 def detection(timestamp="frame-1", cx=145.0):
@@ -84,6 +85,44 @@ class CandidateVision:
         raise AssertionError("preview promoted a candidate")
 
 
+class MarvinSemanticVision:
+    def __init__(self, result=None, error=None):
+        self.result = result
+        self.error = error
+        self.calls = []
+
+    def fetch_frame(self):
+        self.calls.append("frame")
+        if self.error:
+            raise self.error
+        return object()
+
+    def describe_marvin(self, frame):
+        assert frame is not None
+        self.calls.append("describe_marvin")
+        if self.error:
+            raise self.error
+        return self.result
+
+
+def no_marvin_candidates():
+    return CandidateVision([{
+        "timestamp": "frame-1", "camera_running": True, "detections": [],
+    }])
+
+
+def marvin_result(**updates):
+    return dict({
+        "target": "marvin",
+        "found": True,
+        "coarse_direction": "RIGHT",
+        "bbox": {"x1": 400, "y1": 100, "x2": 500, "y2": 300},
+        "image_width": 640,
+        "image_height": 480,
+        "source": "gemini_marvin",
+    }, **updates)
+
+
 def test_world_model_preview_is_read_only_and_actionable():
     observation = {
         "found": True,
@@ -142,6 +181,91 @@ def test_preview_duplicate_frames_fail_closed_without_promotion():
     assert "confirmed" in result["reason"]
     assert vision.process_calls == 0
     assert manager._last_target_confirmation_status == "sentinel"
+
+
+def test_marvin_preview_uses_one_semantic_acquisition_after_yolo_fails():
+    vision = no_marvin_candidates()
+    semantic = MarvinSemanticVision(marvin_result())
+    world = WorldModelObservation({})
+    manager = BehaviorManager(
+        robot_client=ReadOnlyRobot(), vision_adapter=vision, world_model=world,
+        semantic_vision=semantic,
+    )
+    manager.TARGET_CONFIRMATION_POLL_SECONDS = 0
+    manager.execute = lambda *_args: (_ for _ in ()).throw(
+        AssertionError("preview submitted a mission")
+    )
+
+    result = manager.preview_find_object("marvin")
+
+    assert result["ok"] is True
+    assert result["target"] == "marvin"
+    assert result["target_found"] is True
+    assert result["source"] == "gemini_marvin"
+    assert result["authoritative"] is False
+    assert result["coarse_direction"] == "RIGHT"
+    assert result["bbox"] == {"x1": 400, "y1": 100, "x2": 500, "y2": 300}
+    assert result["image_width"] == 640
+    assert result["image_height"] == 480
+    assert result["target_center_x"] == 450.0
+    assert result["target_center_y"] == 200.0
+    assert semantic.calls == ["frame", "describe_marvin"]
+    assert vision.process_calls == 0
+    assert world.writes == 0
+
+
+def test_marvin_semantic_preview_absent_fails_closed_without_robot_action():
+    semantic = MarvinSemanticVision(marvin_result(
+        found=False, coarse_direction="UNKNOWN", bbox=None,
+    ))
+    manager = BehaviorManager(
+        robot_client=ReadOnlyRobot(), vision_adapter=no_marvin_candidates(),
+        semantic_vision=semantic,
+    )
+    manager.TARGET_CONFIRMATION_POLL_SECONDS = 0
+
+    result = manager.preview_find_object("marvin")
+
+    assert result["ok"] is False
+    assert result["target_found"] is False
+    assert "not found" in result["reason"]
+    assert semantic.calls == ["frame", "describe_marvin"]
+
+
+def test_marvin_semantic_preview_failure_fails_closed():
+    semantic = MarvinSemanticVision(error=TimeoutError("offline timeout"))
+    manager = BehaviorManager(
+        robot_client=ReadOnlyRobot(), vision_adapter=no_marvin_candidates(),
+        semantic_vision=semantic,
+    )
+    manager.TARGET_CONFIRMATION_POLL_SECONDS = 0
+
+    result = manager.preview_find_object("marvin")
+
+    assert result["ok"] is False
+    assert result["target_found"] is False
+    assert "unavailable" in result["reason"]
+    assert semantic.calls == ["frame"]
+
+
+def test_marvin_semantic_preview_invalid_or_missing_geometry_fails_closed():
+    for malformed in (
+        marvin_result(bbox=None),
+        marvin_result(bbox={"x1": 500, "y1": 100, "x2": 400, "y2": 300}),
+        marvin_result(image_width=None),
+    ):
+        semantic = MarvinSemanticVision(malformed)
+        manager = BehaviorManager(
+            robot_client=ReadOnlyRobot(), vision_adapter=no_marvin_candidates(),
+            semantic_vision=semantic,
+        )
+        manager.TARGET_CONFIRMATION_POLL_SECONDS = 0
+
+        result = manager.preview_find_object("marvin")
+
+        assert result["ok"] is False
+        assert result["target_found"] is False
+        assert "unavailable" in result["reason"]
 
 
 def test_production_confirmation_wrapper_updates_shared_status():
@@ -371,6 +495,12 @@ def test_voice_relay_preview_proxy_forwards_only_read_only_request():
     assert responses == [(200, {"ok": True, "preview": True, "target": "backpack"})]
     assert request.call_args.args[0] == "GET"
     assert "/find-object/preview?target=backpack" in request.call_args.args[1]
+    assert request.call_args.kwargs["timeout"] == FIND_OBJECT_PREVIEW_TIMEOUT_SECONDS
+
+
+def test_preview_proxy_timeout_is_dedicated_to_read_only_preview():
+    assert FIND_OBJECT_PREVIEW_TIMEOUT_SECONDS == 25.0
+    assert "timeout=3.0" in inspect.getsource(VoiceRelayHandler.dashboard_status)
 
 
 if __name__ == "__main__":
