@@ -3,6 +3,7 @@
 import json
 import math
 import threading
+from types import SimpleNamespace
 
 import pytest
 
@@ -4084,11 +4085,16 @@ class SemanticFake:
         self.marvin_calls = 0
         self.on_frame = lambda: None
         self.on_describe = lambda: None
+        self._frame_index = 0
 
     def fetch_frame(self):
         self.frame_calls += 1
         self.on_frame()
-        return object()
+        self._frame_index += 1
+        return SimpleNamespace(
+            data=b"", width=640, height=480,
+            received_at=f"2026-09-19T12:00:0{self._frame_index}+00:00",
+        )
 
     def describe(self, target, frame):
         self.calls += 1
@@ -4103,7 +4109,9 @@ class SemanticFake:
         self.on_describe()
         return dict(target='marvin', found=self.found,
                     coarse_direction=self.direction, source='gemini_marvin',
-                    geometry_quality='coarse')
+                    geometry_quality='coarse',
+                    bbox=(dict(x1=260, y1=160, x2=380, y2=360)
+                          if self.found else None))
 
 
 def semantic_manager(monkeypatch, *, direction='RIGHT', found=True, reacquire=True,
@@ -4137,6 +4145,13 @@ def semantic_manager(monkeypatch, *, direction='RIGHT', found=True, reacquire=Tr
     manager.robot.forward_interlock.status = lambda: {
         'active_forward': False, 'pending_forward': False, 'front_state': 'CLEAR'}
     manager.semantic_vision = SemanticFake(direction, found)
+    class LocalTracker:
+        def __init__(self, _frame, bbox):
+            self.bbox = dict(bbox)
+
+        def update(self, _frame):
+            return dict(self.bbox)
+    manager.marvin_local_tracker_factory = LocalTracker
     return manager, vision, turns
 
 
@@ -4184,8 +4199,8 @@ def test_marvin_semantic_reacquisition_uses_alias_then_fresh_yolo(monkeypatch):
     assert manager.semantic_vision.generic_targets == []
     assert detector_queries and set(detector_queries) == {'teddy bear'}
     assert len(turns) == 1
-    assert result['semantic_reacquisition_post_yolo_status'] == 'target_confirmed'
-    assert result['semantic_reacquisition_post_yolo_diagnostics']['minimum_timestamp']
+    assert result['semantic_reacquisition_completed'] is True
+    assert result['marvin_local_tracker_confirmed'] is True
     assert all(item['label'] == 'teddy bear' for item in vision.promotions)
 
 
@@ -4205,6 +4220,153 @@ def test_marvin_alias_is_detector_only_and_normal_targets_are_unchanged():
     assert manager._detector_target_label('backpack') == 'backpack'
     manager._get_target_observation('marvin')
     assert world.labels == ['marvin']
+
+
+def test_marvin_local_tracker_requires_fresh_multiple_frames(monkeypatch):
+    manager, _vision, turns = semantic_manager(monkeypatch)
+    seed = manager.semantic_vision.fetch_frame()
+    tracker = manager.marvin_local_tracker_factory(
+        seed, dict(x1=260, y1=160, x2=380, y2=360),
+    )
+    episode = {"used": True, "marvin_tracker": tracker, "telemetry": {}}
+    manager._semantic_episode = episode
+    try:
+        confirmed = manager._confirm_marvin_local_tracker(episode)
+    finally:
+        manager._semantic_episode = None
+    assert confirmed["source"] == "marvin_local_tracker"
+    assert confirmed["target"] == "marvin"
+    assert confirmed["bbox"] == dict(x1=260, y1=160, x2=380, y2=360)
+    assert not turns
+
+
+def test_marvin_local_tracker_repeated_timestamp_fails_closed(monkeypatch):
+    manager, _vision, turns = semantic_manager(monkeypatch)
+    frame = SimpleNamespace(data=b"", width=640, height=480,
+                            received_at="2026-09-19T12:00:01+00:00")
+    tracker = manager.marvin_local_tracker_factory(
+        frame, dict(x1=260, y1=160, x2=380, y2=360),
+    )
+    manager.semantic_vision.fetch_frame = lambda: frame
+    episode = {"used": True, "marvin_tracker": tracker, "telemetry": {}}
+    manager._semantic_episode = episode
+    try:
+        assert manager._confirm_marvin_local_tracker(episode) is None
+    finally:
+        manager._semantic_episode = None
+    assert not turns
+
+
+def test_marvin_local_tracker_stale_timestamp_fails_closed(monkeypatch):
+    manager, _vision, turns = semantic_manager(monkeypatch)
+    seed = manager.semantic_vision.fetch_frame()
+    episode = {
+        "used": True,
+        "marvin_tracker": manager.marvin_local_tracker_factory(
+            seed, dict(x1=260, y1=160, x2=380, y2=360),
+        ),
+        "telemetry": {},
+    }
+    manager._semantic_episode = episode
+    try:
+        assert manager._confirm_marvin_local_tracker(
+            episode, minimum_timestamp="2099-01-01T00:00:00+00:00",
+        ) is None
+    finally:
+        manager._semantic_episode = None
+    assert not turns
+
+
+def test_marvin_local_tracker_one_frame_is_never_authoritative(monkeypatch):
+    manager, _vision, turns = semantic_manager(monkeypatch)
+    manager.MARVIN_LOCAL_TRACKER_MAX_FRAMES = 1
+    manager.MARVIN_LOCAL_TRACKER_MIN_SUPPORT = 2
+    seed = manager.semantic_vision.fetch_frame()
+    episode = {
+        "used": True,
+        "marvin_tracker": manager.marvin_local_tracker_factory(
+            seed, dict(x1=260, y1=160, x2=380, y2=360),
+        ),
+        "telemetry": {},
+    }
+    manager._semantic_episode = episode
+    try:
+        assert manager._confirm_marvin_local_tracker(episode) is None
+    finally:
+        manager._semantic_episode = None
+    assert not turns
+
+
+@pytest.mark.parametrize("failure", ["loss", "decode", "update"])
+def test_marvin_local_tracker_errors_fail_closed(monkeypatch, failure):
+    manager, _vision, turns = semantic_manager(monkeypatch)
+
+    class FailingTracker:
+        def update(self, _frame):
+            if failure == "loss":
+                return None
+            raise ValueError("decode failure" if failure == "decode" else "update failure")
+
+    episode = {"used": True, "marvin_tracker": FailingTracker(), "telemetry": {}}
+    manager._semantic_episode = episode
+    try:
+        assert manager._confirm_marvin_local_tracker(episode) is None
+    finally:
+        manager._semantic_episode = None
+    assert not turns
+
+
+def test_marvin_local_tracker_continuity_jump_fails_closed(monkeypatch):
+    manager, _vision, turns = semantic_manager(monkeypatch)
+
+    class JumpingTracker:
+        def __init__(self):
+            self.calls = 0
+
+        def update(self, _frame):
+            self.calls += 1
+            return (
+                dict(x1=260, y1=160, x2=380, y2=360)
+                if self.calls == 1
+                else dict(x1=0, y1=0, x2=120, y2=200)
+            )
+
+    episode = {"used": True, "marvin_tracker": JumpingTracker(), "telemetry": {}}
+    manager._semantic_episode = episode
+    try:
+        assert manager._confirm_marvin_local_tracker(episode) is None
+    finally:
+        manager._semantic_episode = None
+    assert not turns
+
+
+def test_marvin_local_tracker_preemption_is_not_swallowed(monkeypatch):
+    manager, _vision, _turns = semantic_manager(monkeypatch)
+    manager._semantic_check_current = lambda _episode: (_ for _ in ()).throw(
+        behavior_module._SemanticPreempted("test preemption"),
+    )
+    episode = {"used": True, "marvin_tracker": object(), "telemetry": {}}
+
+    with pytest.raises(behavior_module._SemanticPreempted):
+        manager._confirm_marvin_local_tracker(episode)
+
+
+def test_marvin_local_tracker_is_not_promoted_or_labeled_as_yolo(monkeypatch):
+    manager, vision, _turns = semantic_manager(monkeypatch)
+    from unittest.mock import Mock
+    vision.process_detection_frame = Mock(side_effect=AssertionError("world model promotion"))
+    from datetime import datetime, timezone
+    local = {
+        "found": True, "stale": False, "target": "marvin", "label": "marvin",
+        "source": "marvin_local_tracker",
+        "source_timestamp": datetime.now(timezone.utc).isoformat(),
+        "bbox": dict(x1=260, y1=160, x2=380, y2=360),
+        "image_width": 640, "image_height": 480,
+        "cx": 320.0, "cy": 260.0, "area": 24000.0,
+    }
+
+    assert manager._promote_confirmed_target(local) is local
+    vision.process_detection_frame.assert_not_called()
 
 
 def test_semantic_not_called_when_initial_yolo_confirms(monkeypatch):

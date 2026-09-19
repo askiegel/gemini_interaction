@@ -1,4 +1,5 @@
 google-genai
+opencv-python-headless
 python-dotenv
 requests
 SpeechRecognition

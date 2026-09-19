@@ -7,6 +7,7 @@ from robot_bridge.client import RobotBridgeClient
 from guarded_turn_policy import validate_guarded_turn
 from local_obstacle_policy import recommend_local_avoidance
 from target_lock import TargetLock
+from marvin_local_tracker import MarvinLocalTracker
 
 
 class _GuardedTurnMonitor:
@@ -440,6 +441,8 @@ class _SemanticPreempted(Exception):
 class BehaviorManager:
     MARVIN_SEMANTIC_TARGET = "marvin"
     MARVIN_DETECTOR_ALIAS = "teddy bear"
+    MARVIN_LOCAL_TRACKER_MAX_FRAMES = 3
+    MARVIN_LOCAL_TRACKER_MIN_SUPPORT = 2
 
     SEARCH_TURN_SPEED = 0.30
     SEARCH_TURN_SECONDS = 1.0
@@ -541,6 +544,7 @@ class BehaviorManager:
         )
 
         self.semantic_vision = semantic_vision
+        self.marvin_local_tracker_factory = MarvinLocalTracker
         self._semantic_episode = None
 
         self.target_lock = (
@@ -662,9 +666,13 @@ class BehaviorManager:
         if episode is None:
             return confirmed, status, diagnostics
         self._semantic_check_current(episode)
+        label = str(target_name or "").strip().lower()
+        if confirmed is None and label == self.MARVIN_SEMANTIC_TARGET and episode.get("marvin_tracker"):
+            local = self._confirm_marvin_local_tracker(episode, minimum_timestamp=kwargs.get("minimum_timestamp"))
+            if local is not None:
+                return local, "marvin_local_tracker_confirmed", diagnostics
         if confirmed is not None or episode["used"] or self.semantic_vision is None:
             return confirmed, status, diagnostics
-        label = str(target_name or "").strip().lower()
         if not label or not self._semantic_motion_idle():
             return confirmed, status, diagnostics
         if any(
@@ -703,6 +711,11 @@ class BehaviorManager:
                 semantic_reacquisition_result=semantic,
             )
             direction = semantic["coarse_direction"]
+            if label == self.MARVIN_SEMANTIC_TARGET:
+                if semantic.get("found") is not True:
+                    return None, status, diagnostics
+                tracker = self.marvin_local_tracker_factory(frame, semantic["bbox"])
+                episode["marvin_tracker"] = tracker
             if semantic["found"] is True and direction in {"LEFT", "RIGHT"}:
                 if semantic_turn_budget <= 0:
                     raise ValueError("semantic_turn_budget_exhausted")
@@ -736,6 +749,11 @@ class BehaviorManager:
             telemetry["semantic_reacquisition_error"] = type(exc).__name__
             return None, status, diagnostics
 
+        if label == self.MARVIN_SEMANTIC_TARGET:
+            local = self._confirm_marvin_local_tracker(episode, minimum_timestamp=frame.received_at)
+            telemetry["marvin_local_tracker_confirmed"] = local is not None
+            return local, ("marvin_local_tracker_confirmed" if local else "marvin_local_tracker_unconfirmed"), diagnostics
+
         # Even CENTER/UNKNOWN/absent hints require a new temporal YOLO window.
         # Gemini geometry never enters this return value or the World Model.
         self._semantic_check_current(episode)
@@ -747,6 +765,53 @@ class BehaviorManager:
         telemetry["semantic_reacquisition_post_yolo_status"] = status
         telemetry["semantic_reacquisition_post_yolo_diagnostics"] = diagnostics
         return confirmed, status, diagnostics
+
+    def _confirm_marvin_local_tracker(self, episode, *, minimum_timestamp=None):
+        """Require fresh, continuous local tracker support before motion use."""
+        tracker = episode.get("marvin_tracker")
+        if tracker is None or self.semantic_vision is None:
+            return None
+        observations = []
+        last_timestamp = minimum_timestamp
+        previous = None
+        for _ in range(self.MARVIN_LOCAL_TRACKER_MAX_FRAMES):
+            self._semantic_check_current(episode)
+            try:
+                frame = self._semantic_bounded_call(
+                    self.semantic_vision.fetch_frame,
+                    self.SEMANTIC_FRAME_TIMEOUT_SECONDS,
+                    episode,
+                )
+                timestamp = getattr(frame, "received_at", None)
+                if not self._vision_timestamp_is_newer(timestamp, last_timestamp):
+                    return None
+                width = MarvinLocalTracker._valid_dimension(frame.width)
+                height = MarvinLocalTracker._valid_dimension(frame.height)
+                bbox = tracker.update(frame)
+                if bbox is None:
+                    return None
+                bbox = MarvinLocalTracker._validate_bbox(bbox, frame.width, frame.height)
+                observation = {
+                    "found": True, "stale": False, "target": "marvin", "label": "marvin",
+                    "source": "marvin_local_tracker", "source_timestamp": timestamp,
+                    "bbox": dict(zip(("x1", "y1", "x2", "y2"), bbox)),
+                    "image_width": width, "image_height": height,
+                }
+                observation["cx"] = (bbox[0] + bbox[2]) / 2.0
+                observation["cy"] = (bbox[1] + bbox[3]) / 2.0
+                observation["area"] = (bbox[2] - bbox[0]) * (bbox[3] - bbox[1])
+                if previous is not None and not self._target_observations_match(previous, observation):
+                    return None
+            except _SemanticPreempted:
+                raise
+            except Exception:
+                return None
+            observations.append(observation)
+            previous = observation
+            last_timestamp = timestamp
+            if len(observations) >= self.MARVIN_LOCAL_TRACKER_MIN_SUPPORT:
+                return observation
+        return None
 
     def simulate(self, mission):
         """
@@ -1276,6 +1341,7 @@ class BehaviorManager:
                 "semantic_reacquisition_attempted": False,
                 "semantic_reacquisition_completed": False,
             },
+            "marvin_tracker": None,
         }
         self._semantic_episode = episode
         try:
@@ -2175,6 +2241,8 @@ class BehaviorManager:
         return confirmed
 
     def _promote_confirmed_target(self, target):
+        if isinstance(target, dict) and target.get("source") == "marvin_local_tracker":
+            return target if self._target_is_fresh_and_acquired(target) else None
         processor = getattr(self.vision, "process_detection_frame", None)
         if not callable(processor):
             return None
