@@ -47,7 +47,6 @@ VISION_SERVER_URL = os.getenv(
     "VISION_SERVER_URL",
     "http://127.0.0.1:8000/detections/latest",
 )
-FIND_OBJECT_PREVIEW_TIMEOUT_SECONDS = 25.0
 
 ROBOT_BRIDGE_URL = (
     ConfigurationManager()
@@ -2703,7 +2702,7 @@ class VoiceRelayHandler(BaseHTTPRequestHandler):
                 "GET",
                 f"{COGNITIVE_RUNTIME_URL}/find-object/preview"
                 f"?target={quote(target)}",
-                timeout=FIND_OBJECT_PREVIEW_TIMEOUT_SECONDS,
+                timeout=3.0,
             )
             self.send_json(
                 response["status_code"] or 503,
