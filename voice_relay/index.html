@@ -3020,12 +3020,35 @@
             const response = await fetch("/dashboard/find-marvin", {
                 method: "POST",
                 headers: {"Content-Type": "application/json"},
-                body: JSON.stringify({}),
+                body: JSON.stringify({
+                    execute: isLiveModeEnabled()
+                }),
             });
             const payload = await response.json();
-            if (!response.ok || payload.accepted !== true || !payload.mission) {
-                throw new Error(payload.error || (payload.reasons || []).join("; ") || "Mission rejected.");
+
+            if (!response.ok) {
+                throw new Error(
+                    payload.error ||
+                    (payload.reasons || []).join("; ") ||
+                    "Find Marvin request failed."
+                );
             }
+
+            if (payload.dry_run === true) {
+                findMarvinMissionId = null;
+                elements.findMarvinMission.textContent =
+                    "Dry-run: Marvin (teddy bear) mission not submitted.";
+                return;
+            }
+
+            if (payload.accepted !== true || !payload.mission) {
+                throw new Error(
+                    payload.error ||
+                    (payload.reasons || []).join("; ") ||
+                    "Mission rejected."
+                );
+            }
+
             findMarvinMissionId = payload.mission.mission_id || null;
             elements.findMarvinMission.textContent =
                 "Accepted Marvin (teddy bear)"

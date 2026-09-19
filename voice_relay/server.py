@@ -2199,8 +2199,21 @@ class VoiceRelayHandler(BaseHTTPRequestHandler):
             },
         }
 
-    def submit_find_marvin(self):
+    def submit_find_marvin(self, *, execute=False):
         """Fail closed, then submit the one fixed FIND_OBJECT shortcut."""
+        if execute is not True:
+            return 200, {
+                "ok": True,
+                "accepted": False,
+                "executed": False,
+                "dry_run": True,
+                "target": "teddy bear",
+                "mission": None,
+                "reason": (
+                    "Dry-run mode: Find Marvin mission was not submitted."
+                ),
+            }
+
         status = self.dashboard_status()
         runtime = status.get("runtime", {})
         missions = status.get("missions", {})
@@ -3192,14 +3205,32 @@ class VoiceRelayHandler(BaseHTTPRequestHandler):
             except ValueError as exc:
                 self.send_json(400, {"ok": False, "error": str(exc)})
                 return
-            if payload != {}:
+            allowed_fields = {"execute"}
+            unexpected_fields = set(payload) - allowed_fields
+
+            if unexpected_fields:
                 self.send_json(400, {
                     "ok": False,
                     "accepted": False,
-                    "error": "Find Marvin accepts no browser-supplied mission fields.",
+                    "error": (
+                        "Find Marvin accepts only execution authorization."
+                    ),
                 })
                 return
-            status_code, response = self.submit_find_marvin()
+
+            execute = payload.get("execute", False)
+
+            if not isinstance(execute, bool):
+                self.send_json(400, {
+                    "ok": False,
+                    "accepted": False,
+                    "error": "The execute field must be true or false.",
+                })
+                return
+
+            status_code, response = self.submit_find_marvin(
+                execute=execute
+            )
             self.send_json(status_code, response)
             return
 
