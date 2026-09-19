@@ -404,6 +404,7 @@ def empty_tracking_state(
         "active": False,
         "behavior": None,
         "state": state,
+        "source": None,
         "target_label": None,
         "target_confidence": None,
         "target_center_x": None,
@@ -497,6 +498,8 @@ def build_tracking_state(
         "target_name",
         "label",
     )
+
+    source = _first_value(merged, "source")
 
     if target_label is None and isinstance(
         target_data,
@@ -670,6 +673,7 @@ def build_tracking_state(
         "active": active,
         "behavior": behavior or None,
         "state": state,
+        "source": source,
         "target_label": (
             str(target_label)
             if target_label is not None

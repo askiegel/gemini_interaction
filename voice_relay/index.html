@@ -2392,7 +2392,12 @@
                 (
                     String(tracking.state || "").toUpperCase() ===
                     "PREVIEW"
-                        ? "PREVIEW "
+                        ? (
+                            String(tracking.source || "") ===
+                                "marvin_local_tracker"
+                                ? "PREVIEW OPENCV "
+                                : "PREVIEW "
+                        )
                         : "FIND_OBJECT "
                 ) +
                 targetLabel +

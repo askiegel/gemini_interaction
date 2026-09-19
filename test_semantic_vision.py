@@ -5,6 +5,8 @@ from unittest.mock import Mock
 
 import pytest
 import requests
+import cv2
+import numpy as np
 
 from behavior_manager import BehaviorManager
 from semantic_vision import MARVIN_DESCRIPTION, JpegFrame, SemanticVisionClient
@@ -78,6 +80,152 @@ def test_marvin_preview_uses_physical_description_and_requires_geometry():
     ))
     with pytest.raises(ValueError, match='semantic_bbox_required'):
         missing_geometry.describe_marvin(FRAME)
+
+
+def test_marvin_identity_confirmation_uses_candidate_crop_and_ignores_model_geometry():
+    image = np.zeros((480, 640, 3), dtype=np.uint8)
+    image[100:300, 400:500] = (255, 255, 255)
+    ok, encoded = cv2.imencode('.jpg', image)
+    assert ok
+    frame = JpegFrame(bytes(encoded), 640, 480, '2026-09-15T12:00:00+00:00')
+    instance, client = helper({
+        'target': 'marvin', 'confirmed': True,
+        'bbox': {'x1': 1, 'y1': 2, 'x2': 3, 'y2': 4},
+    })
+
+    result = instance.confirm_marvin_identity(
+        frame, {'x1': 400, 'y1': 100, 'x2': 500, 'y2': 300},
+    )
+
+    assert result == {
+        'target': 'marvin',
+        'confirmed': True,
+        'source': 'gemini_marvin_identity',
+    }
+    assert client.models.generate_content.call_count == 1
+    call = client.models.generate_content.call_args.kwargs
+    crop = cv2.imdecode(
+        np.frombuffer(call['contents'][1].inline_data.data, dtype=np.uint8),
+        cv2.IMREAD_COLOR,
+    )
+    assert crop.shape[:2] == (200, 100)
+    assert 'identity confirmation only' in call['contents'][0]
+    assert 'bounding-box geometry' in call['contents'][0]
+
+
+def test_marvin_candidate_selection_is_one_identity_only_request():
+    image = np.zeros((480, 640, 3), dtype=np.uint8)
+    image[80:350, 380:534] = (255, 255, 255)
+    ok, encoded = cv2.imencode('.jpg', image)
+    assert ok
+    frame = JpegFrame(bytes(encoded), 640, 480, '2026-09-15T12:00:00+00:00')
+    instance, client = helper({
+        'target': 'marvin', 'confirmed': True, 'candidate_index': 0,
+        'bbox': {'x1': 1, 'y1': 2, 'x2': 3, 'y2': 4},
+    })
+    candidates = [{
+        'label': 'chair', 'confidence': 0.052,
+        'bbox': {'x1': 380, 'y1': 80, 'x2': 534, 'y2': 350},
+    }]
+    result = instance.select_marvin_candidate(frame, candidates)
+    assert result == {
+        'target': 'marvin', 'confirmed': True, 'candidate_index': 0,
+        'source': 'gemini_marvin_candidate_selection',
+    }
+    assert client.models.generate_content.call_count == 1
+    assert client.models.generate_content.call_args.kwargs[
+        'config'
+    ].max_output_tokens == 1024
+    prompt = client.models.generate_content.call_args.kwargs['contents'][0]
+    assert 'bounding boxes' in prompt
+    assert 'motion data' in prompt
+
+
+@pytest.mark.parametrize('selection', [
+    {'target': 'marvin', 'confirmed': True, 'candidate_index': 8},
+    {'target': 'marvin', 'confirmed': False, 'candidate_index': -1},
+])
+def test_marvin_candidate_selection_fails_closed_for_nonselection(selection):
+    image = np.zeros((100, 100, 3), dtype=np.uint8)
+    ok, encoded = cv2.imencode('.jpg', image)
+    assert ok
+    frame = JpegFrame(bytes(encoded), 100, 100, '2026-09-15T12:00:00+00:00')
+    instance, _ = helper(selection)
+    candidates = [{
+        'label': 'chair', 'confidence': 0.052,
+        'bbox': {'x1': 1, 'y1': 1, 'x2': 50, 'y2': 50},
+    }]
+    if selection['confirmed']:
+        with pytest.raises(ValueError, match='index_invalid'):
+            instance.select_marvin_candidate(frame, candidates)
+    else:
+        result = instance.select_marvin_candidate(frame, candidates)
+        assert result['confirmed'] is False
+
+
+def test_structured_response_parser_uses_dict_or_text_and_rejects_empty_invalid():
+    instance, _ = helper()
+    assert instance._parse_structured_response(
+        SimpleNamespace(parsed={'ok': True}, text=None),
+        empty_error='empty', invalid_error='invalid',
+    ) == {'ok': True}
+    assert instance._parse_structured_response(
+        SimpleNamespace(parsed=None, text='{"ok": true}'),
+        empty_error='empty', invalid_error='invalid',
+    ) == {'ok': True}
+    for text in (None, '', '   '):
+        with pytest.raises(ValueError, match='^empty$'):
+            instance._parse_structured_response(
+                SimpleNamespace(parsed=None, text=text),
+                empty_error='empty', invalid_error='invalid',
+            )
+    for text in ('{bad', '[]', 'null'):
+        with pytest.raises(ValueError, match='^invalid$'):
+            instance._parse_structured_response(
+                SimpleNamespace(parsed=None, text=text),
+                empty_error='empty', invalid_error='invalid',
+            )
+
+
+def test_candidate_selection_empty_response_exposes_only_safe_finish_reason():
+    image = np.zeros((100, 100, 3), dtype=np.uint8)
+    ok, encoded = cv2.imencode('.jpg', image)
+    assert ok
+    frame = JpegFrame(bytes(encoded), 100, 100, '2026-09-15T12:00:00+00:00')
+    instance, client = helper()
+    finish = SimpleNamespace(name='MAX_TOKENS')
+    client.models.generate_content.return_value = SimpleNamespace(
+        parsed=None, text=None, candidates=[SimpleNamespace(finish_reason=finish)]
+    )
+    with pytest.raises(
+        ValueError,
+        match='^marvin_candidate_selection_response_empty:max_tokens$',
+    ):
+        instance.select_marvin_candidate(frame, [{
+            'label': 'chair', 'bbox': {'x1': 1, 'y1': 1, 'x2': 50, 'y2': 50},
+        }])
+
+
+def test_each_semantic_method_reports_method_specific_empty_response():
+    instance, client = helper()
+    client.models.generate_content.return_value = SimpleNamespace(
+        parsed=None, text=None,
+    )
+    with pytest.raises(ValueError, match='^semantic_response_empty$'):
+        instance.describe('backpack', FRAME)
+
+    image = np.zeros((100, 100, 3), dtype=np.uint8)
+    ok, encoded = cv2.imencode('.jpg', image)
+    assert ok
+    frame = JpegFrame(bytes(encoded), 100, 100, '2026-09-15T12:00:00+00:00')
+    with pytest.raises(ValueError, match='^marvin_identity_response_empty$'):
+        instance.confirm_marvin_identity(
+            frame, {'x1': 1, 'y1': 1, 'x2': 50, 'y2': 50},
+        )
+    with pytest.raises(ValueError, match='^marvin_candidate_selection_response_empty$'):
+        instance.select_marvin_candidate(frame, [{
+            'label': 'chair', 'bbox': {'x1': 1, 'y1': 1, 'x2': 50, 'y2': 50},
+        }])
 
 
 @pytest.mark.parametrize('value', [

@@ -78,6 +78,45 @@ class SemanticVisionClient:
         if self.max_image_bytes <= 0:
             raise ValueError("invalid_semantic_image_limit")
 
+    @staticmethod
+    def _parse_structured_response(
+        response,
+        *,
+        empty_error,
+        invalid_error,
+    ):
+        """Safely parse an SDK structured response without exposing content."""
+        parsed = getattr(response, "parsed", None)
+        if isinstance(parsed, dict):
+            return parsed
+
+        text = getattr(response, "text", None)
+        if not isinstance(text, str) or not text.strip():
+            reason = None
+            candidates = getattr(response, "candidates", None)
+            if isinstance(candidates, (list, tuple)) and candidates:
+                finish_reason = getattr(candidates[0], "finish_reason", None)
+                if finish_reason is not None:
+                    reason = getattr(finish_reason, "name", None) or str(
+                        finish_reason
+                    )
+            if isinstance(reason, str):
+                safe_reason = "".join(
+                    char.lower() if char.isalnum() else "_"
+                    for char in reason
+                ).strip("_")
+                if safe_reason:
+                    raise ValueError(f"{empty_error}:{safe_reason}")
+            raise ValueError(empty_error)
+
+        try:
+            parsed = json.loads(text)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(invalid_error) from exc
+        if not isinstance(parsed, dict):
+            raise ValueError(invalid_error)
+        return parsed
+
     @classmethod
     def from_config(cls, config):
         if not config.get("api_key"):
@@ -126,6 +165,227 @@ class SemanticVisionClient:
             require_bbox=True,
             source="gemini_marvin",
         )
+
+    def confirm_marvin_identity(self, frame, bbox):
+        """Confirm Marvin identity in a locally cropped detector candidate.
+
+        The candidate bbox remains the caller's geometry authority. Any model
+        geometry in an accidental response is intentionally ignored.
+        """
+        if (
+            type(frame.width) is not int or type(frame.height) is not int
+            or frame.width <= 0 or frame.height <= 0
+            or not isinstance(bbox, dict)
+        ):
+            raise ValueError("marvin_identity_crop_geometry_invalid")
+        try:
+            values = [bbox[key] for key in ("x1", "y1", "x2", "y2")]
+            if any(
+                type(value) not in (int, float) or not math.isfinite(value)
+                for value in values
+            ):
+                raise ValueError("marvin_identity_crop_geometry_invalid")
+            x1, y1, x2, y2 = (int(round(value)) for value in values)
+            if not (0 <= x1 < x2 <= frame.width and 0 <= y1 < y2 <= frame.height):
+                raise ValueError("marvin_identity_crop_geometry_invalid")
+            import cv2
+            import numpy as np
+            image = cv2.imdecode(
+                np.frombuffer(frame.data, dtype=np.uint8), cv2.IMREAD_COLOR,
+            )
+            if image is None or image.shape[:2] != (frame.height, frame.width):
+                raise ValueError("marvin_identity_crop_decode_invalid")
+            ok, encoded = cv2.imencode(
+                ".jpg", image[y1:y2, x1:x2], [cv2.IMWRITE_JPEG_QUALITY, 92],
+            )
+            if not ok:
+                raise ValueError("marvin_identity_crop_encode_invalid")
+        except ValueError:
+            raise
+        except Exception as exc:
+            raise ValueError("marvin_identity_crop_decode_invalid") from exc
+
+        from google.genai import types
+        schema = {
+            "type": "OBJECT",
+            "properties": {
+                "target": {"type": "STRING"},
+                "confirmed": {"type": "BOOLEAN"},
+            },
+            "required": ["target", "confirmed"],
+        }
+        prompt = (
+            "This image is a crop from a YOLO teddy bear candidate. Determine only "
+            "whether the candidate is Marvin, the small white humanoid robot with a "
+            "round white head, dark face visor, white body, black joint accents, "
+            "two arms, and two legs. Return confirmed=true only when that physical "
+            "appearance is clearly present; otherwise return confirmed=false. "
+            "This is identity confirmation only. Do not return or infer navigation, "
+            "motion, or bounding-box geometry. Return target exactly 'marvin'."
+        )
+        response = self.client.models.generate_content(
+            model=self.model,
+            contents=[
+                prompt,
+                types.Part.from_bytes(data=bytes(encoded), mime_type="image/jpeg"),
+            ],
+            config=types.GenerateContentConfig(
+                response_mime_type="application/json",
+                response_schema=schema,
+                http_options=types.HttpOptions(
+                    timeout=int(GEMINI_REQUEST_TIMEOUT_SECONDS * 1000),
+                    retry_options=types.HttpRetryOptions(attempts=1),
+                ),
+                automatic_function_calling=types.AutomaticFunctionCallingConfig(
+                    disable=True,
+                ),
+                max_output_tokens=256,
+            ),
+        )
+        parsed = self._parse_structured_response(
+            response,
+            empty_error="marvin_identity_response_empty",
+            invalid_error="marvin_identity_response_invalid",
+        )
+        if (
+            not isinstance(parsed, dict)
+            or parsed.get("target") != "marvin"
+            or type(parsed.get("confirmed")) is not bool
+        ):
+            raise ValueError("marvin_identity_response_invalid")
+        return {
+            "target": "marvin",
+            "confirmed": parsed["confirmed"],
+            "source": "gemini_marvin_identity",
+        }
+
+    def select_marvin_candidate(self, frame, candidates):
+        """Select one locally observed YOLO proposal as Marvin by identity."""
+        if (
+            type(frame.width) is not int or type(frame.height) is not int
+            or frame.width <= 0 or frame.height <= 0
+            or not isinstance(candidates, list)
+            or not candidates or len(candidates) > 8
+        ):
+            raise ValueError("marvin_candidate_selection_input_invalid")
+        try:
+            import cv2
+            import numpy as np
+            image = cv2.imdecode(
+                np.frombuffer(frame.data, dtype=np.uint8), cv2.IMREAD_COLOR,
+            )
+            if image is None or image.shape[:2] != (frame.height, frame.width):
+                raise ValueError("marvin_candidate_selection_decode_invalid")
+            tiles = []
+            for index, candidate in enumerate(candidates):
+                if not isinstance(candidate, dict):
+                    raise ValueError("marvin_candidate_selection_invalid")
+                bbox = candidate.get("bbox")
+                if not isinstance(bbox, dict):
+                    raise ValueError("marvin_candidate_selection_bbox_invalid")
+                values = [bbox.get(key) for key in ("x1", "y1", "x2", "y2")]
+                if any(
+                    type(value) not in (int, float) or not math.isfinite(value)
+                    for value in values
+                ):
+                    raise ValueError("marvin_candidate_selection_bbox_invalid")
+                x1, y1, x2, y2 = (int(round(value)) for value in values)
+                if not (0 <= x1 < x2 <= frame.width and 0 <= y1 < y2 <= frame.height):
+                    raise ValueError("marvin_candidate_selection_bbox_invalid")
+                crop = image[y1:y2, x1:x2]
+                tile = np.full((256, 256, 3), 245, dtype=np.uint8)
+                scale = min(220.0 / crop.shape[1], 220.0 / crop.shape[0])
+                resized = cv2.resize(
+                    crop,
+                    (max(1, int(crop.shape[1] * scale)), max(1, int(crop.shape[0] * scale))),
+                    interpolation=cv2.INTER_AREA,
+                )
+                top = 24 + (220 - resized.shape[0]) // 2
+                left = (256 - resized.shape[1]) // 2
+                tile[top:top + resized.shape[0], left:left + resized.shape[1]] = resized
+                cv2.putText(
+                    tile, str(index), (8, 18), cv2.FONT_HERSHEY_SIMPLEX,
+                    0.55, (0, 0, 0), 1, cv2.LINE_AA,
+                )
+                tiles.append(tile)
+            columns = min(4, len(tiles))
+            rows = (len(tiles) + columns - 1) // columns
+            sheet = np.full((rows * 256, columns * 256, 3), 255, dtype=np.uint8)
+            for index, tile in enumerate(tiles):
+                row, column = divmod(index, columns)
+                sheet[row * 256:(row + 1) * 256, column * 256:(column + 1) * 256] = tile
+            ok, encoded = cv2.imencode(
+                ".jpg", sheet, [cv2.IMWRITE_JPEG_QUALITY, 92],
+            )
+            if not ok:
+                raise ValueError("marvin_candidate_selection_encode_invalid")
+        except ValueError:
+            raise
+        except Exception as exc:
+            raise ValueError("marvin_candidate_selection_image_invalid") from exc
+
+        from google.genai import types
+        schema = {
+            "type": "OBJECT",
+            "properties": {
+                "target": {"type": "STRING"},
+                "confirmed": {"type": "BOOLEAN"},
+                "candidate_index": {"type": "INTEGER"},
+            },
+            "required": ["target", "confirmed", "candidate_index"],
+        }
+        prompt = (
+            "This contact sheet contains numbered YOLO proposal crops. Select "
+            "which proposal, if any, shows Marvin, the small white humanoid "
+            "robot with a round white head, dark visor, white body, black joint "
+            "accents, arms, and legs. Prefer the crop containing the complete "
+            "robot. Return identity selection only: target exactly 'marvin', "
+            "confirmed=true and the selected zero-based candidate_index, or "
+            "confirmed=false and candidate_index=-1. Do not return bounding "
+            "boxes, directions, navigation, or motion data."
+        )
+        response = self.client.models.generate_content(
+            model=self.model,
+            contents=[
+                prompt,
+                types.Part.from_bytes(data=bytes(encoded), mime_type="image/jpeg"),
+            ],
+            config=types.GenerateContentConfig(
+                response_mime_type="application/json",
+                response_schema=schema,
+                http_options=types.HttpOptions(
+                    timeout=int(GEMINI_REQUEST_TIMEOUT_SECONDS * 1000),
+                    retry_options=types.HttpRetryOptions(attempts=1),
+                ),
+                automatic_function_calling=types.AutomaticFunctionCallingConfig(
+                    disable=True,
+                ),
+                max_output_tokens=1024,
+            ),
+        )
+        parsed = self._parse_structured_response(
+            response,
+            empty_error="marvin_candidate_selection_response_empty",
+            invalid_error="marvin_candidate_selection_response_invalid",
+        )
+        if (
+            not isinstance(parsed, dict)
+            or parsed.get("target") != "marvin"
+            or type(parsed.get("confirmed")) is not bool
+        ):
+            raise ValueError("marvin_candidate_selection_response_invalid")
+        index = parsed.get("candidate_index")
+        if parsed["confirmed"]:
+            if type(index) is not int or not 0 <= index < len(candidates):
+                raise ValueError("marvin_candidate_selection_index_invalid")
+        elif index is not None and type(index) is not int:
+            raise ValueError("marvin_candidate_selection_index_invalid")
+        return {
+            "target": "marvin",
+            "confirmed": parsed["confirmed"],
+            "candidate_index": index,
+            "source": "gemini_marvin_candidate_selection",
+        }
 
     def describe(self, target_label, frame):
         return self._describe(target_label, frame)
@@ -195,9 +455,11 @@ class SemanticVisionClient:
                 max_output_tokens=1024,
             ),
         )
-        parsed = getattr(response, "parsed", None)
-        if parsed is None:
-            parsed = json.loads(response.text)
+        parsed = self._parse_structured_response(
+            response,
+            empty_error="semantic_response_empty",
+            invalid_error="semantic_response_invalid",
+        )
         return self._validate(
             parsed, label, frame, require_bbox=require_bbox, source=source,
         )

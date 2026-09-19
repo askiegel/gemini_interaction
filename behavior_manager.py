@@ -447,6 +447,10 @@ class BehaviorManager:
     MARVIN_DETECTOR_ALIAS = "teddy bear"
     MARVIN_LOCAL_TRACKER_MAX_FRAMES = 3
     MARVIN_LOCAL_TRACKER_MIN_SUPPORT = 2
+    MARVIN_PREVIEW_CONFIRMATION_WINDOW_SECONDS = 2.0
+    MARVIN_PREVIEW_MAX_SEMANTIC_CANDIDATES = 8
+    MARVIN_TRACKER_HORIZONTAL_PADDING_FRACTION = 0.20
+    MARVIN_TRACKER_VERTICAL_PADDING_FRACTION = 0.05
 
     SEARCH_TURN_SPEED = 0.30
     SEARCH_TURN_SECONDS = 1.0
@@ -810,17 +814,34 @@ class BehaviorManager:
         tracker = episode.get("marvin_tracker")
         if tracker is None or self.semantic_vision is None:
             return None
+        self._semantic_check_current(episode)
+        return self._confirm_marvin_local_tracker_frames(
+            tracker,
+            minimum_timestamp=minimum_timestamp,
+            fetch_frame=lambda: self._semantic_bounded_call(
+                self.semantic_vision.fetch_frame,
+                self.SEMANTIC_FRAME_TIMEOUT_SECONDS,
+                episode,
+            ),
+            check_current=lambda: self._semantic_check_current(episode),
+        )
+
+    def _confirm_marvin_local_tracker_frames(
+        self, tracker, *, minimum_timestamp=None, fetch_frame, check_current=None
+    ):
+        """Confirm a seeded tracker from fresh frames.
+
+        The frame/continuity core is authority-neutral. Mission callers supply
+        execution/preemption checks; preview callers intentionally do not.
+        """
         observations = []
         last_timestamp = minimum_timestamp
         previous = None
         for _ in range(self.MARVIN_LOCAL_TRACKER_MAX_FRAMES):
-            self._semantic_check_current(episode)
+            if check_current is not None:
+                check_current()
             try:
-                frame = self._semantic_bounded_call(
-                    self.semantic_vision.fetch_frame,
-                    self.SEMANTIC_FRAME_TIMEOUT_SECONDS,
-                    episode,
-                )
+                frame = fetch_frame()
                 timestamp = getattr(frame, "received_at", None)
                 if not self._vision_timestamp_is_newer(timestamp, last_timestamp):
                     return None
@@ -1628,6 +1649,40 @@ class BehaviorManager:
                 reason="FIND_OBJECT preview requires a target.",
             )
 
+        # Marvin preview uses YOLO only for geometry, Gemini only for identity,
+        # and the confirmed local tracker for the published preview geometry.
+        if normalized_target == self.MARVIN_SEMANTIC_TARGET:
+            try:
+                observation = self._preview_marvin_yolo_identity_observation()
+            except Exception as exc:
+                return dict(
+                    base,
+                    reason=(
+                        "Marvin tracker preview unavailable: "
+                        + type(exc).__name__
+                        + (": " + str(exc) if str(exc) else "")
+                    ),
+                )
+            if observation is None:
+                return dict(base, reason="Marvin was not found in the current camera frame.")
+            result = self._build_find_object_preview(
+                normalized_target,
+                observation,
+                source="marvin_local_tracker",
+                authoritative=False,
+            )
+            for key in (
+                "detector_target", "geometry_source", "identity_source",
+                "identity_confirmed", "yolo_seed_bbox", "detector_confidence",
+                "proposal_label", "proposal_confidence", "proposal_support",
+                "tracker_seed_bbox", "tracker_seed_source",
+                "tracker_horizontal_padding_fraction",
+                "tracker_vertical_padding_fraction", "confirmation_diagnostics",
+            ):
+                if key in observation:
+                    result[key] = observation[key]
+            return result
+
         observation = None
         if (
             self.world_model is not None
@@ -1660,32 +1715,6 @@ class BehaviorManager:
             )
         )
         if confirmed is None:
-            if normalized_target == "marvin":
-                try:
-                    observation, coarse_direction = (
-                        self._preview_marvin_semantic_observation()
-                    )
-                except Exception as exc:
-                    return dict(
-                        base,
-                        reason="Marvin semantic preview unavailable: " + str(exc),
-                        confirmation_diagnostics=confirmation_diagnostics,
-                    )
-                if observation is not None:
-                    result = self._build_find_object_preview(
-                        normalized_target,
-                        observation,
-                        source="gemini_marvin",
-                        authoritative=False,
-                        confirmation_diagnostics=confirmation_diagnostics,
-                    )
-                    result["coarse_direction"] = coarse_direction
-                    return result
-                return dict(
-                    base,
-                    reason="Marvin was not found in the current camera frame.",
-                    confirmation_diagnostics=confirmation_diagnostics,
-                )
             return dict(
                 base,
                 reason=(
@@ -1706,43 +1735,307 @@ class BehaviorManager:
             confirmation_diagnostics=confirmation_diagnostics,
         )
 
-    def _preview_marvin_semantic_observation(self):
-        """Acquire one non-authoritative Marvin observation without robot action."""
+    def _preview_marvin_yolo_identity_observation(self):
+        """Select a stable YOLO proposal by identity, then locally track it."""
         semantic_vision = self.semantic_vision
-        if semantic_vision is None:
-            raise ValueError("semantic_vision_unavailable")
-        frame = semantic_vision.fetch_frame()
-        semantic = semantic_vision.describe_marvin(frame)
-        if not isinstance(semantic, dict):
-            raise ValueError("semantic_result_invalid")
-        if semantic.get("found") is False:
-            return None, None
-        if semantic.get("found") is not True:
-            raise ValueError("semantic_found_invalid")
-        direction = semantic.get("coarse_direction")
-        if direction not in {"LEFT", "CENTER", "RIGHT", "UNKNOWN"}:
-            raise ValueError("semantic_direction_invalid")
-        bbox = semantic.get("bbox")
-        width = semantic.get("image_width")
-        height = semantic.get("image_height")
-        if (
-            not isinstance(bbox, dict)
-            or set(bbox) != {"x1", "y1", "x2", "y2"}
-            or type(width) is not int or type(height) is not int
-            or width <= 0 or height <= 0
-            or any(type(value) not in (int, float) or not math.isfinite(value)
-                   for value in bbox.values())
-            or not (0 <= bbox["x1"] < bbox["x2"] <= width)
-            or not (0 <= bbox["y1"] < bbox["y2"] <= height)
+        if semantic_vision is None or not callable(
+            getattr(semantic_vision, "select_marvin_candidate", None)
         ):
-            raise ValueError("semantic_bbox_invalid")
+            raise ValueError("marvin_candidate_selection_unavailable")
+        candidates, status, diagnostics = (
+            self._confirm_marvin_proposal_candidates_with_status()
+        )
+        if not candidates:
+            raise ValueError("marvin_yolo_proposal_" + str(status))
+        frame = semantic_vision.fetch_frame()
+        if any(
+            frame.width != int(candidate["image_width"])
+            or frame.height != int(candidate["image_height"])
+            for candidate in candidates
+        ):
+            raise ValueError("marvin_yolo_frame_dimensions_changed")
+        candidates = candidates[: self.MARVIN_PREVIEW_MAX_SEMANTIC_CANDIDATES]
+        identity = semantic_vision.select_marvin_candidate(frame, candidates)
+        if not isinstance(identity, dict) or identity.get("confirmed") is not True:
+            raise ValueError("marvin_identity_not_confirmed")
+        selected_index = identity.get("candidate_index")
+        if type(selected_index) is not int or not 0 <= selected_index < len(candidates):
+            raise ValueError("marvin_candidate_selection_index_invalid")
+        yolo_candidate = candidates[selected_index]
+        bbox = MarvinLocalTracker._validate_bbox(
+            yolo_candidate.get("bbox"),
+            int(yolo_candidate["image_width"]),
+            int(yolo_candidate["image_height"]),
+        )
+        yolo_bbox = dict(zip(("x1", "y1", "x2", "y2"), bbox))
+        tracker_seed_bbox = self._expand_marvin_tracker_seed_bbox(
+            yolo_bbox,
+            int(yolo_candidate["image_width"]),
+            int(yolo_candidate["image_height"]),
+        )
+        previous_episode = self._semantic_episode
+        episode = {
+            "used": True,
+            "turn_attempts": 0,
+            "turn_completions": 0,
+            "telemetry": {},
+            "marvin_tracker": self.marvin_local_tracker_factory(
+                frame, tracker_seed_bbox,
+            ),
+        }
+        self._semantic_episode = episode
+        try:
+            confirmed = self._confirm_marvin_local_tracker_frames(
+                episode["marvin_tracker"],
+                minimum_timestamp=frame.received_at,
+                fetch_frame=semantic_vision.fetch_frame,
+            )
+        finally:
+            self._semantic_episode = previous_episode
+        if confirmed is None:
+            raise ValueError("marvin_local_tracker_confirmation_required")
         return dict(
-            semantic,
+            confirmed,
             label="marvin",
-            cx=(bbox["x1"] + bbox["x2"]) / 2.0,
-            cy=(bbox["y1"] + bbox["y2"]) / 2.0,
-            area=(bbox["x2"] - bbox["x1"]) * (bbox["y2"] - bbox["y1"]),
-        ), direction
+            target="marvin",
+            source="marvin_local_tracker",
+            proposal_label=yolo_candidate.get("proposal_label"),
+            proposal_confidence=yolo_candidate.get("confidence"),
+            proposal_support=yolo_candidate.get("proposal_support"),
+            detector_confidence=yolo_candidate.get("confidence"),
+            geometry_source="yolo_proposal",
+            identity_source=identity.get(
+                "source", "gemini_marvin_candidate_selection"
+            ),
+            identity_confirmed=True,
+            yolo_seed_bbox=yolo_bbox,
+            tracker_seed_bbox=tracker_seed_bbox,
+            tracker_seed_source="bounded_yolo_proposal_expansion",
+            tracker_horizontal_padding_fraction=(
+                self.MARVIN_TRACKER_HORIZONTAL_PADDING_FRACTION
+            ),
+            tracker_vertical_padding_fraction=(
+                self.MARVIN_TRACKER_VERTICAL_PADDING_FRACTION
+            ),
+            confirmation_diagnostics=diagnostics,
+        )
+
+    @classmethod
+    def _expand_marvin_tracker_seed_bbox(
+        cls, bbox, image_width, image_height
+    ):
+        """Expand only the Marvin preview tracker envelope deterministically."""
+        if (
+            type(image_width) is not int
+            or type(image_height) is not int
+            or image_width <= 0
+            or image_height <= 0
+        ):
+            raise ValueError("marvin_tracker_seed_dimensions_invalid")
+        values = MarvinLocalTracker._validate_bbox(
+            bbox, image_width, image_height,
+        )
+        x1, y1, x2, y2 = values
+        width = x2 - x1
+        height = y2 - y1
+        horizontal_margin = width * cls.MARVIN_TRACKER_HORIZONTAL_PADDING_FRACTION
+        vertical_margin = height * cls.MARVIN_TRACKER_VERTICAL_PADDING_FRACTION
+        expanded = {
+            "x1": max(0, min(image_width, int(round(x1 - horizontal_margin)))),
+            "y1": max(0, min(image_height, int(round(y1 - vertical_margin)))),
+            "x2": max(0, min(image_width, int(round(x2 + horizontal_margin)))),
+            "y2": max(0, min(image_height, int(round(y2 + vertical_margin)))),
+        }
+        if expanded["x2"] <= expanded["x1"] or expanded["y2"] <= expanded["y1"]:
+            raise ValueError("marvin_tracker_seed_geometry_invalid")
+        return expanded
+
+    def _confirm_marvin_proposal_candidates_with_status(self):
+        """Cluster class-agnostic proposals by fresh geometry only."""
+        fetch = getattr(self.vision, "fetch_detection_proposals", None)
+        normalize = getattr(self.vision, "normalize_detection", None)
+        diagnostics = {
+            "confirmation_status": None,
+            "elapsed_seconds": 0.0,
+            "fetch_attempts": 0,
+            "distinct_fresh_timestamps": 0,
+            "evidence_frames_evaluated": 0,
+            "actionable_frames": 0,
+            "maximum_frames": self.TARGET_CONFIRMATION_MAX_FRAMES,
+            "minimum_support": self.TARGET_CONFIRMATION_MIN_SUPPORT,
+            "confirmation_window_seconds": self.MARVIN_PREVIEW_CONFIRMATION_WINDOW_SECONDS,
+            "poll_seconds": self.TARGET_CONFIRMATION_POLL_SECONDS,
+            "minimum_timestamp": None,
+            "attempts": [],
+            "terminal_reason": None,
+            "qualified_support_reached": False,
+            "detector_target": None,
+        }
+        started = time.monotonic()
+        seen_timestamps = set()
+        last_timestamp = None
+        clusters = []
+        actionable_seen = False
+
+        def finish(candidates, status, reason=None):
+            diagnostics["confirmation_status"] = status
+            diagnostics["elapsed_seconds"] = round(
+                max(0.0, time.monotonic() - started), 6
+            )
+            diagnostics["distinct_fresh_timestamps"] = len(seen_timestamps)
+            diagnostics["terminal_reason"] = reason or (
+                "support_reached" if status == "target_confirmed"
+                else "insufficient_temporal_or_geometric_support"
+            )
+            return candidates, status, diagnostics
+
+        if not callable(fetch) or not callable(normalize):
+            return finish([], "target_lost", "proposal_source_unavailable")
+
+        while (
+            diagnostics["evidence_frames_evaluated"]
+            < self.TARGET_CONFIRMATION_MAX_FRAMES
+            and time.monotonic() - started
+            <= self.MARVIN_PREVIEW_CONFIRMATION_WINDOW_SECONDS
+        ):
+            diagnostics["fetch_attempts"] += 1
+            try:
+                payload = fetch()
+            except Exception as exc:
+                return finish(
+                    [],
+                    "target_reconfirmation_failed" if actionable_seen else "target_lost",
+                    type(exc).__name__,
+                )
+            attempt = {
+                "attempt_index": diagnostics["fetch_attempts"],
+                "response_timestamp": (
+                    payload.get("timestamp")
+                    if isinstance(payload, dict) else None
+                ),
+                "actionable_candidate_count": 0,
+                "candidate_labels": [],
+                "cluster_support_counts": [],
+            }
+            diagnostics["attempts"].append(attempt)
+            if not isinstance(payload, dict) or payload.get("camera_running") is not True:
+                time.sleep(self.TARGET_CONFIRMATION_POLL_SECONDS)
+                continue
+            timestamp = payload.get("timestamp")
+            if (
+                not isinstance(timestamp, str)
+                or not timestamp.strip()
+                or timestamp in seen_timestamps
+                or not self._vision_timestamp_is_newer(timestamp, last_timestamp)
+            ):
+                time.sleep(self.TARGET_CONFIRMATION_POLL_SECONDS)
+                continue
+            seen_timestamps.add(timestamp)
+            last_timestamp = timestamp
+            detections = payload.get("detections")
+            if not isinstance(detections, list):
+                time.sleep(self.TARGET_CONFIRMATION_POLL_SECONDS)
+                continue
+
+            observations = []
+            for raw_detection in detections:
+                if not isinstance(raw_detection, dict):
+                    continue
+                try:
+                    normalized = normalize(raw_detection)
+                except Exception:
+                    continue
+                if not isinstance(normalized, dict):
+                    continue
+                normalized.update({
+                    "found": True,
+                    "stale": False,
+                    "target": self.MARVIN_SEMANTIC_TARGET,
+                    "source_timestamp": timestamp,
+                    "proposal_label": normalized.get("label"),
+                    "raw_detection": dict(raw_detection),
+                })
+                if (
+                    self._target_is_fresh_and_acquired(normalized)
+                    and self._target_bbox(normalized) is not None
+                ):
+                    observations.append(normalized)
+                    actionable_seen = True
+            if not observations:
+                time.sleep(self.TARGET_CONFIRMATION_POLL_SECONDS)
+                continue
+
+            diagnostics["actionable_frames"] += 1
+            diagnostics["evidence_frames_evaluated"] += 1
+            attempt["actionable_candidate_count"] = len(observations)
+            attempt["candidate_labels"] = [
+                observation.get("label") for observation in observations
+            ]
+            for observation in observations:
+                matching = []
+                for index, cluster in enumerate(clusters):
+                    if timestamp in cluster["timestamps"]:
+                        continue
+                    if any(
+                        self._target_observation_match_details(
+                            observation, member, ignore_label=True
+                        )["matched"]
+                        for member in cluster["observations"]
+                    ):
+                        matching.append(index)
+                if matching:
+                    cluster = clusters[matching[0]]
+                    cluster["observations"].append(observation)
+                    cluster["timestamps"].add(timestamp)
+                else:
+                    clusters.append({
+                        "observations": [observation],
+                        "timestamps": {timestamp},
+                    })
+            attempt["cluster_support_counts"] = [
+                len(cluster["timestamps"]) for cluster in clusters
+            ]
+            if any(
+                support >= self.TARGET_CONFIRMATION_MIN_SUPPORT
+                for support in attempt["cluster_support_counts"]
+            ):
+                diagnostics["qualified_support_reached"] = True
+            time.sleep(self.TARGET_CONFIRMATION_POLL_SECONDS)
+
+        eligible = [
+            cluster for cluster in clusters
+            if len(cluster["timestamps"]) >= self.TARGET_CONFIRMATION_MIN_SUPPORT
+        ]
+        if not eligible:
+            return finish(
+                [],
+                "target_reconfirmation_failed" if actionable_seen else "target_lost",
+            )
+
+        representatives = []
+        for cluster in eligible:
+            representative = max(
+                cluster["observations"],
+                key=lambda item: (
+                    float(item.get("area") or 0.0),
+                    float(item.get("confidence") or 0.0),
+                ),
+            )
+            representative = dict(representative)
+            representative["proposal_support"] = len(cluster["timestamps"])
+            representatives.append(representative)
+        representatives.sort(
+            key=lambda item: (
+                -int(item["proposal_support"]),
+                -float(item.get("area") or 0.0),
+                item.get("label") or "",
+                tuple(
+                    item["bbox"].get(key)
+                    for key in ("x1", "y1", "x2", "y2")
+                ),
+            )
+        )
+        return finish(representatives, "target_confirmed")
 
     def _build_find_object_preview(
         self,
@@ -2002,7 +2295,7 @@ class BehaviorManager:
         return cls._target_observation_match_details(first, second)["matched"]
 
     @classmethod
-    def _target_observation_match_details(cls, first, second):
+    def _target_observation_match_details(cls, first, second, *, ignore_label=False):
         """Explain the existing target-association decision."""
         first_label = first.get("label") if isinstance(first, dict) else None
         second_label = second.get("label") if isinstance(second, dict) else None
@@ -2016,7 +2309,7 @@ class BehaviorManager:
                 first, second
             ),
         }
-        if (
+        if not ignore_label and (
             not isinstance(first_label, str)
             or not isinstance(second_label, str)
             or first_label.casefold() != second_label.casefold()
@@ -2122,12 +2415,17 @@ class BehaviorManager:
         target_name,
         *,
         minimum_timestamp=None,
+        detector_target=None,
         return_diagnostics=False,
         confirmation_window_seconds=None,
     ):
         """Confirm a target and optionally return bounded diagnostics."""
         semantic_target = str(target_name or "").strip().lower()
-        detector_target = self._detector_target_label(semantic_target)
+        detector_target = (
+            self._detector_target_label(semantic_target)
+            if detector_target is None
+            else str(detector_target).strip().lower()
+        )
         started = time.monotonic()
         confirmation_window = (
             self.TARGET_CONFIRMATION_WINDOW_SECONDS

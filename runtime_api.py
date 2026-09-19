@@ -193,21 +193,29 @@ class RuntimeAPIHandler(BaseHTTPRequestHandler):
                     target
                 )
                 tracking = build_tracking_state(result)
-                self.send_json(
-                    200,
-                    {
-                        "ok": bool(result.get("ok")),
-                        "preview": True,
-                        "authoritative": bool(result.get("authoritative")),
-                        "source": result.get("source"),
-                        "target": result.get("target", target.lower()),
-                        "reason": result.get("reason"),
-                        "tracking": tracking,
-                        "confirmation_diagnostics": result.get(
-                            "confirmation_diagnostics"
-                        ),
-                    },
-                )
+                payload = {
+                    "ok": bool(result.get("ok")),
+                    "preview": True,
+                    "authoritative": bool(result.get("authoritative")),
+                    "source": result.get("source"),
+                    "target": result.get("target", target.lower()),
+                    "reason": result.get("reason"),
+                    "tracking": tracking,
+                    "confirmation_diagnostics": result.get(
+                        "confirmation_diagnostics"
+                    ),
+                }
+                for key in (
+                    "detector_target", "detector_confidence", "geometry_source",
+                    "identity_source", "identity_confirmed", "yolo_seed_bbox",
+                    "proposal_label", "proposal_confidence", "proposal_support",
+                    "tracker_seed_bbox", "tracker_seed_source",
+                    "tracker_horizontal_padding_fraction",
+                    "tracker_vertical_padding_fraction",
+                ):
+                    if key in result:
+                        payload[key] = result[key]
+                self.send_json(200, payload)
             except Exception as exc:
                 self.send_json(
                     200,

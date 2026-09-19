@@ -102,6 +102,49 @@ class VisionAdapter:
             )
         return payload
 
+    def fetch_detection_proposals(self) -> Dict[str, Any]:
+        """Read the class-agnostic low-confidence proposal cache."""
+        marker = "/detections/latest"
+        if marker in self.vision_url:
+            proposal_url = self.vision_url.replace(
+                marker,
+                "/detections/candidates/latest",
+            )
+        else:
+            proposal_url = self.vision_url.rstrip(
+                "/"
+            ) + "/detections/candidates/latest"
+
+        response = requests.get(proposal_url, timeout=0.25)
+        response.raise_for_status()
+        payload = response.json()
+        if not isinstance(payload, dict):
+            raise ValueError(
+                "Vision proposal response must be an object."
+            )
+        detections = payload.get("detections")
+        if not isinstance(detections, list):
+            raise ValueError(
+                "Vision proposal response detections must be a list."
+            )
+        if not isinstance(payload.get("timestamp"), str):
+            raise ValueError(
+                "Vision proposal response timestamp is invalid."
+            )
+        if payload.get("camera_running") is not True:
+            raise ValueError(
+                "Vision proposal response camera is not running."
+            )
+        for detection in detections:
+            if not isinstance(detection, dict):
+                raise ValueError(
+                    "Vision proposal detection must be an object."
+                )
+        return {
+            **payload,
+            "detections": [dict(detection) for detection in detections],
+        }
+
     def _assign_person_identities(
         self,
         detections: List[Dict[str, Any]],

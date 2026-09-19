@@ -136,6 +136,22 @@ def test_find_object_bbox_precedence_and_fallbacks():
         "x1": 1.0, "y1": 2.0, "x2": 30.0, "y2": 40.0,
     }
 
+
+def test_build_tracking_state_preserves_tracker_source():
+    tracking = build_tracking_state({
+        "behavior": "FIND_OBJECT",
+        "state": "PREVIEW",
+        "target": "marvin",
+        "source": "marvin_local_tracker",
+        "bbox": {"x1": 192, "y1": 152, "x2": 450, "y2": 412},
+        "target_center_x": 321.0,
+        "target_center_y": 282.0,
+        "target_area": 67080.0,
+        "image_width": 640,
+        "image_height": 480,
+    })
+    assert tracking["source"] == "marvin_local_tracker"
+
     location = {
         "behavior": "FIND_OBJECT",
         "state": "CENTERING",

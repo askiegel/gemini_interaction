@@ -2,6 +2,7 @@
 
 import tempfile
 from pathlib import Path
+from unittest.mock import Mock, patch
 
 from vision_adapter import VisionAdapter
 from world_model import WorldModel
@@ -33,6 +34,33 @@ def assert_close(actual, expected, tolerance=0.001):
     assert abs(actual - expected) <= tolerance, (
         f"Expected {expected}, got {actual}"
     )
+
+
+def test_class_agnostic_proposal_fetch_uses_candidates_endpoint():
+    world = WorldModel(storage_path=":memory:")
+    adapter = VisionAdapter(
+        world_model=world,
+        vision_url="http://vision.invalid/detections/latest",
+    )
+    payload = {
+        "timestamp": "2026-09-19T00:00:00+00:00",
+        "camera_running": True,
+        "detections": [{
+            "label": "chair",
+            "confidence": 0.021,
+            "x1": 381, "y1": 81, "x2": 533, "y2": 349,
+            "center_x": 457, "center_y": 215,
+            "area": 40736,
+        }],
+    }
+    response = Mock()
+    response.json.return_value = payload
+    response.raise_for_status.return_value = None
+    with patch("vision_adapter.requests.get", return_value=response) as get:
+        result = adapter.fetch_detection_proposals()
+    assert result["detections"][0]["label"] == "chair"
+    assert get.call_args.args[0] == "http://vision.invalid/detections/candidates/latest"
+    assert get.call_args.kwargs["timeout"] == 0.25
 
 
 def test_backpack_found_from_bbox():

@@ -40,6 +40,12 @@ def test_preview_bbox_uses_existing_find_object_target_box_style():
     assert "context.strokeRect(x1, y1, x2 - x1, y2 - y1);" in HTML
 
 
+def test_marvin_preview_overlay_labels_and_draws_opencv_tracker_source():
+    assert 'String(tracking.source || "") ===\n                                "marvin_local_tracker"' in HTML
+    assert '"PREVIEW OPENCV "' in HTML
+    assert "const targetBbox =" in HTML
+
+
 def test_normal_detection_overlay_and_clear_preview_remain_unchanged():
     assert "detections.forEach((detection) =>" in HTML
     assert "function clearFindObjectPreview() {\n        findObjectPreviewTracking = null;" in HTML
