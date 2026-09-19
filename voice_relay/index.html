@@ -675,7 +675,7 @@
             </div>
 
             <div class="find-marvin-status" aria-live="polite">
-                <strong>Motion-capable control · Marvin (semantic; detector alias teddy bear)</strong>
+                <strong>Motion-capable control · Marvin (teddy bear)</strong>
                 <span id="findMarvinPreflight">Waiting for safety telemetry.</span>
                 <span id="findMarvinMission">No Find Marvin mission submitted.</span>
                 <span id="findMarvinProgress">Centering —/— · Approach —/—</span>
@@ -2683,12 +2683,12 @@
             const marvinActive = Boolean(
                 active
                 && String(active.mission_type || "").toUpperCase() === "FIND_OBJECT"
-                && String(active.target || "").toLowerCase() === "marvin"
+                && String(active.target || "").toLowerCase() === "teddy bear"
             );
 
             elements.activeMission.textContent =
                 active
-                    ? (marvinActive ? "Marvin" : active.mission_type)
+                    ? (marvinActive ? "Marvin (teddy bear)" : active.mission_type)
                     : "None";
 
             elements.runtimeState.textContent =
@@ -2713,7 +2713,7 @@
 
             const marvinResult = (
                 String(lastResult.behavior || "").toUpperCase() === "FIND_OBJECT"
-                && String(lastResult.target || "").toLowerCase() === "marvin"
+                && String(lastResult.target || "").toLowerCase() === "teddy bear"
             ) ? lastResult : null;
             const marvinTelemetry = marvinActive ? tracking : (marvinResult || {});
             if (marvinActive || marvinResult) {
@@ -2724,7 +2724,7 @@
                     ? " · " + marvinTelemetry.reason
                     : "";
                 elements.findMarvinMission.textContent =
-                    "Marvin · " + state + reason
+                    "Marvin (teddy bear) · " + state + reason
                     + (findMarvinMissionId ? " · " + findMarvinMissionId : "");
                 elements.findMarvinProgress.textContent =
                     "Centering "
@@ -3026,7 +3026,7 @@
             }
             findMarvinMissionId = payload.mission.mission_id || null;
             elements.findMarvinMission.textContent =
-                "Accepted Marvin"
+                "Accepted Marvin (teddy bear)"
                 + (findMarvinMissionId ? " · " + findMarvinMissionId : "");
         } catch (error) {
             elements.findMarvinMission.textContent = "Find Marvin rejected · " + error.message;
