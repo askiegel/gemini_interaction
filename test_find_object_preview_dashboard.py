@@ -5,6 +5,14 @@ from pathlib import Path
 HTML = Path("voice_relay/index.html").read_text(encoding="utf-8")
 
 
+def test_find_object_preview_defaults_to_marvin_and_keeps_generic_input():
+    assert 'id="findObjectPreviewTarget"' in HTML
+    assert 'id="findObjectPreviewTarget"\n                    type="text"\n                    value="marvin"' in HTML
+    assert '"/dashboard/find-object-preview?target="' in HTML
+    assert "encodeURIComponent(target)" in HTML
+    assert 'value="backpack"' not in HTML
+
+
 def test_successful_preview_tracking_is_retained_and_sent_to_overlay():
     assert "findObjectPreviewTracking = result.tracking || null;" in HTML
     assert "findObjectPreviewTracking ||\n                        (statusFindObjectTracking ? {} : tracking)" in HTML
