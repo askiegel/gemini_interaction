@@ -9,10 +9,6 @@ import pytest
 import behavior_manager as behavior_module
 from behavior_manager import BehaviorManager
 from mission_types import create_mission
-from robot_bridge.forward_interlock import (
-    FORWARD_POLICY_TARGET_APPROACH,
-    evaluate_lidar_state,
-)
 from runtime import CognitiveRuntime
 from tracking_state import build_tracking_state, empty_tracking_state
 
@@ -25,7 +21,6 @@ class FakeRobotBridgeClient:
         self,
         speed=0.10,
         seconds=1.0,
-        **_kwargs,
     ):
         self.calls.append(
             (
@@ -253,7 +248,7 @@ class AlwaysPermittedInterlock:
     def __init__(self):
         self.refresh_calls = 0
 
-    def refresh(self, **_kwargs):
+    def refresh(self):
         self.refresh_calls += 1
         return True, "fresh_clear"
 
@@ -261,15 +256,13 @@ class AlwaysPermittedInterlock:
 class GuardedSearchRobot:
     def __init__(self, move_result=None, move_exception=None, interlock=None):
         self.calls = []
-        self.forward_policies = []
         self.move_result = move_result or {"ok": True, "automatic_stop": True}
         self.move_exception = move_exception
         self.forward_interlock = (
             interlock if interlock is not None else AlwaysPermittedInterlock()
         )
 
-    def move_forward(self, speed, seconds, **_kwargs):
-        self.forward_policies.append(_kwargs.get("forward_policy"))
+    def move_forward(self, speed, seconds):
         self.calls.append(("move_forward", speed, seconds))
         if self.move_exception is not None:
             raise self.move_exception
@@ -2061,7 +2054,7 @@ class _SequenceInterlock(AlwaysPermittedInterlock):
         self.permissions = list(permissions)
         self.reasons = list(reasons or [])
 
-    def refresh(self, **_kwargs):
+    def refresh(self):
         self.refresh_calls += 1
         permitted = self.permissions.pop(0) if self.permissions else False
         if self.reasons:
@@ -2215,7 +2208,7 @@ class _TwoResultRobot(GuardedSearchRobot):
             {"ok": False, "error": "transport_failed"},
         ]
 
-    def move_forward(self, speed, seconds, **_kwargs):
+    def move_forward(self, speed, seconds):
         self.calls.append(("move_forward", speed, seconds))
         return dict(self.forward_results.pop(0))
 
@@ -2372,111 +2365,9 @@ class ApproachRefreshInterlock:
         self.reason = reason
         self.refresh_calls = 0
 
-    def refresh(self, **_kwargs):
+    def refresh(self):
         self.refresh_calls += 1
         return self.permitted, self.reason
-
-
-class _TargetApproachPolicyInterlock:
-    def __init__(self, *, front="CLEAR", available=True, valid=True,
-                 reason="fresh", age=0.05):
-        self.state = {
-            "available": available,
-            "valid": valid,
-            "reason": reason,
-            "producer_session": "session-1",
-            "effective_age_seconds": age,
-            "sectors": {
-                "front": {"available": True, "state": front},
-            },
-        }
-        self.policies = []
-
-    def refresh(self, *, policy="strict"):
-        self.policies.append(policy)
-        return evaluate_lidar_state(
-            self.state,
-            "session-1",
-            policy=policy,
-        )
-
-
-@pytest.mark.parametrize("front", ["CLEAR", "CAUTION"])
-def test_centered_find_target_uses_target_approach_policy(front):
-    interlock = _TargetApproachPolicyInterlock(front=front)
-    manager, robot, _vision = _multi_step_manager(
-        centered_candidate_payloads(f"target-{front.lower()}"),
-        interlock=interlock,
-    )
-    manager.FIND_APPROACH_MAX_CHUNKS = 1
-
-    result = manager.execute(_mission())
-
-    assert result["state"] == "APPROACH_STEP_COMPLETE"
-    assert len(_move_calls(robot)) == 1
-    assert interlock.policies == [FORWARD_POLICY_TARGET_APPROACH]
-    assert robot.forward_policies == [FORWARD_POLICY_TARGET_APPROACH]
-
-
-def test_centered_find_target_blocked_front_dispatches_no_forward():
-    interlock = _TargetApproachPolicyInterlock(front="BLOCKED")
-    manager, robot, _vision = _multi_step_manager([], interlock=interlock)
-
-    result = manager.execute(_mission())
-
-    assert result["state"] == "APPROACH_BLOCKED"
-    assert _move_calls(robot) == []
-
-
-@pytest.mark.parametrize(
-    "interlock",
-    [
-        _TargetApproachPolicyInterlock(reason="stale"),
-        _TargetApproachPolicyInterlock(valid=False, reason="invalid"),
-        _TargetApproachPolicyInterlock(available=False),
-    ],
-    ids=["stale", "invalid", "unavailable"],
-)
-def test_centered_find_target_unhealthy_lidar_dispatches_no_forward(interlock):
-    manager, robot, _vision = _multi_step_manager([], interlock=interlock)
-
-    result = manager.execute(_mission())
-
-    assert result["state"] == "APPROACH_BLOCKED"
-    assert _move_calls(robot) == []
-
-
-def test_target_reached_after_caution_permitted_approach_chunk():
-    interlock = _TargetApproachPolicyInterlock(front="CAUTION")
-    manager, robot, _vision = _multi_step_manager(
-        close_candidate_payloads("close-after-caution"),
-        interlock=interlock,
-    )
-
-    result = manager.execute(_mission())
-
-    assert result["state"] == "TARGET_REACHED"
-    assert result["approach_chunks_attempted"] == 1
-    assert result["approach_chunks_completed"] == 1
-    assert len(_move_calls(robot)) == 1
-
-
-def test_caution_permitted_approach_keeps_four_chunk_hard_maximum():
-    payloads = []
-    for step in range(4):
-        payloads.extend(centered_candidate_payloads(f"step-{step}"))
-    interlock = _TargetApproachPolicyInterlock(front="CAUTION")
-    manager, robot, _vision = _multi_step_manager(
-        payloads,
-        interlock=interlock,
-    )
-
-    result = manager.execute(_mission())
-
-    assert result["state"] == "APPROACH_SEQUENCE_COMPLETE"
-    assert result["approach_chunks_attempted"] == 4
-    assert result["approach_chunks_completed"] == 4
-    assert len(_move_calls(robot)) == 4
 
 
 def test_approach_refreshes_existing_interlock_once_before_dispatch():
@@ -2576,7 +2467,7 @@ class _RecoveryInterlock:
         self.current = self.states[0]
         self.refresh_calls = 0
 
-    def refresh(self, **_kwargs):
+    def refresh(self):
         self.refresh_calls += 1
         if self.states:
             self.current = self.states.pop(0)
@@ -2699,7 +2590,7 @@ class _SequencedForwardRobot(GuardedSearchRobot):
         super().__init__()
         self.results = list(results)
 
-    def move_forward(self, speed, seconds, **_kwargs):
+    def move_forward(self, speed, seconds):
         self.calls.append(("move_forward", speed, seconds))
         return dict(self.results.pop(0))
 
@@ -4302,9 +4193,9 @@ def test_clearance_forward_transport_uncertainty_does_not_retry():
     )
     original_move = robot.move_forward
 
-    def move_once_then_uncertain(speed, seconds, **kwargs):
+    def move_once_then_uncertain(speed, seconds):
         if len(_move_calls(robot)) == 0:
-            return original_move(speed, seconds, **kwargs)
+            return original_move(speed, seconds)
         robot.calls.append(("move_forward", speed, seconds))
         return {
             "ok": False,

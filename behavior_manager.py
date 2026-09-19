@@ -5,10 +5,6 @@ import time
 from datetime import datetime, timezone
 
 from robot_bridge.client import RobotBridgeClient
-from robot_bridge.forward_interlock import (
-    FORWARD_POLICY_STRICT,
-    FORWARD_POLICY_TARGET_APPROACH,
-)
 from guarded_turn_policy import validate_guarded_turn
 from local_obstacle_policy import recommend_local_avoidance
 from target_lock import TargetLock
@@ -3073,13 +3069,8 @@ class BehaviorManager:
                     approach_result=approach_result,
                     **telemetry,
                 )
-            forward_policy = (
-                FORWARD_POLICY_STRICT
-                if bypass_pending
-                else FORWARD_POLICY_TARGET_APPROACH
-            )
             try:
-                permitted, reason = refresh(policy=forward_policy)
+                permitted, reason = refresh()
             except Exception as exc:
                 approach_result = {
                     "ok": False,
@@ -3592,7 +3583,6 @@ class BehaviorManager:
                 approach_result = self.robot.move_forward(
                     speed=self.FIND_APPROACH_FORWARD_SPEED,
                     seconds=self.FIND_APPROACH_FORWARD_SECONDS,
-                    forward_policy=forward_policy,
                 )
             except Exception as exc:
                 approach_result = {
