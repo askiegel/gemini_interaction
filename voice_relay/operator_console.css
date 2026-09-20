@@ -280,34 +280,6 @@ button {
     color: #991b1b;
 }
 
-.operator-camera-banner {
-    position: absolute;
-    top: 14px;
-    left: 50%;
-    z-index: 5;
-    min-width: 260px;
-    max-width: calc(100% - 160px);
-    transform: translateX(-50%);
-    padding: 10px 22px;
-    border-radius: 999px;
-    background: rgba(15, 23, 42, 0.88);
-    color: #ffffff;
-    text-align: center;
-    font-size: clamp(17px, 2vw, 27px);
-    font-weight: 900;
-    letter-spacing: 0.04em;
-    text-shadow: 0 2px 4px rgba(0, 0, 0, 0.45);
-    pointer-events: none;
-}
-
-.operator-camera-banner.centered {
-    background: rgba(22, 163, 74, 0.92);
-}
-
-.operator-camera-banner.stopped {
-    background: rgba(220, 38, 38, 0.9);
-}
-
 .operator-steering-arrow {
     position: absolute;
     top: 50%;
@@ -415,12 +387,6 @@ button {
 
     .operator-camera-card .tracking-metrics {
         grid-template-columns: 1fr 1fr;
-    }
-
-    .operator-camera-banner {
-        max-width: calc(100% - 40px);
-        min-width: 0;
-        width: auto;
     }
 
     .operator-value {

@@ -118,12 +118,6 @@
     }
 
     function addCameraIndicators(cameraStage) {
-        const banner = document.createElement("div");
-        banner.id = "operatorCameraBanner";
-        banner.className =
-            "operator-camera-banner stopped";
-        banner.textContent = "STOPPED";
-
         const leftArrow = document.createElement("div");
         leftArrow.id = "operatorLeftArrow";
         leftArrow.className =
@@ -145,7 +139,6 @@
         centered.textContent = "● CENTERED";
 
         cameraStage.append(
-            banner,
             leftArrow,
             rightArrow,
             centered
@@ -358,11 +351,6 @@
         const classification =
             stateClass(state, direction);
 
-        const banner =
-            document.getElementById(
-                "operatorCameraBanner"
-            );
-
         const statePanel =
             document.getElementById(
                 "operatorState"
@@ -382,15 +370,6 @@
             document.getElementById(
                 "operatorCentered"
             );
-
-        if (banner) {
-            banner.textContent =
-                String(state).replaceAll("_", " ");
-
-            banner.className =
-                "operator-camera-banner " +
-                classification;
-        }
 
         if (statePanel) {
             statePanel.textContent =

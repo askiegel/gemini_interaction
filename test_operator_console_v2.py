@@ -44,7 +44,6 @@ def main():
         "max-width: 1100px",
         ".operator-steering-arrow",
         ".operator-centered-indicator",
-        ".operator-camera-banner",
         ".operator-telemetry-card",
     ]
 
@@ -66,6 +65,9 @@ def main():
 
     for requirement in javascript_requirements:
         assert requirement in javascript, requirement
+
+    assert "operatorCameraBanner" not in javascript
+    assert ".operator-camera-banner" not in css
 
     assert (
         "tracking.horizontal_error <"
