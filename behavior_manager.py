@@ -496,6 +496,9 @@ class BehaviorManager:
     FIND_ARRIVAL_AREA = 75000.0
     MARVIN_ONE_STEP_LIDAR_REFRESH_MAX_ATTEMPTS = 3
     MARVIN_ONE_STEP_LIDAR_REFRESH_POLL_SECONDS = 0.05
+    MARVIN_CENTERING_TURN_SPEED = 0.25
+    MARVIN_CENTERING_TURN_DURATION = 0.25
+    MARVIN_CENTERING_MAX_TURNS = 1
 
     FOLLOW_SEARCH_TURN_SPEED = 0.50
     FOLLOW_SEARCH_TURN_SECONDS = 0.30
@@ -1416,7 +1419,9 @@ class BehaviorManager:
         }
         self._semantic_episode = episode
         try:
-            if getattr(mission, "marvin_one_step_test", False) is True:
+            if getattr(mission, "marvin_centering_test", False) is True:
+                outcome = self._execute_marvin_centering_test(target_name)
+            elif getattr(mission, "marvin_one_step_test", False) is True:
                 outcome = self._execute_marvin_one_step_test(target_name)
             else:
                 outcome = self._execute_guarded_find_search(target_name)
@@ -1432,6 +1437,168 @@ class BehaviorManager:
         if episode["used"] and outcome.get("ok") is not True:
             outcome["completed"] = True
         outcome.update(episode["telemetry"])
+        return outcome
+
+    def _execute_marvin_centering_test(self, target_name):
+        """Acquire Marvin, issue at most one guarded turn, then reacquire."""
+        base = {
+            "ok": False, "completed": True, "executed": False,
+            "behavior": "FIND_OBJECT", "mode": "marvin_centering_test",
+            "target": "marvin", "target_found": False,
+            "identity_confirmed": False, "tracking_confirmed": False,
+            "alignment": None, "centering_direction": None,
+            "pre_turn_yolo_horizontal_error_pixels": None,
+            "pre_turn_tracker_horizontal_error_pixels": None,
+            "post_turn_yolo_horizontal_error_pixels": None,
+            "post_turn_tracker_horizontal_error_pixels": None,
+            "pre_turn_absolute_error": None, "post_turn_absolute_error": None,
+            "centering_improved": False, "post_turn_alignment": None,
+            "turn_chunks_attempted": 0, "turn_chunks_completed": 0,
+            "centering_turn_chunks_attempted": 0,
+            "centering_turn_chunks_completed": 0,
+            "avoidance_attempted": 0, "forward_calls": 0,
+            "turn_speed": self.MARVIN_CENTERING_TURN_SPEED,
+            "turn_duration": self.MARVIN_CENTERING_TURN_DURATION,
+            "post_step_stop_result": None,
+        }
+        outcome = None
+        turn_dispatched = False
+        episode = self._semantic_episode
+
+        def finish(**fields):
+            result = dict(base)
+            result.update(fields)
+            return result
+
+        try:
+            if target_name != self.MARVIN_SEMANTIC_TARGET or episode is None:
+                outcome = finish(state="MARVIN_CENTERING_BLOCKED", reason="marvin_centering_target_invalid")
+            else:
+                self._semantic_check_current(episode)
+                episode["used"] = True
+                first_geometry = {}
+
+                def capture_first(bbox, width, _height):
+                    center_x = (bbox["x1"] + bbox["x2"]) / 2.0
+                    first_geometry.update(
+                        yolo_seed_bbox=dict(bbox),
+                        yolo_center_x=center_x,
+                        yolo_horizontal_error_pixels=center_x - width / 2.0,
+                    )
+
+                acquired = self._acquire_marvin_proposal_tracker_observation(
+                    execution_guard=lambda: self._semantic_check_current(episode),
+                    episode=episode,
+                    before_tracker_initialization=capture_first,
+                )
+                self._semantic_check_current(episode)
+                if not isinstance(acquired, dict) or acquired.get("source") != "marvin_local_tracker":
+                    outcome = finish(state="MARVIN_CENTERING_BLOCKED", reason="marvin_local_tracker_confirmation_required")
+                else:
+                    tracker_error = float(acquired["cx"]) - float(acquired["image_width"]) / 2.0
+                    yolo_error = float(first_geometry["yolo_horizontal_error_pixels"])
+                    common = {
+                        "target_found": True,
+                        "identity_confirmed": True,
+                        "tracking_confirmed": True,
+                        "authority_source": "marvin_local_tracker",
+                        "semantic_source": acquired.get("identity_source"),
+                        "identity_source": acquired.get("identity_source"),
+                        "proposal_label": acquired.get("proposal_label"),
+                        "proposal_confidence": acquired.get("proposal_confidence"),
+                        "proposal_support": acquired.get("proposal_support"),
+                        "geometry_source": acquired.get("geometry_source"),
+                        "yolo_seed_bbox": acquired.get("yolo_seed_bbox"),
+                        "tracker_seed_bbox": acquired.get("tracker_seed_bbox"),
+                        "tracker_seed_source": acquired.get("tracker_seed_source"),
+                        "confirmation_diagnostics": acquired.get("confirmation_diagnostics"),
+                        "bbox": acquired.get("bbox"),
+                        "tracker_bbox": acquired.get("bbox"),
+                        "tracker_cx": acquired.get("cx"), "tracker_cy": acquired.get("cy"),
+                        "tracker_area": acquired.get("area"),
+                        "image_width": acquired.get("image_width"),
+                        "image_height": acquired.get("image_height"),
+                        "yolo_center_x": first_geometry["yolo_center_x"],
+                        "yolo_horizontal_error_pixels": yolo_error,
+                        "pre_turn_yolo_horizontal_error_pixels": yolo_error,
+                        "pre_turn_tracker_horizontal_error_pixels": tracker_error,
+                        "pre_turn_absolute_error": abs(yolo_error),
+                        "horizontal_error_pixels": tracker_error,
+                        "steering_direction": "CENTER" if abs(yolo_error) <= self.FIND_CENTER_TOLERANCE_PIXELS else ("LEFT" if yolo_error < 0 else "RIGHT"),
+                        "center_tolerance_pixels": self.FIND_CENTER_TOLERANCE_PIXELS,
+                    }
+                    if abs(yolo_error) <= self.FIND_CENTER_TOLERANCE_PIXELS:
+                        outcome = finish(
+                            state="MARVIN_CENTERING_ALREADY_ALIGNED",
+                            reason="Marvin is already within centering tolerance.",
+                            alignment="CENTERED", post_turn_alignment="CENTERED",
+                            **common,
+                        )
+                    else:
+                        direction = "LEFT" if yolo_error < 0 else "RIGHT"
+                        common["alignment"] = "OFF_CENTER"
+                        common["centering_direction"] = direction
+                        self._semantic_check_current(episode)
+                        session = self._current_lidar_session()
+                        if session is None:
+                            outcome = finish(state="MARVIN_CENTERING_BLOCKED", reason="turn_guard_unavailable", **common)
+                        else:
+                            turn = self._execute_target_directed_turn(
+                                direction, self.MARVIN_CENTERING_TURN_SPEED,
+                                self.MARVIN_CENTERING_TURN_DURATION,
+                                expected_lidar_session=session,
+                            )
+                            common["turn_chunks_attempted"] = 1
+                            common["centering_turn_chunks_attempted"] = 1
+                            common["turn_chunks_completed"] = int(isinstance(turn, dict) and turn.get("ok") is True)
+                            common["centering_turn_chunks_completed"] = common["turn_chunks_completed"]
+                            if not isinstance(turn, dict) or turn.get("ok") is not True:
+                                outcome = finish(state="MARVIN_CENTERING_BLOCKED", reason="turn_guard_denied", turn_result=turn, **common)
+                            else:
+                                turn_dispatched = True
+                                self.robot.stop()
+                                self._semantic_check_current(episode)
+                                post_geometry = {}
+
+                                def capture_post(bbox, width, _height):
+                                    center_x = (bbox["x1"] + bbox["x2"]) / 2.0
+                                    post_geometry["yolo_horizontal_error_pixels"] = center_x - width / 2.0
+
+                                post = self._acquire_marvin_proposal_tracker_observation(
+                                    execution_guard=lambda: self._semantic_check_current(episode),
+                                    episode=episode,
+                                    before_tracker_initialization=capture_post,
+                                )
+                                post_yolo_error = float(post_geometry["yolo_horizontal_error_pixels"])
+                                post_tracker_error = float(post["cx"]) - float(post["image_width"]) / 2.0
+                                outcome = finish(
+                                    ok=True, executed=True,
+                                    state="MARVIN_CENTERING_STEP_COMPLETE",
+                                    reason="One bounded Marvin centering turn completed.",
+                                    post_turn_yolo_horizontal_error_pixels=post_yolo_error,
+                                    post_turn_tracker_horizontal_error_pixels=post_tracker_error,
+                                    post_turn_absolute_error=abs(post_yolo_error),
+                                    centering_improved=abs(post_yolo_error) < abs(yolo_error),
+                                    post_turn_alignment=("CENTERED" if abs(post_yolo_error) <= self.FIND_CENTER_TOLERANCE_PIXELS else "OFF_CENTER"),
+                                    turn_result=turn, **common,
+                                )
+        except _SemanticPreempted:
+            outcome = finish(state="PREEMPTED", reason="FIND_OBJECT execution was preempted.")
+        except Exception as exc:
+            outcome = finish(
+                state=("MARVIN_CENTERING_REACQUISITION_FAILED" if turn_dispatched else "MARVIN_CENTERING_BLOCKED"),
+                reason=("marvin_centering_reacquisition_failed" if turn_dispatched else "marvin_centering_error"),
+                error_type=type(exc).__name__,
+            )
+        finally:
+            try:
+                stop_result = self.robot.stop()
+            except Exception as exc:
+                stop_result = {"ok": False, "error": str(exc), "error_type": type(exc).__name__}
+            if outcome is None:
+                outcome = finish(state="MARVIN_CENTERING_BLOCKED", reason="marvin_centering_no_result")
+            outcome["post_step_stop_result"] = stop_result
+            self._publish_tracking_state(outcome)
         return outcome
 
     def _execute_marvin_one_step_test(self, target_name):

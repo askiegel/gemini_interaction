@@ -25,6 +25,7 @@ class Mission:
     priority: int = 5
     source: str = "cognitive"
     marvin_one_step_test: bool = False
+    marvin_centering_test: bool = False
 
     def to_dict(self):
         return asdict(self)
@@ -42,6 +43,7 @@ def create_mission(
     priority=5,
     source="cognitive",
     marvin_one_step_test=False,
+    marvin_centering_test=False,
 ):
     started_at = now() if status == MISSION_ACTIVE else None
 
@@ -57,4 +59,5 @@ def create_mission(
         priority=priority,
         source=source,
         marvin_one_step_test=marvin_one_step_test,
+        marvin_centering_test=marvin_centering_test,
     )

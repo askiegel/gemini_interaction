@@ -658,6 +658,15 @@
                     Marvin One-Step Test
                 </button>
 
+                <button
+                    id="marvinCenteringStepButton"
+                    class="motion-capable-control"
+                    type="button"
+                    disabled
+                >
+                    Marvin Centering Step
+                </button>
+
                 <button data-command="Find my backpack">
                     Find Backpack
                 </button>
@@ -2042,6 +2051,8 @@
             document.getElementById("findMarvinProgress"),
         marvinOneStepTestButton:
             document.getElementById("marvinOneStepTestButton"),
+        marvinCenteringStepButton:
+            document.getElementById("marvinCenteringStepButton"),
         cameraImage:
             document.getElementById("cameraImage"),
         cameraOverlay:
@@ -2082,6 +2093,7 @@
     let findMarvinMissionId = null;
     let findMarvinSubmitting = false;
     let marvinOneStepSubmitting = false;
+    let marvinCenteringSubmitting = false;
 
     function findMarvinPreflight(status) {
         const runtime = status.runtime || {};
@@ -2741,6 +2753,9 @@
             elements.marvinOneStepTestButton.disabled = (
                 marvinOneStepSubmitting || !oneStepPreflight.safe
             );
+            elements.marvinCenteringStepButton.disabled = (
+                marvinCenteringSubmitting || !oneStepPreflight.safe
+            );
             elements.findMarvinPreflight.textContent = preflight.reason;
 
             const marvinResult = (
@@ -2759,14 +2774,25 @@
                     "Marvin (teddy bear) · " + state + reason
                     + (findMarvinMissionId ? " · " + findMarvinMissionId : "");
                 elements.findMarvinProgress.textContent =
-                    "Centering "
-                    + String(marvinTelemetry.centering_turn_chunks_attempted ?? "—")
-                    + "/"
-                    + String(marvinTelemetry.centering_turn_chunks_completed ?? "—")
-                    + " · Approach "
-                    + String(marvinTelemetry.approach_chunks_attempted ?? "—")
-                    + "/"
-                    + String(marvinTelemetry.approach_chunks_completed ?? "—");
+                    marvinTelemetry.mode === "marvin_centering_test"
+                    ? "Center "
+                        + String(marvinTelemetry.centering_direction || "—")
+                        + " "
+                        + String(marvinTelemetry.pre_turn_yolo_horizontal_error_pixels ?? "—")
+                        + "px → "
+                        + String(marvinTelemetry.post_turn_yolo_horizontal_error_pixels ?? "—")
+                        + "px · improved="
+                        + String(marvinTelemetry.centering_improved ?? "—")
+                        + " · "
+                        + String(marvinTelemetry.post_turn_alignment || "—")
+                    : "Centering "
+                        + String(marvinTelemetry.centering_turn_chunks_attempted ?? "—")
+                        + "/"
+                        + String(marvinTelemetry.centering_turn_chunks_completed ?? "—")
+                        + " · Approach "
+                        + String(marvinTelemetry.approach_chunks_attempted ?? "—")
+                        + "/"
+                        + String(marvinTelemetry.approach_chunks_completed ?? "—");
             }
 
             elements.behaviorState.textContent =
@@ -3118,6 +3144,30 @@
             elements.findMarvinMission.textContent = "Marvin one-step test rejected · " + error.message;
         } finally {
             marvinOneStepSubmitting = false;
+            refreshStatus();
+        }
+    });
+
+    elements.marvinCenteringStepButton.addEventListener("click", async () => {
+        if (elements.marvinCenteringStepButton.disabled || marvinCenteringSubmitting) return;
+        marvinCenteringSubmitting = true;
+        elements.marvinCenteringStepButton.disabled = true;
+        elements.findMarvinMission.textContent = "Submitting Marvin centering step...";
+        try {
+            const response = await fetch("/dashboard/find-marvin-centering-step", {
+                method: "POST",
+                headers: {"Content-Type": "application/json"},
+                body: JSON.stringify({execute: isLiveModeEnabled()}),
+            });
+            const payload = await response.json();
+            if (!response.ok) throw new Error(payload.error || (payload.reasons || []).join("; ") || "Centering step rejected.");
+            elements.findMarvinMission.textContent = payload.dry_run === true
+                ? "Dry-run: Marvin centering step not submitted."
+                : "Marvin centering step accepted.";
+        } catch (error) {
+            elements.findMarvinMission.textContent = "Marvin centering step rejected · " + error.message;
+        } finally {
+            marvinCenteringSubmitting = false;
             refreshStatus();
         }
     });

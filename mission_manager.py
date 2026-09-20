@@ -28,8 +28,9 @@ class MissionManager:
         speech = intent_json.get("speech", "")
         target = intent_json.get("target", None)
         marvin_one_step_test = intent_json.get("marvin_one_step_test", False)
+        marvin_centering_test = intent_json.get("marvin_centering_test", False)
 
-        if type(marvin_one_step_test) is not bool:
+        if type(marvin_one_step_test) is not bool or type(marvin_centering_test) is not bool:
             mission = create_mission(
                 mission_type="FIND_OBJECT",
                 target=target,
@@ -50,6 +51,18 @@ class MissionManager:
                 speech=speech,
                 status=MISSION_REJECTED,
                 priority=0,
+            )
+            self.mission_history.append(mission)
+            return mission
+
+        if marvin_centering_test and (
+            intent != "FIND_OBJECT"
+            or str(target or "").strip().lower() != "marvin"
+            or marvin_one_step_test is True
+        ):
+            mission = create_mission(
+                mission_type="FIND_OBJECT", target=target, speech=speech,
+                status=MISSION_REJECTED, priority=0,
             )
             self.mission_history.append(mission)
             return mission
@@ -105,6 +118,7 @@ class MissionManager:
                 status=MISSION_ACTIVE,
                 priority=6,
                 marvin_one_step_test=marvin_one_step_test,
+                marvin_centering_test=marvin_centering_test,
             )
             return self.submit_mission(mission)
 
