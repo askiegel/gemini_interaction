@@ -115,6 +115,47 @@ def test_alignment_limit_allows_only_three_turns():
     assert result["executed"] is True
 
 
+def test_forward_resets_consecutive_alignment_budget_and_motion_limit_is_distinct():
+    instance, robot, turns = configured([
+        -67.5, -67.5, -53, -40, -20, -65.5, -40,
+    ])
+    result = instance.execute(approach_mission())
+    assert result["state"] == "MARVIN_GUARDED_APPROACH_MOTION_LIMIT"
+    assert result["turn_chunks_completed"] == 4
+    assert result["approach_chunks_completed"] == 2
+    assert result["motion_actions_completed"] == 6
+    assert result["executed"] is True
+    assert turns == [
+        ("LEFT", 0.25, 0.25),
+        ("LEFT", 0.25, 0.25),
+        ("LEFT", 0.25, 0.25),
+        ("LEFT", 0.25, 0.25),
+    ]
+    assert len([call for call in robot.calls if call[0] == "forward"]) == 2
+    assert result["approach_cycle_results"][-1]["cycle_index"] == 7
+    assert result["approach_cycle_results"][-1]["selected_action"] is None
+
+
+def test_alternating_turn_forward_cycles_reset_budget_and_complete():
+    instance, robot, turns = configured([-70, -40, -70, -40, -70, -40])
+    result = instance.execute(approach_mission())
+    assert result["state"] == "MARVIN_GUARDED_APPROACH_COMPLETE"
+    assert turns == [("LEFT", 0.25, 0.25)] * 3
+    assert len([call for call in robot.calls if call[0] == "forward"]) == 3
+    assert result["turn_chunks_completed"] == 3
+    assert result["approach_chunks_completed"] == 3
+    assert result["motion_actions_completed"] == 6
+
+
+def test_consecutive_alignment_limit_remains_three_without_forward_reset():
+    instance, robot, turns = configured([-70, -70, -70, -70])
+    result = instance.execute(approach_mission())
+    assert result["state"] == "MARVIN_GUARDED_APPROACH_ALIGNMENT_LIMIT"
+    assert turns == [("LEFT", 0.25, 0.25)] * 3
+    assert not [call for call in robot.calls if call[0] == "forward"]
+    assert result["motion_actions_completed"] == 3
+
+
 def test_reacquisition_failure_after_forward_is_terminal_and_stopped():
     instance, robot, turns = configured([0])
     instance.vision.payloads = instance.vision.payloads[:3]

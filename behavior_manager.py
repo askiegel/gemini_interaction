@@ -501,6 +501,7 @@ class BehaviorManager:
     MARVIN_CENTERING_MAX_TURNS = 1
     MARVIN_GUARDED_APPROACH_MAX_TURNS = 3
     MARVIN_GUARDED_APPROACH_MAX_FORWARD_STEPS = 3
+    MARVIN_GUARDED_APPROACH_MAX_MOTION_ACTIONS = 6
     MARVIN_GUARDED_APPROACH_LARGE_ERROR_PIXELS = 80.0
 
     FOLLOW_SEARCH_TURN_SPEED = 0.50
@@ -1725,7 +1726,9 @@ class BehaviorManager:
             "target": "marvin", "target_found": False,
             "identity_confirmed": False, "tracking_confirmed": False,
             "max_turns": self.MARVIN_GUARDED_APPROACH_MAX_TURNS,
+            "max_consecutive_alignment_turns": self.MARVIN_GUARDED_APPROACH_MAX_TURNS,
             "max_forward_steps": self.MARVIN_GUARDED_APPROACH_MAX_FORWARD_STEPS,
+            "max_motion_actions": self.MARVIN_GUARDED_APPROACH_MAX_MOTION_ACTIONS,
             "turn_chunks_attempted": 0, "turn_chunks_completed": 0,
             "centering_turn_chunks_attempted": 0,
             "centering_turn_chunks_completed": 0,
@@ -1745,6 +1748,7 @@ class BehaviorManager:
         turns = 0
         forwards = 0
         actions = 0
+        consecutive_alignment_turns = 0
         recorded_cycles = set()
 
         def record_cycle(cycle):
@@ -1767,6 +1771,7 @@ class BehaviorManager:
                     for c in result["approach_cycle_results"]
                 ),
             )
+            result["consecutive_alignment_turns"] = consecutive_alignment_turns
             result["executed"] = bool(
                 result["executed"]
                 or result["motion_actions_completed"] > 0
@@ -1829,9 +1834,18 @@ class BehaviorManager:
                         "current_alignment": alignment,
                         "current_horizontal_error_pixels": tracker_error,
                         "current_yolo_horizontal_error_pixels": yolo_error,
+                        "consecutive_alignment_turns": consecutive_alignment_turns,
                     }
                     if alignment == "OFF_CENTER":
-                        if turns >= self.MARVIN_GUARDED_APPROACH_MAX_TURNS:
+                        if actions >= self.MARVIN_GUARDED_APPROACH_MAX_MOTION_ACTIONS:
+                            record_cycle(cycle)
+                            outcome = finish(
+                                state="MARVIN_GUARDED_APPROACH_MOTION_LIMIT",
+                                reason="Maximum guarded Marvin motion actions completed.",
+                                **base_update,
+                            )
+                            break
+                        if consecutive_alignment_turns >= self.MARVIN_GUARDED_APPROACH_MAX_TURNS:
                             record_cycle(cycle)
                             outcome = finish(
                                 state="MARVIN_GUARDED_APPROACH_ALIGNMENT_LIMIT",
@@ -1868,6 +1882,7 @@ class BehaviorManager:
                             record_cycle(cycle)
                             outcome = finish(state="MARVIN_GUARDED_APPROACH_BLOCKED", reason="turn_guard_denied", **base_update)
                             break
+                        consecutive_alignment_turns += 1
                         try:
                             turn_stop = self.robot.stop()
                         except Exception:
@@ -1891,6 +1906,14 @@ class BehaviorManager:
                             ok=True, executed=True,
                             state="MARVIN_GUARDED_APPROACH_COMPLETE",
                             reason="Maximum guarded Marvin approach steps completed.",
+                            **base_update,
+                        )
+                        break
+                    if actions >= self.MARVIN_GUARDED_APPROACH_MAX_MOTION_ACTIONS:
+                        record_cycle(cycle)
+                        outcome = finish(
+                            state="MARVIN_GUARDED_APPROACH_MOTION_LIMIT",
+                            reason="Maximum guarded Marvin motion actions completed.",
                             **base_update,
                         )
                         break
@@ -1949,6 +1972,7 @@ class BehaviorManager:
                             **base_update,
                         )
                         break
+                    consecutive_alignment_turns = 0
                     self._semantic_check_current(episode)
         except _SemanticPreempted:
             outcome = finish(state="PREEMPTED", reason="FIND_OBJECT execution was preempted.")
