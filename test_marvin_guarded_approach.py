@@ -90,10 +90,10 @@ def test_three_centered_cycles_issue_three_forward_steps_only():
 @pytest.mark.parametrize(
     "errors,expected_turns,expected_forwards",
     [
-        ([120, 40, 0, 0, 0], [("RIGHT", 0.25, 0.25)], 3),
-        ([-120, -40, 0, 0, 0], [("LEFT", 0.25, 0.25)], 3),
-        ([120, 80, 40, 0, 0, 0], [("RIGHT", 0.25, 0.25)] * 2, 3),
-        ([90, -70, 20, 0, 0, 0], [("RIGHT", 0.25, 0.25), ("LEFT", 0.25, 0.25)], 3),
+        ([120, 40, 0, 0, 0], [("RIGHT", 0.25, 0.50)], 3),
+        ([-120, -40, 0, 0, 0], [("LEFT", 0.25, 0.50)], 3),
+        ([120, 80, 40, 0, 0, 0], [("RIGHT", 0.25, 0.50), ("RIGHT", 0.25, 0.25)], 3),
+        ([90, -70, 20, 0, 0, 0], [("RIGHT", 0.25, 0.50), ("LEFT", 0.25, 0.25)], 3),
     ],
 )
 def test_alignment_cycles_use_new_measurements(errors, expected_turns, expected_forwards):
@@ -109,9 +109,10 @@ def test_alignment_limit_allows_only_three_turns():
     instance, robot, turns = configured([120, 120, 120, 120])
     result = instance.execute(approach_mission())
     assert result["state"] == "MARVIN_GUARDED_APPROACH_ALIGNMENT_LIMIT"
-    assert turns == [("RIGHT", 0.25, 0.25)] * 3
+    assert turns == [("RIGHT", 0.25, 0.50)] * 3
     assert not [call for call in robot.calls if call[0] == "forward"]
     assert result["motion_actions_attempted"] == 3
+    assert result["executed"] is True
 
 
 def test_reacquisition_failure_after_forward_is_terminal_and_stopped():
@@ -275,6 +276,57 @@ def test_guarded_exact_tolerance_is_centered_without_turn(error):
     assert turns == []
     assert result["target_found"] is True
     assert len([call for call in robot.calls if call[0] == "forward"]) == 3
+
+
+@pytest.mark.parametrize(
+    "error,direction,duration",
+    [
+        (-51, "LEFT", 0.25), (51, "RIGHT", 0.25),
+        (-80, "LEFT", 0.25), (80, "RIGHT", 0.25),
+        (-81, "LEFT", 0.50), (81, "RIGHT", 0.50),
+        (-120, "LEFT", 0.50), (120, "RIGHT", 0.50),
+    ],
+)
+def test_guarded_turn_duration_boundaries(error, direction, duration):
+    instance, robot, turns = configured([error, 0, 0, 0])
+    result = instance.execute(approach_mission())
+    assert turns[0] == (direction, 0.25, duration)
+    assert result["approach_cycle_results"][0]["selected_turn_speed"] == 0.25
+    assert result["approach_cycle_results"][0]["selected_turn_duration"] == duration
+    assert duration <= 0.50
+
+
+def test_guarded_large_then_small_correction_uses_two_bands():
+    instance, robot, turns = configured([-105, -45, 0, 0])
+    result = instance.execute(approach_mission())
+    assert turns[:1] == [("LEFT", 0.25, 0.50)]
+    assert result["approach_cycle_results"][0]["selected_turn_duration"] == 0.50
+    assert result["approach_cycle_results"][1]["alignment"] == "CENTERED"
+    assert result["executed"] is True
+
+
+def test_guarded_alignment_limit_after_completed_turns_is_executed():
+    instance, robot, turns = configured([-120, -120, -120, -120])
+    result = instance.execute(approach_mission())
+    assert result["state"] == "MARVIN_GUARDED_APPROACH_ALIGNMENT_LIMIT"
+    assert result["ok"] is False
+    assert result["executed"] is True
+    assert result["turn_chunks_completed"] == 3
+
+
+def test_guarded_initial_acquisition_failure_is_not_executed():
+    instance, robot, turns = configured([0])
+    instance.vision.payloads = []
+    result = instance.execute(approach_mission())
+    assert result["executed"] is False
+
+
+def test_guarded_completed_turn_then_reacquisition_failure_is_executed():
+    instance, robot, turns = configured([120])
+    instance.vision.payloads = instance.vision.payloads[:3]
+    result = instance.execute(approach_mission())
+    assert result["state"] == "MARVIN_GUARDED_APPROACH_REACQUISITION_FAILED"
+    assert result["executed"] is True
 
 
 def test_browser_rotational_preflight_is_not_forward_coupled():

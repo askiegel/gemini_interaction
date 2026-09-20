@@ -501,6 +501,7 @@ class BehaviorManager:
     MARVIN_CENTERING_MAX_TURNS = 1
     MARVIN_GUARDED_APPROACH_MAX_TURNS = 3
     MARVIN_GUARDED_APPROACH_MAX_FORWARD_STEPS = 3
+    MARVIN_GUARDED_APPROACH_LARGE_ERROR_PIXELS = 80.0
 
     FOLLOW_SEARCH_TURN_SPEED = 0.50
     FOLLOW_SEARCH_TURN_SECONDS = 0.30
@@ -1707,6 +1708,15 @@ class BehaviorManager:
             "refresh": refresh,
         }
 
+    def _marvin_guarded_approach_turn_duration(self, horizontal_error):
+        """Select the bounded approach correction duration by pixel error."""
+        magnitude = abs(float(horizontal_error))
+        if magnitude <= self.FIND_CENTER_TOLERANCE_PIXELS:
+            return None
+        if magnitude <= self.MARVIN_GUARDED_APPROACH_LARGE_ERROR_PIXELS:
+            return self.MARVIN_CENTERING_TURN_DURATION
+        return 0.50
+
     def _execute_marvin_guarded_approach_test(self, target_name):
         """Run a bounded acquire/align/approach/reacquire test."""
         base = {
@@ -1756,6 +1766,10 @@ class BehaviorManager:
                     bool(c.get("turn_completed")) or bool(c.get("forward_completed"))
                     for c in result["approach_cycle_results"]
                 ),
+            )
+            result["executed"] = bool(
+                result["executed"]
+                or result["motion_actions_completed"] > 0
             )
             result.update(fields)
             return result
@@ -1826,8 +1840,11 @@ class BehaviorManager:
                             )
                             break
                         direction = "LEFT" if yolo_error < 0 else "RIGHT"
+                        turn_duration = self._marvin_guarded_approach_turn_duration(yolo_error)
                         cycle["selected_action"] = "turn"
                         cycle["selected_direction"] = direction
+                        cycle["selected_turn_speed"] = self.MARVIN_CENTERING_TURN_SPEED
+                        cycle["selected_turn_duration"] = turn_duration
                         self._semantic_check_current(episode)
                         session = self._current_lidar_session()
                         if session is None:
@@ -1839,7 +1856,7 @@ class BehaviorManager:
                         try:
                             turn = self._execute_target_directed_turn(
                                 direction, self.MARVIN_CENTERING_TURN_SPEED,
-                                self.MARVIN_CENTERING_TURN_DURATION,
+                                turn_duration,
                                 expected_lidar_session=session,
                             )
                         except Exception:
