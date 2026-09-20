@@ -390,7 +390,9 @@ class CognitiveRuntime:
                     finished_mission = (
                         self.mission_manager.complete_active_mission()
                     )
-                    runtime_state = "MISSION_COMPLETED"
+                    # The mission result/history retain the terminal
+                    # outcome; runtime_state describes lifecycle readiness.
+                    runtime_state = "MISSION_ACTIVE"
 
                 elif result.get("ok"):
                     # The behavior completed one safe bounded step, but the
@@ -414,6 +416,17 @@ class CognitiveRuntime:
                 runtime_state = "MISSION_INTERRUPTED"
 
             next_mission = self.mission_manager.get_active_mission()
+
+            if (
+                next_mission is None
+                and not self.mission_manager.get_queue()
+                and execution_error is None
+            ):
+                runtime_state = "IDLE"
+            elif next_mission is None and self.mission_manager.get_queue():
+                # Queued work remains available; do not expose a transient
+                # idle window before the existing scheduler starts it.
+                runtime_state = "MISSION_ACCEPTED"
 
             world_updates = {
                 "runtime_state": runtime_state,

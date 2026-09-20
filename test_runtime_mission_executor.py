@@ -93,6 +93,21 @@ class LegacyBoundedBehaviorManager:
         }
 
 
+class FixedResultBehaviorManager:
+    def __init__(self, result):
+        self.result = result
+        self.execution_count = 0
+
+    def execute(self, mission):
+        self.execution_count += 1
+        return dict(self.result, behavior=mission.mission_type)
+
+
+class RaisingBehaviorManager:
+    def execute(self, mission):
+        raise RuntimeError("execution exploded")
+
+
 def create_runtime(
     storage_path,
     behavior_manager,
@@ -108,6 +123,107 @@ def create_runtime(
         behavior_manager=behavior_manager,
         loop_interval=0.01,
     )
+
+
+def test_terminal_success_returns_runtime_to_idle_and_preserves_result(tmp_path):
+    runtime = create_runtime(
+        storage_path=str(tmp_path / "success.json"),
+        behavior_manager=FixedResultBehaviorManager({
+            "ok": True, "completed": True, "state": "MARVIN_CENTERING_STEP_COMPLETE",
+        }),
+    )
+    submission = runtime.submit_text("Find Marvin")
+    result = runtime.run_once()
+    status = runtime.get_status()
+    assert result["state"] == "MARVIN_CENTERING_STEP_COMPLETE"
+    assert status["runtime_state"] == "IDLE"
+    assert status["active_mission"] is None
+    assert status["queue"] == []
+    assert status["last_result"]["state"] == "MARVIN_CENTERING_STEP_COMPLETE"
+    assert status["history_count"] >= 1
+    assert submission["mission"]["mission_id"]
+
+
+def test_blocked_and_preempted_results_return_to_idle(tmp_path):
+    for name, result in ((
+        ("blocked", {"ok": False, "completed": True, "state": "MARVIN_CENTERING_BLOCKED"}),
+        ("preempted", {"ok": False, "completed": True, "state": "PREEMPTED"}),
+    )):
+        runtime = create_runtime(
+            storage_path=str(tmp_path / f"{name}.json"),
+            behavior_manager=FixedResultBehaviorManager(result),
+        )
+        runtime.submit_text("Find Marvin")
+        runtime.run_once()
+        status = runtime.get_status()
+        assert status["runtime_state"] == "IDLE"
+        assert status["active_mission"] is None
+        assert status["last_result"]["state"] == result["state"]
+
+
+def test_one_step_terminal_result_is_preserved_while_runtime_becomes_idle(tmp_path):
+    runtime = create_runtime(
+        storage_path=str(tmp_path / "one_step.json"),
+        behavior_manager=FixedResultBehaviorManager({
+            "ok": True, "completed": True, "state": "MARVIN_ONE_STEP_COMPLETE",
+        }),
+    )
+    runtime.submit_text("Find Marvin")
+    runtime.run_once()
+    status = runtime.get_status()
+    assert status["runtime_state"] == "IDLE"
+    assert status["last_result"]["state"] == "MARVIN_ONE_STEP_COMPLETE"
+    assert status["active_mission"] is None
+
+
+def test_execution_error_remains_failed_not_idle(tmp_path):
+    runtime = create_runtime(
+        storage_path=str(tmp_path / "error.json"),
+        behavior_manager=RaisingBehaviorManager(),
+    )
+    runtime.submit_text("Find Marvin")
+    runtime.run_once()
+    status = runtime.get_status()
+    assert status["runtime_state"] == "MISSION_FAILED"
+    assert status["last_error"] == "execution exploded"
+    assert status["active_mission"] is None
+
+
+def test_queued_mission_prevents_idle_window_then_returns_idle(tmp_path):
+    runtime = create_runtime(
+        storage_path=str(tmp_path / "queue.json"),
+        behavior_manager=FixedResultBehaviorManager({
+            "ok": True, "completed": True, "state": "DONE",
+        }),
+    )
+    runtime.submit_text("Find Marvin")
+    runtime.submit_intent({
+        "intent": "FIND_OBJECT", "target": "backpack", "speech": "backpack",
+    })
+    runtime.run_once()
+    first_status = runtime.get_status()
+    assert first_status["runtime_state"] == "MISSION_ACTIVE"
+    assert first_status["active_mission"] is not None
+    runtime.run_once()
+    assert runtime.get_status()["runtime_state"] == "IDLE"
+
+
+def test_sequential_mission_can_start_after_terminal_idle(tmp_path):
+    runtime = create_runtime(
+        storage_path=str(tmp_path / "sequential.json"),
+        behavior_manager=FixedResultBehaviorManager({
+            "ok": True, "completed": True, "state": "DONE",
+        }),
+    )
+    runtime.submit_text("Find Marvin")
+    runtime.run_once()
+    assert runtime.get_status()["runtime_state"] == "IDLE"
+    second = runtime.submit_intent({
+        "intent": "FIND_OBJECT", "target": "backpack", "speech": "backpack",
+    })
+    assert second.status == "ACTIVE"
+    runtime.run_once()
+    assert runtime.get_status()["runtime_state"] == "IDLE"
 
 
 def main():
@@ -212,12 +328,7 @@ def main():
 
         runtime.world_model.reload()
 
-        assert (
-            runtime.world_model.robot_state[
-                "runtime_state"
-            ]
-            == "MISSION_COMPLETED"
-        )
+        assert runtime.world_model.robot_state["runtime_state"] == "IDLE"
 
         assert (
             runtime.world_model.robot_state[
