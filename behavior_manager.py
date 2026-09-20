@@ -502,7 +502,6 @@ class BehaviorManager:
     MARVIN_GUARDED_APPROACH_MAX_TURNS = 3
     MARVIN_GUARDED_APPROACH_MAX_FORWARD_STEPS = 3
     MARVIN_GUARDED_APPROACH_MAX_MOTION_ACTIONS = 6
-    MARVIN_GUARDED_APPROACH_LARGE_ERROR_PIXELS = 80.0
 
     FOLLOW_SEARCH_TURN_SPEED = 0.50
     FOLLOW_SEARCH_TURN_SECONDS = 0.30
@@ -1714,8 +1713,6 @@ class BehaviorManager:
         magnitude = abs(float(horizontal_error))
         if magnitude <= self.FIND_CENTER_TOLERANCE_PIXELS:
             return None
-        if magnitude <= self.MARVIN_GUARDED_APPROACH_LARGE_ERROR_PIXELS:
-            return self.MARVIN_CENTERING_TURN_DURATION
         return 0.50
 
     def _execute_marvin_guarded_approach_test(self, target_name):

@@ -92,8 +92,8 @@ def test_three_centered_cycles_issue_three_forward_steps_only():
     [
         ([120, 40, 0, 0, 0], [("RIGHT", 0.25, 0.50)], 3),
         ([-120, -40, 0, 0, 0], [("LEFT", 0.25, 0.50)], 3),
-        ([120, 80, 40, 0, 0, 0], [("RIGHT", 0.25, 0.50), ("RIGHT", 0.25, 0.25)], 3),
-        ([90, -70, 20, 0, 0, 0], [("RIGHT", 0.25, 0.50), ("LEFT", 0.25, 0.25)], 3),
+        ([120, 80, 40, 0, 0, 0], [("RIGHT", 0.25, 0.50)] * 2, 3),
+        ([90, -70, 20, 0, 0, 0], [("RIGHT", 0.25, 0.50), ("LEFT", 0.25, 0.50)], 3),
     ],
 )
 def test_alignment_cycles_use_new_measurements(errors, expected_turns, expected_forwards):
@@ -126,10 +126,10 @@ def test_forward_resets_consecutive_alignment_budget_and_motion_limit_is_distinc
     assert result["motion_actions_completed"] == 6
     assert result["executed"] is True
     assert turns == [
-        ("LEFT", 0.25, 0.25),
-        ("LEFT", 0.25, 0.25),
-        ("LEFT", 0.25, 0.25),
-        ("LEFT", 0.25, 0.25),
+        ("LEFT", 0.25, 0.50),
+        ("LEFT", 0.25, 0.50),
+        ("LEFT", 0.25, 0.50),
+        ("LEFT", 0.25, 0.50),
     ]
     assert len([call for call in robot.calls if call[0] == "forward"]) == 2
     assert result["approach_cycle_results"][-1]["cycle_index"] == 7
@@ -140,7 +140,7 @@ def test_alternating_turn_forward_cycles_reset_budget_and_complete():
     instance, robot, turns = configured([-70, -40, -70, -40, -70, -40])
     result = instance.execute(approach_mission())
     assert result["state"] == "MARVIN_GUARDED_APPROACH_COMPLETE"
-    assert turns == [("LEFT", 0.25, 0.25)] * 3
+    assert turns == [("LEFT", 0.25, 0.50)] * 3
     assert len([call for call in robot.calls if call[0] == "forward"]) == 3
     assert result["turn_chunks_completed"] == 3
     assert result["approach_chunks_completed"] == 3
@@ -151,7 +151,7 @@ def test_consecutive_alignment_limit_remains_three_without_forward_reset():
     instance, robot, turns = configured([-70, -70, -70, -70])
     result = instance.execute(approach_mission())
     assert result["state"] == "MARVIN_GUARDED_APPROACH_ALIGNMENT_LIMIT"
-    assert turns == [("LEFT", 0.25, 0.25)] * 3
+    assert turns == [("LEFT", 0.25, 0.50)] * 3
     assert not [call for call in robot.calls if call[0] == "forward"]
     assert result["motion_actions_completed"] == 3
 
@@ -306,7 +306,7 @@ def test_guarded_boundary_off_center_remains_found_and_turns_once(error, directi
     assert result["target_found"] is True
     assert result["approach_cycle_results"][0]["alignment"] == "OFF_CENTER"
     assert result["approach_cycle_results"][0]["selected_direction"] == direction
-    assert turns == [(direction, 0.25, 0.25)]
+    assert turns == [(direction, 0.25, 0.50)]
 
 
 @pytest.mark.parametrize("error", [-50, 50])
@@ -322,8 +322,9 @@ def test_guarded_exact_tolerance_is_centered_without_turn(error):
 @pytest.mark.parametrize(
     "error,direction,duration",
     [
-        (-51, "LEFT", 0.25), (51, "RIGHT", 0.25),
-        (-80, "LEFT", 0.25), (80, "RIGHT", 0.25),
+        (-51, "LEFT", 0.50), (51, "RIGHT", 0.50),
+        (-70, "LEFT", 0.50), (70, "RIGHT", 0.50),
+        (-80, "LEFT", 0.50), (80, "RIGHT", 0.50),
         (-81, "LEFT", 0.50), (81, "RIGHT", 0.50),
         (-120, "LEFT", 0.50), (120, "RIGHT", 0.50),
     ],
