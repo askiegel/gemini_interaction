@@ -667,6 +667,15 @@
                     Marvin Centering Step
                 </button>
 
+                <button
+                    id="marvinGuardedApproachButton"
+                    class="motion-capable-control"
+                    type="button"
+                    disabled
+                >
+                    Marvin Guarded Approach
+                </button>
+
                 <button data-command="Find my backpack">
                     Find Backpack
                 </button>
@@ -2053,6 +2062,8 @@
             document.getElementById("marvinOneStepTestButton"),
         marvinCenteringStepButton:
             document.getElementById("marvinCenteringStepButton"),
+        marvinGuardedApproachButton:
+            document.getElementById("marvinGuardedApproachButton"),
         cameraImage:
             document.getElementById("cameraImage"),
         cameraOverlay:
@@ -2094,6 +2105,7 @@
     let findMarvinSubmitting = false;
     let marvinOneStepSubmitting = false;
     let marvinCenteringSubmitting = false;
+    let marvinGuardedApproachSubmitting = false;
 
     function findMarvinPreflight(status) {
         const runtime = status.runtime || {};
@@ -2141,6 +2153,38 @@
         return runtime.state === "IDLE"
             ? {safe: true, reason: "One-step Marvin test ready."}
             : {safe: false, reason: "Runtime must be IDLE for one-step test."};
+    }
+
+    function marvinRotationalPreflight(status) {
+        const runtime = status.runtime || {};
+        const missions = status.missions || {};
+        const lidar = runtime.lidar || {};
+        const robot = status.robot || {};
+        const motion = robot.motion || {};
+        const safe = (
+            runtime.connected === true
+            && runtime.running === true
+            && runtime.state === "IDLE"
+            && runtime.last_error === null
+            && !missions.active
+            && missions.queue_count === 0
+            && robot.connected === true
+            && robot.status === "READY"
+            && robot.ros_ready === true
+            && motion.linear_x === 0
+            && motion.angular_z === 0
+            && motion.streaming === false
+            && lidar.running === true
+            && lidar.available === true
+            && lidar.valid === true
+            && lidar.reason === "fresh"
+        );
+        return {
+            safe,
+            reason: safe
+                ? "Rotational Marvin preflight passed."
+                : "Disabled: runtime, mission, LiDAR, or stopped-state rotational preflight is not satisfied."
+        };
     }
 
     function clearTrackingOverlay() {
@@ -2753,8 +2797,12 @@
             elements.marvinOneStepTestButton.disabled = (
                 marvinOneStepSubmitting || !oneStepPreflight.safe
             );
+            const rotationalPreflight = marvinRotationalPreflight(status);
             elements.marvinCenteringStepButton.disabled = (
-                marvinCenteringSubmitting || !oneStepPreflight.safe
+                marvinCenteringSubmitting || !rotationalPreflight.safe
+            );
+            elements.marvinGuardedApproachButton.disabled = (
+                marvinGuardedApproachSubmitting || !rotationalPreflight.safe
             );
             elements.findMarvinPreflight.textContent = preflight.reason;
 
@@ -2774,7 +2822,21 @@
                     "Marvin (teddy bear) · " + state + reason
                     + (findMarvinMissionId ? " · " + findMarvinMissionId : "");
                 elements.findMarvinProgress.textContent =
-                    marvinTelemetry.mode === "marvin_centering_test"
+                    marvinTelemetry.mode === "marvin_guarded_approach_test"
+                    ? "Turns "
+                        + String(marvinTelemetry.turn_chunks_completed ?? "—")
+                        + "/"
+                        + String(marvinTelemetry.max_turns ?? 3)
+                        + " · Forward "
+                        + String(marvinTelemetry.approach_chunks_completed ?? "—")
+                        + "/"
+                        + String(marvinTelemetry.max_forward_steps ?? 3)
+                        + " · Marvin "
+                        + String(marvinTelemetry.current_alignment || "—")
+                        + " "
+                        + String(marvinTelemetry.current_yolo_horizontal_error_pixels ?? "—")
+                        + "px"
+                    : marvinTelemetry.mode === "marvin_centering_test"
                     ? "Center "
                         + String(marvinTelemetry.centering_direction || "—")
                         + " "
@@ -3168,6 +3230,30 @@
             elements.findMarvinMission.textContent = "Marvin centering step rejected · " + error.message;
         } finally {
             marvinCenteringSubmitting = false;
+            refreshStatus();
+        }
+    });
+
+    elements.marvinGuardedApproachButton.addEventListener("click", async () => {
+        if (elements.marvinGuardedApproachButton.disabled || marvinGuardedApproachSubmitting) return;
+        marvinGuardedApproachSubmitting = true;
+        elements.marvinGuardedApproachButton.disabled = true;
+        elements.findMarvinMission.textContent = "Submitting Marvin guarded approach...";
+        try {
+            const response = await fetch("/dashboard/find-marvin-guarded-approach", {
+                method: "POST",
+                headers: {"Content-Type": "application/json"},
+                body: JSON.stringify({execute: isLiveModeEnabled()}),
+            });
+            const payload = await response.json();
+            if (!response.ok) throw new Error(payload.error || (payload.reasons || []).join("; ") || "Guarded approach rejected.");
+            elements.findMarvinMission.textContent = payload.dry_run === true
+                ? "Dry-run: Marvin guarded approach not submitted."
+                : "Marvin guarded approach accepted.";
+        } catch (error) {
+            elements.findMarvinMission.textContent = "Marvin guarded approach rejected · " + error.message;
+        } finally {
+            marvinGuardedApproachSubmitting = false;
             refreshStatus();
         }
     });

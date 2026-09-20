@@ -2417,6 +2417,59 @@ class VoiceRelayHandler(BaseHTTPRequestHandler):
             "error": response["error"] or "Runtime mission submission failed.",
         }
 
+    def submit_marvin_guarded_approach(self, *, execute=False):
+        """Submit the bounded Marvin align-and-approach test."""
+        if execute is not True:
+            return 200, {
+                "ok": True, "accepted": False, "executed": False,
+                "dry_run": True, "target": "marvin", "mission": None,
+                "reason": "Dry-run mode: Marvin guarded approach was not submitted.",
+            }
+        status = self.dashboard_status()
+        runtime = status.get("runtime", {})
+        missions = status.get("missions", {})
+        lidar = runtime.get("lidar", {}) if isinstance(runtime.get("lidar", {}), dict) else {}
+        robot = status.get("robot", {})
+        motion = robot.get("motion", {}) if isinstance(robot.get("motion", {}), dict) else {}
+
+        def stopped(value):
+            return (isinstance(value, (int, float)) and not isinstance(value, bool)
+                    and math.isfinite(value) and value == 0)
+
+        requirements = (
+            (runtime.get("connected") is True, "runtime status unavailable"),
+            (runtime.get("running") is True, "runtime is not running"),
+            (runtime.get("state") == "IDLE", "runtime is not IDLE"),
+            (runtime.get("last_error") is None, "runtime reports an error"),
+            (missions.get("active") is None, "another mission is active"),
+            (missions.get("queue_count") == 0, "mission queue is not empty"),
+            (robot.get("connected") is True, "Robot Bridge status unavailable"),
+            (robot.get("status") == "READY", "Robot Bridge is not READY"),
+            (robot.get("ros_ready") is True, "Robot Bridge ROS is not ready"),
+            (stopped(motion.get("linear_x")), "Robot Bridge linear motion is not zero"),
+            (stopped(motion.get("angular_z")), "Robot Bridge angular motion is not zero"),
+            (motion.get("streaming") is False, "Robot Bridge streaming motion is active"),
+            (lidar.get("running") is True, "LiDAR worker is not running"),
+            (lidar.get("available") is True, "LiDAR is unavailable"),
+            (lidar.get("valid") is True, "LiDAR is invalid"),
+            (lidar.get("reason") == "fresh", "LiDAR is not fresh"),
+        )
+        failures = [reason for safe, reason in requirements if not safe]
+        if failures:
+            return 409, {"ok": False, "accepted": False,
+                         "error": "Marvin guarded approach preflight failed.", "reasons": failures}
+        response = request_json(
+            "POST", f"{COGNITIVE_RUNTIME_URL}/missions",
+            payload={"source_text": "Marvin Guarded Approach.", "intent": {
+                "intent": "FIND_OBJECT", "speech": "Marvin Guarded Approach.",
+                "target": "marvin", "marvin_guarded_approach_test": True,
+            }}, timeout=15.0,
+        )
+        return response["status_code"] or 503, response["data"] or {
+            "ok": False, "accepted": False,
+            "error": response["error"] or "Runtime mission submission failed.",
+        }
+
     def relay_runtime_json(
         self,
         method,
@@ -3394,6 +3447,25 @@ class VoiceRelayHandler(BaseHTTPRequestHandler):
                                      "error": "The execute field must be true or false."})
                 return
             status_code, response = self.submit_marvin_centering_step(execute=execute)
+            self.send_json(status_code, response)
+            return
+
+        if path == "/dashboard/find-marvin-guarded-approach":
+            try:
+                payload = self.read_json_body()
+            except ValueError as exc:
+                self.send_json(400, {"ok": False, "error": str(exc)})
+                return
+            if set(payload) - {"execute"}:
+                self.send_json(400, {"ok": False, "accepted": False,
+                                     "error": "Marvin guarded approach accepts only execution authorization."})
+                return
+            execute = payload.get("execute", False)
+            if not isinstance(execute, bool):
+                self.send_json(400, {"ok": False, "accepted": False,
+                                     "error": "The execute field must be true or false."})
+                return
+            status_code, response = self.submit_marvin_guarded_approach(execute=execute)
             self.send_json(status_code, response)
             return
 

@@ -499,6 +499,8 @@ class BehaviorManager:
     MARVIN_CENTERING_TURN_SPEED = 0.25
     MARVIN_CENTERING_TURN_DURATION = 0.25
     MARVIN_CENTERING_MAX_TURNS = 1
+    MARVIN_GUARDED_APPROACH_MAX_TURNS = 3
+    MARVIN_GUARDED_APPROACH_MAX_FORWARD_STEPS = 3
 
     FOLLOW_SEARCH_TURN_SPEED = 0.50
     FOLLOW_SEARCH_TURN_SECONDS = 0.30
@@ -1419,7 +1421,9 @@ class BehaviorManager:
         }
         self._semantic_episode = episode
         try:
-            if getattr(mission, "marvin_centering_test", False) is True:
+            if getattr(mission, "marvin_guarded_approach_test", False) is True:
+                outcome = self._execute_marvin_guarded_approach_test(target_name)
+            elif getattr(mission, "marvin_centering_test", False) is True:
                 outcome = self._execute_marvin_centering_test(target_name)
             elif getattr(mission, "marvin_one_step_test", False) is True:
                 outcome = self._execute_marvin_one_step_test(target_name)
@@ -1601,6 +1605,350 @@ class BehaviorManager:
             self._publish_tracking_state(outcome)
         return outcome
 
+    def _marvin_one_step_forward_guard(self, episode):
+        """Run the exact bounded forward guard used by Marvin motion tests."""
+        interlock = getattr(self.robot, "forward_interlock", None)
+        session = self._current_lidar_session()
+        if interlock is None or session is None or self.world_model is None:
+            return {"authorized": False, "reason": "forward_guard_unavailable"}
+
+        permitted = False
+        interlock_reason = None
+        lidar = None
+        guards = {}
+        stale_identity = None
+        stale_retry_count = 0
+        initial_reason = None
+        initial_sequence = None
+        guard_authorized = False
+        while True:
+            if stale_retry_count > 0:
+                self._semantic_check_current(episode)
+                time.sleep(self.MARVIN_ONE_STEP_LIDAR_REFRESH_POLL_SECONDS)
+                self._semantic_check_current(episode)
+            permitted, interlock_reason = interlock.refresh()
+            lidar = self.world_model.get_lidar_obstacles(expected_session=session)
+            front = lidar.get("sectors", {}).get("front", {}) if isinstance(lidar, dict) else {}
+            lidar_ok = bool(
+                isinstance(lidar, dict)
+                and lidar.get("producer_session") == session
+                and lidar.get("available") is True
+                and lidar.get("valid") is True
+                and lidar.get("reason") == "fresh"
+                and front.get("state") == "CLEAR"
+            )
+            lidar_reason = lidar.get("reason") if isinstance(lidar, dict) else None
+            acquisition_sequence = lidar.get("acquisition_sequence") if isinstance(lidar, dict) else None
+            if stale_retry_count == 0:
+                initial_reason = lidar_reason or interlock_reason
+                initial_sequence = acquisition_sequence
+            guards = {
+                "lidar_guard": lidar,
+                "forward_interlock_result": {
+                    "permitted": permitted, "reason": interlock_reason,
+                    "producer_session": session,
+                },
+            }
+            stale_reasons = {"stale", "stale_lidar", "not_fresh"}
+            lidar_stale = lidar_reason in stale_reasons
+            interlock_stale = interlock_reason in stale_reasons
+            front_state = front.get("state") if isinstance(front, dict) else None
+            stale_denial = (
+                (lidar_stale or interlock_stale)
+                and not (
+                    lidar_reason not in (None, "fresh") and not lidar_stale
+                )
+                and not (
+                    interlock_reason not in (None, "fresh_clear") and not interlock_stale
+                )
+                and not (front_state is not None and front_state != "CLEAR")
+            )
+            if permitted is True and interlock_reason == "fresh_clear" and lidar_ok:
+                current_identity = (
+                    lidar.get("producer_session"), acquisition_sequence
+                ) if isinstance(lidar, dict) else None
+                if stale_identity is None or current_identity != stale_identity:
+                    guard_authorized = True
+                    break
+                stale_denial = True
+            if not stale_denial:
+                break
+            stale_identity = (
+                lidar.get("producer_session"), acquisition_sequence
+            ) if isinstance(lidar, dict) else None
+            if stale_retry_count + 1 >= self.MARVIN_ONE_STEP_LIDAR_REFRESH_MAX_ATTEMPTS:
+                break
+            stale_retry_count += 1
+        refresh = {
+            "lidar_refresh_attempted": stale_retry_count > 0,
+            "lidar_refresh_attempt_count": stale_retry_count,
+            "lidar_refresh_succeeded": (
+                stale_retry_count > 0 and guard_authorized
+                and permitted is True and interlock_reason == "fresh_clear"
+                and lidar_ok
+            ),
+            "lidar_refresh_initial_reason": initial_reason,
+            "lidar_refresh_final_reason": (
+                interlock_reason if interlock_reason != "fresh_clear"
+                else lidar.get("reason") if isinstance(lidar, dict) else None
+            ),
+            "lidar_refresh_initial_acquisition_sequence": initial_sequence,
+            "lidar_refresh_final_acquisition_sequence": (
+                lidar.get("acquisition_sequence") if isinstance(lidar, dict) else None
+            ),
+        }
+        return {
+            "authorized": (
+                guard_authorized and permitted is True
+                and interlock_reason == "fresh_clear" and lidar_ok
+            ),
+            "reason": "fresh_clear" if guard_authorized else "forward_guard_denied",
+            "guards": guards,
+            "refresh": refresh,
+        }
+
+    def _execute_marvin_guarded_approach_test(self, target_name):
+        """Run a bounded acquire/align/approach/reacquire test."""
+        base = {
+            "ok": False, "completed": True, "executed": False,
+            "behavior": "FIND_OBJECT", "mode": "marvin_guarded_approach_test",
+            "target": "marvin", "target_found": False,
+            "identity_confirmed": False, "tracking_confirmed": False,
+            "max_turns": self.MARVIN_GUARDED_APPROACH_MAX_TURNS,
+            "max_forward_steps": self.MARVIN_GUARDED_APPROACH_MAX_FORWARD_STEPS,
+            "turn_chunks_attempted": 0, "turn_chunks_completed": 0,
+            "centering_turn_chunks_attempted": 0,
+            "centering_turn_chunks_completed": 0,
+            "approach_chunks_attempted": 0, "approach_chunks_completed": 0,
+            "motion_actions_attempted": 0, "motion_actions_completed": 0,
+            "forward_speed": self.FIND_APPROACH_FORWARD_SPEED,
+            "forward_duration": self.FIND_APPROACH_FORWARD_SECONDS,
+            "turn_speed": self.MARVIN_CENTERING_TURN_SPEED,
+            "turn_duration": self.MARVIN_CENTERING_TURN_DURATION,
+            "avoidance_attempted": 0, "current_alignment": None,
+            "current_horizontal_error_pixels": None,
+            "current_yolo_horizontal_error_pixels": None,
+            "approach_cycle_results": [], "post_step_stop_result": None,
+        }
+        episode = self._semantic_episode
+        outcome = None
+        turns = 0
+        forwards = 0
+        actions = 0
+        recorded_cycles = set()
+
+        def record_cycle(cycle):
+            """Retain the cycle even when its terminal action fails."""
+            marker = id(cycle)
+            if marker not in recorded_cycles:
+                recorded_cycles.add(marker)
+                base["approach_cycle_results"].append(cycle)
+
+        def finish(**fields):
+            result = dict(base)
+            result.update(
+                turn_chunks_attempted=turns,
+                turn_chunks_completed=sum(bool(c.get("turn_completed")) for c in result["approach_cycle_results"]),
+                approach_chunks_attempted=forwards,
+                approach_chunks_completed=sum(bool(c.get("forward_completed")) for c in result["approach_cycle_results"]),
+                motion_actions_attempted=actions,
+                motion_actions_completed=sum(
+                    bool(c.get("turn_completed")) or bool(c.get("forward_completed"))
+                    for c in result["approach_cycle_results"]
+                ),
+            )
+            result.update(fields)
+            return result
+
+        try:
+            if target_name != self.MARVIN_SEMANTIC_TARGET or episode is None:
+                outcome = finish(state="MARVIN_GUARDED_APPROACH_BLOCKED", reason="marvin_guarded_approach_target_invalid")
+            else:
+                episode["used"] = True
+                while True:
+                    self._semantic_check_current(episode)
+                    geometry = {}
+
+                    def capture(bbox, width, _height):
+                        center_x = (bbox["x1"] + bbox["x2"]) / 2.0
+                        geometry.update(
+                            yolo_seed_bbox=dict(bbox),
+                            yolo_horizontal_error_pixels=center_x - width / 2.0,
+                        )
+
+                    acquired = self._acquire_marvin_proposal_tracker_observation(
+                        execution_guard=lambda: self._semantic_check_current(episode),
+                        episode=episode,
+                        before_tracker_initialization=capture,
+                    )
+                    self._semantic_check_current(episode)
+                    if not isinstance(acquired, dict) or acquired.get("source") != "marvin_local_tracker":
+                        raise ValueError("marvin_local_tracker_confirmation_required")
+                    yolo_error = float(geometry["yolo_horizontal_error_pixels"])
+                    tracker_error = float(acquired["cx"]) - float(acquired["image_width"]) / 2.0
+                    alignment = "CENTERED" if abs(yolo_error) <= self.FIND_CENTER_TOLERANCE_PIXELS else "OFF_CENTER"
+                    cycle = {
+                        "cycle_index": actions + 1,
+                        "acquisition_confirmed": True,
+                        "proposal_label": acquired.get("proposal_label"),
+                        "proposal_support": acquired.get("proposal_support"),
+                        "authority_source": acquired.get("source"),
+                        "yolo_seed_bbox": acquired.get("yolo_seed_bbox"),
+                        "tracker_bbox": acquired.get("bbox"),
+                        "yolo_horizontal_error_pixels": yolo_error,
+                        "tracker_horizontal_error_pixels": tracker_error,
+                        "alignment": alignment,
+                        "selected_action": None, "selected_direction": None,
+                        "turn_attempted": False, "turn_completed": False,
+                        "forward_attempted": False, "forward_completed": False,
+                        "stop_ok": None,
+                    }
+                    base_update = {
+                        "target_found": True, "identity_confirmed": True,
+                        "tracking_confirmed": True,
+                        "authority_source": acquired.get("source"),
+                        "identity_source": acquired.get("identity_source"),
+                        "proposal_label": acquired.get("proposal_label"),
+                        "proposal_support": acquired.get("proposal_support"),
+                        "yolo_seed_bbox": acquired.get("yolo_seed_bbox"),
+                        "tracker_bbox": acquired.get("bbox"),
+                        "current_alignment": alignment,
+                        "current_horizontal_error_pixels": tracker_error,
+                        "current_yolo_horizontal_error_pixels": yolo_error,
+                    }
+                    if alignment == "OFF_CENTER":
+                        if turns >= self.MARVIN_GUARDED_APPROACH_MAX_TURNS:
+                            record_cycle(cycle)
+                            outcome = finish(
+                                state="MARVIN_GUARDED_APPROACH_ALIGNMENT_LIMIT",
+                                reason="Marvin remains off-center after the bounded turn limit.",
+                                **base_update,
+                            )
+                            break
+                        direction = "LEFT" if yolo_error < 0 else "RIGHT"
+                        cycle["selected_action"] = "turn"
+                        cycle["selected_direction"] = direction
+                        self._semantic_check_current(episode)
+                        session = self._current_lidar_session()
+                        if session is None:
+                            record_cycle(cycle)
+                            outcome = finish(state="MARVIN_GUARDED_APPROACH_BLOCKED", reason="turn_guard_unavailable", **base_update)
+                            break
+                        cycle["turn_attempted"] = True
+                        self._semantic_check_current(episode)
+                        try:
+                            turn = self._execute_target_directed_turn(
+                                direction, self.MARVIN_CENTERING_TURN_SPEED,
+                                self.MARVIN_CENTERING_TURN_DURATION,
+                                expected_lidar_session=session,
+                            )
+                        except Exception:
+                            turn = {"ok": False}
+                        turns += 1
+                        actions += 1
+                        cycle["turn_completed"] = isinstance(turn, dict) and turn.get("ok") is True
+                        if not cycle["turn_completed"]:
+                            record_cycle(cycle)
+                            outcome = finish(state="MARVIN_GUARDED_APPROACH_BLOCKED", reason="turn_guard_denied", **base_update)
+                            break
+                        try:
+                            turn_stop = self.robot.stop()
+                        except Exception:
+                            turn_stop = {"ok": False}
+                        cycle["stop_ok"] = bool(
+                            isinstance(turn_stop, dict) and turn_stop.get("ok") is True
+                        )
+                        record_cycle(cycle)
+                        if not cycle["stop_ok"]:
+                            outcome = finish(
+                                state="MARVIN_GUARDED_APPROACH_BLOCKED",
+                                reason="turn_stop_failed",
+                                **base_update,
+                            )
+                            break
+                        self._semantic_check_current(episode)
+                        continue
+
+                    if forwards >= self.MARVIN_GUARDED_APPROACH_MAX_FORWARD_STEPS:
+                        outcome = finish(
+                            ok=True, executed=True,
+                            state="MARVIN_GUARDED_APPROACH_COMPLETE",
+                            reason="Maximum guarded Marvin approach steps completed.",
+                            **base_update,
+                        )
+                        break
+                    guard = self._marvin_one_step_forward_guard(episode)
+                    cycle["selected_action"] = "forward"
+                    cycle.update({
+                        key: guard.get("refresh", {}).get(key)
+                        for key in (
+                            "lidar_refresh_attempted", "lidar_refresh_attempt_count",
+                            "lidar_refresh_succeeded", "lidar_refresh_initial_reason",
+                            "lidar_refresh_final_reason",
+                            "lidar_refresh_initial_acquisition_sequence",
+                            "lidar_refresh_final_acquisition_sequence",
+                        )
+                    })
+                    cycle["forward_interlock_reason"] = guard.get("guards", {}).get("forward_interlock_result", {}).get("reason")
+                    if not guard.get("authorized"):
+                        record_cycle(cycle)
+                        outcome = finish(state="MARVIN_GUARDED_APPROACH_BLOCKED", reason="forward_guard_denied", **base_update)
+                        break
+                    self._semantic_check_current(episode)
+                    cycle["forward_attempted"] = True
+                    try:
+                        forward = self.robot.move_forward(
+                            speed=self.FIND_APPROACH_FORWARD_SPEED,
+                            seconds=self.FIND_APPROACH_FORWARD_SECONDS,
+                        )
+                    except Exception:
+                        forward = {"ok": False}
+                    forwards += 1
+                    actions += 1
+                    cycle["forward_completed"] = isinstance(forward, dict) and forward.get("ok") is True
+                    try:
+                        forward_stop = self.robot.stop()
+                    except Exception:
+                        forward_stop = {"ok": False}
+                    cycle["stop_ok"] = bool(
+                        isinstance(forward_stop, dict) and forward_stop.get("ok") is True
+                    )
+                    record_cycle(cycle)
+                    if not cycle["stop_ok"]:
+                        outcome = finish(
+                            state="MARVIN_GUARDED_APPROACH_BLOCKED",
+                            reason="forward_stop_failed",
+                            **base_update,
+                        )
+                        break
+                    if not cycle["forward_completed"]:
+                        outcome = finish(state="MARVIN_GUARDED_APPROACH_BLOCKED", reason="marvin_forward_failed", **base_update)
+                        break
+                    if forwards >= self.MARVIN_GUARDED_APPROACH_MAX_FORWARD_STEPS:
+                        outcome = finish(
+                            ok=True, executed=True,
+                            state="MARVIN_GUARDED_APPROACH_COMPLETE",
+                            reason="Maximum guarded Marvin approach steps completed.",
+                            **base_update,
+                        )
+                        break
+                    self._semantic_check_current(episode)
+        except _SemanticPreempted:
+            outcome = finish(state="PREEMPTED", reason="FIND_OBJECT execution was preempted.")
+        except Exception as exc:
+            outcome = finish(state="MARVIN_GUARDED_APPROACH_REACQUISITION_FAILED", reason="marvin_guarded_approach_reacquisition_failed", error_type=type(exc).__name__)
+        finally:
+            try:
+                stop_result = self.robot.stop()
+            except Exception as exc:
+                stop_result = {"ok": False, "error": str(exc), "error_type": type(exc).__name__}
+            if outcome is None:
+                outcome = finish(state="MARVIN_GUARDED_APPROACH_BLOCKED", reason="marvin_guarded_approach_no_result")
+            outcome["post_step_stop_result"] = stop_result
+            outcome["final_stop_result"] = stop_result
+            self._publish_tracking_state(outcome)
+        return outcome
+
     def _execute_marvin_one_step_test(self, target_name):
         """Run the isolated, one-forward Marvin tracker validation path."""
         base = {
@@ -1742,120 +2090,10 @@ class BehaviorManager:
                                 reason="forward_guard_unavailable", **common,
                             )
                         else:
-                            permitted = False
-                            interlock_reason = None
-                            lidar = None
-                            guards = {}
-                            stale_identity = None
-                            stale_retry_count = 0
-                            initial_reason = None
-                            initial_sequence = None
-                            guard_authorized = False
-                            while True:
-                                if stale_retry_count > 0:
-                                    self._semantic_check_current(episode)
-                                    time.sleep(
-                                        self.MARVIN_ONE_STEP_LIDAR_REFRESH_POLL_SECONDS
-                                    )
-                                    self._semantic_check_current(episode)
-                                permitted, interlock_reason = interlock.refresh()
-                                lidar = self.world_model.get_lidar_obstacles(expected_session=session)
-                                front = lidar.get("sectors", {}).get("front", {}) if isinstance(lidar, dict) else {}
-                                lidar_ok = bool(
-                                    isinstance(lidar, dict)
-                                    and lidar.get("producer_session") == session
-                                    and lidar.get("available") is True
-                                    and lidar.get("valid") is True
-                                    and lidar.get("reason") == "fresh"
-                                    and front.get("state") == "CLEAR"
-                                )
-                                lidar_reason = lidar.get("reason") if isinstance(lidar, dict) else None
-                                denial_reason = lidar_reason or interlock_reason
-                                acquisition_sequence = (
-                                    lidar.get("acquisition_sequence")
-                                    if isinstance(lidar, dict) else None
-                                )
-                                if stale_retry_count == 0:
-                                    initial_reason = denial_reason
-                                    initial_sequence = acquisition_sequence
-                                guards = {
-                                    "lidar_guard": lidar,
-                                    "forward_interlock_result": {
-                                        "permitted": permitted, "reason": interlock_reason,
-                                        "producer_session": session,
-                                    },
-                                }
-                                stale_reasons = {"stale", "stale_lidar", "not_fresh"}
-                                lidar_stale = lidar_reason in stale_reasons
-                                interlock_stale = interlock_reason in stale_reasons
-                                front_state = front.get("state") if isinstance(front, dict) else None
-                                nonstale_lidar_denial = (
-                                    lidar_reason not in (None, "fresh")
-                                    and not lidar_stale
-                                )
-                                nonstale_interlock_denial = (
-                                    interlock_reason not in (None, "fresh_clear")
-                                    and not interlock_stale
-                                )
-                                nonstale_front_denial = (
-                                    front_state is not None and front_state != "CLEAR"
-                                )
-                                stale_denial = (
-                                    (lidar_stale or interlock_stale)
-                                    and not nonstale_lidar_denial
-                                    and not nonstale_interlock_denial
-                                    and not nonstale_front_denial
-                                )
-                                if permitted is True and interlock_reason == "fresh_clear" and lidar_ok:
-                                    current_identity = (
-                                        lidar.get("producer_session"),
-                                        acquisition_sequence,
-                                    ) if isinstance(lidar, dict) else None
-                                    if stale_identity is not None and current_identity == stale_identity:
-                                        stale_denial = True
-                                    else:
-                                        guard_authorized = True
-                                        break
-                                if not stale_denial:
-                                    break
-                                stale_identity = (
-                                    lidar.get("producer_session"),
-                                    acquisition_sequence,
-                                ) if isinstance(lidar, dict) else None
-                                if stale_retry_count + 1 >= self.MARVIN_ONE_STEP_LIDAR_REFRESH_MAX_ATTEMPTS:
-                                    break
-                                stale_retry_count += 1
-                            outcome_lidar_refresh = {
-                                "lidar_refresh_attempted": stale_retry_count > 0,
-                                "lidar_refresh_attempt_count": stale_retry_count,
-                                "lidar_refresh_succeeded": (
-                                    stale_retry_count > 0
-                                    and guard_authorized
-                                    and permitted is True
-                                    and interlock_reason == "fresh_clear"
-                                    and lidar_ok
-                                ),
-                                "lidar_refresh_initial_reason": initial_reason,
-                                "lidar_refresh_final_reason": (
-                                    interlock_reason
-                                    if interlock_reason != "fresh_clear"
-                                    else (
-                                        lidar.get("reason")
-                                        if isinstance(lidar, dict) else None
-                                    )
-                                ),
-                                "lidar_refresh_initial_acquisition_sequence": initial_sequence,
-                                "lidar_refresh_final_acquisition_sequence": (
-                                    lidar.get("acquisition_sequence")
-                                    if isinstance(lidar, dict) else None
-                                ),
-                            }
-                            if (
-                                not guard_authorized
-                                or permitted is not True
-                                or interlock_reason != "fresh_clear"
-                                or not lidar_ok
-                            ):
+                            guard = self._marvin_one_step_forward_guard(episode)
+                            guards = guard.get("guards", {})
+                            outcome_lidar_refresh = guard.get("refresh", {})
+                            if not guard.get("authorized"):
                                 outcome = finish(
                                     state="MARVIN_ONE_STEP_BLOCKED",
                                     reason="forward_guard_denied", **common, **guards,
