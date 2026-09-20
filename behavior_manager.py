@@ -494,6 +494,8 @@ class BehaviorManager:
     FIND_APPROACH_FORWARD_SECONDS = 0.50
     FIND_APPROACH_MAX_CHUNKS = 4
     FIND_ARRIVAL_AREA = 75000.0
+    MARVIN_ONE_STEP_LIDAR_REFRESH_MAX_ATTEMPTS = 3
+    MARVIN_ONE_STEP_LIDAR_REFRESH_POLL_SECONDS = 0.05
 
     FOLLOW_SEARCH_TURN_SPEED = 0.50
     FOLLOW_SEARCH_TURN_SECONDS = 0.30
@@ -1447,6 +1449,13 @@ class BehaviorManager:
             "approach_forward_duration": self.FIND_APPROACH_FORWARD_SECONDS,
             "approach_chunks_attempted": 0, "approach_chunks_completed": 0,
             "forward_result": None, "post_step_stop_result": None,
+            "lidar_refresh_attempted": False,
+            "lidar_refresh_attempt_count": 0,
+            "lidar_refresh_succeeded": False,
+            "lidar_refresh_initial_reason": None,
+            "lidar_refresh_final_reason": None,
+            "lidar_refresh_initial_acquisition_sequence": None,
+            "lidar_refresh_final_acquisition_sequence": None,
             "turn_chunks_attempted": 0, "turn_chunks_completed": 0,
             "centering_turn_chunks_attempted": 0,
             "centering_turn_chunks_completed": 0,
@@ -1566,36 +1575,133 @@ class BehaviorManager:
                                 reason="forward_guard_unavailable", **common,
                             )
                         else:
-                            permitted, interlock_reason = interlock.refresh()
-                            lidar = self.world_model.get_lidar_obstacles(expected_session=session)
-                            front = lidar.get("sectors", {}).get("front", {}) if isinstance(lidar, dict) else {}
-                            lidar_ok = bool(
-                                isinstance(lidar, dict)
-                                and lidar.get("producer_session") == session
-                                and lidar.get("available") is True
-                                and lidar.get("valid") is True
-                                and lidar.get("reason") == "fresh"
-                                and front.get("state") == "CLEAR"
-                            )
-                            guards = {
-                                "lidar_guard": lidar,
-                                "forward_interlock_result": {
-                                    "permitted": permitted, "reason": interlock_reason,
-                                    "producer_session": session,
-                                },
+                            permitted = False
+                            interlock_reason = None
+                            lidar = None
+                            guards = {}
+                            stale_identity = None
+                            stale_retry_count = 0
+                            initial_reason = None
+                            initial_sequence = None
+                            guard_authorized = False
+                            while True:
+                                if stale_retry_count > 0:
+                                    self._semantic_check_current(episode)
+                                    time.sleep(
+                                        self.MARVIN_ONE_STEP_LIDAR_REFRESH_POLL_SECONDS
+                                    )
+                                    self._semantic_check_current(episode)
+                                permitted, interlock_reason = interlock.refresh()
+                                lidar = self.world_model.get_lidar_obstacles(expected_session=session)
+                                front = lidar.get("sectors", {}).get("front", {}) if isinstance(lidar, dict) else {}
+                                lidar_ok = bool(
+                                    isinstance(lidar, dict)
+                                    and lidar.get("producer_session") == session
+                                    and lidar.get("available") is True
+                                    and lidar.get("valid") is True
+                                    and lidar.get("reason") == "fresh"
+                                    and front.get("state") == "CLEAR"
+                                )
+                                lidar_reason = lidar.get("reason") if isinstance(lidar, dict) else None
+                                denial_reason = lidar_reason or interlock_reason
+                                acquisition_sequence = (
+                                    lidar.get("acquisition_sequence")
+                                    if isinstance(lidar, dict) else None
+                                )
+                                if stale_retry_count == 0:
+                                    initial_reason = denial_reason
+                                    initial_sequence = acquisition_sequence
+                                guards = {
+                                    "lidar_guard": lidar,
+                                    "forward_interlock_result": {
+                                        "permitted": permitted, "reason": interlock_reason,
+                                        "producer_session": session,
+                                    },
+                                }
+                                stale_reasons = {"stale", "stale_lidar", "not_fresh"}
+                                lidar_stale = lidar_reason in stale_reasons
+                                interlock_stale = interlock_reason in stale_reasons
+                                front_state = front.get("state") if isinstance(front, dict) else None
+                                nonstale_lidar_denial = (
+                                    lidar_reason not in (None, "fresh")
+                                    and not lidar_stale
+                                )
+                                nonstale_interlock_denial = (
+                                    interlock_reason not in (None, "fresh_clear")
+                                    and not interlock_stale
+                                )
+                                nonstale_front_denial = (
+                                    front_state is not None and front_state != "CLEAR"
+                                )
+                                stale_denial = (
+                                    (lidar_stale or interlock_stale)
+                                    and not nonstale_lidar_denial
+                                    and not nonstale_interlock_denial
+                                    and not nonstale_front_denial
+                                )
+                                if permitted is True and interlock_reason == "fresh_clear" and lidar_ok:
+                                    current_identity = (
+                                        lidar.get("producer_session"),
+                                        acquisition_sequence,
+                                    ) if isinstance(lidar, dict) else None
+                                    if stale_identity is not None and current_identity == stale_identity:
+                                        stale_denial = True
+                                    else:
+                                        guard_authorized = True
+                                        break
+                                if not stale_denial:
+                                    break
+                                stale_identity = (
+                                    lidar.get("producer_session"),
+                                    acquisition_sequence,
+                                ) if isinstance(lidar, dict) else None
+                                if stale_retry_count + 1 >= self.MARVIN_ONE_STEP_LIDAR_REFRESH_MAX_ATTEMPTS:
+                                    break
+                                stale_retry_count += 1
+                            outcome_lidar_refresh = {
+                                "lidar_refresh_attempted": stale_retry_count > 0,
+                                "lidar_refresh_attempt_count": stale_retry_count,
+                                "lidar_refresh_succeeded": (
+                                    stale_retry_count > 0
+                                    and guard_authorized
+                                    and permitted is True
+                                    and interlock_reason == "fresh_clear"
+                                    and lidar_ok
+                                ),
+                                "lidar_refresh_initial_reason": initial_reason,
+                                "lidar_refresh_final_reason": (
+                                    interlock_reason
+                                    if interlock_reason != "fresh_clear"
+                                    else (
+                                        lidar.get("reason")
+                                        if isinstance(lidar, dict) else None
+                                    )
+                                ),
+                                "lidar_refresh_initial_acquisition_sequence": initial_sequence,
+                                "lidar_refresh_final_acquisition_sequence": (
+                                    lidar.get("acquisition_sequence")
+                                    if isinstance(lidar, dict) else None
+                                ),
                             }
-                            if permitted is not True or interlock_reason != "fresh_clear" or not lidar_ok:
+                            if (
+                                not guard_authorized
+                                or permitted is not True
+                                or interlock_reason != "fresh_clear"
+                                or not lidar_ok
+                            ):
                                 outcome = finish(
                                     state="MARVIN_ONE_STEP_BLOCKED",
                                     reason="forward_guard_denied", **common, **guards,
+                                    **outcome_lidar_refresh,
                                 )
                             elif not self._execution_is_current():
                                 outcome = finish(
                                     state="PREEMPTED",
                                     reason="FIND_OBJECT execution was preempted.",
-                                    **common, **guards,
+                                    **common, **guards, **outcome_lidar_refresh,
                                 )
                             else:
+                                self._semantic_check_current(episode)
                                 forward_result = None
                                 try:
                                     forward_result = self.robot.move_forward(
@@ -1615,7 +1721,7 @@ class BehaviorManager:
                                     approach_chunks_attempted=attempted,
                                     approach_chunks_completed=completed,
                                     forward_result=forward_result,
-                                    **common, **guards,
+                                    **common, **guards, **outcome_lidar_refresh,
                                 )
         except _MarvinProposalNotCentered as exc:
             geometry = exc.geometry

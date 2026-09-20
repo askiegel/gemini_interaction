@@ -54,6 +54,39 @@ class World:
         }
 
 
+class SequenceWorld:
+    def __init__(self, reasons, sequences):
+        self.responses = [
+            {
+                "producer_session": "one-step-session",
+                "acquisition_sequence": sequence,
+                "available": reason == "fresh",
+                "valid": reason == "fresh",
+                "reason": reason,
+                "sectors": {"front": {"state": "CLEAR"}},
+            }
+            for reason, sequence in zip(reasons, sequences)
+        ]
+        self.calls = 0
+
+    def get_lidar_obstacles(self, *, expected_session):
+        self.calls += 1
+        return self.responses.pop(0)
+
+
+class SequenceInterlock:
+    def __init__(self, results):
+        self.results = list(results)
+        self.calls = 0
+
+    def refresh(self):
+        self.calls += 1
+        return self.results.pop(0)
+
+    def status(self):
+        return {"active_forward": False, "pending_forward": False}
+
+
 class Semantic:
     def __init__(self, found=True, candidate_index=0):
         self.found = found
@@ -154,6 +187,13 @@ def manager(*, found=True, boxes=None, robot=None, proposal_boxes=None, candidat
     return instance, robot
 
 
+def sequenced_guard_manager(reasons, sequences, interlock_results):
+    instance, robot = manager()
+    instance.world_model = SequenceWorld(reasons, sequences)
+    robot.forward_interlock = SequenceInterlock(interlock_results)
+    return instance, robot
+
+
 def mission():
     return create_mission(
         mission_type="FIND_OBJECT", target="marvin", speech="test",
@@ -175,6 +215,183 @@ def test_centered_confirmed_tracker_allows_one_forward_then_stop():
     assert result["approach_chunks_attempted"] == result["approach_chunks_completed"] == 1
     assert result["turn_chunks_attempted"] == result["centering_turn_chunks_attempted"] == 0
     assert robot.calls == [("forward", 0.08, 0.50), ("stop",)]
+    assert result["post_step_stop_result"]["ok"] is True
+
+
+def test_fresh_first_guard_has_no_lidar_refresh_retry():
+    instance, robot = sequenced_guard_manager(
+        ["fresh"], [1], [(True, "fresh_clear")],
+    )
+    result = instance.execute(mission())
+    assert result["ok"] is True
+    assert result["lidar_refresh_attempted"] is False
+    assert result["lidar_refresh_attempt_count"] == 0
+    assert result["lidar_refresh_succeeded"] is False
+    assert result["lidar_refresh_initial_reason"] == "fresh"
+    assert result["lidar_refresh_final_acquisition_sequence"] == 1
+    assert [call for call in robot.calls if call[0] == "forward"] == [
+        ("forward", 0.08, 0.50),
+    ]
+
+
+def test_stale_then_fresh_guard_retries_once_with_new_sequence():
+    instance, robot = sequenced_guard_manager(
+        ["stale", "fresh"], [10, 11],
+        [(False, "stale"), (True, "fresh_clear")],
+    )
+    result = instance.execute(mission())
+    assert result["ok"] is True
+    assert result["lidar_refresh_attempted"] is True
+    assert result["lidar_refresh_attempt_count"] == 1
+    assert result["lidar_refresh_succeeded"] is True
+    assert result["lidar_refresh_initial_reason"] == "stale"
+    assert result["lidar_refresh_final_reason"] == "fresh"
+    assert result["lidar_refresh_initial_acquisition_sequence"] == 10
+    assert result["lidar_refresh_final_acquisition_sequence"] == 11
+    assert len([call for call in robot.calls if call[0] == "forward"]) == 1
+    assert result["turn_chunks_attempted"] == 0
+
+
+def test_two_stale_guards_then_fresh_guard_use_newest_sequence():
+    instance, robot = sequenced_guard_manager(
+        ["stale", "stale", "fresh"], [20, 21, 22],
+        [(False, "stale"), (False, "stale"), (True, "fresh_clear")],
+    )
+    result = instance.execute(mission())
+    assert result["ok"] is True
+    assert result["lidar_refresh_attempt_count"] == 2
+    assert result["lidar_refresh_final_acquisition_sequence"] == 22
+    assert len([call for call in robot.calls if call[0] == "forward"]) == 1
+
+
+def test_three_stale_guards_are_bounded_and_blocked():
+    instance, robot = sequenced_guard_manager(
+        ["stale", "stale", "stale"], [30, 31, 32],
+        [(False, "stale"), (False, "stale"), (False, "stale")],
+    )
+    result = instance.execute(mission())
+    assert result["state"] == "MARVIN_ONE_STEP_BLOCKED"
+    assert result["reason"] == "forward_guard_denied"
+    assert result["lidar_refresh_attempt_count"] == 2
+    assert result["lidar_refresh_succeeded"] is False
+    assert not [call for call in robot.calls if call[0] == "forward"]
+    assert result["post_step_stop_result"]["ok"] is True
+
+
+@pytest.mark.parametrize("reason,interlock_reason", [
+    ("fresh", "caution"),
+    ("fresh", "blocked"),
+    ("unavailable", "unavailable"),
+])
+def test_non_stale_guard_denials_do_not_retry(reason, interlock_reason):
+    instance, robot = sequenced_guard_manager(
+        [reason], [40], [(False, interlock_reason)],
+    )
+    result = instance.execute(mission())
+    assert result["state"] == "MARVIN_ONE_STEP_BLOCKED"
+    assert result["lidar_refresh_attempt_count"] == 0
+    assert result["lidar_refresh_attempted"] is False
+    assert not [call for call in robot.calls if call[0] == "forward"]
+    assert result["post_step_stop_result"]["ok"] is True
+
+
+def test_stale_then_non_stale_denial_stops_retrying():
+    instance, robot = sequenced_guard_manager(
+        ["stale", "fresh"], [50, 51],
+        [(False, "stale"), (False, "blocked")],
+    )
+    result = instance.execute(mission())
+    assert result["state"] == "MARVIN_ONE_STEP_BLOCKED"
+    assert result["lidar_refresh_attempt_count"] == 1
+    assert result["lidar_refresh_final_reason"] == "blocked"
+    assert not [call for call in robot.calls if call[0] == "forward"]
+    assert result["post_step_stop_result"]["ok"] is True
+
+
+def test_same_stale_acquisition_sequence_never_authorizes_motion():
+    instance, robot = sequenced_guard_manager(
+        ["stale", "stale", "fresh"], [20, 21, 21],
+        [(False, "stale"), (False, "stale"), (True, "fresh_clear")],
+    )
+    result = instance.execute(mission())
+    assert result["state"] == "MARVIN_ONE_STEP_BLOCKED"
+    assert result["lidar_refresh_attempt_count"] == 2
+    assert not [call for call in robot.calls if call[0] == "forward"]
+
+
+def test_stale_lidar_with_initial_non_stale_interlock_denial_does_not_retry():
+    instance, robot = sequenced_guard_manager(
+        ["stale"], [90], [(False, "blocked")],
+    )
+    result = instance.execute(mission())
+    assert result["state"] == "MARVIN_ONE_STEP_BLOCKED"
+    assert result["lidar_refresh_attempt_count"] == 0
+    assert instance.world_model.calls == 1
+    assert not [call for call in robot.calls if call[0] == "forward"]
+    assert result["post_step_stop_result"]["ok"] is True
+
+
+@pytest.mark.parametrize("front_state", ["CAUTION", "BLOCKED", "UNKNOWN"])
+def test_stale_lidar_with_non_clear_front_does_not_retry(front_state):
+    instance, robot = sequenced_guard_manager(
+        ["stale"], [91], [(False, "stale")],
+    )
+    instance.world_model.responses[0]["sectors"]["front"]["state"] = front_state
+    result = instance.execute(mission())
+    assert result["state"] == "MARVIN_ONE_STEP_BLOCKED"
+    assert result["lidar_refresh_attempt_count"] == 0
+    assert instance.world_model.calls == 1
+    assert not [call for call in robot.calls if call[0] == "forward"]
+    assert result["post_step_stop_result"]["ok"] is True
+
+
+def test_preemption_before_stale_retry_prevents_forward():
+    instance, robot = sequenced_guard_manager(
+        ["stale", "fresh"], [70, 71],
+        [(False, "stale"), (True, "fresh_clear")],
+    )
+    instance.execution_authorization_provider = lambda: (
+        instance.world_model.calls == 0
+    )
+    result = instance.execute(mission())
+    assert result["state"] == "PREEMPTED"
+    assert not [call for call in robot.calls if call[0] == "forward"]
+    assert result["post_step_stop_result"]["ok"] is True
+
+
+def test_preemption_after_fresh_retry_before_forward_prevents_forward():
+    instance, robot = sequenced_guard_manager(
+        ["stale", "fresh"], [80, 81],
+        [(False, "stale"), (True, "fresh_clear")],
+    )
+    instance.execution_authorization_provider = lambda: (
+        instance.world_model.calls < 2
+    )
+    result = instance.execute(mission())
+    assert result["state"] == "PREEMPTED"
+    assert not [call for call in robot.calls if call[0] == "forward"]
+    assert result["post_step_stop_result"]["ok"] is True
+
+
+def test_preemption_during_stale_retry_wait_prevents_second_guard(monkeypatch):
+    instance, robot = sequenced_guard_manager(
+        ["stale", "fresh"], [100, 101],
+        [(False, "stale"), (True, "fresh_clear")],
+    )
+    instance.TARGET_CONFIRMATION_POLL_SECONDS = 0
+    authorization = {"allowed": True}
+    instance.execution_authorization_provider = lambda: authorization["allowed"]
+
+    def revoke_during_refresh_wait(seconds):
+        if seconds == instance.MARVIN_ONE_STEP_LIDAR_REFRESH_POLL_SECONDS:
+            authorization["allowed"] = False
+
+    monkeypatch.setattr("behavior_manager.time.sleep", revoke_during_refresh_wait)
+    result = instance.execute(mission())
+
+    assert result["state"] == "PREEMPTED"
+    assert instance.world_model.calls == 1
+    assert not [call for call in robot.calls if call[0] == "forward"]
     assert result["post_step_stop_result"]["ok"] is True
 
 
