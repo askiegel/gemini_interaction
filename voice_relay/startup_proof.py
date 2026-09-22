@@ -18,12 +18,12 @@ PROJECT_DIR = VOICE_RELAY_DIR.parent
 
 ROBOT_HOST = os.getenv(
     "MAYDAY_SSH_HOST",
-    "ubuntu@192.168.68.124",
+    "ubuntu@minipupperv2.local",
 )
 
 ROBOT_BRIDGE_URL = os.getenv(
     "ROBOT_BRIDGE_URL",
-    "http://192.168.68.124:8090",
+    "http://minipupperv2.local:8090",
 ).rstrip("/")
 
 NAV_ASSET = (

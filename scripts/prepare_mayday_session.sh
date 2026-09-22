@@ -2,12 +2,12 @@
 set -e
 set -o pipefail
 
-ROBOT="${ROBOT:-http://192.168.68.124:8090}"
-CAMERA="${CAMERA:-http://192.168.68.124:8091}"
+ROBOT="${ROBOT:-http://minipupperv2.local:8090}"
+CAMERA="${CAMERA:-http://minipupperv2.local:8091}"
 DASHBOARD="${DASHBOARD:-http://127.0.0.1:8765}"
 VISION="${VISION:-http://127.0.0.1:8000}"
 RUNTIME="${RUNTIME:-http://127.0.0.1:8770}"
-MAYDAY="${MAYDAY:-ubuntu@192.168.68.124}"
+MAYDAY="${MAYDAY:-ubuntu@minipupperv2.local}"
 
 SCRIPT_DIRECTORY=$(
     cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &&
