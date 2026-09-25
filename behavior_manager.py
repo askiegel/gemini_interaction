@@ -1352,33 +1352,32 @@ class BehaviorManager:
             return {"ok": False, "executed": bool(isinstance(robot_result, dict) and robot_result.get("executed")), "behavior": "MOVE_FORWARD", "reason": (robot_result.get("stop_reason", "local_forward_failed") if isinstance(robot_result, dict) else "local_forward_failed"), "camera_gate": camera_gate, "robot_result": robot_result, "emergency_stop_result": stop_result}
         return {"ok": True, "executed": bool(robot_result.get("executed")), "behavior": "MOVE_FORWARD", "reason": robot_result.get("stop_reason", "local_forward_complete"), "camera_gate": camera_gate, "robot_result": robot_result}
 
-    def _execute_turn_left(self, mission):
-        robot_result = self.robot.turn_left(
-            speed=0.50,
-            seconds=0.40,
+    def _execute_explicit_turn(self, behavior, direction):
+        session = self._current_lidar_session()
+        if session is None:
+            return {
+                "ok": False,
+                "executed": False,
+                "behavior": behavior,
+                "reason": "lidar_producer_session_unavailable",
+            }
+        result = self.execute_guarded_turn(
+            direction,
+            angular_speed=0.50,
+            duration=0.40,
+            expected_lidar_session=session,
         )
-
         return {
-            "ok": bool(robot_result.get("ok")),
-            "executed": True,
-            "behavior": "TURN_LEFT",
-            "reason": "Executed short left turn.",
-            "robot_result": robot_result,
+            **result,
+            "behavior": behavior,
+            "executed": bool(result.get("confirmed_forwarded")),
         }
+
+    def _execute_turn_left(self, mission):
+        return self._execute_explicit_turn("TURN_LEFT", "LEFT")
 
     def _execute_turn_right(self, mission):
-        robot_result = self.robot.turn_right(
-            speed=0.50,
-            seconds=0.40,
-        )
-
-        return {
-            "ok": bool(robot_result.get("ok")),
-            "executed": True,
-            "behavior": "TURN_RIGHT",
-            "reason": "Executed short right turn.",
-            "robot_result": robot_result,
-        }
+        return self._execute_explicit_turn("TURN_RIGHT", "RIGHT")
 
     def _execute_find_object(self, mission):
         """
