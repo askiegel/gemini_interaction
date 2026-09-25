@@ -8,9 +8,18 @@ import time
 import behavior_manager as behavior_manager_module
 from behavior_manager import BehaviorManager
 from local_obstacle_policy import recommend_local_avoidance
+from local_motion_safety_envelope import build_local_motion_lidar_geometry
 
 
 SESSION = "session-1"
+
+
+def _clear_geometry():
+    return build_local_motion_lidar_geometry({
+        "frame_id": "lidar_link", "angle_min": -3.141592653589793,
+        "angle_increment": 6.283185307179586 / 80, "range_min": 0.02,
+        "range_max": 8.0, "ranges": [1.5] * 80,
+    })
 
 
 def snapshot(*, front="CLEAR", left="CLEAR", front_left="CLEAR",
@@ -30,6 +39,7 @@ def snapshot(*, front="CLEAR", left="CLEAR", front_left="CLEAR",
         "producer_session": SESSION,
         "received_monotonic_seconds": 10.0,
         "age_at_receipt_seconds": 0.05,
+        "local_motion_geometry": _clear_geometry(),
         "sectors": {
             "front": sector(front),
             "front_left": sector(front_left),

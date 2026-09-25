@@ -3,6 +3,7 @@
 import math
 
 from lidar_perception import read_lidar_state
+from local_motion_safety_envelope import evaluate_local_motion_safety
 
 
 MAX_ABSOLUTE_ANGULAR_SPEED = 1.0
@@ -54,7 +55,7 @@ def _front_status(sector):
 
 
 def _result(*, permitted, reason, direction, angular_z, duration,
-            state, relevant):
+            state, relevant, local_motion_safety=None):
     unknown = ("UNKNOWN", None, False, None)
     return {
         "permitted": permitted,
@@ -78,6 +79,7 @@ def _result(*, permitted, reason, direction, angular_z, duration,
         "front_left_minimum_clearance_m": relevant.get("front_left", unknown)[3],
         "right_minimum_clearance_m": relevant.get("right", unknown)[3],
         "front_right_minimum_clearance_m": relevant.get("front_right", unknown)[3],
+        "local_motion_safety": local_motion_safety,
     }
 
 
@@ -146,6 +148,15 @@ def validate_guarded_turn(direction, angular_speed, duration, state, *, expected
                        angular_z=None, duration=duration_value, state=validated, relevant=relevant)
 
     signed_speed = angular_value if direction == "LEFT" else -angular_value
+    envelope = evaluate_local_motion_safety(
+        validated, expected_session=expected_session, angular_z=signed_speed,
+        duration=duration_value, now=now,
+    )
+    if not envelope["permitted"]:
+        return _result(permitted=False, reason=envelope["reason"], direction=direction,
+                       angular_z=None, duration=duration_value, state=validated,
+                       relevant=relevant, local_motion_safety=envelope)
     return _result(permitted=True, reason="turn_side_clear_advisory", direction=direction,
                    angular_z=signed_speed, duration=duration_value,
-                   state=validated, relevant=relevant)
+                   state=validated, relevant=relevant,
+                   local_motion_safety=envelope)

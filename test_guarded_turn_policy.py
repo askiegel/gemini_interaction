@@ -9,6 +9,15 @@ from guarded_turn_policy import (
     MAX_TURN_DURATION_SECONDS,
     validate_guarded_turn,
 )
+from local_motion_safety_envelope import build_local_motion_lidar_geometry
+
+
+def _clear_geometry():
+    return build_local_motion_lidar_geometry({
+        "frame_id": "lidar_link", "angle_min": -math.pi,
+        "angle_increment": math.tau / 80, "range_min": 0.02,
+        "range_max": 8.0, "ranges": [1.5] * 80,
+    })
 
 
 def snapshot(*, front="CLEAR", left="CLEAR", front_left="CLEAR",
@@ -23,6 +32,7 @@ def snapshot(*, front="CLEAR", left="CLEAR", front_left="CLEAR",
         "available": True, "valid": True, "reason": "fresh",
         "producer_session": session, "received_monotonic_seconds": now,
         "age_at_receipt_seconds": age, "effective_age_seconds": age,
+        "local_motion_geometry": _clear_geometry(),
         "sectors": {
             "front": sector(front), "front_left": sector(front_left),
             "front_right": sector(front_right), "left": sector(left),

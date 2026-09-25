@@ -11,6 +11,7 @@ import time
 import uuid
 
 from robot_bridge.client import RobotBridgeClient
+from local_motion_safety_envelope import build_local_motion_lidar_geometry
 from voice_relay.lidar_sectors import finite_number, lidar_sector_payload
 
 
@@ -113,6 +114,8 @@ class LidarPerceptionWorker:
                 received = self._monotonic()
                 latency = received - started
                 payload = lidar_sector_payload(raw)
+                scan = raw.get("telemetry", {}).get("scan", {}) if isinstance(raw, dict) else {}
+                local_motion_geometry = build_local_motion_lidar_geometry(scan)
                 source = payload["source"]
                 age = source.get("age_seconds")
                 stamp = source.get("stamp_seconds")
@@ -132,6 +135,7 @@ class LidarPerceptionWorker:
                 state.update(
                     available=True, valid=True, reason="fresh",
                     sectors=payload["sectors"], source=source,
+                    local_motion_geometry=local_motion_geometry,
                     request_latency_seconds=latency,
                     received_monotonic_seconds=received,
                     age_at_receipt_seconds=conservative_age,
