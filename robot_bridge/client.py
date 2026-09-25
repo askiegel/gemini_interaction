@@ -75,6 +75,9 @@ class RobotBridgeClient:
                 "url": url,
             }
 
+    def local_forward(self):
+        return self._request("POST", "/local-motion/forward", {})
+
     def status(self):
         return self._request("GET", "/status")
 

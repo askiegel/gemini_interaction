@@ -8,6 +8,7 @@ from guarded_turn_policy import validate_guarded_turn
 from local_obstacle_policy import recommend_local_avoidance
 from target_lock import TargetLock
 from marvin_local_tracker import MarvinLocalTracker
+from camera_motion_gate import evaluate_camera_gate
 
 
 class _GuardedTurnMonitor:
@@ -1333,18 +1334,19 @@ class BehaviorManager:
         return result
 
     def _execute_move_forward(self, mission):
-        robot_result = self.robot.move_forward(
-            speed=0.08,
-            seconds=0.50,
-        )
-
-        return {
-            "ok": bool(robot_result.get("ok")),
-            "executed": True,
-            "behavior": "MOVE_FORWARD",
-            "reason": "Executed short forward movement.",
-            "robot_result": robot_result,
-        }
+        try:
+            payload = self.vision.fetch_vision_payload()
+            camera_gate = evaluate_camera_gate(payload)
+        except Exception as exc:
+            camera_gate = {"camera_semantic_clear": False, "reason": "camera_request_failed", "error": str(exc)}
+        if not camera_gate["camera_semantic_clear"]:
+            stop_result = self.robot.stop()
+            return {"ok": False, "executed": False, "behavior": "MOVE_FORWARD", "reason": camera_gate["reason"], "camera_gate": camera_gate, "robot_result": stop_result}
+        try:
+            robot_result = self.robot.local_forward()
+        except Exception as exc:
+            return {"ok": False, "executed": False, "behavior": "MOVE_FORWARD", "reason": "local_forward_request_failed", "camera_gate": camera_gate, "error": str(exc)}
+        return {"ok": bool(robot_result.get("ok")), "executed": bool(robot_result.get("executed")), "behavior": "MOVE_FORWARD", "reason": robot_result.get("stop_reason", "local_forward_complete"), "camera_gate": camera_gate, "robot_result": robot_result}
 
     def _execute_turn_left(self, mission):
         robot_result = self.robot.turn_left(
