@@ -223,7 +223,15 @@ def evaluate_local_motion_safety(state, *, expected_session, linear_x=0.0,
         result["protected_radius_m"] = protected
         reason = "rotation_protected_region_violated"
     else:
-        violates = [point for point in valid_points
+        # Translation is directional: sector requirements must constrain both
+        # sample sufficiency and the points that can veto its swept tube.
+        directional_points = [
+            point for point in valid_points
+            if _sector_name(math.degrees(math.atan2(
+                point["y_m"], point["x_m"]
+            ))) in required
+        ]
+        violates = [point for point in directional_points
                     if _distance_to_segment(point["x_m"], point["y_m"], path_x, path_y)
                     <= LOCAL_LIDAR_PROTECTED_RADIUS_M]
         reason = "translation_protected_region_violated"

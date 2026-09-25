@@ -73,12 +73,46 @@ def test_directional_obstacle_blocks_its_translation(bearing, command):
     assert result["reason"] == "translation_protected_region_violated"
 
 
+@pytest.mark.parametrize("bearing, blocking, nonblocking", [
+    (45, {"linear_x": 0.1}, ({"linear_x": -0.1}, {"linear_y": -0.1})),
+    (45, {"linear_y": 0.1}, ({"linear_x": -0.1}, {"linear_y": -0.1})),
+    (-135, {"linear_x": -0.1}, ({"linear_x": 0.1}, {"linear_y": 0.1})),
+    (-135, {"linear_y": -0.1}, ({"linear_x": 0.1}, {"linear_y": 0.1})),
+    (0, {"linear_x": 0.1}, ({"linear_x": -0.1},)),
+    (180, {"linear_x": -0.1}, ({"linear_x": 0.1},)),
+    (90, {"linear_y": 0.1}, ({"linear_y": -0.1},)),
+    (-90, {"linear_y": -0.1}, ({"linear_y": 0.1},)),
+])
+def test_nearby_obstacle_only_vetoes_translations_in_its_directional_neighborhood(
+        bearing, blocking, nonblocking):
+    payload = scan()
+    set_robot_bearing(payload, bearing, 0.50)
+    assert evaluate(payload, **blocking)["reason"] == (
+        "translation_protected_region_violated"
+    )
+    for command in nonblocking:
+        result = evaluate(payload, **command)
+        assert result["permitted"] is True
+        assert result["reason"] == "protected_region_clear"
+
+
+def test_relevant_sector_point_outside_swept_tube_does_not_veto_translation():
+    payload = scan()
+    set_robot_bearing(payload, 45, 1.0)
+    result = evaluate(payload, linear_x=0.1)
+    assert "front_left" in result["required_sectors"]
+    assert result["permitted"] is True
+    assert result["reason"] == "protected_region_clear"
+
+
 def test_rotation_uses_same_circular_geometry_for_left_and_right():
     payload = scan()
-    set_robot_bearing(payload, 0, LOCAL_LIDAR_PROTECTED_RADIUS_M - 0.01)
+    set_robot_bearing(payload, 45, 0.50)
     left = evaluate(payload, angular_z=0.4)
     right = evaluate(payload, angular_z=-0.4)
+    assert left["permitted"] is right["permitted"] is False
     assert left["reason"] == right["reason"] == "rotation_protected_region_violated"
+    assert left["violating_point"] == right["violating_point"]
 
 
 def test_rotation_geometry_permits_points_outside_protected_circle():
