@@ -77,8 +77,8 @@ def test_empty_sectors(ranges):
 
 
 def test_robust_percentile_is_deterministic_and_resists_isolated_return():
-    result = calculate_sectors(scan([0.1] + [3] * 10, -5, 1))["front"]
-    assert result["minimum_clearance_m"] == 0.1
+    result = calculate_sectors(scan([0.25] + [3] * 10, -5, 1))["front"]
+    assert result["minimum_clearance_m"] == 0.25
     assert result["robust_clearance_m"] == 3
     result = calculate_sectors(scan([4, 1, 3, 2], -5, 1))["front"]
     assert result["robust_clearance_m"] == pytest.approx(1.3)
@@ -240,3 +240,26 @@ def test_threshold_metadata_on_success_and_unavailable_payload(source):
         ("CAUTION", "robust_clearance_m", "<=", 0.75),
         ("CAUTION", "minimum_clearance_m", "<=", 0.60),
     ]
+
+
+def test_confirmed_mayday_self_returns_are_excluded_only_in_bounded_mask():
+    from voice_relay.lidar_sectors import is_mayday_self_return
+    assert is_mayday_self_return(-15, .15)
+    assert is_mayday_self_return(-3, .111)
+    assert not is_mayday_self_return(-2, .1)
+    assert not is_mayday_self_return(-10, .25)
+    assert not is_mayday_self_return(-16, .1)
+    assert not is_mayday_self_return(0, .1)
+
+def test_measured_self_cluster_does_not_block_real_forward_clearance():
+    # Raw angles are lidar_link; +90 degrees maps them to robot bearings.
+    cluster = [0.10] * 5
+    values = cluster + [1.14] * 6
+    result = calculate_sectors(scan(values, -104, 2), rotation_radians=math.pi / 2)
+    assert result["front"]["state"] == "CLEAR"
+    assert result["front"]["minimum_clearance_m"] == pytest.approx(1.14)
+    # These counterexamples remain physical front-obstacle evidence.
+    for bearing, distance in ((-10, .25), (-16, .10), (0, .10), (5, .20)):
+        raw = bearing - 90
+        sector = calculate_sectors(scan([distance], raw), rotation_radians=math.pi / 2)["front"]
+        assert sector["state"] == "BLOCKED"

@@ -9,6 +9,14 @@ small samples offer limited outlier resistance, so counts accompany distances.
 import math
 
 
+MAYDAY_SELF_BEARING_MIN_DEG = -15.0
+MAYDAY_SELF_BEARING_MAX_DEG = -2.0
+MAYDAY_SELF_MAX_RANGE_M = 0.15
+
+def is_mayday_self_return(bearing_deg, distance):
+    return MAYDAY_SELF_BEARING_MIN_DEG <= bearing_deg < MAYDAY_SELF_BEARING_MAX_DEG and distance <= MAYDAY_SELF_MAX_RANGE_M
+
+
 SECTOR_BOUNDS = {
     "front": (-20, 20),
     "front_left": (20, 60),
@@ -107,6 +115,8 @@ def calculate_sectors(scan, *, rotation_radians=0.0):
         if not math.isfinite(angle):
             raise ValueError("LiDAR sample angle is invalid.")
         bearing = math.degrees((angle + math.pi) % math.tau - math.pi)
+        if is_mayday_self_return(bearing, distance):
+            continue
         # Stabilize exact boundary angles after radians/modulo roundoff.
         for boundary in (-120, -60, -20, 20, 60, 120):
             if abs(bearing - boundary) < 1e-10:
@@ -152,6 +162,7 @@ def lidar_sector_payload(payload):
         "distance_reference": "sensor_origin",
         "robust_statistic": "linear_10th_percentile",
         "classification_thresholds": classification_metadata(),
+        "self_return_filter": {"enabled": True, "bearing_min_deg": MAYDAY_SELF_BEARING_MIN_DEG, "bearing_max_deg": MAYDAY_SELF_BEARING_MAX_DEG, "max_range_m": MAYDAY_SELF_MAX_RANGE_M},
         "source": {
             "frame_id": scan.get("frame_id"),
             "stamp_seconds": scan.get("stamp_seconds"),
