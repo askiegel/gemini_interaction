@@ -32,8 +32,8 @@ def test_behavior_uses_stop_or_single_local_forward(monkeypatch):
     assert result["executed"] and robot.calls==["local"] and result["robot_result"]["ownership"]=="x"
 def test_client_posts_empty_object(monkeypatch):
     client=RobotBridgeClient(base_url="http://x"); calls=[]
-    monkeypatch.setattr(client,"_request",lambda *args: calls.append(args) or {"ok":True})
-    client.local_forward(); assert calls==[("POST","/local-motion/forward",{})]
+    monkeypatch.setattr(client,"_request",lambda *args, **kwargs: calls.append((args, kwargs)) or {"ok":True})
+    client.local_forward(); assert calls==[(("POST","/local-motion/forward",{}), {"timeout": 120.0})]
 
 
 def test_camera_gate_timestamp_and_detection_contract():
@@ -65,11 +65,11 @@ def test_bridge_result_and_exception_are_not_retried(monkeypatch):
     class Failing(Robot):
         def local_forward(self): self.calls.append("local"); raise RuntimeError("offline")
     robot=Failing(); result=BehaviorManager(robot_client=robot,vision_adapter=Vision({}))._execute_move_forward(None)
-    assert not result["ok"] and not result["executed"] and robot.calls==["local"]
+    assert not result["ok"] and not result["executed"] and robot.calls==["local", "stop"]
     class Rejected(Robot):
         def local_forward(self): self.calls.append("local"); return {"ok":False,"executed":False,"stop_reason":"forward_obstacle","clearance":.3}
     robot=Rejected(); result=BehaviorManager(robot_client=robot,vision_adapter=Vision({}))._execute_move_forward(None)
-    assert not result["executed"] and result["reason"]=="forward_obstacle" and result["robot_result"]["clearance"]==.3 and robot.calls==["local"]
+    assert not result["executed"] and result["reason"]=="forward_obstacle" and result["robot_result"]["clearance"]==.3 and robot.calls==["local", "stop"]
 
 def test_stop_regression_uses_stop_not_local_forward():
     robot=Robot(); result=BehaviorManager(robot_client=robot,vision_adapter=Vision({}))._execute_stop()

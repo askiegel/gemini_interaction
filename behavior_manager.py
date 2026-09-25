@@ -1345,8 +1345,12 @@ class BehaviorManager:
         try:
             robot_result = self.robot.local_forward()
         except Exception as exc:
-            return {"ok": False, "executed": False, "behavior": "MOVE_FORWARD", "reason": "local_forward_request_failed", "camera_gate": camera_gate, "error": str(exc)}
-        return {"ok": bool(robot_result.get("ok")), "executed": bool(robot_result.get("executed")), "behavior": "MOVE_FORWARD", "reason": robot_result.get("stop_reason", "local_forward_complete"), "camera_gate": camera_gate, "robot_result": robot_result}
+            stop_result = self.robot.stop()
+            return {"ok": False, "executed": False, "behavior": "MOVE_FORWARD", "reason": "local_forward_request_failed", "camera_gate": camera_gate, "error": str(exc), "emergency_stop_result": stop_result}
+        if not isinstance(robot_result, dict) or robot_result.get("ok") is not True:
+            stop_result = self.robot.stop()
+            return {"ok": False, "executed": bool(isinstance(robot_result, dict) and robot_result.get("executed")), "behavior": "MOVE_FORWARD", "reason": (robot_result.get("stop_reason", "local_forward_failed") if isinstance(robot_result, dict) else "local_forward_failed"), "camera_gate": camera_gate, "robot_result": robot_result, "emergency_stop_result": stop_result}
+        return {"ok": True, "executed": bool(robot_result.get("executed")), "behavior": "MOVE_FORWARD", "reason": robot_result.get("stop_reason", "local_forward_complete"), "camera_gate": camera_gate, "robot_result": robot_result}
 
     def _execute_turn_left(self, mission):
         robot_result = self.robot.turn_left(

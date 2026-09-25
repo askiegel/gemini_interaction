@@ -3,6 +3,8 @@ import math
 import urllib.request
 import urllib.error
 
+LOCAL_FORWARD_TIMEOUT_SECONDS = 120.0
+
 
 
 
@@ -39,7 +41,7 @@ class RobotBridgeClient:
     def configure_forward_interlock(self, interlock):
         self.forward_interlock = interlock
 
-    def _request(self, method, path, payload=None):
+    def _request(self, method, path, payload=None, timeout=None):
         url = f"{self.base_url}{path}"
 
         data = None
@@ -57,7 +59,7 @@ class RobotBridgeClient:
         )
 
         try:
-            with urllib.request.urlopen(request, timeout=self.timeout) as response:
+            with urllib.request.urlopen(request, timeout=self.timeout if timeout is None else timeout) as response:
                 body = response.read().decode("utf-8")
                 return json.loads(body)
 
@@ -76,7 +78,7 @@ class RobotBridgeClient:
             }
 
     def local_forward(self):
-        return self._request("POST", "/local-motion/forward", {})
+        return self._request("POST", "/local-motion/forward", {}, timeout=LOCAL_FORWARD_TIMEOUT_SECONDS)
 
     def status(self):
         return self._request("GET", "/status")
