@@ -12,6 +12,7 @@ from local_obstacle_policy import (
 from target_lock import TargetLock
 from marvin_local_tracker import MarvinLocalTracker
 from marvin_pursuit_state import evaluate_marvin_pursuit_state
+from marvin_arrival_policy import evaluate_marvin_arrival
 from marvin_search_policy import plan_marvin_search_step
 from local_motion_safety_envelope import evaluate_local_motion_safety
 from camera_motion_gate import evaluate_camera_gate
@@ -1526,6 +1527,9 @@ class BehaviorManager:
         base = {
             "ok": False,
             "completed": False,
+            "arrived_at_marvin": False,
+            "arrival": None,
+            "selected_identity_id": None,
             "reason": None,
             "max_actions": max_actions,
             "actions_executed": 0,
@@ -1596,6 +1600,7 @@ class BehaviorManager:
                 "entity_id": pursuit.get("entity_id"),
                 "fresh": pursuit.get("fresh"),
                 "geometry_usable": pursuit.get("geometry_usable"),
+                "arrival": None,
                 "selected_action": "no_motion",
                 "route": "none",
                 "executed_primitive": None,
@@ -1613,6 +1618,63 @@ class BehaviorManager:
                     base,
                     history=list(base["history"]),
                     reason="find_marvin_identity_changed",
+                )
+
+            try:
+                arrival = evaluate_marvin_arrival(
+                    lock_result,
+                    lock_snapshot,
+                    selected_identity_id=current_identity_id,
+                    now=now,
+                )
+            except Exception as exc:
+                base["history"].append(history_entry)
+                return dict(
+                    base,
+                    history=list(base["history"]),
+                    reason="marvin_arrival_evaluation_failed",
+                    error=str(exc),
+                    error_type=type(exc).__name__,
+                )
+            if (
+                not isinstance(arrival, dict)
+                or arrival.get("ok") is not True
+                or not isinstance(arrival.get("arrived_at_marvin"), bool)
+                or arrival.get("selected_identity_id") != current_identity_id
+            ):
+                base["history"].append(history_entry)
+                return dict(
+                    base,
+                    history=list(base["history"]),
+                    reason="marvin_arrival_evaluation_failed",
+                )
+            history_entry["arrival"] = arrival
+            if arrival["arrived_at_marvin"]:
+                if not (
+                    pursuit.get("state") == "READY_TO_APPROACH"
+                    and pursuit.get("pursuit_authorized") is True
+                    and arrival.get("identity_authorized") is True
+                    and arrival.get("fresh") is True
+                    and arrival.get("geometry_valid") is True
+                ):
+                    base["history"].append(history_entry)
+                    return dict(
+                        base,
+                        history=list(base["history"]),
+                        reason="marvin_arrival_evaluation_inconsistent",
+                    )
+                history_entry["route"] = "arrival"
+                history_entry["selected_action"] = "arrived_at_marvin"
+                base["history"].append(history_entry)
+                return dict(
+                    base,
+                    ok=True,
+                    completed=True,
+                    arrived_at_marvin=True,
+                    arrival=arrival,
+                    selected_identity_id=current_identity_id,
+                    history=list(base["history"]),
+                    reason="arrived_at_marvin",
                 )
 
             state = pursuit.get("state")
