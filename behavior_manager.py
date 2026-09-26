@@ -3150,6 +3150,19 @@ class BehaviorManager:
             "bbox": observation.get("bbox"),
             "target_observation": observation,
         }
+        # Keep the timestamp attached to the exact observation selected for
+        # this preview. Marvin's temporary tracker has no persistent identity
+        # key today, so do not synthesize one from its seed or track state.
+        source_timestamp = observation.get("source_timestamp")
+        if source_timestamp is not None:
+            result["source_timestamp"] = source_timestamp
+            result["vision_timestamp"] = source_timestamp
+        for key in (
+            "entity_id", "identity_id", "identity_status",
+            "identity_ambiguous", "identity_match_score",
+        ):
+            if key in observation:
+                result[key] = observation[key]
         if confirmation_diagnostics is not None:
             result["confirmation_diagnostics"] = confirmation_diagnostics
         return result

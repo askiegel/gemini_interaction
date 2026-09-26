@@ -286,6 +286,8 @@ def test_marvin_preview_uses_one_semantic_acquisition_after_yolo_fails():
 
     assert result["ok"] is True
     assert result["target"] == "marvin"
+    assert result["source_timestamp"] == result["target_observation"]["source_timestamp"]
+    assert result["vision_timestamp"] == result["source_timestamp"]
     assert result["target_found"] is True
     assert result["source"] == "marvin_local_tracker"
     assert result["authoritative"] is False
@@ -300,6 +302,8 @@ def test_marvin_preview_uses_one_semantic_acquisition_after_yolo_fails():
     tracking = build_tracking_state(result)
     assert tracking["source"] == "marvin_local_tracker"
     assert tracking["bbox"] == result["bbox"]
+    assert tracking["vision_timestamp"] == result["source_timestamp"]
+    assert isinstance(tracking["detection_age_ms"], int)
     assert semantic.calls == ["frame", "select_marvin_candidate", "frame", "frame"]
     assert semantic.selection_candidates[0][0]["proposal_label"] == "toilet"
     assert result["proposal_label"] == "toilet"
@@ -702,6 +706,8 @@ def test_runtime_marvin_preview_preserves_tracker_provenance():
         "geometry_source": "yolo",
         "identity_source": "gemini_marvin_identity",
         "identity_confirmed": True,
+        "source_timestamp": "2026-09-25T12:00:00+00:00",
+        "vision_timestamp": "2026-09-25T12:00:00+00:00",
         "yolo_seed_bbox": seed_bbox,
         "tracker_seed_bbox": {"x1": 285, "y1": 82, "x2": 489, "y2": 346},
         "tracker_seed_source": "bounded_yolo_proposal_expansion",
@@ -715,6 +721,9 @@ def test_runtime_marvin_preview_preserves_tracker_provenance():
     assert payload["geometry_source"] == "yolo"
     assert payload["identity_source"] == "gemini_marvin_identity"
     assert payload["identity_confirmed"] is True
+    assert payload["source_timestamp"] == "2026-09-25T12:00:00+00:00"
+    assert payload["vision_timestamp"] == "2026-09-25T12:00:00+00:00"
+    assert payload["tracking"]["vision_timestamp"] == "2026-09-25T12:00:00+00:00"
     assert payload["yolo_seed_bbox"] == seed_bbox
     assert payload["tracker_seed_bbox"] == {"x1": 285, "y1": 82, "x2": 489, "y2": 346}
     assert payload["tracker_seed_source"] == "bounded_yolo_proposal_expansion"
