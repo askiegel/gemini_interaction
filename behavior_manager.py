@@ -5,7 +5,10 @@ from datetime import datetime, timezone
 
 from robot_bridge.client import RobotBridgeClient
 from guarded_turn_policy import validate_guarded_turn
-from local_obstacle_policy import recommend_local_avoidance
+from local_obstacle_policy import (
+    plan_local_obstacle_avoidance,
+    recommend_local_avoidance,
+)
 from target_lock import TargetLock
 from marvin_local_tracker import MarvinLocalTracker
 from camera_motion_gate import evaluate_camera_gate
@@ -1378,6 +1381,146 @@ class BehaviorManager:
 
     def _execute_turn_right(self, mission):
         return self._execute_explicit_turn("TURN_RIGHT", "RIGHT")
+
+    def execute_local_obstacle_avoidance_step(
+        self, *, expected_lidar_session=None, now=None,
+    ):
+        """Plan and execute at most one existing bounded local primitive.
+
+        This is deliberately not a mission handler.  A caller must obtain a
+        fresh World Model snapshot again before asking for another step.
+        """
+        session = expected_lidar_session or self._current_lidar_session()
+        base = {
+            "ok": False,
+            "planner": None,
+            "selected_action": None,
+            "executed_primitive": None,
+            "motion_executed": False,
+            "replan_required": False,
+            "execution_result": None,
+            "reason": None,
+        }
+        if session is None:
+            return dict(base, reason="lidar_producer_session_unavailable")
+        if self.world_model is None:
+            return dict(base, reason="world_model_unavailable")
+        try:
+            state = self.world_model.get_lidar_obstacles(
+                expected_session=session,
+                now=now,
+            )
+        except Exception as exc:
+            return dict(base, reason="local_avoidance_lidar_read_failed",
+                        error=str(exc), error_type=type(exc).__name__)
+        try:
+            planner = plan_local_obstacle_avoidance(
+                state, expected_session=session, now=now,
+            )
+        except Exception as exc:
+            return dict(base, reason="local_avoidance_planner_error",
+                        error=str(exc), error_type=type(exc).__name__)
+        result = dict(base, planner=planner)
+        if not isinstance(planner, dict):
+            return dict(result, reason="invalid_local_avoidance_planner_result")
+        selected = planner.get("selected_action")
+        result["selected_action"] = selected
+        if (
+            planner.get("ok") is not True
+            or planner.get("producer_session") != session
+            or not isinstance(selected, str)
+        ):
+            return dict(result, reason=planner.get(
+                "reason", "local_avoidance_not_permitted",
+            ))
+        evaluations = planner.get("candidate_evaluations")
+        selected_evaluation = (
+            evaluations.get(selected) if isinstance(evaluations, dict) else None
+        )
+        if (
+            not isinstance(selected_evaluation, dict)
+            or selected_evaluation.get("permitted") is not True
+        ):
+            return dict(result, reason="selected_candidate_not_permitted")
+
+        mapping = {
+            "forward": ("forward", None),
+            "left_turn": ("left_turn", "LEFT"),
+            "right_turn": ("right_turn", "RIGHT"),
+            "forward_left": ("left_turn", "LEFT"),
+            "forward_right": ("right_turn", "RIGHT"),
+        }
+        primitive = mapping.get(selected)
+        if primitive is None:
+            return dict(result, reason="unsupported_local_avoidance_action")
+        executed_primitive, direction = primitive
+        if direction is not None:
+            turn_evaluation = evaluations.get(executed_primitive)
+            if (
+                not isinstance(turn_evaluation, dict)
+                or turn_evaluation.get("permitted") is not True
+            ):
+                return dict(result, reason="mapped_turn_candidate_not_permitted")
+
+        # Exactly one dispatch site follows.  There is intentionally no
+        # fallback action or follow-up forward command in this invocation.
+        try:
+            if direction is None:
+                execution = self.robot.local_forward()
+                execution_ok = bool(
+                    isinstance(execution, dict)
+                    and execution.get("ok") is True
+                    and execution.get("executed") is True
+                )
+            else:
+                execution = self.execute_guarded_turn(
+                    direction,
+                    angular_speed=0.50,
+                    duration=0.40,
+                    expected_lidar_session=session,
+                    now=now,
+                )
+                execution_ok = bool(
+                    isinstance(execution, dict)
+                    and execution.get("ok") is True
+                    and execution.get("permitted") is True
+                    and execution.get("confirmed_forwarded") is True
+                )
+        except Exception as exc:
+            return dict(
+                result,
+                executed_primitive=executed_primitive,
+                reason="local_avoidance_primitive_exception",
+                error=str(exc),
+                error_type=type(exc).__name__,
+            )
+        if not execution_ok:
+            return dict(
+                result,
+                executed_primitive=executed_primitive,
+                execution_result=execution,
+                reason=(
+                    execution.get("reason", "local_avoidance_primitive_failed")
+                    if isinstance(execution, dict)
+                    else "local_avoidance_primitive_failed"
+                ),
+            )
+        reason = (
+            "turned_for_forward_left_replan"
+            if selected == "forward_left" else
+            "turned_for_forward_right_replan"
+            if selected == "forward_right" else
+            "bounded_local_avoidance_primitive_complete"
+        )
+        return dict(
+            result,
+            ok=True,
+            executed_primitive=executed_primitive,
+            motion_executed=True,
+            replan_required=True,
+            execution_result=execution,
+            reason=reason,
+        )
 
     def _execute_find_object(self, mission):
         """
