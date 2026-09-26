@@ -11,6 +11,8 @@ from local_obstacle_policy import (
 )
 from target_lock import TargetLock
 from marvin_local_tracker import MarvinLocalTracker
+from marvin_pursuit_state import evaluate_marvin_pursuit_state
+from local_motion_safety_envelope import evaluate_local_motion_safety
 from camera_motion_gate import evaluate_camera_gate
 
 
@@ -1385,6 +1387,165 @@ class BehaviorManager:
 
     def _execute_turn_right(self, mission):
         return self._execute_explicit_turn("TURN_RIGHT", "RIGHT")
+
+    def execute_marvin_pursuit_step(
+        self,
+        preview_result,
+        target_lock_result,
+        target_lock_snapshot,
+        *,
+        selected_identity_id=None,
+        identity_evidence=None,
+        bridge_result=None,
+        now=None,
+    ):
+        """Execute at most one bounded primitive for a current Marvin state.
+
+        This intentionally has no mission loop, search behavior, or cached
+        authority.  Every invocation evaluates the supplied current Preview
+        and TargetLock evidence before it reads current LiDAR.
+        """
+        pursuit = evaluate_marvin_pursuit_state(
+            preview_result,
+            target_lock_result,
+            target_lock_snapshot,
+            selected_identity_id=selected_identity_id,
+            identity_evidence=identity_evidence,
+            bridge_result=bridge_result,
+            now=now,
+        )
+        pursuit_state = (
+            pursuit.get("state")
+            if isinstance(pursuit, dict)
+            else "INSUFFICIENT_EVIDENCE"
+        )
+        base = {
+            "ok": False,
+            "pursuit_state": pursuit_state,
+            "pursuit": pursuit if isinstance(pursuit, dict) else None,
+            "decision": "no_motion",
+            "executed_primitive": None,
+            "motion_executed": False,
+            "replan_required": False,
+            "forward_safety": None,
+            "avoidance_result": None,
+            "reason": None,
+        }
+        if (
+            not isinstance(pursuit, dict)
+            or pursuit.get("state") != "READY_TO_APPROACH"
+            or pursuit.get("pursuit_authorized") is not True
+        ):
+            return dict(base, reason="marvin_pursuit_not_authorized")
+
+        session = self._current_lidar_session()
+        if session is None or self.world_model is None:
+            return dict(base, reason="lidar_producer_session_unavailable")
+        try:
+            lidar = self.world_model.get_lidar_obstacles(
+                expected_session=session, now=now,
+            )
+            safety = evaluate_local_motion_safety(
+                lidar,
+                expected_session=session,
+                linear_x=self.FIND_APPROACH_FORWARD_SPEED,
+                duration=self.FIND_APPROACH_FORWARD_SECONDS,
+                now=now,
+            )
+        except Exception as exc:
+            return dict(
+                base,
+                reason="marvin_pursuit_lidar_read_or_evaluation_failed",
+                error=str(exc),
+                error_type=type(exc).__name__,
+            )
+        base["forward_safety"] = safety
+        if not self._marvin_pursuit_lidar_is_trusted(lidar, safety, session):
+            return dict(base, reason="marvin_pursuit_lidar_not_trusted")
+
+        if safety.get("permitted") is True:
+            try:
+                forward = self.robot.local_forward()
+            except Exception as exc:
+                return dict(
+                    base,
+                    decision="approach_forward",
+                    executed_primitive="forward",
+                    reason="marvin_pursuit_forward_exception",
+                    error=str(exc),
+                    error_type=type(exc).__name__,
+                )
+            forward_ok = bool(
+                isinstance(forward, dict)
+                and forward.get("ok") is True
+                and forward.get("executed") is True
+            )
+            if not forward_ok:
+                return dict(
+                    base,
+                    decision="approach_forward",
+                    executed_primitive="forward",
+                    forward_result=forward,
+                    reason=(
+                        forward.get("reason", "marvin_pursuit_forward_failed")
+                        if isinstance(forward, dict)
+                        else "marvin_pursuit_forward_failed"
+                    ),
+                )
+            return dict(
+                base,
+                ok=True,
+                decision="approach_forward",
+                executed_primitive="forward",
+                motion_executed=True,
+                replan_required=True,
+                forward_result=forward,
+                reason="marvin_pursuit_forward_complete",
+            )
+
+        # A trusted blocked forward path is an obstacle condition, never an
+        # arrival inference.  The delegated step owns at most one primitive.
+        try:
+            avoidance = self.execute_local_obstacle_avoidance_step(
+                expected_lidar_session=session,
+                now=now,
+            )
+        except Exception as exc:
+            return dict(
+                base,
+                decision="avoidance_required",
+                reason="marvin_pursuit_avoidance_exception",
+                error=str(exc),
+                error_type=type(exc).__name__,
+            )
+        if not isinstance(avoidance, dict):
+            return dict(
+                base,
+                decision="avoidance_required",
+                reason="marvin_pursuit_avoidance_result_malformed",
+            )
+        executed = avoidance.get("motion_executed") is True
+        return dict(
+            base,
+            ok=avoidance.get("ok") is True and executed,
+            decision="avoidance_required",
+            executed_primitive=avoidance.get("executed_primitive"),
+            motion_executed=executed,
+            replan_required=executed,
+            avoidance_result=avoidance,
+            reason=avoidance.get("reason", "marvin_pursuit_avoidance_failed"),
+        )
+
+    @staticmethod
+    def _marvin_pursuit_lidar_is_trusted(lidar, safety, session):
+        """Require the same validated producer-bound state used by safety."""
+        return bool(
+            isinstance(lidar, dict)
+            and lidar.get("producer_session") == session
+            and isinstance(safety, dict)
+            and isinstance(safety.get("geometry"), dict)
+            and safety["geometry"].get("valid") is True
+        )
 
     def execute_local_obstacle_avoidance_step(
         self, *, expected_lidar_session=None, now=None,
