@@ -16,6 +16,7 @@ from marvin_local_tracker import MarvinLocalTracker
 from marvin_pursuit_state import evaluate_marvin_pursuit_state
 from marvin_arrival_policy import evaluate_marvin_arrival
 from marvin_identity_continuity import evaluate_marvin_identity_continuity
+from marvin_identity_refresh_policy import build_marvin_identity_refresh_update
 from marvin_preview_reacquisition import evaluate_marvin_preview_reacquisition
 from marvin_search_policy import plan_marvin_search_step
 from local_motion_safety_envelope import evaluate_local_motion_safety
@@ -1532,13 +1533,7 @@ class BehaviorManager:
         )
         if target_label != self.MARVIN_SEMANTIC_TARGET:
             raise RuntimeError("marvin_target_lock_target_mismatch")
-        lock_result = self.target_lock.resolve(
-            mission_id=self.target_lock.mission_id,
-            target_label=self.MARVIN_SEMANTIC_TARGET,
-        )
         lock_snapshot = self.target_lock.snapshot()
-        if not isinstance(lock_result, dict):
-            raise RuntimeError("marvin_target_lock_result_malformed")
         if not isinstance(lock_snapshot, dict):
             raise RuntimeError("marvin_target_lock_snapshot_malformed")
         preview = self.preview_find_object(self.MARVIN_SEMANTIC_TARGET)
@@ -1546,17 +1541,26 @@ class BehaviorManager:
             raise RuntimeError("marvin_preview_result_malformed")
         selected_identity_id = (
             lock_snapshot.get("locked_identity_id")
-            or lock_result.get("identity_id")
-            or lock_result.get("locked_identity_id")
         )
 
         confirmed_entity = None
         previous_confirmation = None
+        identity_refresh = {
+            "ok": True,
+            "allow_refresh": False,
+            "reason": "confirmed_marvin_entity_unavailable",
+            "entity_id": None,
+            "identity_id": None,
+            "observation_update": None,
+        }
         if selected_identity_id and self.world_model is not None:
             try:
+                reload_world_model = getattr(self.world_model, "reload", None)
+                if callable(reload_world_model):
+                    reload_world_model()
                 entities = self.world_model.get_entities()
-            except Exception:
-                entities = None
+            except Exception as exc:
+                raise RuntimeError("marvin_world_model_entity_lookup_failed") from exc
             matches = [
                 entity for entity in entities
                 if isinstance(entity, dict)
@@ -1589,6 +1593,76 @@ class BehaviorManager:
             confirmed_entity,
             now=continuity_now,
         )
+        if confirmed_entity is not None:
+            identity_refresh = build_marvin_identity_refresh_update(
+                identity_continuity,
+                confirmed_entity,
+                preview,
+                now=continuity_now,
+            )
+            if identity_refresh.get("allow_refresh") is True:
+                update = identity_refresh.get("observation_update")
+                if not isinstance(update, dict):
+                    raise RuntimeError("marvin_identity_refresh_payload_malformed")
+                bbox = update["bbox"]
+                location = {
+                    "cx": (bbox["x1"] + bbox["x2"]) / 2.0,
+                    "cy": (bbox["y1"] + bbox["y2"]) / 2.0,
+                    "frame": "camera",
+                }
+                prior_confidence = confirmed_entity.get("confidence", 0.0)
+                refresh_confidence = update.get("confidence", prior_confidence)
+                refresh_attributes = {
+                    key: value
+                    for key, value in update.items()
+                    if key != "confidence"
+                }
+                try:
+                    existing_record = self.world_model.get_entity(
+                        confirmed_entity["entity_id"]
+                    )
+                    if isinstance(existing_record, dict):
+                        current_entity_id = existing_record.get("entity_id")
+                        current_attributes = existing_record.get("attributes", {})
+                    else:
+                        current_entity_id = getattr(
+                            existing_record, "entity_id", None
+                        )
+                        current_attributes = getattr(
+                            existing_record, "attributes", {}
+                        )
+                    if (
+                        existing_record is None
+                        or current_entity_id != confirmed_entity["entity_id"]
+                        or not isinstance(current_attributes, dict)
+                        or current_attributes.get("identity_id")
+                        != identity_refresh.get("identity_id")
+                    ):
+                        raise RuntimeError("confirmed_entity_no_longer_exists")
+                    self.world_model.update_entity(
+                        entity_id=confirmed_entity["entity_id"],
+                        label=confirmed_entity["label"],
+                        entity_type=confirmed_entity["entity_type"],
+                        confidence=refresh_confidence,
+                        source=update["source"],
+                        location=location,
+                        attributes=refresh_attributes,
+                    )
+                except Exception as exc:
+                    raise RuntimeError("marvin_identity_refresh_write_failed") from exc
+
+        # Resolve only after any continuity-authorized observation refresh so
+        # TargetLock consumes the ordinary World Model path and remains the
+        # sole runtime identity-lock authority.
+        lock_result = self.target_lock.resolve(
+            mission_id=self.target_lock.mission_id,
+            target_label=self.MARVIN_SEMANTIC_TARGET,
+        )
+        lock_snapshot = self.target_lock.snapshot()
+        if not isinstance(lock_result, dict):
+            raise RuntimeError("marvin_target_lock_result_malformed")
+        if not isinstance(lock_snapshot, dict):
+            raise RuntimeError("marvin_target_lock_snapshot_malformed")
         bridge_result = evaluate_marvin_preview_reacquisition(
             preview,
             lock_snapshot,
@@ -1603,6 +1677,7 @@ class BehaviorManager:
             "identity_evidence": lock_result,
             "bridge_result": bridge_result,
             "identity_continuity": identity_continuity,
+            "identity_refresh": identity_refresh,
         }
 
     def execute_find_marvin_controller(
