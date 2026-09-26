@@ -13,6 +13,7 @@ from target_lock import TargetLock
 from marvin_local_tracker import MarvinLocalTracker
 from marvin_pursuit_state import evaluate_marvin_pursuit_state
 from marvin_arrival_policy import evaluate_marvin_arrival
+from marvin_preview_reacquisition import evaluate_marvin_preview_reacquisition
 from marvin_search_policy import plan_marvin_search_step
 from local_motion_safety_envelope import evaluate_local_motion_safety
 from camera_motion_gate import evaluate_camera_gate
@@ -1513,9 +1514,55 @@ class BehaviorManager:
             reason="marvin_search_guarded_turn_complete",
         )
 
+    def build_find_marvin_controller_state(self, *, now=None):
+        """Read current Marvin evidence for one controller decision.
+
+        This is perception/identity acquisition only.  It deliberately does
+        not invoke the controller or any action primitive.
+        """
+        if self.target_lock is None:
+            raise RuntimeError("marvin_target_lock_unavailable")
+        target_label = (
+            str(self.target_lock.target_label or "").strip().lower()
+            or self.MARVIN_SEMANTIC_TARGET
+        )
+        if target_label != self.MARVIN_SEMANTIC_TARGET:
+            raise RuntimeError("marvin_target_lock_target_mismatch")
+        lock_result = self.target_lock.resolve(
+            mission_id=self.target_lock.mission_id,
+            target_label=self.MARVIN_SEMANTIC_TARGET,
+        )
+        lock_snapshot = self.target_lock.snapshot()
+        if not isinstance(lock_result, dict):
+            raise RuntimeError("marvin_target_lock_result_malformed")
+        if not isinstance(lock_snapshot, dict):
+            raise RuntimeError("marvin_target_lock_snapshot_malformed")
+        preview = self.preview_find_object(self.MARVIN_SEMANTIC_TARGET)
+        if not isinstance(preview, dict):
+            raise RuntimeError("marvin_preview_result_malformed")
+        selected_identity_id = (
+            lock_snapshot.get("locked_identity_id")
+            or lock_result.get("identity_id")
+            or lock_result.get("locked_identity_id")
+        )
+        bridge_result = evaluate_marvin_preview_reacquisition(
+            preview,
+            lock_snapshot,
+            identity_evidence=lock_result,
+            now=now,
+        )
+        return {
+            "preview_result": preview,
+            "target_lock_result": lock_result,
+            "target_lock_snapshot": lock_snapshot,
+            "selected_identity_id": selected_identity_id,
+            "identity_evidence": lock_result,
+            "bridge_result": bridge_result,
+        }
+
     def execute_find_marvin_controller(
         self, state_provider, *, max_actions=FIND_MARVIN_CONTROLLER_MAX_ACTIONS,
-        now=None,
+        now=None, dry_run=False,
     ):
         """Run a finite sequence of fresh, one-step Marvin search/pursuit actions.
 
@@ -1543,6 +1590,8 @@ class BehaviorManager:
             return dict(base, reason="invalid_find_marvin_action_limit")
         if not callable(state_provider):
             return dict(base, reason="find_marvin_state_provider_unavailable")
+        if not isinstance(dry_run, bool):
+            return dict(base, reason="invalid_find_marvin_dry_run")
 
         selected_identity_id = None
         search_history = []
@@ -1675,6 +1724,8 @@ class BehaviorManager:
                     selected_identity_id=current_identity_id,
                     history=list(base["history"]),
                     reason="arrived_at_marvin",
+                    dry_run=dry_run,
+                    next_route="arrived",
                 )
 
             state = pursuit.get("state")
@@ -1682,6 +1733,14 @@ class BehaviorManager:
             if state in {"SEARCHING", "REACQUIRE_REQUIRED"}:
                 history_entry["route"] = "search"
                 history_entry["selected_action"] = "search_step"
+                if dry_run:
+                    history_entry["selected_action"] = "dry_run_search"
+                    base["history"].append(history_entry)
+                    return dict(
+                        base, ok=True, dry_run=True, next_route="search",
+                        history=list(base["history"]),
+                        reason="find_marvin_dry_run",
+                    )
                 # An executor-side exception may occur after dispatch, so the
                 # request consumes a shared bounded action opportunity first.
                 base["actions_executed"] += 1
@@ -1760,6 +1819,8 @@ class BehaviorManager:
                 return dict(
                     base,
                     ok=True,
+                    dry_run=dry_run,
+                    next_route="none",
                     history=list(base["history"]),
                     reason=self._find_marvin_controller_pause_reason(
                         state, authorized,
@@ -1768,6 +1829,14 @@ class BehaviorManager:
 
             history_entry["route"] = "pursuit"
             history_entry["selected_action"] = "pursuit_step"
+            if dry_run:
+                history_entry["selected_action"] = "dry_run_pursuit"
+                base["history"].append(history_entry)
+                return dict(
+                    base, ok=True, dry_run=True, next_route="pursuit",
+                    history=list(base["history"]),
+                    reason="find_marvin_dry_run",
+                )
             # Count the one-step request before invoking it.  A transport-side
             # exception leaves delivery uncertain, so it still consumes this
             # bounded action opportunity and cannot be retried implicitly.

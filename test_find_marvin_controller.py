@@ -41,7 +41,7 @@ def arrived(identity="marvin-1"):
 
 
 def invoke(monkeypatch, states, *, search_steps=None, pursuit_steps=None, max_actions=6,
-           identities=None, arrivals=None):
+           identities=None, arrivals=None, dry_run=False):
     manager = BehaviorManager(robot_client=object())
     provider_calls, evaluator_calls, arrival_calls, search_calls, pursuit_calls = [], [], [], [], []
     state_values = iter(states)
@@ -88,7 +88,8 @@ def invoke(monkeypatch, states, *, search_steps=None, pursuit_steps=None, max_ac
     monkeypatch.setattr(behavior_manager_module, "evaluate_marvin_arrival", arrival)
     monkeypatch.setattr(manager, "execute_marvin_search_step", search)
     monkeypatch.setattr(manager, "execute_marvin_pursuit_step", pursuit_step)
-    result = manager.execute_find_marvin_controller(provider, max_actions=max_actions, now=10.0)
+    result = manager.execute_find_marvin_controller(
+        provider, max_actions=max_actions, now=10.0, dry_run=dry_run)
     return result, provider_calls, evaluator_calls, arrival_calls, search_calls, pursuit_calls
 
 
@@ -236,6 +237,21 @@ def test_arrival_receives_no_lidar_authority(monkeypatch):
         monkeypatch, [pursuit()], max_actions=1)
     assert len(calls) == 1
     assert set(calls[0][1]) == {"selected_identity_id", "now"}
+
+
+def test_dry_run_reports_existing_routes_without_any_executor(monkeypatch):
+    cases = (
+        (pursuit("SEARCHING", False), "search"),
+        (pursuit("REACQUIRE_REQUIRED", False), "search"),
+        (pursuit(), "pursuit"),
+    )
+    for state, route in cases:
+        result, providers, evaluations, arrivals, searches, pursuits = invoke(
+            monkeypatch, [state], max_actions=1, dry_run=True)
+        assert result["dry_run"] is True and result["next_route"] == route
+        assert result["actions_executed"] == 0
+        assert len(providers) == len(evaluations) == len(arrivals) == 1
+        assert searches == pursuits == []
 
 
 def test_no_motion_replan_false_and_search_complete_stop(monkeypatch):

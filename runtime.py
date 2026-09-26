@@ -169,6 +169,79 @@ class CognitiveRuntime:
                 == self._control_generation
             )
 
+    def build_find_marvin_controller_state(self):
+        """Return one fresh Marvin controller evidence bundle without action."""
+        builder = getattr(
+            self.behavior_manager,
+            "build_find_marvin_controller_state",
+            None,
+        )
+        if not callable(builder):
+            raise RuntimeError("find_marvin_state_provider_unavailable")
+        return builder()
+
+    def dry_run_find_marvin_controller(self, *, execute=False):
+        """Evaluate one Find-Marvin controller decision with action disabled."""
+        if execute is not False:
+            return {
+                "ok": False,
+                "target": "marvin",
+                "execution_authorized": False,
+                "motion_executed": False,
+                "reason": "find_marvin_execution_not_authorized",
+            }
+        controller = getattr(
+            self.behavior_manager,
+            "execute_find_marvin_controller",
+            None,
+        )
+        if not callable(controller):
+            return {
+                "ok": False,
+                "target": "marvin",
+                "execution_authorized": False,
+                "motion_executed": False,
+                "reason": "find_marvin_controller_unavailable",
+            }
+        try:
+            result = controller(
+                self.build_find_marvin_controller_state,
+                max_actions=1,
+                dry_run=True,
+            )
+        except Exception as exc:
+            return {
+                "ok": False,
+                "target": "marvin",
+                "execution_authorized": False,
+                "motion_executed": False,
+                "reason": "find_marvin_dry_run_exception",
+                "error": str(exc),
+                "error_type": type(exc).__name__,
+            }
+        if not isinstance(result, dict):
+            return {
+                "ok": False,
+                "target": "marvin",
+                "execution_authorized": False,
+                "motion_executed": False,
+                "reason": "find_marvin_dry_run_result_malformed",
+            }
+        history = result.get("history")
+        latest = history[-1] if isinstance(history, list) and history else {}
+        return dict(
+            result,
+            target="marvin",
+            controller_ready=result.get("ok") is True,
+            pursuit_state=(
+                latest.get("pursuit_state")
+                if isinstance(latest, dict) else None
+            ),
+            next_route=result.get("next_route", "none"),
+            execution_authorized=False,
+            motion_executed=False,
+        )
+
     def _stop_lidar(self):
         with self._lidar_lifecycle_lock:
             if self._lidar_stopped:

@@ -455,6 +455,7 @@ class RuntimeAPIHandler(BaseHTTPRequestHandler):
 
         supported_paths = {
             "/guarded-turn",
+            "/find-marvin/controller",
             "/missions",
             "/network/connect",
             "/network/disconnect",
@@ -525,6 +526,23 @@ class RuntimeAPIHandler(BaseHTTPRequestHandler):
                     angular_speed,
                     duration,
                     expected_lidar_session=producer_session,
+                )
+                self.send_json(200, result)
+                return
+
+            if path == "/find-marvin/controller":
+                if set(request_data) != {"execute"} or not isinstance(
+                    request_data.get("execute"), bool
+                ):
+                    raise ValueError(
+                        "find-marvin/controller requires exactly boolean execute."
+                    )
+                if request_data["execute"] is not False:
+                    raise ValueError(
+                        "find-marvin/controller execution is not authorized."
+                    )
+                result = self.server.runtime.dry_run_find_marvin_controller(
+                    execute=request_data["execute"],
                 )
                 self.send_json(200, result)
                 return
