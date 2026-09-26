@@ -512,6 +512,7 @@ class BehaviorManager:
     MARVIN_GUARDED_APPROACH_MAX_TURNS = 3
     MARVIN_GUARDED_APPROACH_MAX_FORWARD_STEPS = 3
     MARVIN_GUARDED_APPROACH_MAX_MOTION_ACTIONS = 6
+    FIND_MARVIN_CONTROLLER_MAX_ACTIONS = 6
 
     FOLLOW_SEARCH_TURN_SPEED = 0.50
     FOLLOW_SEARCH_TURN_SECONDS = 0.30
@@ -1387,6 +1388,190 @@ class BehaviorManager:
 
     def _execute_turn_right(self, mission):
         return self._execute_explicit_turn("TURN_RIGHT", "RIGHT")
+
+    def execute_find_marvin_controller(
+        self, state_provider, *, max_actions=FIND_MARVIN_CONTROLLER_MAX_ACTIONS,
+        now=None,
+    ):
+        """Run a finite sequence of fresh, one-step Marvin pursuit actions.
+
+        ``state_provider`` must return the current Preview and TargetLock
+        evidence for one decision.  This controller owns neither transport nor
+        search motion; its only motion-capable delegation is the existing
+        ``execute_marvin_pursuit_step`` boundary.
+        """
+        base = {
+            "ok": False,
+            "completed": False,
+            "reason": None,
+            "max_actions": max_actions,
+            "actions_executed": 0,
+            "history": [],
+        }
+        if (
+            not isinstance(max_actions, int)
+            or isinstance(max_actions, bool)
+            or max_actions <= 0
+        ):
+            return dict(base, reason="invalid_find_marvin_action_limit")
+        if not callable(state_provider):
+            return dict(base, reason="find_marvin_state_provider_unavailable")
+
+        selected_identity_id = None
+        for _action_index in range(max_actions):
+            try:
+                evidence = state_provider()
+            except Exception as exc:
+                return dict(
+                    base,
+                    history=list(base["history"]),
+                    reason="find_marvin_state_provider_exception",
+                    error=str(exc),
+                    error_type=type(exc).__name__,
+                )
+            if not isinstance(evidence, dict):
+                return dict(
+                    base,
+                    history=list(base["history"]),
+                    reason="find_marvin_state_evidence_malformed",
+                )
+            preview = evidence.get("preview_result")
+            lock_result = evidence.get("target_lock_result")
+            lock_snapshot = evidence.get("target_lock_snapshot")
+            try:
+                pursuit = evaluate_marvin_pursuit_state(
+                    preview,
+                    lock_result,
+                    lock_snapshot,
+                    selected_identity_id=evidence.get("selected_identity_id"),
+                    identity_evidence=evidence.get("identity_evidence"),
+                    bridge_result=evidence.get("bridge_result"),
+                    now=now,
+                )
+            except Exception as exc:
+                return dict(
+                    base,
+                    history=list(base["history"]),
+                    reason="find_marvin_pursuit_evaluation_exception",
+                    error=str(exc),
+                    error_type=type(exc).__name__,
+                )
+            if not isinstance(pursuit, dict):
+                pursuit = {
+                    "state": "INSUFFICIENT_EVIDENCE",
+                    "pursuit_authorized": False,
+                    "reason": "marvin_pursuit_result_malformed",
+                }
+            current_identity_id = pursuit.get("selected_identity_id")
+            history_entry = {
+                "pursuit_state": pursuit.get("state"),
+                "pursuit_authorized": (
+                    pursuit.get("pursuit_authorized") is True
+                ),
+                "selected_identity_id": current_identity_id,
+                "entity_id": pursuit.get("entity_id"),
+                "fresh": pursuit.get("fresh"),
+                "geometry_usable": pursuit.get("geometry_usable"),
+                "selected_action": "no_motion",
+                "executed_primitive": None,
+                "replan_required": False,
+                "pursuit_step_result": None,
+            }
+            if selected_identity_id is None:
+                selected_identity_id = current_identity_id
+            elif current_identity_id != selected_identity_id:
+                base["history"].append(history_entry)
+                return dict(
+                    base,
+                    history=list(base["history"]),
+                    reason="find_marvin_identity_changed",
+                )
+
+            state = pursuit.get("state")
+            authorized = pursuit.get("pursuit_authorized") is True
+            if state != "READY_TO_APPROACH" or not authorized:
+                base["history"].append(history_entry)
+                return dict(
+                    base,
+                    ok=True,
+                    history=list(base["history"]),
+                    reason=self._find_marvin_controller_pause_reason(
+                        state, authorized,
+                    ),
+                )
+
+            history_entry["selected_action"] = "pursuit_step"
+            # Count the one-step request before invoking it.  A transport-side
+            # exception leaves delivery uncertain, so it still consumes this
+            # bounded action opportunity and cannot be retried implicitly.
+            base["actions_executed"] += 1
+            try:
+                step = self.execute_marvin_pursuit_step(
+                    preview,
+                    lock_result,
+                    lock_snapshot,
+                    selected_identity_id=evidence.get("selected_identity_id"),
+                    identity_evidence=evidence.get("identity_evidence"),
+                    bridge_result=evidence.get("bridge_result"),
+                    now=now,
+                )
+            except Exception as exc:
+                base["history"].append(history_entry)
+                return dict(
+                    base,
+                    history=list(base["history"]),
+                    reason="find_marvin_pursuit_step_exception",
+                    error=str(exc),
+                    error_type=type(exc).__name__,
+                )
+            history_entry["pursuit_step_result"] = step
+            if isinstance(step, dict):
+                history_entry["selected_action"] = step.get(
+                    "decision", "pursuit_step",
+                )
+                history_entry["executed_primitive"] = step.get(
+                    "executed_primitive"
+                )
+                history_entry["replan_required"] = (
+                    step.get("replan_required") is True
+                )
+            base["history"].append(history_entry)
+            if not isinstance(step, dict) or step.get("ok") is not True:
+                return dict(
+                    base,
+                    history=list(base["history"]),
+                    reason="find_marvin_pursuit_step_failed",
+                )
+            if step.get("motion_executed") is not True:
+                return dict(
+                    base,
+                    history=list(base["history"]),
+                    reason="find_marvin_pursuit_step_no_motion",
+                )
+            if step.get("replan_required") is not True:
+                return dict(
+                    base,
+                    history=list(base["history"]),
+                    reason="find_marvin_pursuit_step_replan_required",
+                )
+
+        return dict(
+            base,
+            ok=True,
+            history=list(base["history"]),
+            reason="find_marvin_action_limit_reached",
+        )
+
+    @staticmethod
+    def _find_marvin_controller_pause_reason(state, authorized):
+        """Map non-motion pursuit evidence to an explicit bounded outcome."""
+        if state in {"REACQUIRE_REQUIRED", "SAME_IDENTITY_REACQUIRED"}:
+            return "reacquire_required"
+        if state == "INSUFFICIENT_EVIDENCE":
+            return "insufficient_evidence"
+        if state == "READY_TO_APPROACH" and not authorized:
+            return "find_marvin_pursuit_not_authorized"
+        return "paused_for_search"
 
     def execute_marvin_pursuit_step(
         self,
