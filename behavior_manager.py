@@ -1516,12 +1516,12 @@ class BehaviorManager:
         self, state_provider, *, max_actions=FIND_MARVIN_CONTROLLER_MAX_ACTIONS,
         now=None,
     ):
-        """Run a finite sequence of fresh, one-step Marvin pursuit actions.
+        """Run a finite sequence of fresh, one-step Marvin search/pursuit actions.
 
         ``state_provider`` must return the current Preview and TargetLock
         evidence for one decision.  This controller owns neither transport nor
-        search motion; its only motion-capable delegation is the existing
-        ``execute_marvin_pursuit_step`` boundary.
+        scan planning, or low-level motion.  Its only motion-capable
+        delegations are the existing one-step search and pursuit boundaries.
         """
         base = {
             "ok": False,
@@ -1541,6 +1541,7 @@ class BehaviorManager:
             return dict(base, reason="find_marvin_state_provider_unavailable")
 
         selected_identity_id = None
+        search_history = []
         for _action_index in range(max_actions):
             try:
                 evidence = state_provider()
@@ -1596,9 +1597,13 @@ class BehaviorManager:
                 "fresh": pursuit.get("fresh"),
                 "geometry_usable": pursuit.get("geometry_usable"),
                 "selected_action": "no_motion",
+                "route": "none",
                 "executed_primitive": None,
                 "replan_required": False,
+                "search_action": None,
+                "search_step_result": None,
                 "pursuit_step_result": None,
+                "action_index": base["actions_executed"] + 1,
             }
             if selected_identity_id is None:
                 selected_identity_id = current_identity_id
@@ -1612,6 +1617,82 @@ class BehaviorManager:
 
             state = pursuit.get("state")
             authorized = pursuit.get("pursuit_authorized") is True
+            if state in {"SEARCHING", "REACQUIRE_REQUIRED"}:
+                history_entry["route"] = "search"
+                history_entry["selected_action"] = "search_step"
+                # An executor-side exception may occur after dispatch, so the
+                # request consumes a shared bounded action opportunity first.
+                base["actions_executed"] += 1
+                try:
+                    step = self.execute_marvin_search_step(
+                        pursuit,
+                        prior_search_history=list(search_history),
+                        selected_identity_id=current_identity_id,
+                        preview_result=preview,
+                        target_lock_snapshot=lock_snapshot,
+                        bridge_result=evidence.get("bridge_result"),
+                        now=now,
+                    )
+                except Exception as exc:
+                    base["history"].append(history_entry)
+                    return dict(
+                        base,
+                        history=list(base["history"]),
+                        reason="find_marvin_search_step_exception",
+                        error=str(exc),
+                        error_type=type(exc).__name__,
+                    )
+                history_entry["search_step_result"] = step
+                if isinstance(step, dict):
+                    planner = step.get("planner")
+                    search_action = step.get("search_action")
+                    if search_action is None and isinstance(planner, dict):
+                        search_action = planner.get("selected_search_action")
+                    history_entry["search_action"] = search_action
+                    history_entry["selected_action"] = step.get(
+                        "decision", "search_step",
+                    )
+                    history_entry["executed_primitive"] = step.get(
+                        "executed_primitive"
+                    )
+                    history_entry["replan_required"] = (
+                        step.get("replan_required") is True
+                    )
+                base["history"].append(history_entry)
+                if not isinstance(step, dict) or step.get("ok") is not True:
+                    return dict(
+                        base, history=list(base["history"]),
+                        reason="find_marvin_search_step_failed",
+                    )
+                if history_entry["search_action"] == "search_complete":
+                    return dict(
+                        base, ok=True, history=list(base["history"]),
+                        reason="find_marvin_search_complete",
+                    )
+                if step.get("motion_executed") is not True:
+                    return dict(
+                        base, history=list(base["history"]),
+                        reason="find_marvin_search_step_no_motion",
+                    )
+                if step.get("replan_required") is not True:
+                    return dict(
+                        base, history=list(base["history"]),
+                        reason="find_marvin_search_step_replan_required",
+                    )
+                # The pure policy counts successful scan turns only.  Preview
+                # checks and failed/non-motion requests never advance it.
+                if history_entry["search_action"] not in {
+                    "turn_left", "turn_right",
+                }:
+                    return dict(
+                        base, history=list(base["history"]),
+                        reason="find_marvin_search_action_malformed",
+                    )
+                search_history.append({
+                    "selected_search_action": history_entry["search_action"],
+                })
+                continue
+
             if state != "READY_TO_APPROACH" or not authorized:
                 base["history"].append(history_entry)
                 return dict(
@@ -1623,6 +1704,7 @@ class BehaviorManager:
                     ),
                 )
 
+            history_entry["route"] = "pursuit"
             history_entry["selected_action"] = "pursuit_step"
             # Count the one-step request before invoking it.  A transport-side
             # exception leaves delivery uncertain, so it still consumes this
