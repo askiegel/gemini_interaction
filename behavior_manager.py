@@ -15,6 +15,7 @@ from person_identity_manager import PersonIdentityManager
 from marvin_local_tracker import MarvinLocalTracker
 from marvin_pursuit_state import evaluate_marvin_pursuit_state
 from marvin_arrival_policy import evaluate_marvin_arrival
+from marvin_identity_continuity import evaluate_marvin_identity_continuity
 from marvin_preview_reacquisition import evaluate_marvin_preview_reacquisition
 from marvin_search_policy import plan_marvin_search_step
 from local_motion_safety_envelope import evaluate_local_motion_safety
@@ -1548,6 +1549,46 @@ class BehaviorManager:
             or lock_result.get("identity_id")
             or lock_result.get("locked_identity_id")
         )
+
+        confirmed_entity = None
+        previous_confirmation = None
+        if selected_identity_id and self.world_model is not None:
+            try:
+                entities = self.world_model.get_entities()
+            except Exception:
+                entities = None
+            matches = [
+                entity for entity in entities
+                if isinstance(entity, dict)
+                and str(entity.get("label") or "").strip().lower() == "marvin"
+                and isinstance(entity.get("attributes"), dict)
+                and str(entity["attributes"].get("identity_id") or "").strip()
+                == str(selected_identity_id).strip()
+            ] if isinstance(entities, list) else []
+            if len(matches) == 1:
+                confirmed_entity = matches[0]
+                attributes = confirmed_entity.get("attributes", {})
+                previously_operator_confirmed = (
+                    attributes.get("operator_confirmed") is True
+                    and attributes.get("identity_confirmation_source")
+                    == "marvin_local_tracker_preview"
+                    and bool(attributes.get("identity_confirmation_timestamp"))
+                )
+                previous_confirmation = {
+                    "ok": previously_operator_confirmed,
+                    "confirmed": previously_operator_confirmed,
+                    "identity_confirmed": previously_operator_confirmed,
+                    "entity_id": confirmed_entity.get("entity_id"),
+                    "identity_id": attributes.get("identity_id"),
+                }
+
+        continuity_now = now if now is not None else datetime.now(timezone.utc)
+        identity_continuity = evaluate_marvin_identity_continuity(
+            preview,
+            previous_confirmation,
+            confirmed_entity,
+            now=continuity_now,
+        )
         bridge_result = evaluate_marvin_preview_reacquisition(
             preview,
             lock_snapshot,
@@ -1561,6 +1602,7 @@ class BehaviorManager:
             "selected_identity_id": selected_identity_id,
             "identity_evidence": lock_result,
             "bridge_result": bridge_result,
+            "identity_continuity": identity_continuity,
         }
 
     def execute_find_marvin_controller(

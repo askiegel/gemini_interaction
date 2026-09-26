@@ -49,6 +49,52 @@ def snapshot(mode="LOCKED", identity=IDENTITY):
     return {"tracking_mode": mode, "locked_identity_id": identity}
 
 
+def continuity_preview():
+    value = preview()
+    value.update({
+        "source": "marvin_local_tracker",
+        "entity_id": "entity-1",
+    })
+    value["target_observation"] = {
+        "found": True,
+        "stale": False,
+        "source_timestamp": STAMP,
+        "entity_id": "entity-1",
+        "identity_id": IDENTITY,
+        "bbox": dict(value["bbox"]),
+        "image_width": 640.0,
+        "image_height": 480.0,
+        "identity_ambiguous": False,
+    }
+    return value
+
+
+def confirmed_world_entity(identity=IDENTITY):
+    return {
+        "entity_id": "entity-1",
+        "label": "marvin",
+        "entity_type": "person",
+        "attributes": {
+            "identity_id": identity,
+            "operator_confirmed": True,
+            "identity_confirmation_source": "marvin_local_tracker_preview",
+            "identity_confirmation_timestamp": STAMP,
+        },
+    }
+
+
+class FakeWorldModel:
+    def __init__(self, entities):
+        self.entities = deepcopy(entities)
+        self.update_calls = []
+
+    def get_entities(self):
+        return deepcopy(self.entities)
+
+    def update_entity(self, **kwargs):
+        self.update_calls.append(kwargs)
+
+
 class FakeTargetLock:
     def __init__(self, result=None, state=None):
         self.result = result or locked()
@@ -65,10 +111,11 @@ class FakeTargetLock:
         return deepcopy(self.state)
 
 
-def manager(monkeypatch, target_lock=None, preview_value=None):
+def manager(monkeypatch, target_lock=None, preview_value=None, world_model=None):
     value = preview() if preview_value is None else preview_value
     instance = BehaviorManager(robot_client=object())
     instance.target_lock = target_lock or FakeTargetLock()
+    instance.world_model = world_model
     monkeypatch.setattr(instance, "preview_find_object", lambda _target: deepcopy(value))
     return instance
 
@@ -84,6 +131,80 @@ def test_state_provider_is_fresh_and_preserves_authoritative_bundle(monkeypatch)
     assert first["preview_result"]["authoritative"] is False
     assert first["target_lock_result"]["bbox"]["y2"] == 364.0
     assert first["identity_evidence"] == first["target_lock_result"]
+
+
+def test_state_provider_exposes_pure_identity_continuity(monkeypatch):
+    entity = confirmed_world_entity()
+    world = FakeWorldModel([entity])
+    lock = FakeTargetLock()
+    instance = manager(
+        monkeypatch, lock, continuity_preview(), world_model=world,
+    )
+
+    bundle = instance.build_find_marvin_controller_state(now=STAMP)
+
+    assert bundle["identity_continuity"] == {
+        "ok": True,
+        "allow_refresh": True,
+        "reason": "same_confirmed_identity_observed",
+        "entity_id": "entity-1",
+        "identity_id": IDENTITY,
+    }
+    assert lock.snapshot() == snapshot()
+    assert world.update_calls == []
+
+
+def test_failed_continuity_is_read_only_and_dry_run_calls_no_executor(monkeypatch):
+    waiting = FakeTargetLock(
+        locked(found=False, tracking_mode="WAITING_FOR_IDENTITY"),
+        snapshot("WAITING_FOR_IDENTITY"),
+    )
+    original_lock = waiting.snapshot()
+    world = FakeWorldModel([confirmed_world_entity()])
+    original_entities = deepcopy(world.entities)
+    instance = manager(monkeypatch, waiting, preview(), world_model=world)
+    executor_calls = []
+    monkeypatch.setattr(
+        instance, "execute_marvin_search_step",
+        lambda *args, **kwargs: executor_calls.append("search"),
+    )
+    monkeypatch.setattr(
+        instance, "execute_marvin_pursuit_step",
+        lambda *args, **kwargs: executor_calls.append("pursuit"),
+    )
+    monkeypatch.setattr(
+        behavior_manager_module,
+        "evaluate_marvin_pursuit_state",
+        lambda *args, **kwargs: {
+            "state": "REACQUIRE_REQUIRED",
+            "pursuit_authorized": False,
+            "selected_identity_id": IDENTITY,
+            "reason": "waiting_for_identity",
+        },
+    )
+    monkeypatch.setattr(
+        behavior_manager_module,
+        "evaluate_marvin_arrival",
+        lambda *args, **kwargs: {
+            "ok": True,
+            "arrived_at_marvin": False,
+            "selected_identity_id": IDENTITY,
+            "reason": "target_lock_not_locked",
+        },
+    )
+
+    bundle = instance.build_find_marvin_controller_state(now=STAMP)
+    assert bundle["identity_continuity"]["allow_refresh"] is False
+    assert waiting.snapshot() == original_lock
+    assert world.entities == original_entities
+    assert world.update_calls == []
+
+    result = instance.execute_find_marvin_controller(
+        lambda: bundle, max_actions=1, dry_run=True,
+    )
+    assert result["next_route"] == "search"
+    assert result["actions_executed"] == 0
+    assert executor_calls == []
 
 
 def test_provider_bundle_feeds_pursuit_and_arrival_policies(monkeypatch):
