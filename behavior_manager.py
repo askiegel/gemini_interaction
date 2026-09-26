@@ -12,6 +12,7 @@ from local_obstacle_policy import (
 from target_lock import TargetLock
 from marvin_local_tracker import MarvinLocalTracker
 from marvin_pursuit_state import evaluate_marvin_pursuit_state
+from marvin_search_policy import plan_marvin_search_step
 from local_motion_safety_envelope import evaluate_local_motion_safety
 from camera_motion_gate import evaluate_camera_gate
 
@@ -1388,6 +1389,128 @@ class BehaviorManager:
 
     def _execute_turn_right(self, mission):
         return self._execute_explicit_turn("TURN_RIGHT", "RIGHT")
+
+    def execute_marvin_search_step(
+        self,
+        pursuit_state,
+        *,
+        prior_search_history=None,
+        selected_identity_id=None,
+        preview_result=None,
+        target_lock_snapshot=None,
+        bridge_result=None,
+        max_search_actions=None,
+        now=None,
+    ):
+        """Plan and execute at most one existing guarded Marvin scan turn.
+
+        This deliberately owns neither a search session nor a scan loop.  The
+        caller supplies fresh Preview/TargetLock evidence and calls again only
+        after the result requests replanning.
+        """
+        base = {
+            "ok": False,
+            "decision": "fail_closed",
+            "search_action": "fail_closed",
+            "planner": None,
+            "motion_executed": False,
+            "executed_primitive": None,
+            "replan_required": False,
+            "guarded_turn_result": None,
+            "reason": None,
+        }
+        planner_kwargs = {
+            "prior_search_history": prior_search_history,
+            "selected_identity_id": selected_identity_id,
+            "preview_result": preview_result,
+            "target_lock_snapshot": target_lock_snapshot,
+            "bridge_result": bridge_result,
+            "now": now,
+        }
+        if max_search_actions is not None:
+            planner_kwargs["max_search_actions"] = max_search_actions
+        try:
+            planner = plan_marvin_search_step(pursuit_state, **planner_kwargs)
+        except Exception as exc:
+            return dict(
+                base,
+                reason="marvin_search_planner_exception",
+                error=str(exc),
+                error_type=type(exc).__name__,
+            )
+        if not isinstance(planner, dict):
+            return dict(base, reason="marvin_search_planner_result_malformed")
+        action = planner.get("selected_search_action")
+        result = dict(base, planner=planner, search_action=action)
+        requested_identity = (
+            str(selected_identity_id).strip()
+            if isinstance(selected_identity_id, str) else None
+        ) or None
+        planned_identity = planner.get("selected_identity_id")
+        if (
+            requested_identity is not None
+            and planned_identity is not None
+            and planned_identity != requested_identity
+        ):
+            return dict(result, reason="marvin_search_selected_identity_changed")
+        if action in {"preview_only", "reacquired", "search_complete"}:
+            return dict(
+                result, ok=planner.get("ok") is True,
+                decision=action, reason=planner.get("reason"),
+            )
+        if action != "turn_left" and action != "turn_right":
+            return dict(result, reason="marvin_search_action_not_permitted")
+
+        session = self._current_lidar_session()
+        if session is None:
+            return dict(result, reason="lidar_producer_session_unavailable")
+        direction = "LEFT" if action == "turn_left" else "RIGHT"
+        primitive = "guarded_turn_left" if direction == "LEFT" else "guarded_turn_right"
+        try:
+            guarded_turn = self.execute_guarded_turn(
+                direction,
+                self.SEARCH_TURN_SPEED,
+                self.SEARCH_TURN_SECONDS,
+                expected_lidar_session=session,
+                now=now,
+            )
+        except Exception as exc:
+            return dict(
+                result,
+                decision="search_turn",
+                executed_primitive=primitive,
+                reason="marvin_search_guarded_turn_exception",
+                error=str(exc),
+                error_type=type(exc).__name__,
+            )
+        turn_ok = bool(
+            isinstance(guarded_turn, dict)
+            and guarded_turn.get("ok") is True
+            and guarded_turn.get("permitted") is True
+            and guarded_turn.get("confirmed_forwarded") is True
+        )
+        if not turn_ok:
+            return dict(
+                result,
+                decision="search_turn",
+                executed_primitive=primitive,
+                guarded_turn_result=guarded_turn,
+                reason=(
+                    guarded_turn.get("reason", "marvin_search_guarded_turn_failed")
+                    if isinstance(guarded_turn, dict)
+                    else "marvin_search_guarded_turn_failed"
+                ),
+            )
+        return dict(
+            result,
+            ok=True,
+            decision="search_turn",
+            motion_executed=True,
+            executed_primitive=primitive,
+            replan_required=True,
+            guarded_turn_result=guarded_turn,
+            reason="marvin_search_guarded_turn_complete",
+        )
 
     def execute_find_marvin_controller(
         self, state_provider, *, max_actions=FIND_MARVIN_CONTROLLER_MAX_ACTIONS,
