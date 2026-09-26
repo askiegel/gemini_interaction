@@ -10,6 +10,35 @@ RECOMMENDATIONS = ("FORWARD", "TURN_LEFT", "TURN_RIGHT", "HOLD")
 TRUSTED_SIDE_STATES = {"CLEAR"}
 BLOCKING_FRONT_STATES = {"CAUTION", "BLOCKED"}
 
+# These are recommendations only.  They deliberately mirror the bounded
+# commands already understood by the local safety envelope; this module never
+# transports one of them.
+LOCAL_AVOIDANCE_CANDIDATES = {
+    "forward": {
+        "action": "forward", "linear_x": 0.10, "linear_y": 0.0,
+        "angular_z": 0.0, "duration": 0.50,
+    },
+    "forward_left": {
+        "action": "forward_left", "linear_x": 0.10, "linear_y": 0.10,
+        "angular_z": 0.0, "duration": 0.50,
+    },
+    "forward_right": {
+        "action": "forward_right", "linear_x": 0.10, "linear_y": -0.10,
+        "angular_z": 0.0, "duration": 0.50,
+    },
+    "left_turn": {
+        "action": "left_turn", "linear_x": 0.0, "linear_y": 0.0,
+        "angular_z": 0.50, "duration": 0.40,
+    },
+    "right_turn": {
+        "action": "right_turn", "linear_x": 0.0, "linear_y": 0.0,
+        "angular_z": -0.50, "duration": 0.40,
+    },
+}
+
+_FORWARD_BLOCKING_REASON = "translation_protected_region_violated"
+_LATERAL_EPSILON_M = 1e-9
+
 
 def _finite(value):
     return (
@@ -132,3 +161,118 @@ def recommend_local_avoidance(state, *, expected_session, now=None,
     else:
         recommendation, reason = "TURN_LEFT", "clearance_near_tie_left_preferred"
     return _status(recommendation=recommendation, reason=reason, trusted=True, **common)
+
+
+def _candidate_evaluation(state, expected_session, command, now):
+    """Call the sole local collision authority for one hypothetical action."""
+    from local_motion_safety_envelope import evaluate_local_motion_safety
+
+    try:
+        return evaluate_local_motion_safety(
+            state,
+            expected_session=expected_session,
+            linear_x=command["linear_x"],
+            linear_y=command["linear_y"],
+            angular_z=command["angular_z"],
+            duration=command["duration"],
+            now=now,
+        )
+    except Exception as exc:
+        # A policy exception is not an authorization.  Preserve its type for
+        # diagnostics while making the candidate explicitly fail closed.
+        return {
+            "permitted": False,
+            "reason": "local_motion_safety_evaluator_error",
+            "error": str(exc),
+            "error_type": type(exc).__name__,
+        }
+
+
+def _away_from_blocker_priority(blocking_point):
+    """Deterministic non-executing preference order from base-link XY."""
+    y = blocking_point.get("y_m") if isinstance(blocking_point, dict) else None
+    if not _finite(y):
+        return ()
+    if y > _LATERAL_EPSILON_M:
+        # The blocker is to Mayday's left: prefer the right-side options.
+        return ("forward_right", "right_turn", "forward_left", "left_turn")
+    if y < -_LATERAL_EPSILON_M:
+        # The blocker is to Mayday's right: prefer the left-side options.
+        return ("forward_left", "left_turn", "forward_right", "right_turn")
+    # A centered blocker has no geometry-supported side preference.  The
+    # fixed order is deterministic and only chooses already-permitted actions.
+    return ("forward_left", "forward_right", "left_turn", "right_turn")
+
+
+def _blocking_point_summary(point):
+    if not isinstance(point, dict):
+        return None
+    values = (point.get("x_m"), point.get("y_m"))
+    if not all(_finite(value) for value in values):
+        return None
+    x_m, y_m = values
+    distance = point.get("distance_m")
+    if not _finite(distance):
+        distance = math.hypot(x_m, y_m)
+    bearing = point.get("robot_bearing_deg")
+    if not _finite(bearing):
+        bearing = math.degrees(math.atan2(y_m, x_m))
+    return {
+        "x_m": x_m,
+        "y_m": y_m,
+        "distance_m": distance,
+        "bearing_deg": bearing,
+    }
+
+
+def plan_local_obstacle_avoidance(state, *, expected_session, now=None):
+    """Purely recommend a safe bounded action for a desired forward move.
+
+    The local-motion envelope is the only safety authority: all candidates,
+    including pure turns, are evaluated through it.  This function returns a
+    recommendation only and intentionally has no Robot Bridge, ownership, or
+    BehaviorManager dependency.
+    """
+    evaluations = {
+        name: _candidate_evaluation(state, expected_session, command, now)
+        for name, command in LOCAL_AVOIDANCE_CANDIDATES.items()
+    }
+    forward = evaluations["forward"]
+    base = {
+        "ok": False,
+        "desired_action": "forward",
+        "selected_action": None,
+        "reason": None,
+        "producer_session": (
+            state.get("producer_session") if isinstance(state, dict) else None
+        ),
+        "candidate_evaluations": evaluations,
+        "blocking_point": _blocking_point_summary(
+            forward.get("violating_point") if isinstance(forward, dict) else None
+        ),
+    }
+    if forward.get("permitted") is True:
+        return dict(base, ok=True, selected_action="forward",
+                    reason="desired_motion_clear")
+
+    # A translated desired move can safely drive a side choice only when its
+    # lower-level geometry identified an actual approaching obstacle.  All
+    # freshness, session, coverage, malformed-data, and footprint denials
+    # stay fail-closed rather than becoming turn authorizations.
+    if forward.get("reason") != _FORWARD_BLOCKING_REASON:
+        return dict(base, reason=forward.get("reason", "forward_not_permitted"))
+    blocking_point = base["blocking_point"]
+    priority = _away_from_blocker_priority(blocking_point)
+    if not priority:
+        return dict(base, reason="blocking_geometry_unavailable")
+    for candidate in priority:
+        if evaluations[candidate].get("permitted") is True:
+            lateral = blocking_point["y_m"]
+            if lateral > _LATERAL_EPSILON_M:
+                reason = "forward_blocked_prefer_away_from_left_obstacle"
+            elif lateral < -_LATERAL_EPSILON_M:
+                reason = "forward_blocked_prefer_away_from_right_obstacle"
+            else:
+                reason = "forward_blocked_centered_deterministic_safe_side"
+            return dict(base, ok=True, selected_action=candidate, reason=reason)
+    return dict(base, reason="no_safe_local_avoidance")
