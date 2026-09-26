@@ -43,6 +43,35 @@ def evaluate(payload=None, **command):
     )
 
 
+def evaluate_geometry(geometry, **command):
+    return evaluate_local_motion_safety(
+        {**state(), "local_motion_geometry": geometry}, expected_session=SESSION,
+        now=10.0, duration=0.5, **command,
+    )
+
+
+def geometry_with_point(x_m, y_m):
+    geometry = build_local_motion_lidar_geometry(scan())
+    point = {"x_m": x_m, "y_m": y_m,
+             "distance_m": math.hypot(x_m, y_m),
+             "robot_bearing_deg": math.degrees(math.atan2(y_m, x_m))}
+    sector = next(name for name, lower, upper in (
+        ("front", -22.5, 22.5), ("front_left", 22.5, 67.5),
+        ("left", 67.5, 112.5), ("rear_left", 112.5, 157.5),
+        ("rear", 157.5, 180.0), ("rear_right", -157.5, -112.5),
+        ("right", -112.5, -67.5), ("front_right", -67.5, -22.5),
+    ) if ((lower <= point["robot_bearing_deg"] < upper)
+          or (name == "rear" and abs(point["robot_bearing_deg"]) >= 157.5)))
+    geometry["points"].append(point)
+    diagnostics = geometry["sectors"][sector]
+    diagnostics["available"] = True
+    diagnostics["valid_sample_count"] += 1
+    diagnostics["minimum_distance_from_base_m"] = min(
+        diagnostics["minimum_distance_from_base_m"], point["distance_m"]
+    )
+    return geometry
+
+
 def test_base_link_transform_accounts_for_lidar_offset_and_yaw():
     payload = scan()
     set_robot_bearing(payload, 0, 1.0)
@@ -73,27 +102,48 @@ def test_directional_obstacle_blocks_its_translation(bearing, command):
     assert result["reason"] == "translation_protected_region_violated"
 
 
-@pytest.mark.parametrize("bearing, blocking, nonblocking", [
-    (45, {"linear_x": 0.1}, ({"linear_x": -0.1}, {"linear_y": -0.1})),
-    (45, {"linear_y": 0.1}, ({"linear_x": -0.1}, {"linear_y": -0.1})),
-    (-135, {"linear_x": -0.1}, ({"linear_x": 0.1}, {"linear_y": 0.1})),
-    (-135, {"linear_y": -0.1}, ({"linear_x": 0.1}, {"linear_y": 0.1})),
-    (0, {"linear_x": 0.1}, ({"linear_x": -0.1},)),
-    (180, {"linear_x": -0.1}, ({"linear_x": 0.1},)),
-    (90, {"linear_y": 0.1}, ({"linear_y": -0.1},)),
-    (-90, {"linear_y": -0.1}, ({"linear_y": 0.1},)),
+def test_live_table_leg_only_vetoes_motion_toward_its_left_front_direction():
+    geometry = geometry_with_point(0.362, 0.479)
+    expected = {
+        "forward": ({"linear_x": 0.1}, True),
+        "reverse": ({"linear_x": -0.1}, True),
+        "left": ({"linear_y": 0.1}, False),
+        "right": ({"linear_y": -0.1}, True),
+        "forward_left": ({"linear_x": 0.1, "linear_y": 0.1}, False),
+        "forward_right": ({"linear_x": 0.1, "linear_y": -0.1}, True),
+        "left_turn": ({"angular_z": 0.5}, True),
+        "right_turn": ({"angular_z": -0.5}, True),
+    }
+    for _, (command, permitted) in expected.items():
+        result = evaluate_geometry(geometry, **command)
+        assert result["permitted"] is permitted
+
+
+@pytest.mark.parametrize("x_m,y_m,blocking,nonblocking", [
+    (0.60, 0.0, {"linear_x": 0.1}, ({"linear_x": -0.1},)),
+    (-0.60, 0.0, {"linear_x": -0.1}, ({"linear_x": 0.1},)),
+    (0.0, 0.60, {"linear_y": 0.1}, ({"linear_x": 0.1}, {"linear_y": -0.1})),
+    (0.0, -0.60, {"linear_y": -0.1}, ({"linear_x": 0.1}, {"linear_y": 0.1})),
 ])
-def test_nearby_obstacle_only_vetoes_translations_in_its_directional_neighborhood(
-        bearing, blocking, nonblocking):
-    payload = scan()
-    set_robot_bearing(payload, bearing, 0.50)
-    assert evaluate(payload, **blocking)["reason"] == (
-        "translation_protected_region_violated"
-    )
+def test_cardinal_obstacle_only_blocks_translation_toward_it(
+        x_m, y_m, blocking, nonblocking):
+    geometry = geometry_with_point(x_m, y_m)
+    assert evaluate_geometry(geometry, **blocking)["permitted"] is False
     for command in nonblocking:
-        result = evaluate(payload, **command)
-        assert result["permitted"] is True
-        assert result["reason"] == "protected_region_clear"
+        assert evaluate_geometry(geometry, **command)["permitted"] is True
+
+
+@pytest.mark.parametrize("x_m,y_m,toward,away", [
+    (0.50, 0.50, {"linear_x": 0.1, "linear_y": 0.1}, {"linear_x": -0.1, "linear_y": -0.1}),
+    (0.50, -0.50, {"linear_x": 0.1, "linear_y": -0.1}, {"linear_x": -0.1, "linear_y": 0.1}),
+    (-0.50, 0.50, {"linear_x": -0.1, "linear_y": 0.1}, {"linear_x": 0.1, "linear_y": -0.1}),
+    (-0.50, -0.50, {"linear_x": -0.1, "linear_y": -0.1}, {"linear_x": 0.1, "linear_y": 0.1}),
+])
+def test_diagonal_obstacle_blocks_only_substantial_toward_component(
+        x_m, y_m, toward, away):
+    geometry = geometry_with_point(x_m, y_m)
+    assert evaluate_geometry(geometry, **toward)["permitted"] is False
+    assert evaluate_geometry(geometry, **away)["permitted"] is True
 
 
 def test_relevant_sector_point_outside_swept_tube_does_not_veto_translation():
@@ -110,15 +160,20 @@ def test_rotation_uses_same_circular_geometry_for_left_and_right():
     set_robot_bearing(payload, 45, 0.50)
     left = evaluate(payload, angular_z=0.4)
     right = evaluate(payload, angular_z=-0.4)
-    assert left["permitted"] is right["permitted"] is False
-    assert left["reason"] == right["reason"] == "rotation_protected_region_violated"
-    assert left["violating_point"] == right["violating_point"]
+    assert left["permitted"] is right["permitted"] is True
+    assert left["reason"] == right["reason"] == "protected_region_clear"
 
 
 def test_rotation_geometry_permits_points_outside_protected_circle():
     result = evaluate(scan(), angular_z=0.4)
     assert result["permitted"] is True
     assert result["protected_radius_m"] == pytest.approx(LOCAL_LIDAR_PROTECTED_RADIUS_M)
+
+
+def test_obstacle_inside_operational_footprint_fails_closed():
+    result = evaluate_geometry(geometry_with_point(0.21, 0.0), angular_z=0.4)
+    assert result["permitted"] is False
+    assert result["reason"] == "operational_footprint_violated"
 
 
 @pytest.mark.parametrize("command, expected", [

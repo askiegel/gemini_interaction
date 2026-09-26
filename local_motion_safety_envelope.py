@@ -139,6 +139,30 @@ def _distance_to_segment(x, y, end_x, end_y):
     return math.hypot(x - projection * end_x, y - projection * end_y)
 
 
+def _translation_approaches_point(point, path_x, path_y):
+    """Whether a bounded translation materially closes on an obstacle.
+
+    A point must lie within 45 degrees of the translation direction, become
+    closer at the bounded endpoint, and enter the swept protected tube.  The
+    direction test prevents a nearby lateral point from becoming a veto merely
+    because the capsule includes the robot's starting footprint.
+    """
+    path_length = math.hypot(path_x, path_y)
+    if path_length == 0:
+        return False
+    x, y = point["x_m"], point["y_m"]
+    longitudinal = (x * path_x + y * path_y) / path_length
+    lateral = abs(x * path_y - y * path_x) / path_length
+    start_distance = math.hypot(x, y)
+    end_distance = math.hypot(x - path_x, y - path_y)
+    return (
+        longitudinal > lateral
+        and end_distance < start_distance
+        and _distance_to_segment(x, y, path_x, path_y)
+        <= LOCAL_LIDAR_PROTECTED_RADIUS_M
+    )
+
+
 def _required_sectors(linear_x, linear_y, angular_z):
     if angular_z:
         return [name for name, _, _ in OCTANT_SECTORS]
@@ -154,12 +178,13 @@ def _required_sectors(linear_x, linear_y, angular_z):
 def evaluate_local_motion_safety(state, *, expected_session, linear_x=0.0,
                                  linear_y=0.0, angular_z=0.0, duration=0.0,
                                  now=None):
-    """Evaluate a bounded command's protected circular swept region.
+    """Evaluate a bounded command's circular-footprint clearance.
 
-    Pure result only.  Straight translation uses a protected-radius tube along
-    its bounded displacement. Rotation uses the approved 0.67 m circle.
-    Combined translation/rotation conservatively expands that circle by the
-    bounded linear path length.
+    Pure result only. Translation vetoes a point only when the bounded path
+    materially approaches it and enters the protected tube. A circular
+    footprint is invariant under pure rotation, so rotation alone does not
+    create a static-clearance veto. Combined commands use their translation
+    component without rotational enlargement.
     """
     # Delayed import avoids a construction-time cycle: lidar_perception
     # publishes geometry made by this pure module.
@@ -214,28 +239,22 @@ def evaluate_local_motion_safety(state, *, expected_session, linear_x=0.0,
         result["reason"] = "insufficient_lidar_samples"
         return result
     path_x, path_y = linear_x * duration, linear_y * duration
-    if angular_z:
-        # A circular footprint under rotation is protected at every heading.
-        # Translation plus rotation uses a conservative enclosing radius.
-        protected = LOCAL_LIDAR_PROTECTED_RADIUS_M + math.hypot(path_x, path_y)
-        violates = [point for point in valid_points
-                    if math.hypot(point["x_m"], point["y_m"]) <= protected]
-        result["protected_radius_m"] = protected
-        reason = "rotation_protected_region_violated"
-    else:
-        # Translation is directional: sector requirements must constrain both
-        # sample sufficiency and the points that can veto its swept tube.
-        directional_points = [
-            point for point in valid_points
-            if _sector_name(math.degrees(math.atan2(
-                point["y_m"], point["x_m"]
-            ))) in required
-        ]
-        violates = [point for point in directional_points
-                    if _distance_to_segment(point["x_m"], point["y_m"], path_x, path_y)
-                    <= LOCAL_LIDAR_PROTECTED_RADIUS_M]
-        reason = "translation_protected_region_violated"
     result["geometry"] = geometry
+    footprint_violations = [
+        point for point in valid_points
+        if math.hypot(point["x_m"], point["y_m"])
+        <= MAYDAY_OPERATIONAL_FOOTPRINT_RADIUS_M
+    ]
+    if footprint_violations:
+        nearest = min(footprint_violations,
+                      key=lambda point: math.hypot(point["x_m"], point["y_m"]))
+        result.update(reason="operational_footprint_violated", violating_point=nearest)
+        return result
+    violates = [
+        point for point in valid_points
+        if _translation_approaches_point(point, path_x, path_y)
+    ]
+    reason = "translation_protected_region_violated"
     if violates:
         nearest = min(violates, key=lambda point: math.hypot(point["x_m"], point["y_m"]))
         result.update(reason=reason, violating_point=nearest)
