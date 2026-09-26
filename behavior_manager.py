@@ -14,6 +14,10 @@ from marvin_local_tracker import MarvinLocalTracker
 from camera_motion_gate import evaluate_camera_gate
 
 
+LOCAL_AVOIDANCE_LIDAR_WAIT_TIMEOUT_SECONDS = 1.0
+LOCAL_AVOIDANCE_LIDAR_POLL_INTERVAL_SECONDS = 0.05
+
+
 class _GuardedTurnMonitor:
     """Monitor one explicit bounded turn without owning transport locks."""
 
@@ -1547,6 +1551,8 @@ class BehaviorManager:
 
     def execute_local_obstacle_avoidance_loop(
         self, *, expected_lidar_session=None, max_steps=3, now=None,
+        lidar_wait_timeout_seconds=LOCAL_AVOIDANCE_LIDAR_WAIT_TIMEOUT_SECONDS,
+        lidar_poll_interval_seconds=LOCAL_AVOIDANCE_LIDAR_POLL_INTERVAL_SECONDS,
     ):
         """Run a bounded sequence of coordinator steps with fresh LiDAR.
 
@@ -1561,6 +1567,7 @@ class BehaviorManager:
             "max_steps": max_steps,
             "steps_executed": 0,
             "steps": [],
+            "freshness_waits": [],
         }
         if (
             not isinstance(max_steps, int)
@@ -1571,6 +1578,10 @@ class BehaviorManager:
         session = expected_lidar_session or self._current_lidar_session()
         if session is None:
             return dict(base, reason="lidar_producer_session_unavailable")
+        if not self._valid_local_avoidance_wait_bounds(
+            lidar_wait_timeout_seconds, lidar_poll_interval_seconds,
+        ):
+            return dict(base, reason="invalid_lidar_freshness_wait_bounds")
         result = dict(base, producer_session=session)
         previous_sequence = None
         for _step_index in range(max_steps):
@@ -1616,11 +1627,153 @@ class BehaviorManager:
                 return dict(result, ok=True,
                             reason="local_avoidance_replan_not_required")
             previous_sequence = sequence
+            if _step_index + 1 < max_steps:
+                try:
+                    freshness = self._wait_for_newer_lidar_snapshot(
+                        expected_lidar_session=session,
+                        previous_sequence=previous_sequence,
+                        timeout_seconds=lidar_wait_timeout_seconds,
+                        poll_interval_seconds=lidar_poll_interval_seconds,
+                    )
+                except Exception as exc:
+                    freshness = {
+                        "ok": False,
+                        "reason": "local_avoidance_lidar_wait_exception",
+                        "error": str(exc),
+                        "error_type": type(exc).__name__,
+                        "previous_acquisition_sequence": previous_sequence,
+                    }
+                wait_summary = {
+                    key: value for key, value in freshness.items()
+                    if key != "snapshot"
+                }
+                result["freshness_waits"].append(wait_summary)
+                if freshness.get("ok") is not True:
+                    return dict(result, reason=freshness.get(
+                        "reason", "fresh_lidar_after_motion_unavailable",
+                    ))
         return dict(
             result,
             ok=True,
             reason="local_avoidance_step_limit_reached",
         )
+
+    @staticmethod
+    def _valid_local_avoidance_wait_bounds(timeout_seconds, poll_interval_seconds):
+        values = (timeout_seconds, poll_interval_seconds)
+        if any(isinstance(value, bool) for value in values):
+            return False
+        try:
+            timeout = float(timeout_seconds)
+            interval = float(poll_interval_seconds)
+        except (TypeError, ValueError, OverflowError):
+            return False
+        return (
+            math.isfinite(timeout)
+            and math.isfinite(interval)
+            and timeout > 0.0
+            and interval > 0.0
+            and interval <= timeout
+        )
+
+    def _wait_for_newer_lidar_snapshot(
+        self, *, expected_lidar_session, previous_sequence,
+        timeout_seconds=LOCAL_AVOIDANCE_LIDAR_WAIT_TIMEOUT_SECONDS,
+        poll_interval_seconds=LOCAL_AVOIDANCE_LIDAR_POLL_INTERVAL_SECONDS,
+    ):
+        """Wait a bounded time for a newer World Model LiDAR acquisition."""
+        base = {
+            "ok": False,
+            "snapshot": None,
+            "acquisition_sequence": None,
+            "previous_acquisition_sequence": previous_sequence,
+            "last_acquisition_sequence": None,
+            "producer_session": expected_lidar_session,
+            "wait_elapsed_seconds": 0.0,
+            "poll_count": 0,
+            "reason": None,
+        }
+        if (
+            not isinstance(expected_lidar_session, str)
+            or not expected_lidar_session
+            or not isinstance(previous_sequence, int)
+            or isinstance(previous_sequence, bool)
+            or previous_sequence < 0
+            or not self._valid_local_avoidance_wait_bounds(
+                timeout_seconds, poll_interval_seconds,
+            )
+        ):
+            return dict(base, reason="invalid_lidar_freshness_wait_request")
+        if self.world_model is None:
+            return dict(base, reason="world_model_unavailable")
+
+        timeout = float(timeout_seconds)
+        interval = float(poll_interval_seconds)
+        started = time.monotonic()
+        deadline = started + timeout
+        last_sequence = None
+
+        def finish(reason, *, snapshot=None, sequence=None, ok=False):
+            elapsed = max(0.0, time.monotonic() - started)
+            return dict(
+                base,
+                ok=ok,
+                snapshot=snapshot,
+                acquisition_sequence=sequence,
+                last_acquisition_sequence=last_sequence,
+                wait_elapsed_seconds=elapsed,
+                poll_count=poll_count,
+                reason=reason,
+            )
+
+        poll_count = 0
+        while True:
+            if time.monotonic() >= deadline:
+                return finish("fresh_lidar_after_motion_timeout")
+            poll_count += 1
+            try:
+                snapshot = self.world_model.get_lidar_obstacles(
+                    expected_session=expected_lidar_session,
+                )
+            except Exception as exc:
+                result = finish("world_model_read_failed")
+                result.update(error=str(exc), error_type=type(exc).__name__)
+                return result
+            elapsed = time.monotonic() - started
+            if elapsed >= timeout:
+                return finish("fresh_lidar_after_motion_timeout")
+            if not isinstance(snapshot, dict):
+                return finish("malformed_lidar_snapshot")
+            session = snapshot.get("producer_session")
+            if not isinstance(session, str) or not session:
+                return finish("malformed_lidar_snapshot", snapshot=snapshot)
+            if session != expected_lidar_session:
+                return finish("lidar_producer_session_changed", snapshot=snapshot)
+            sequence = snapshot.get("acquisition_sequence")
+            if (
+                not isinstance(sequence, int)
+                or isinstance(sequence, bool)
+                or sequence < 0
+            ):
+                return finish("malformed_lidar_acquisition_sequence", snapshot=snapshot)
+            last_sequence = sequence
+            if sequence > previous_sequence:
+                return finish(
+                    "newer_lidar_snapshot_available",
+                    snapshot=snapshot,
+                    sequence=sequence,
+                    ok=True,
+                )
+            if sequence < previous_sequence:
+                return finish(
+                    "lidar_acquisition_sequence_regressed",
+                    snapshot=snapshot,
+                    sequence=sequence,
+                )
+            remaining = deadline - time.monotonic()
+            if remaining <= 0.0:
+                return finish("fresh_lidar_after_motion_timeout")
+            time.sleep(min(interval, remaining))
 
     def _execute_find_object(self, mission):
         """
