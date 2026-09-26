@@ -242,6 +242,54 @@ class CognitiveRuntime:
             motion_executed=False,
         )
 
+    def confirm_find_marvin_identity(self, *, confirm=False):
+        """Explicitly confirm one fresh Marvin Preview without motion."""
+        if confirm is not True:
+            return {
+                "ok": False,
+                "confirmed": False,
+                "reason": "explicit_identity_confirmation_required",
+                "motion_executed": False,
+            }
+        confirmer = getattr(
+            self.behavior_manager,
+            "confirm_marvin_identity_from_preview",
+            None,
+        )
+        if not callable(confirmer):
+            return {
+                "ok": False,
+                "confirmed": False,
+                "reason": "marvin_identity_confirmation_unavailable",
+                "motion_executed": False,
+            }
+        try:
+            result = confirmer()
+        except Exception as exc:
+            return {
+                "ok": False,
+                "confirmed": False,
+                "reason": "marvin_identity_confirmation_exception",
+                "error": str(exc),
+                "error_type": type(exc).__name__,
+                "motion_executed": False,
+            }
+        if not isinstance(result, dict):
+            return {
+                "ok": False,
+                "confirmed": False,
+                "reason": "marvin_identity_confirmation_result_malformed",
+                "motion_executed": False,
+            }
+        if result.get("motion_executed") is not False:
+            return {
+                "ok": False,
+                "confirmed": False,
+                "reason": "identity_confirmation_motion_invariant_failed",
+                "motion_executed": False,
+            }
+        return result
+
     def _stop_lidar(self):
         with self._lidar_lifecycle_lock:
             if self._lidar_stopped:

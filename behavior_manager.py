@@ -10,6 +10,8 @@ from local_obstacle_policy import (
     recommend_local_avoidance,
 )
 from target_lock import TargetLock
+from entity_registry import EntityRegistry
+from person_identity_manager import PersonIdentityManager
 from marvin_local_tracker import MarvinLocalTracker
 from marvin_pursuit_state import evaluate_marvin_pursuit_state
 from marvin_arrival_policy import evaluate_marvin_arrival
@@ -600,6 +602,7 @@ class BehaviorManager:
         self._guarded_turn_slot_lock = threading.Lock()
         self._guarded_turn_owner_generation = None
         self._guarded_turn_monitor = None
+        self._marvin_identity_confirmation_lock = threading.Lock()
         # Optional runtime-owned hook for live, dashboard-facing telemetry.
         # BehaviorManager remains usable without a runtime callback.
         self.tracking_state_callback = None
@@ -3381,6 +3384,455 @@ class BehaviorManager:
             authoritative=False,
             confirmation_diagnostics=confirmation_diagnostics,
         )
+
+    def confirm_marvin_identity_from_preview(
+        self,
+        preview_result=None,
+        *,
+        now=None,
+    ):
+        """Serialize explicit confirmation requests against duplicate writes."""
+        with self._marvin_identity_confirmation_lock:
+            return self._confirm_marvin_identity_from_preview(
+                preview_result,
+                now=now,
+            )
+
+    def _confirm_marvin_identity_from_preview(
+        self,
+        preview_result=None,
+        *,
+        now=None,
+    ):
+        """Persist an explicitly operator-confirmed, fresh Marvin preview.
+
+        Preview itself remains non-authoritative. This method is the narrow
+        operator-confirmation boundary: it validates the current local-tracker
+        observation, writes a canonical World Model person entity carrying a
+        PersonIdentityManager ID, then asks the ordinary TargetLock resolver
+        to acquire that entity. It never dispatches motion.
+        """
+        if self.world_model is None or self.target_lock is None:
+            return self._marvin_identity_confirmation_failure(
+                "world_model_or_target_lock_unavailable"
+            )
+        if preview_result is None:
+            try:
+                preview_result = self.preview_find_object("marvin")
+            except Exception as exc:
+                return self._marvin_identity_confirmation_failure(
+                    "preview_acquisition_failed",
+                    error=str(exc),
+                )
+        if not isinstance(preview_result, dict):
+            return self._marvin_identity_confirmation_failure(
+                "preview_result_malformed"
+            )
+
+        observation = preview_result.get("target_observation")
+        if not isinstance(observation, dict):
+            observation = preview_result
+        diagnostics = preview_result.get("confirmation_diagnostics")
+        if (
+            preview_result.get("ok") is not True
+            or preview_result.get("target_found") is not True
+            or preview_result.get("target") != "marvin"
+            or preview_result.get("source") != "marvin_local_tracker"
+            or preview_result.get("identity_confirmed") is not True
+            or preview_result.get("authoritative") is not False
+            or observation.get("found") is not True
+            or observation.get("target", "marvin") != "marvin"
+            or observation.get("label", "marvin") != "marvin"
+            or observation.get("stale") is True
+            or observation.get("source", "marvin_local_tracker")
+            != "marvin_local_tracker"
+            or preview_result.get("identity_ambiguous") is True
+            or observation.get("identity_ambiguous") is True
+            or not isinstance(diagnostics, dict)
+            or diagnostics.get("confirmation_status") != "target_confirmed"
+            or diagnostics.get("qualified_support_reached") is not True
+            or diagnostics.get("identity_ambiguous") is True
+        ):
+            return self._marvin_identity_confirmation_failure(
+                "preview_not_confirmed_current_marvin"
+            )
+
+        timestamp = preview_result.get("source_timestamp") or observation.get(
+            "source_timestamp"
+        )
+        if not timestamp:
+            return self._marvin_identity_confirmation_failure(
+                "preview_timestamp_missing_or_malformed"
+            )
+        parsed_timestamp = self._parse_marvin_confirmation_timestamp(
+            timestamp
+        )
+        current_time = self._parse_marvin_confirmation_timestamp(now)
+        if parsed_timestamp is None or current_time is None:
+            return self._marvin_identity_confirmation_failure(
+                "preview_timestamp_missing_or_malformed"
+            )
+        age_seconds = max(
+            0.0,
+            (current_time - parsed_timestamp).total_seconds(),
+        )
+        if age_seconds > self.TARGET_MAX_AGE_SECONDS:
+            return self._marvin_identity_confirmation_failure(
+                "preview_stale",
+                preview_age_seconds=age_seconds,
+            )
+
+        bbox = self._validated_marvin_confirmation_geometry(
+            preview_result,
+            observation,
+        )
+        if bbox is None:
+            return self._marvin_identity_confirmation_failure(
+                "preview_geometry_invalid"
+            )
+        image_width = float(
+            preview_result.get("image_width")
+            or observation.get("image_width")
+        )
+        image_height = float(
+            preview_result.get("image_height")
+            or observation.get("image_height")
+        )
+        cx = (bbox["x1"] + bbox["x2"]) / 2.0
+        cy = (bbox["y1"] + bbox["y2"]) / 2.0
+        area = (bbox["x2"] - bbox["x1"]) * (bbox["y2"] - bbox["y1"])
+        try:
+            confidence = float(
+                preview_result.get("target_confidence")
+                or observation.get("confidence")
+                or preview_result.get("detector_confidence")
+                or 0.0
+            )
+        except (TypeError, ValueError):
+            return self._marvin_identity_confirmation_failure(
+                "preview_confidence_malformed"
+            )
+        if not math.isfinite(confidence) or confidence < 0.0:
+            return self._marvin_identity_confirmation_failure(
+                "preview_confidence_malformed"
+            )
+
+        try:
+            self.world_model.reload()
+            lock_snapshot = self.target_lock.snapshot()
+        except Exception as exc:
+            return self._marvin_identity_confirmation_failure(
+                "identity_state_unavailable",
+                error=str(exc),
+            )
+        if not isinstance(lock_snapshot, dict):
+            return self._marvin_identity_confirmation_failure(
+                "target_lock_snapshot_malformed"
+            )
+        selected_identity_id = str(
+            lock_snapshot.get("locked_identity_id") or ""
+        ).strip() or None
+        if (
+            lock_snapshot.get("tracking_mode") == TargetLock.MODE_LOCKED
+            and not selected_identity_id
+        ):
+            return self._marvin_identity_confirmation_failure(
+                "conflicting_selected_identity"
+            )
+        preview_identity = str(
+            preview_result.get("identity_id") or observation.get("identity_id") or ""
+        ).strip() or None
+        if (
+            selected_identity_id
+            and preview_identity
+            and selected_identity_id != preview_identity
+        ):
+            return self._marvin_identity_confirmation_failure(
+                "conflicting_selected_identity"
+            )
+
+        existing_entities = [
+            entity
+            for entity in self.world_model.entities.values()
+            if self.world_model._normalize_entity_label(entity.label) == "marvin"
+        ]
+        distinct_identity_ids = {
+            str(entity.attributes.get("identity_id") or "").strip()
+            for entity in existing_entities
+            if str(entity.attributes.get("identity_id") or "").strip()
+        }
+        if len(distinct_identity_ids) > 1:
+            return self._marvin_identity_confirmation_failure(
+                "conflicting_persistent_marvin_identities"
+            )
+        if selected_identity_id and selected_identity_id not in distinct_identity_ids:
+            return self._marvin_identity_confirmation_failure(
+                "conflicting_selected_identity"
+            )
+        if preview_identity and distinct_identity_ids and (
+            preview_identity not in distinct_identity_ids
+        ):
+            return self._marvin_identity_confirmation_failure(
+                "conflicting_persistent_marvin_identity"
+            )
+        if preview_identity and not distinct_identity_ids:
+            return self._marvin_identity_confirmation_failure(
+                "preview_identity_not_world_model_authoritative"
+            )
+
+        existing_entity = None
+        if existing_entities:
+            existing_entity = max(
+                existing_entities,
+                key=lambda entity: entity.last_seen,
+            )
+            entity_age = self.world_model._timestamp_age_seconds(
+                existing_entity.last_seen
+            )
+            latest = self.world_model.find_latest_entity_by_label(
+                "marvin", max_age_seconds=self.TARGET_MAX_AGE_SECONDS,
+                refresh=False,
+            )
+            if (
+                entity_age is None
+                or entity_age > self.TARGET_MAX_AGE_SECONDS
+                or not isinstance(latest, dict)
+                or latest.get("found") is not True
+                or latest.get("identity_ambiguous") is True
+                or not self._target_observations_match(
+                    {
+                        "label": "marvin", "bbox": bbox, "cx": cx, "cy": cy,
+                        "area": area, "image_width": image_width,
+                        "image_height": image_height,
+                    },
+                    {
+                        "label": "marvin", "bbox": latest.get("bbox"),
+                        "cx": latest.get("cx"), "cy": latest.get("cy"),
+                        "area": latest.get("area"),
+                        "image_width": latest.get("image_width"),
+                        "image_height": latest.get("image_height"),
+                    },
+                )
+            ):
+                return self._marvin_identity_confirmation_failure(
+                    "existing_marvin_identity_not_unambiguously_current"
+                )
+            if selected_identity_id and latest.get("identity_id") != selected_identity_id:
+                return self._marvin_identity_confirmation_failure(
+                    "conflicting_selected_identity"
+                )
+
+        identity_reused = bool(existing_entity and distinct_identity_ids)
+        entity_id = existing_entity.entity_id if existing_entity is not None else None
+        if identity_reused:
+            identity_id = next(iter(distinct_identity_ids))
+            identity_status = "MATCHED"
+        else:
+            # An isolated canonical manager intentionally prevents matching
+            # this operator-confirmed Marvin to unrelated/stale human records.
+            identity_assignment = PersonIdentityManager().assign_identity({
+                "label": "person",
+                "cx": cx,
+                "cy": cy,
+                "area": area,
+                "image_width": image_width,
+                "image_height": image_height,
+                "bbox": dict(bbox),
+                "confidence": confidence,
+            })
+            identity_id = str(identity_assignment.get("identity_id") or "").strip()
+            identity_status = identity_assignment.get("identity_status")
+            if (
+                not identity_id
+                or identity_assignment.get("identity_ambiguous") is True
+                or identity_status != "NEW"
+            ):
+                return self._marvin_identity_confirmation_failure(
+                    "persistent_identity_assignment_failed"
+                )
+
+        confirmation_time = current_time.isoformat().replace("+00:00", "Z")
+        attributes = {
+            "identity_id": identity_id,
+            "identity_status": identity_status,
+            "identity_match_score": 1.0 if identity_reused else 0.0,
+            "identity_ambiguous": False,
+            "bbox": dict(bbox),
+            "area": area,
+            "image_width": image_width,
+            "image_height": image_height,
+            "targetable": True,
+            "source_timestamp": timestamp,
+            "operator_confirmed": True,
+            "identity_confirmation_source": "marvin_local_tracker_preview",
+            "identity_confirmation_timestamp": confirmation_time,
+            "preview_candidate": {
+                "source": "marvin_local_tracker",
+                "source_timestamp": timestamp,
+                "bbox": dict(bbox),
+            },
+        }
+        try:
+            location = {"cx": cx, "cy": cy, "frame": "camera"}
+            if entity_id is None:
+                entity_id = EntityRegistry(self.world_model).register_observation(
+                    label="marvin",
+                    entity_type="person",
+                    confidence=confidence,
+                    source="operator_confirmed_marvin_preview",
+                    location=location,
+                    attributes=attributes,
+                )
+            else:
+                self.world_model.update_entity(
+                    entity_id=entity_id,
+                    label="marvin",
+                    entity_type="person",
+                    confidence=confidence,
+                    source="operator_confirmed_marvin_preview",
+                    location=location,
+                    attributes=attributes,
+                )
+        except Exception as exc:
+            return self._marvin_identity_confirmation_failure(
+                "world_model_write_failed",
+                error=str(exc),
+            )
+        try:
+            resolved = self.target_lock.resolve(
+                mission_id=self.target_lock.mission_id,
+                target_label="marvin",
+            )
+            resolved_snapshot = self.target_lock.snapshot()
+        except Exception as exc:
+            return self._marvin_identity_confirmation_failure(
+                "target_lock_resolution_failed",
+                entity_id=entity_id,
+                identity_id=identity_id,
+                error=str(exc),
+            )
+        if (
+            not isinstance(resolved, dict)
+            or not isinstance(resolved_snapshot, dict)
+            or resolved_snapshot.get("tracking_mode") != TargetLock.MODE_LOCKED
+            or resolved_snapshot.get("locked_identity_id") != identity_id
+            or resolved.get("identity_id") != identity_id
+            or resolved.get("found") is not True
+            or resolved.get("stale") is True
+            or resolved.get("identity_ambiguous") is True
+        ):
+            return self._marvin_identity_confirmation_failure(
+                "target_lock_resolution_failed",
+                entity_id=entity_id,
+                identity_id=identity_id,
+                target_lock_mode=(
+                    resolved_snapshot.get("tracking_mode")
+                    if isinstance(resolved_snapshot, dict)
+                    else None
+                ),
+            )
+
+        return {
+            "ok": True,
+            "confirmed": True,
+            "identity_confirmed": True,
+            "reason": "marvin_identity_confirmed",
+            "entity_id": entity_id,
+            "identity_id": identity_id,
+            "identity_created": not identity_reused,
+            "identity_reused": identity_reused,
+            "source_preview": {
+                "source": "marvin_local_tracker",
+                "candidate_id": preview_result.get("candidate_id"),
+                "identity_source": preview_result.get("identity_source"),
+                "proposal_label": preview_result.get("proposal_label"),
+                "source_timestamp": timestamp,
+                "bbox": dict(bbox),
+            },
+            "confirmation_timestamp": confirmation_time,
+            "target_lock_mode": resolved_snapshot["tracking_mode"],
+            "locked_identity_id": resolved_snapshot["locked_identity_id"],
+            "motion_executed": False,
+        }
+
+    @staticmethod
+    def _marvin_identity_confirmation_failure(reason, **details):
+        return {
+            "ok": False,
+            "confirmed": False,
+            "identity_confirmed": False,
+            "reason": reason,
+            "motion_executed": False,
+            **details,
+        }
+
+    @staticmethod
+    def _parse_marvin_confirmation_timestamp(value):
+        from datetime import datetime, timezone
+
+        if value is None:
+            return datetime.now(timezone.utc)
+        if isinstance(value, datetime):
+            parsed = value
+        elif isinstance(value, str) and value.strip():
+            normalized = value.strip()
+            if normalized.endswith("Z"):
+                normalized = normalized[:-1] + "+00:00"
+            try:
+                parsed = datetime.fromisoformat(normalized)
+            except ValueError:
+                return None
+        else:
+            return None
+        if parsed.tzinfo is None:
+            from datetime import timezone
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc)
+
+    @staticmethod
+    def _validated_marvin_confirmation_geometry(preview, observation):
+        def finite(value):
+            return (
+                isinstance(value, (int, float))
+                and not isinstance(value, bool)
+                and math.isfinite(value)
+            )
+
+        bbox = (
+            preview.get("bbox")
+            if "bbox" in preview
+            else observation.get("bbox")
+        )
+        width = (
+            preview.get("image_width")
+            if "image_width" in preview
+            else observation.get("image_width")
+        )
+        height = (
+            preview.get("image_height")
+            if "image_height" in preview
+            else observation.get("image_height")
+        )
+        if (
+            not isinstance(bbox, dict)
+            or not all(finite(bbox.get(key)) for key in ("x1", "y1", "x2", "y2"))
+            or not finite(width)
+            or not finite(height)
+            or width <= 0
+            or height <= 0
+        ):
+            return None
+        normalized = {key: float(bbox[key]) for key in ("x1", "y1", "x2", "y2")}
+        if (
+            normalized["x1"] < 0
+            or normalized["y1"] < 0
+            or normalized["x2"] > float(width)
+            or normalized["y2"] > float(height)
+            or normalized["x2"] <= normalized["x1"]
+            or normalized["y2"] <= normalized["y1"]
+        ):
+            return None
+        return normalized
 
     def _preview_marvin_yolo_identity_observation(self):
         """Acquire Marvin perception for read-only Preview."""

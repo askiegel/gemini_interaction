@@ -456,6 +456,7 @@ class RuntimeAPIHandler(BaseHTTPRequestHandler):
         supported_paths = {
             "/guarded-turn",
             "/find-marvin/controller",
+            "/find-marvin/confirm-identity",
             "/missions",
             "/network/connect",
             "/network/disconnect",
@@ -545,6 +546,23 @@ class RuntimeAPIHandler(BaseHTTPRequestHandler):
                     execute=request_data["execute"],
                 )
                 self.send_json(200, result)
+                return
+
+            if path == "/find-marvin/confirm-identity":
+                if set(request_data) != {"confirm"} or not isinstance(
+                    request_data.get("confirm"), bool
+                ):
+                    raise ValueError(
+                        "find-marvin/confirm-identity requires exactly boolean confirm."
+                    )
+                if request_data["confirm"] is not True:
+                    raise ValueError(
+                        "find-marvin/confirm-identity requires explicit confirmation."
+                    )
+                result = self.server.runtime.confirm_find_marvin_identity(
+                    confirm=request_data["confirm"],
+                )
+                self.send_json(200 if result.get("ok") is True else 409, result)
                 return
 
             if path == "/network/connect":

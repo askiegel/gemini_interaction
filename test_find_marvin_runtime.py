@@ -1,6 +1,7 @@
 """Offline runtime plumbing contracts for the dry-run Find-Marvin adapter."""
 
 from copy import deepcopy
+from datetime import datetime, timezone
 import inspect
 from types import SimpleNamespace
 from unittest.mock import Mock
@@ -15,7 +16,7 @@ from runtime import CognitiveRuntime
 from runtime_api import RuntimeAPIHandler
 
 
-STAMP = "2026-09-26T16:00:00+00:00"
+STAMP = datetime.now(timezone.utc).isoformat()
 IDENTITY = "marvin-identity"
 
 
