@@ -1,6 +1,8 @@
 """Offline one-primitive tests for local-obstacle avoidance orchestration."""
 
 import behavior_manager as behavior_manager_module
+import pytest
+
 from behavior_manager import BehaviorManager
 
 
@@ -211,3 +213,25 @@ def test_existing_pure_planner_module_is_not_modified_by_execution(monkeypatch):
     result, _robot, _world, _planner, _turns = invoke(monkeypatch, planned)
     assert result["planner"] is planned
     assert planned["candidate_evaluations"] == original
+
+
+def test_minimum_sequence_blocks_before_planning_or_motion(monkeypatch):
+    robot = Robot()
+    world = WorldModel()
+    manager = BehaviorManager(robot_client=robot, world_model=world)
+    manager.lidar_session = SESSION
+    world.get_lidar_obstacles = lambda **_kwargs: {
+        "producer_session": SESSION,
+        "acquisition_sequence": 100,
+    }
+    monkeypatch.setattr(
+        behavior_manager_module,
+        "plan_local_obstacle_avoidance",
+        lambda *_args, **_kwargs: pytest.fail("stale sequence must not plan"),
+    )
+    result = manager.execute_local_obstacle_avoidance_step(
+        now=10.0, minimum_lidar_acquisition_sequence=100,
+    )
+    assert result["reason"] == "fresh_lidar_after_motion_unavailable"
+    assert result["lidar_acquisition_sequence"] == 100
+    assert robot.forward_calls == 0

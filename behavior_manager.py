@@ -1384,6 +1384,7 @@ class BehaviorManager:
 
     def execute_local_obstacle_avoidance_step(
         self, *, expected_lidar_session=None, now=None,
+        minimum_lidar_acquisition_sequence=None,
     ):
         """Plan and execute at most one existing bounded local primitive.
 
@@ -1399,6 +1400,7 @@ class BehaviorManager:
             "motion_executed": False,
             "replan_required": False,
             "execution_result": None,
+            "lidar_acquisition_sequence": None,
             "reason": None,
         }
         if session is None:
@@ -1413,14 +1415,35 @@ class BehaviorManager:
         except Exception as exc:
             return dict(base, reason="local_avoidance_lidar_read_failed",
                         error=str(exc), error_type=type(exc).__name__)
+        sequence = state.get("acquisition_sequence") if isinstance(state, dict) else None
+        sequence_valid = (
+            isinstance(sequence, int)
+            and not isinstance(sequence, bool)
+            and sequence >= 0
+        )
+        minimum_valid = (
+            isinstance(minimum_lidar_acquisition_sequence, int)
+            and not isinstance(minimum_lidar_acquisition_sequence, bool)
+            and minimum_lidar_acquisition_sequence >= 0
+        )
+        result = dict(
+            base,
+            lidar_acquisition_sequence=sequence if sequence_valid else None,
+        )
+        if minimum_lidar_acquisition_sequence is not None and (
+            not minimum_valid
+            or not sequence_valid
+            or sequence <= minimum_lidar_acquisition_sequence
+        ):
+            return dict(result, reason="fresh_lidar_after_motion_unavailable")
         try:
             planner = plan_local_obstacle_avoidance(
                 state, expected_session=session, now=now,
             )
         except Exception as exc:
-            return dict(base, reason="local_avoidance_planner_error",
+            return dict(result, reason="local_avoidance_planner_error",
                         error=str(exc), error_type=type(exc).__name__)
-        result = dict(base, planner=planner)
+        result["planner"] = planner
         if not isinstance(planner, dict):
             return dict(result, reason="invalid_local_avoidance_planner_result")
         selected = planner.get("selected_action")
@@ -1520,6 +1543,83 @@ class BehaviorManager:
             replan_required=True,
             execution_result=execution,
             reason=reason,
+        )
+
+    def execute_local_obstacle_avoidance_loop(
+        self, *, expected_lidar_session=None, max_steps=3, now=None,
+    ):
+        """Run a bounded sequence of coordinator steps with fresh LiDAR.
+
+        This method intentionally contains no primitive or transport call.
+        Every motion-capable operation remains inside the one-step coordinator.
+        """
+        base = {
+            "ok": False,
+            "completed": False,
+            "reason": None,
+            "producer_session": expected_lidar_session,
+            "max_steps": max_steps,
+            "steps_executed": 0,
+            "steps": [],
+        }
+        if (
+            not isinstance(max_steps, int)
+            or isinstance(max_steps, bool)
+            or max_steps <= 0
+        ):
+            return dict(base, reason="invalid_local_avoidance_step_limit")
+        session = expected_lidar_session or self._current_lidar_session()
+        if session is None:
+            return dict(base, reason="lidar_producer_session_unavailable")
+        result = dict(base, producer_session=session)
+        previous_sequence = None
+        for _step_index in range(max_steps):
+            try:
+                step = self.execute_local_obstacle_avoidance_step(
+                    expected_lidar_session=session,
+                    now=now,
+                    minimum_lidar_acquisition_sequence=previous_sequence,
+                )
+            except Exception as exc:
+                step = {
+                    "ok": False,
+                    "motion_executed": False,
+                    "reason": "local_avoidance_step_exception",
+                    "error": str(exc),
+                    "error_type": type(exc).__name__,
+                }
+            result["steps"].append(step)
+            if not isinstance(step, dict):
+                return dict(result, reason="invalid_local_avoidance_step_result")
+            if step.get("ok") is not True:
+                return dict(result, reason=step.get(
+                    "reason", "local_avoidance_step_failed",
+                ))
+            if step.get("motion_executed") is not True:
+                return dict(result, reason="local_avoidance_motion_not_executed")
+            sequence = step.get("lidar_acquisition_sequence")
+            if (
+                not isinstance(sequence, int)
+                or isinstance(sequence, bool)
+                or sequence < 0
+                or (previous_sequence is not None and sequence <= previous_sequence)
+            ):
+                return dict(result, reason="fresh_lidar_after_motion_unavailable")
+            planner = step.get("planner")
+            if (
+                not isinstance(planner, dict)
+                or planner.get("producer_session") != session
+            ):
+                return dict(result, reason="producer_session_mismatch")
+            result["steps_executed"] += 1
+            if step.get("replan_required") is not True:
+                return dict(result, ok=True,
+                            reason="local_avoidance_replan_not_required")
+            previous_sequence = sequence
+        return dict(
+            result,
+            ok=True,
+            reason="local_avoidance_step_limit_reached",
         )
 
     def _execute_find_object(self, mission):
