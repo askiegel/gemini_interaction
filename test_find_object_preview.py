@@ -72,7 +72,7 @@ class CandidateVision:
 
     @staticmethod
     def normalize_detection(item):
-        return {
+        normalized = {
             "label": item["label"],
             "confidence": item["confidence"],
             "cx": item["center_x"],
@@ -87,6 +87,10 @@ class CandidateVision:
             "image_width": item["image_width"],
             "image_height": item["image_height"],
         }
+        for key in ("track_id", "tracker_source"):
+            if key in item:
+                normalized[key] = item[key]
+        return normalized
 
     def process_detection_frame(self, _detections):
         self.process_calls += 1
@@ -316,6 +320,48 @@ def test_marvin_preview_uses_one_semantic_acquisition_after_yolo_fails():
     assert vision.queries == []
     assert vision.process_calls == 0
     assert world.writes == 0
+
+
+def test_marvin_preview_preserves_existing_proposal_tracker_metadata():
+    vision = marvin_yolo_candidates()
+    for payload in vision.payloads:
+        payload["detections"][0].update(
+            track_id=77,
+            tracker_source="botsort_reid",
+        )
+    manager = BehaviorManager(
+        robot_client=ReadOnlyRobot(), vision_adapter=vision,
+        semantic_vision=MarvinSemanticVision(marvin_result()),
+    )
+    manager.TARGET_CONFIRMATION_POLL_SECONDS = 0
+    use_preview_tracker(manager)
+
+    result = manager.preview_find_object("marvin")
+
+    assert result["track_id"] == 77
+    assert result["tracker_source"] == "botsort_reid"
+    assert result["target_observation"]["track_id"] == 77
+    assert result["target_observation"]["tracker_source"] == "botsort_reid"
+    status, payload = _call_runtime_preview(result)
+    assert status == 200
+    assert payload["track_id"] == 77
+    assert payload["tracker_source"] == "botsort_reid"
+
+
+def test_marvin_preview_never_fabricates_missing_proposal_tracker_metadata():
+    manager = BehaviorManager(
+        robot_client=ReadOnlyRobot(), vision_adapter=marvin_yolo_candidates(),
+        semantic_vision=MarvinSemanticVision(marvin_result()),
+    )
+    manager.TARGET_CONFIRMATION_POLL_SECONDS = 0
+    use_preview_tracker(manager)
+
+    result = manager.preview_find_object("marvin")
+
+    assert "track_id" not in result
+    assert "tracker_source" not in result
+    assert "track_id" not in result["target_observation"]
+    assert "tracker_source" not in result["target_observation"]
 
 
 def test_marvin_preview_requires_two_fresh_tracker_frames_and_uses_tracker_geometry():

@@ -16,6 +16,7 @@ from marvin_local_tracker import MarvinLocalTracker
 from marvin_pursuit_state import evaluate_marvin_pursuit_state
 from marvin_arrival_policy import evaluate_marvin_arrival
 from marvin_identity_continuity import evaluate_marvin_identity_continuity
+from marvin_identity_episode import evaluate_marvin_identity_episode
 from marvin_identity_refresh_policy import build_marvin_identity_refresh_update
 from marvin_preview_reacquisition import evaluate_marvin_preview_reacquisition
 from marvin_search_policy import plan_marvin_search_step
@@ -1584,6 +1585,10 @@ class BehaviorManager:
                     "identity_confirmed": previously_operator_confirmed,
                     "entity_id": confirmed_entity.get("entity_id"),
                     "identity_id": attributes.get("identity_id"),
+                    "confirmation_timestamp": attributes.get(
+                        "identity_confirmation_timestamp"
+                    ),
+                    "preview_candidate": attributes.get("preview_candidate"),
                 }
 
         continuity_now = now if now is not None else datetime.now(timezone.utc)
@@ -1591,6 +1596,13 @@ class BehaviorManager:
             preview,
             previous_confirmation,
             confirmed_entity,
+            now=continuity_now,
+        )
+        # Diagnostic only: this bounded episode policy neither changes the
+        # existing refresh authority nor supplies a World Model write payload.
+        identity_episode_continuity = evaluate_marvin_identity_episode(
+            previous_confirmation,
+            preview,
             now=continuity_now,
         )
         if confirmed_entity is not None:
@@ -1677,6 +1689,7 @@ class BehaviorManager:
             "identity_evidence": lock_result,
             "bridge_result": bridge_result,
             "identity_continuity": identity_continuity,
+            "identity_episode_continuity": identity_episode_continuity,
             "identity_refresh": identity_refresh,
         }
 
@@ -3445,6 +3458,7 @@ class BehaviorManager:
                 "tracker_seed_bbox", "tracker_seed_source",
                 "tracker_horizontal_padding_fraction",
                 "tracker_vertical_padding_fraction", "confirmation_diagnostics",
+                "track_id", "tracker_source",
             ):
                 if key in observation:
                     result[key] = observation[key]
@@ -4057,6 +4071,16 @@ class BehaviorManager:
             execution_guard()
         if confirmed is None:
             raise ValueError("marvin_local_tracker_confirmation_required")
+        # Preserve only provider-supplied tracker diagnostics. They remain
+        # non-authoritative metadata and never alter local tracker behavior.
+        tracker_metadata = {}
+        raw_proposal = yolo_candidate.get("raw_detection")
+        if not isinstance(raw_proposal, dict):
+            raw_proposal = {}
+        for key in ("track_id", "tracker_source"):
+            value = yolo_candidate.get(key, raw_proposal.get(key))
+            if value is not None:
+                tracker_metadata[key] = value
         return dict(
             confirmed,
             label="marvin",
@@ -4081,6 +4105,7 @@ class BehaviorManager:
                 self.MARVIN_TRACKER_VERTICAL_PADDING_FRACTION
             ),
             confirmation_diagnostics=diagnostics,
+            **tracker_metadata,
         )
 
     @classmethod
