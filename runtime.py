@@ -345,6 +345,79 @@ class CognitiveRuntime:
             reason=result.get("reason", "marvin_autonomous_controller_complete"),
         )
 
+    @staticmethod
+    def _is_normal_marvin_find_mission(mission):
+        """Identify only the normal MissionManager FIND_OBJECT Marvin route."""
+        return bool(
+            getattr(mission, "mission_type", None) == "FIND_OBJECT"
+            and str(getattr(mission, "target", "") or "").strip().lower()
+            == "marvin"
+        )
+
+    def _execute_normal_marvin_find_mission(self, mission):
+        """Delegate a normal Find-Marvin mission to the reviewed controller.
+
+        The controller remains the only pursuit implementation.  This method
+        merely maps its terminal result onto the existing mission lifecycle;
+        in particular, a finite action-budget result is explicitly safe
+        incomplete rather than an arrival success.
+        """
+        result = self.execute_bounded_find_marvin_autonomous(
+            max_actions=self.FIND_MARVIN_AUTONOMOUS_MAX_ACTIONS,
+        )
+        base = dict(
+            result if isinstance(result, dict) else {},
+            behavior="FIND_OBJECT",
+            target="marvin",
+            mission_route="bounded_marvin_autonomous",
+            mission_id=getattr(mission, "mission_id", None),
+        )
+        controller = base.get("controller_result")
+        if not isinstance(controller, dict) or base.get("ok") is not True:
+            return dict(
+                base,
+                ok=False,
+                completed=True,
+                arrived_at_marvin=False,
+                mission_outcome="safe_failure",
+                state="FIND_MARVIN_FAILED",
+                reason=base.get("reason", "find_marvin_controller_failed"),
+            )
+        if (
+            controller.get("reason") == "arrived_at_marvin"
+            and controller.get("arrived_at_marvin") is True
+            and controller.get("completed") is True
+        ):
+            return dict(
+                base,
+                ok=True,
+                completed=True,
+                arrived_at_marvin=True,
+                mission_outcome="arrived_at_marvin",
+                state="ARRIVED_AT_MARVIN",
+                reason="arrived_at_marvin",
+            )
+        if controller.get("reason") == "find_marvin_action_limit_reached":
+            return dict(
+                base,
+                ok=True,
+                completed=True,
+                arrived_at_marvin=False,
+                mission_outcome="safe_incomplete",
+                state="FIND_MARVIN_SAFE_INCOMPLETE",
+                reason="find_marvin_action_limit_reached",
+            )
+        return dict(
+            base,
+            ok=False,
+            completed=True,
+            arrived_at_marvin=False,
+            mission_outcome="safe_failure",
+            state="FIND_MARVIN_FAILED",
+            reason="find_marvin_controller_terminal_result_unrecognized",
+            controller_reason=controller.get("reason"),
+        )
+
     def execute_single_marvin_alignment(
         self, *, direction, angular_speed, duration,
     ):
@@ -726,7 +799,10 @@ class CognitiveRuntime:
         execution_error = None
 
         try:
-            result = self.behavior_manager.execute(mission)
+            if self._is_normal_marvin_find_mission(mission):
+                result = self._execute_normal_marvin_find_mission(mission)
+            else:
+                result = self.behavior_manager.execute(mission)
 
             if not isinstance(result, dict):
                 raise TypeError(
