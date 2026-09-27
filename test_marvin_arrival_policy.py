@@ -9,6 +9,7 @@ from marvin_arrival_policy import (
     MARVIN_ARRIVAL_AREA_FRACTION,
     MARVIN_ARRIVAL_HEIGHT_FRACTION,
     evaluate_marvin_arrival,
+    evaluate_marvin_visual_arrival,
 )
 
 
@@ -135,6 +136,36 @@ def test_preview_bridge_and_unrelated_extras_cannot_establish_arrival():
     assert evaluate(lock(found=False), preview_result={"target": "marvin", "identity_confirmed": True})["arrived_at_marvin"] is False
     assert evaluate(lock(found=False), tracker_id="reused-track", bbox_overlap=1.0)["arrived_at_marvin"] is False
     assert evaluate(lock(found=False), obstacle_state="CLEAR", clearance_m=99.0)["arrived_at_marvin"] is False
+
+
+def test_visual_session_reuses_calibrated_threshold_without_identity_authority():
+    preview = {
+        "ok": True, "preview": True, "authoritative": False,
+        "target": "marvin", "target_found": True, "identity_confirmed": True,
+        "source_timestamp": STAMP, "image_width": 640.0, "image_height": 480.0,
+        "bbox": {"x1": 100.0, "y1": 100.0, "x2": 288.0, "y2": 364.0},
+        "marvin_continuity": {"tracker_id": 9, "tracker_source": "diagnostic"},
+    }
+    value = evaluate_marvin_visual_arrival(preview, now=STAMP)
+    assert value["arrived_at_marvin"] is True
+    assert value["visual_session_authorized"] is True
+    assert value["identity_authorized"] is False
+    assert value["selected_identity_id"] is None
+
+
+def test_visual_session_arrival_fails_closed_for_ambiguous_or_stale_preview():
+    base = {
+        "ok": True, "preview": True, "authoritative": False,
+        "target": "marvin", "target_found": True, "identity_confirmed": True,
+        "source_timestamp": STAMP, "image_width": 640.0, "image_height": 480.0,
+        "bbox": {"x1": 100.0, "y1": 100.0, "x2": 288.0, "y2": 364.0},
+    }
+    assert not evaluate_marvin_visual_arrival(
+        dict(base, ambiguous=True), now=STAMP,
+    )["arrived_at_marvin"]
+    assert not evaluate_marvin_visual_arrival(
+        dict(base, source_timestamp="2026-09-26T15:59:56+00:00"), now=STAMP,
+    )["arrived_at_marvin"]
 
 
 def test_deterministic_and_inputs_not_mutated():

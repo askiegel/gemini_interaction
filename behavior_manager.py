@@ -13,8 +13,15 @@ from target_lock import TargetLock
 from entity_registry import EntityRegistry
 from person_identity_manager import PersonIdentityManager
 from marvin_local_tracker import MarvinLocalTracker
-from marvin_pursuit_state import evaluate_marvin_pursuit_state
-from marvin_arrival_policy import evaluate_marvin_arrival
+from marvin_pursuit_state import (
+    VISUAL_READY_TO_ALIGN,
+    VISUAL_READY_TO_APPROACH,
+    evaluate_marvin_pursuit_state,
+)
+from marvin_arrival_policy import (
+    evaluate_marvin_arrival,
+    evaluate_marvin_visual_arrival,
+)
 from marvin_identity_continuity import evaluate_marvin_identity_continuity
 from marvin_identity_episode import evaluate_marvin_identity_episode
 from marvin_identity_refresh_policy import build_marvin_identity_refresh_update
@@ -1544,6 +1551,40 @@ class BehaviorManager:
             lock_snapshot.get("locked_identity_id")
         )
 
+        # A runtime restart drops only the in-memory lock.  A current,
+        # semantic-confirmed Preview may still drive the bounded visual
+        # session branch, but it must not refresh persistent state or ask
+        # TargetLock to resolve/create anything merely to do so.
+        if not self._marvin_target_lock_snapshot_is_locked(lock_snapshot):
+            continuity_now = now if now is not None else datetime.now(timezone.utc)
+            return {
+                "preview_result": preview,
+                "target_lock_result": {},
+                "target_lock_snapshot": lock_snapshot,
+                "selected_identity_id": None,
+                "identity_evidence": None,
+                "bridge_result": None,
+                "identity_continuity": {
+                    "ok": True,
+                    "allow_refresh": False,
+                    "reason": "target_lock_unavailable_for_persistent_refresh",
+                    "entity_id": None,
+                    "identity_id": None,
+                },
+                "identity_episode_continuity": evaluate_marvin_identity_episode(
+                    None, preview, now=continuity_now,
+                ),
+                "identity_refresh": {
+                    "ok": True,
+                    "allow_refresh": False,
+                    "reason": "visual_session_has_no_persistent_refresh",
+                    "entity_id": None,
+                    "identity_id": None,
+                    "observation_update": None,
+                },
+                "visual_session": True,
+            }
+
         confirmed_entity = None
         previous_confirmation = None
         identity_refresh = {
@@ -1692,6 +1733,15 @@ class BehaviorManager:
             "identity_episode_continuity": identity_episode_continuity,
             "identity_refresh": identity_refresh,
         }
+
+    @staticmethod
+    def _marvin_target_lock_snapshot_is_locked(snapshot):
+        return (
+            isinstance(snapshot, dict)
+            and str(snapshot.get("tracking_mode") or "").strip().upper()
+            == TargetLock.MODE_LOCKED
+            and bool(str(snapshot.get("locked_identity_id") or "").strip())
+        )
 
     def build_marvin_identity_episode_diagnostic(self, *, now=None):
         """Read Marvin episode evidence without refresh, resolution, or action.
@@ -1951,12 +2001,18 @@ class BehaviorManager:
                     reason="find_marvin_identity_changed",
                 )
 
+            visual_session = pursuit.get("state") in {
+                VISUAL_READY_TO_ALIGN, VISUAL_READY_TO_APPROACH,
+            }
             try:
-                arrival = evaluate_marvin_arrival(
-                    lock_result,
-                    lock_snapshot,
-                    selected_identity_id=current_identity_id,
-                    now=now,
+                arrival = (
+                    evaluate_marvin_visual_arrival(preview, now=now)
+                    if visual_session else evaluate_marvin_arrival(
+                        lock_result,
+                        lock_snapshot,
+                        selected_identity_id=current_identity_id,
+                        now=now,
+                    )
                 )
             except Exception as exc:
                 base["history"].append(history_entry)
@@ -1971,7 +2027,10 @@ class BehaviorManager:
                 not isinstance(arrival, dict)
                 or arrival.get("ok") is not True
                 or not isinstance(arrival.get("arrived_at_marvin"), bool)
-                or arrival.get("selected_identity_id") != current_identity_id
+                or (
+                    not visual_session
+                    and arrival.get("selected_identity_id") != current_identity_id
+                )
             ):
                 base["history"].append(history_entry)
                 return dict(
@@ -1982,9 +2041,15 @@ class BehaviorManager:
             history_entry["arrival"] = arrival
             if arrival["arrived_at_marvin"]:
                 if not (
-                    pursuit.get("state") == "READY_TO_APPROACH"
+                    (
+                        pursuit.get("state") == "READY_TO_APPROACH"
+                        or visual_session
+                    )
                     and pursuit.get("pursuit_authorized") is True
-                    and arrival.get("identity_authorized") is True
+                    and (
+                        arrival.get("identity_authorized") is True
+                        or arrival.get("visual_session_authorized") is True
+                    )
                     and arrival.get("fresh") is True
                     and arrival.get("geometry_valid") is True
                 ):
@@ -2096,7 +2161,10 @@ class BehaviorManager:
                 })
                 continue
 
-            if state != "READY_TO_APPROACH" or not authorized:
+            if state not in {
+                "READY_TO_APPROACH", VISUAL_READY_TO_ALIGN,
+                VISUAL_READY_TO_APPROACH,
+            } or not authorized:
                 base["history"].append(history_entry)
                 return dict(
                     base,
@@ -2187,7 +2255,10 @@ class BehaviorManager:
             return "reacquire_required"
         if state == "INSUFFICIENT_EVIDENCE":
             return "insufficient_evidence"
-        if state == "READY_TO_APPROACH" and not authorized:
+        if state in {
+            "READY_TO_APPROACH", VISUAL_READY_TO_ALIGN,
+            VISUAL_READY_TO_APPROACH,
+        } and not authorized:
             return "find_marvin_pursuit_not_authorized"
         return "paused_for_search"
 
@@ -2236,7 +2307,10 @@ class BehaviorManager:
         }
         if (
             not isinstance(pursuit, dict)
-            or pursuit.get("state") != "READY_TO_APPROACH"
+            or pursuit.get("state") not in {
+                "READY_TO_APPROACH", VISUAL_READY_TO_ALIGN,
+                VISUAL_READY_TO_APPROACH,
+            }
             or pursuit.get("pursuit_authorized") is not True
         ):
             return dict(base, reason="marvin_pursuit_not_authorized")
@@ -2244,6 +2318,48 @@ class BehaviorManager:
         session = self._current_lidar_session()
         if session is None or self.world_model is None:
             return dict(base, reason="lidar_producer_session_unavailable")
+        if pursuit_state == VISUAL_READY_TO_ALIGN:
+            direction = (
+                "LEFT" if pursuit.get("horizontal_error", 0.0) < 0.0 else "RIGHT"
+            )
+            duration = self._marvin_guarded_approach_turn_duration(
+                pursuit.get("horizontal_error", 0.0)
+            )
+            if duration is None:
+                return dict(base, reason="marvin_visual_alignment_geometry_inconsistent")
+            try:
+                turn = self._execute_target_directed_turn(
+                    direction,
+                    self.MARVIN_CENTERING_TURN_SPEED,
+                    duration,
+                    expected_lidar_session=session,
+                )
+            except Exception as exc:
+                return dict(
+                    base, decision="align_" + direction.lower(),
+                    executed_primitive="guarded_turn_" + direction.lower(),
+                    reason="marvin_visual_alignment_exception",
+                    error=str(exc), error_type=type(exc).__name__,
+                )
+            turn_ok = bool(
+                isinstance(turn, dict)
+                and turn.get("ok") is True
+                and turn.get("permitted") is True
+            )
+            return dict(
+                base,
+                ok=turn_ok,
+                decision="align_" + direction.lower(),
+                executed_primitive="guarded_turn_" + direction.lower(),
+                motion_executed=turn_ok,
+                replan_required=turn_ok,
+                alignment_result=turn,
+                reason=(
+                    "marvin_visual_alignment_complete" if turn_ok
+                    else (turn.get("reason", "marvin_visual_alignment_denied")
+                          if isinstance(turn, dict) else "marvin_visual_alignment_denied")
+                ),
+            )
         try:
             lidar = self.world_model.get_lidar_obstacles(
                 expected_session=session, now=now,

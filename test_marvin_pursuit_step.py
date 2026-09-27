@@ -38,6 +38,18 @@ def ready(**updates):
     return value
 
 
+def visual_preview(*, centered=False):
+    x1, x2 = (270.0, 370.0) if centered else (400.0, 500.0)
+    return {
+        "ok": True, "preview": True, "authoritative": False,
+        "target": "marvin", "target_found": True, "identity_confirmed": True,
+        "source_timestamp": "2026-09-26T16:00:00+00:00",
+        "image_width": 640.0, "image_height": 480.0,
+        "bbox": {"x1": x1, "y1": 20.0, "x2": x2, "y2": 220.0},
+        "marvin_continuity": {"tracker_id": 1, "tracker_source": "diagnostic"},
+    }
+
+
 def safety(*, permitted, geometry=True):
     return {
         "permitted": permitted,
@@ -92,6 +104,36 @@ def test_ready_and_clear_dispatches_one_forward_then_requires_replan(monkeypatch
     assert robot.forward_calls == 1 and avoids == []
     assert world.calls == [(SESSION, 10.0)] and len(pursuit_calls) == len(safety_calls) == 1
     assert_one_primitive(robot, avoids)
+
+
+def test_visual_off_center_dispatches_one_guarded_alignment_before_any_forward(monkeypatch):
+    robot = Robot()
+    manager = BehaviorManager(robot_client=robot, world_model=World())
+    manager.lidar_session = SESSION
+    turns = []
+    monkeypatch.setattr(
+        manager, "_execute_target_directed_turn",
+        lambda *args, **kwargs: turns.append((args, kwargs)) or {
+            "ok": True, "permitted": True,
+        },
+    )
+    result = manager.execute_marvin_pursuit_step(
+        visual_preview(), {}, {"tracking_mode": "UNLOCKED"}, now="2026-09-26T16:00:00+00:00",
+    )
+    assert result["ok"] is result["motion_executed"] is result["replan_required"] is True
+    assert result["decision"] == "align_right"
+    assert robot.forward_calls == 0
+    assert turns == [(("RIGHT", 0.25, 0.50), {"expected_lidar_session": SESSION})]
+
+
+def test_visual_centered_uses_existing_lidar_gated_forward_path(monkeypatch):
+    result, robot, _world, _calls, safety_calls, avoids = invoke(
+        monkeypatch,
+        pursuit={"ok": True, "state": "VISUAL_READY_TO_APPROACH", "pursuit_authorized": True},
+        inputs=(visual_preview(centered=True), {}, {"tracking_mode": "UNLOCKED"}),
+    )
+    assert result["decision"] == "approach_forward"
+    assert robot.forward_calls == 1 and len(safety_calls) == 1 and avoids == []
 
 
 def test_ready_and_trusted_blockage_calls_only_one_avoidance_step(monkeypatch):

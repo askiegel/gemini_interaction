@@ -3,7 +3,10 @@
 Preview can find a Marvin candidate and the preview bridge can relate that
 candidate to a selected identity.  Neither is an authority to pursue.
 Only a fresh, unambiguous current TargetLock observation for that same
-persistent identity can produce ``READY_TO_APPROACH``.
+persistent identity can produce ``READY_TO_APPROACH``.  A separate,
+non-persistent visual-session branch may authorize one bounded action from a
+fresh Marvin Preview after a runtime restart; it never creates or supplies an
+identity.
 """
 
 from datetime import datetime, timezone
@@ -21,7 +24,11 @@ MARVIN_LOCKED = "MARVIN_LOCKED"
 REACQUIRE_REQUIRED = "REACQUIRE_REQUIRED"
 SAME_IDENTITY_REACQUIRED = "SAME_IDENTITY_REACQUIRED"
 READY_TO_APPROACH = "READY_TO_APPROACH"
+VISUAL_READY_TO_ALIGN = "VISUAL_READY_TO_ALIGN"
+VISUAL_READY_TO_APPROACH = "VISUAL_READY_TO_APPROACH"
 INSUFFICIENT_EVIDENCE = "INSUFFICIENT_EVIDENCE"
+
+FIND_CENTER_TOLERANCE_PIXELS = 50.0
 
 
 def evaluate_marvin_pursuit_state(
@@ -99,7 +106,7 @@ def evaluate_marvin_pursuit_state(
 
     if not selected_identity:
         if candidate:
-            return _result(base, CANDIDATE_SEEN, "fresh_preview_candidate_without_persistent_identity")
+            return _visual_session_result(base, preview_result)
         return _result(base, SEARCHING, "no_preview_candidate_or_persistent_identity")
 
     lock_identity = _identity_id(lock_result)
@@ -142,6 +149,37 @@ def _result(base, state, reason, *, pursuit_authorized=False):
                 pursuit_authorized=bool(pursuit_authorized))
 
 
+def _visual_session_result(base, preview_result):
+    """Authorize current-session visual pursuit without persistent identity.
+
+    This deliberately consumes only the already-confirmed Marvin Preview.
+    In particular, tracker metadata is not inspected: it remains diagnostic
+    continuity information and cannot become identity authority.
+    """
+    geometry, reason = _visual_preview_geometry(preview_result)
+    if geometry is None:
+        return _result(base, INSUFFICIENT_EVIDENCE, reason)
+    base.update(
+        fresh=True,
+        geometry_usable=True,
+        visual_session=True,
+        target_center_x=geometry["cx"],
+        image_width=geometry["image_width"],
+        horizontal_error=geometry["horizontal_error"],
+    )
+    if abs(geometry["horizontal_error"]) > FIND_CENTER_TOLERANCE_PIXELS:
+        return _result(
+            base, VISUAL_READY_TO_ALIGN,
+            "fresh_unambiguous_marvin_preview_requires_alignment",
+            pursuit_authorized=True,
+        )
+    return _result(
+        base, VISUAL_READY_TO_APPROACH,
+        "fresh_unambiguous_marvin_preview_centered",
+        pursuit_authorized=True,
+    )
+
+
 def _preview_candidate(value, now, max_age_seconds):
     if value is None:
         return False, "preview_unavailable"
@@ -159,6 +197,44 @@ def _preview_candidate(value, now, max_age_seconds):
     if freshness in {"missing", "invalid"}:
         return False, "preview_timestamp_" + freshness
     return freshness == "fresh", "preview_candidate_stale" if freshness == "stale" else "preview_candidate_fresh"
+
+
+def _visual_preview_geometry(value):
+    """Return safe centering geometry from an already semantic-confirmed Preview."""
+    if not isinstance(value, dict):
+        return None, "preview_result_malformed"
+    if _preview_ambiguous(value):
+        return None, "preview_target_ambiguous"
+    bbox = value.get("bbox")
+    if not _bbox(bbox):
+        return None, "preview_geometry_malformed"
+    width = value.get("image_width")
+    height = value.get("image_height")
+    if not (_finite_positive(width) and _finite_positive(height)):
+        return None, "preview_image_dimensions_malformed"
+    x1, y1, x2, y2 = (float(bbox[key]) for key in ("x1", "y1", "x2", "y2"))
+    if not (0.0 <= x1 < x2 <= float(width) and 0.0 <= y1 < y2 <= float(height)):
+        return None, "preview_geometry_malformed"
+    cx = (x1 + x2) / 2.0
+    return {
+        "cx": cx,
+        "image_width": float(width),
+        "horizontal_error": cx - float(width) / 2.0,
+    }, None
+
+
+def _preview_ambiguous(value):
+    if value.get("identity_ambiguous") is True or value.get("ambiguous") is True:
+        return True
+    for nested_name in ("tracking", "target_observation", "selected_proposal"):
+        nested = value.get(nested_name)
+        if isinstance(nested, dict) and (
+            nested.get("identity_ambiguous") is True
+            or nested.get("ambiguous") is True
+            or str(nested.get("identity_status") or "").strip().upper() == "AMBIGUOUS"
+        ):
+            return True
+    return False
 
 
 def _bridge_consistent(supplied, computed):

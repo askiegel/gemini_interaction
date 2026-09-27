@@ -106,6 +106,70 @@ def test_ready_authorized_routes_only_to_pursuit(monkeypatch):
     assert searches == [] and len(pursuits) == result["actions_executed"] == 1
 
 
+def test_visual_session_routes_to_one_pursuit_step_without_persistent_identity(monkeypatch):
+    manager = BehaviorManager(robot_client=object())
+    calls = []
+    evidence_value = {
+        "preview_result": {"fresh": "marvin"},
+        "target_lock_result": {},
+        "target_lock_snapshot": {"tracking_mode": "UNLOCKED"},
+        "selected_identity_id": None,
+    }
+    monkeypatch.setattr(
+        behavior_manager_module, "evaluate_marvin_pursuit_state",
+        lambda *args, **kwargs: {
+            "ok": True, "state": "VISUAL_READY_TO_ALIGN",
+            "pursuit_authorized": True, "selected_identity_id": None,
+            "entity_id": None, "fresh": True, "geometry_usable": True,
+        },
+    )
+    monkeypatch.setattr(
+        behavior_manager_module, "evaluate_marvin_visual_arrival",
+        lambda *args, **kwargs: {
+            "ok": True, "arrived_at_marvin": False,
+            "visual_session_authorized": True,
+        },
+    )
+    monkeypatch.setattr(
+        manager, "execute_marvin_pursuit_step",
+        lambda *args, **kwargs: calls.append((args, kwargs)) or successful_pursuit(),
+    )
+    result = manager.execute_find_marvin_controller(lambda: evidence_value, max_actions=1)
+    assert result["actions_executed"] == 1 and result["history"][0]["route"] == "pursuit"
+    assert len(calls) == 1
+
+
+def test_visual_arrival_stops_without_pursuit_or_identity(monkeypatch):
+    manager = BehaviorManager(robot_client=object())
+    calls = []
+    evidence_value = {
+        "preview_result": {"fresh": "marvin"},
+        "target_lock_result": {},
+        "target_lock_snapshot": {"tracking_mode": "UNLOCKED"},
+        "selected_identity_id": None,
+    }
+    monkeypatch.setattr(
+        behavior_manager_module, "evaluate_marvin_pursuit_state",
+        lambda *args, **kwargs: {
+            "ok": True, "state": "VISUAL_READY_TO_APPROACH",
+            "pursuit_authorized": True, "selected_identity_id": None,
+            "entity_id": None, "fresh": True, "geometry_usable": True,
+        },
+    )
+    monkeypatch.setattr(
+        behavior_manager_module, "evaluate_marvin_visual_arrival",
+        lambda *args, **kwargs: {
+            "ok": True, "arrived_at_marvin": True,
+            "visual_session_authorized": True, "fresh": True,
+            "geometry_valid": True,
+        },
+    )
+    monkeypatch.setattr(manager, "execute_marvin_pursuit_step", lambda *a, **k: calls.append(True))
+    result = manager.execute_find_marvin_controller(lambda: evidence_value, max_actions=1)
+    assert result["arrived_at_marvin"] is True and result["actions_executed"] == 0
+    assert calls == []
+
+
 def test_arrival_stops_before_any_search_or_pursuit_executor(monkeypatch):
     result, providers, evaluations, arrivals, searches, pursuits = invoke(
         monkeypatch, [pursuit()], arrivals=[arrived()], max_actions=1)

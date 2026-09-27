@@ -81,6 +81,53 @@ def evaluate_marvin_arrival(
     )
 
 
+def evaluate_marvin_visual_arrival(
+    preview_result,
+    *,
+    now=None,
+    max_age_seconds=DEFAULT_PREVIEW_MAX_AGE_SECONDS,
+):
+    """Evaluate the calibrated stop threshold for current-session vision.
+
+    Unlike ``evaluate_marvin_arrival``, this has no persistent-identity role.
+    It accepts only the existing semantic-confirmed, fresh Preview and never
+    reads or writes TargetLock or the World Model.
+    """
+    result = _base_result(None)
+    result["visual_session_authorized"] = False
+    if not _positive(max_age_seconds):
+        return _fail(result, "invalid_max_age_seconds", ok=False)
+    if not isinstance(preview_result, dict):
+        return _fail(result, "preview_result_malformed", ok=False)
+    if (
+        preview_result.get("ok") is not True
+        or preview_result.get("preview") is not True
+        or preview_result.get("authoritative") is not False
+        or str(preview_result.get("target") or "").strip().lower() != "marvin"
+        or preview_result.get("target_found") is not True
+        or preview_result.get("identity_confirmed") is not True
+        or _preview_ambiguous(preview_result)
+    ):
+        return _fail(result, "preview_not_unambiguous_semantic_marvin")
+    freshness = _freshness(
+        preview_result.get("source_timestamp") or preview_result.get("vision_timestamp"),
+        now, max_age_seconds,
+    )
+    if freshness != "fresh":
+        return _fail(result, "preview_timestamp_" + freshness)
+    result["fresh"] = True
+    geometry = _geometry(preview_result)
+    if geometry is None:
+        return _fail(result, "preview_geometry_invalid")
+    result.update(geometry)
+    result["geometry_valid"] = True
+    result["visual_session_authorized"] = True
+    result["area_threshold_met"] = result["area_fraction"] >= MARVIN_ARRIVAL_AREA_FRACTION
+    if result["height_fraction"] < MARVIN_ARRIVAL_HEIGHT_FRACTION:
+        return _fail(result, "marvin_visual_standoff_not_reached")
+    return dict(result, arrived_at_marvin=True, reason="marvin_visual_standoff_reached")
+
+
 def _base_result(selected_identity_id):
     return {
         "ok": True,
@@ -168,6 +215,20 @@ def _ambiguous(value):
     return (value.get("identity_ambiguous") is True
             or str(value.get("identity_status") or "").strip().upper()
             in {"AMBIGUOUS", "NEW_FRAME_CONFLICT", "IDENTITY_MISMATCH"})
+
+
+def _preview_ambiguous(value):
+    if value.get("identity_ambiguous") is True or value.get("ambiguous") is True:
+        return True
+    for name in ("tracking", "target_observation", "selected_proposal"):
+        nested = value.get(name)
+        if isinstance(nested, dict) and (
+            nested.get("identity_ambiguous") is True
+            or nested.get("ambiguous") is True
+            or str(nested.get("identity_status") or "").strip().upper() == "AMBIGUOUS"
+        ):
+            return True
+    return False
 
 
 def _number(value):

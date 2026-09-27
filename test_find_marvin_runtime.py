@@ -320,14 +320,16 @@ def test_provider_bundle_feeds_pursuit_and_arrival_policies(monkeypatch):
     assert arrival["arrived_at_marvin"] is True
 
 
-def test_waiting_identity_and_preview_failure_remain_fail_closed(monkeypatch):
+def test_unlocked_target_lock_uses_read_only_visual_session_builder(monkeypatch):
     waiting = FakeTargetLock(
         locked(found=False, tracking_mode="WAITING_FOR_IDENTITY"),
         snapshot("WAITING_FOR_IDENTITY"),
     )
-    bundle = manager(monkeypatch, waiting).build_find_marvin_controller_state()
-    assert bundle["selected_identity_id"] == IDENTITY
+    world = FakeWorldModel([confirmed_world_entity()])
+    bundle = manager(monkeypatch, waiting, world_model=world).build_find_marvin_controller_state()
+    assert bundle["selected_identity_id"] is None
     assert bundle["target_lock_snapshot"]["tracking_mode"] == "WAITING_FOR_IDENTITY"
+    assert waiting.calls == [] and world.update_calls == []
     broken = manager(monkeypatch)
     monkeypatch.setattr(broken, "preview_find_object", lambda _target: (_ for _ in ()).throw(RuntimeError("offline")))
     with pytest.raises(RuntimeError, match="offline"):

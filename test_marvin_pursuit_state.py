@@ -6,6 +6,7 @@ import inspect
 from marvin_pursuit_state import (
     CANDIDATE_SEEN, INSUFFICIENT_EVIDENCE, MARVIN_LOCKED, REACQUIRE_REQUIRED,
     READY_TO_APPROACH, SAME_IDENTITY_REACQUIRED, SEARCHING,
+    VISUAL_READY_TO_ALIGN, VISUAL_READY_TO_APPROACH,
     evaluate_marvin_pursuit_state,
 )
 
@@ -44,9 +45,43 @@ def test_no_preview_or_lock_is_searching():
     assert evaluate(None, None, snapshot())["state"] == SEARCHING
 
 
-def test_fresh_preview_without_persistent_identity_is_candidate_seen():
+def test_preview_without_image_dimensions_cannot_authorize_visual_session():
     value = evaluate(preview(), None, snapshot())
-    assert value["state"] == CANDIDATE_SEEN
+    assert value["state"] == INSUFFICIENT_EVIDENCE
+    assert value["pursuit_authorized"] is False
+
+
+def test_fresh_unambiguous_preview_without_target_lock_authorizes_visual_session_only():
+    value = evaluate(
+        preview(
+            image_width=640.0, image_height=480.0,
+            bbox={"x1": 400.0, "y1": 20.0, "x2": 500.0, "y2": 220.0},
+        ), None, snapshot(),
+    )
+    assert value["state"] == VISUAL_READY_TO_ALIGN
+    assert value["pursuit_authorized"] is True
+    assert value["selected_identity_id"] is value["entity_id"] is None
+    assert value["horizontal_error"] == 130.0
+
+    centered = evaluate(
+        preview(
+            image_width=640.0, image_height=480.0,
+            bbox={"x1": 270.0, "y1": 20.0, "x2": 370.0, "y2": 220.0},
+            marvin_continuity={"tracker_id": 7, "tracker_source": "diagnostic"},
+        ), None, snapshot(),
+    )
+    assert centered["state"] == VISUAL_READY_TO_APPROACH
+    assert centered["selected_identity_id"] is None
+
+
+def test_visual_session_fails_closed_on_ambiguous_preview():
+    value = evaluate(
+        preview(
+            image_width=640.0, image_height=480.0,
+            target_observation={"identity_ambiguous": True},
+        ), None, snapshot(),
+    )
+    assert value["state"] == INSUFFICIENT_EVIDENCE
     assert value["pursuit_authorized"] is False
 
 
