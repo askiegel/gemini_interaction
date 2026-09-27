@@ -22,6 +22,7 @@ from marvin_arrival_policy import (
     evaluate_marvin_arrival,
     evaluate_marvin_visual_arrival,
 )
+from marvin_preview_schema import normalize_marvin_preview
 from marvin_identity_continuity import evaluate_marvin_identity_continuity
 from marvin_identity_episode import evaluate_marvin_identity_episode
 from marvin_identity_refresh_policy import build_marvin_identity_refresh_update
@@ -1922,6 +1923,7 @@ class BehaviorManager:
                 self.MAX_NONPHYSICAL_STALE_REPLANS
             ),
             "history": [],
+            "arrival_observations_confirmed": 0,
         }
         if (
             not isinstance(max_actions, int)
@@ -1953,6 +1955,7 @@ class BehaviorManager:
             return isinstance(stop_result, dict) and stop_result.get("ok") is True
 
         selected_identity_id = None
+        arrival_candidate_timestamp = None
         search_history = []
         # ``actions_executed`` counts physical or delivery-uncertain actions.
         # A verified pre-transport stale veto can replan once without spending
@@ -2069,6 +2072,81 @@ class BehaviorManager:
                     history=list(base["history"]),
                     reason="marvin_arrival_evaluation_failed",
                 )
+
+            normalized_preview = normalize_marvin_preview(preview)
+            observation_timestamp = (
+                normalized_preview.get("source_timestamp")
+                or normalized_preview.get("vision_timestamp")
+                if isinstance(normalized_preview, dict)
+                else None
+            )
+
+            # Persistent TargetLock arrival remains identity-authoritative,
+            # but each arrival confirmation must also be independently
+            # supported by the current fresh, semantic Marvin Preview.
+            if arrival.get("arrived_at_marvin") and not visual_session:
+                try:
+                    preview_arrival = evaluate_marvin_visual_arrival(
+                        preview, now=now,
+                    )
+                except Exception as exc:
+                    base["history"].append(history_entry)
+                    return dict(
+                        base,
+                        history=list(base["history"]),
+                        reason="marvin_arrival_preview_confirmation_failed",
+                        error=str(exc),
+                        error_type=type(exc).__name__,
+                    )
+                history_entry["preview_arrival_confirmation"] = preview_arrival
+                if (
+                    not isinstance(preview_arrival, dict)
+                    or preview_arrival.get("ok") is not True
+                    or preview_arrival.get("arrived_at_marvin") is not True
+                    or preview_arrival.get("fresh") is not True
+                    or preview_arrival.get("geometry_valid") is not True
+                    or preview_arrival.get("visual_session_authorized") is not True
+                ):
+                    arrival = dict(
+                        arrival,
+                        arrived_at_marvin=False,
+                        reason="marvin_preview_arrival_not_confirmed",
+                    )
+
+            # Once an arrival candidate is pending, the next decision must
+            # be based on a distinct source frame. A cached/repeated frame is
+            # not a confirmation and cannot be reused to plan motion.
+            if arrival_candidate_timestamp is not None and (
+                not isinstance(observation_timestamp, str)
+                or not observation_timestamp
+                or observation_timestamp == arrival_candidate_timestamp
+            ):
+                history_entry.update(
+                    route="arrival_confirmation",
+                    selected_action="arrival_confirmation_rejected",
+                    arrival_confirmation_reason="observation_not_independent",
+                    arrival_candidate_timestamp=arrival_candidate_timestamp,
+                    confirmation_observation_timestamp=observation_timestamp,
+                )
+                base["history"].append(history_entry)
+                base["arrival_observations_confirmed"] = 0
+                if not stop_completed_action(history_entry):
+                    return dict(
+                        base,
+                        history=list(base["history"]),
+                        reason="find_marvin_arrival_confirmation_stop_failed",
+                    )
+                return dict(
+                    base,
+                    ok=True,
+                    completed=False,
+                    arrived_at_marvin=False,
+                    history=list(base["history"]),
+                    reason="find_marvin_arrival_confirmation_not_independent",
+                    dry_run=dry_run,
+                    next_route="none",
+                )
+
             history_entry["arrival"] = arrival
             if arrival["arrived_at_marvin"]:
                 if not (
@@ -2090,8 +2168,43 @@ class BehaviorManager:
                         history=list(base["history"]),
                         reason="marvin_arrival_evaluation_inconsistent",
                     )
-                history_entry["route"] = "arrival"
-                history_entry["selected_action"] = "arrived_at_marvin"
+                if arrival_candidate_timestamp is None:
+                    if not isinstance(observation_timestamp, str) or not observation_timestamp:
+                        base["history"].append(history_entry)
+                        return dict(
+                            base,
+                            history=list(base["history"]),
+                            reason="marvin_arrival_observation_timestamp_missing",
+                        )
+                    arrival_candidate_timestamp = observation_timestamp
+                    history_entry.update(
+                        route="arrival_confirmation",
+                        selected_action="confirm_arrival",
+                        arrival_confirmation_reason="first_qualifying_observation",
+                        arrival_candidate_timestamp=arrival_candidate_timestamp,
+                        arrival_observations_confirmed=1,
+                    )
+                    base["arrival_observations_confirmed"] = 1
+                    base["history"].append(history_entry)
+                    if not stop_completed_action(history_entry):
+                        return dict(
+                            base,
+                            history=list(base["history"]),
+                            reason="find_marvin_arrival_confirmation_stop_failed",
+                        )
+                    # No motion is permitted between the candidate and its
+                    # confirmation. The next loop iteration obtains a new
+                    # Preview/state bundle without consuming action budget.
+                    continue
+
+                history_entry.update(
+                    route="arrival",
+                    selected_action="arrived_at_marvin",
+                    arrival_candidate_timestamp=arrival_candidate_timestamp,
+                    confirmation_observation_timestamp=observation_timestamp,
+                    arrival_observations_confirmed=2,
+                )
+                base["arrival_observations_confirmed"] = 2
                 base["history"].append(history_entry)
                 return dict(
                     base,
@@ -2105,6 +2218,14 @@ class BehaviorManager:
                     dry_run=dry_run,
                     next_route="arrived",
                 )
+
+            if arrival_candidate_timestamp is not None:
+                history_entry["arrival_candidate_reset"] = True
+                history_entry["arrival_candidate_reset_reason"] = arrival.get(
+                    "reason", "second_observation_did_not_arrive",
+                )
+                arrival_candidate_timestamp = None
+                base["arrival_observations_confirmed"] = 0
 
             state = pursuit.get("state")
             authorized = pursuit.get("pursuit_authorized") is True

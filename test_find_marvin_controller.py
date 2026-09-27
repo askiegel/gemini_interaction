@@ -1,14 +1,40 @@
 """Offline bounded-controller contracts for Find-Marvin routing."""
 
 from copy import deepcopy
+from datetime import datetime, timedelta, timezone
 
 import behavior_manager as behavior_manager_module
 from behavior_manager import BehaviorManager
+import pytest
 
 
-def evidence(identity="marvin-1"):
-    return {"preview_result": {"preview": "fresh"}, "target_lock_result": {"lock": "fresh"},
+def evidence(identity="marvin-1", preview_result=None):
+    return {"preview_result": preview_result or {"preview": "fresh"}, "target_lock_result": {"lock": "fresh"},
             "target_lock_snapshot": {"snapshot": "fresh"}, "selected_identity_id": identity}
+
+
+def arrival_preview(height_fraction, timestamp, *, ambiguous=False, confirmed=True):
+    image_height = 480.0
+    bbox_height = round(float(height_fraction) * image_height)
+    return {
+        "ok": True,
+        "preview": True,
+        "authoritative": False,
+        "target": "marvin",
+        "target_found": True,
+        "source": "marvin_local_tracker",
+        "identity_confirmed": confirmed,
+        "ambiguous": ambiguous,
+        "source_timestamp": timestamp,
+        "image_width": 640.0,
+        "image_height": image_height,
+        "bbox": {
+            "x1": 200.0,
+            "y1": image_height - bbox_height,
+            "x2": 400.0,
+            "y2": image_height,
+        },
+    }
 
 
 def pursuit(state="READY_TO_APPROACH", authorized=True, identity="marvin-1"):
@@ -71,7 +97,12 @@ def invoke(monkeypatch, states, *, search_steps=None, pursuit_steps=None, max_ac
 
     def provider():
         provider_calls.append(True)
-        return evidence(next(identity_values))
+        stamp = (
+            datetime(2026, 9, 26, 16, 0, 9, tzinfo=timezone.utc)
+            + timedelta(microseconds=len(provider_calls))
+        ).isoformat()
+        preview_result = arrival_preview(0.56, stamp)
+        return evidence(next(identity_values), preview_result)
 
     def evaluate(*args, **kwargs):
         evaluator_calls.append((args, kwargs))
@@ -108,7 +139,7 @@ def invoke(monkeypatch, states, *, search_steps=None, pursuit_steps=None, max_ac
     monkeypatch.setattr(manager, "execute_marvin_search_step", search)
     monkeypatch.setattr(manager, "execute_marvin_pursuit_step", pursuit_step)
     result = manager.execute_find_marvin_controller(
-        provider, max_actions=max_actions, now=10.0, dry_run=dry_run,
+        provider, max_actions=max_actions, now="2026-09-26T16:00:10+00:00", dry_run=dry_run,
         stop_after_action=stop_after_action)
     return result, provider_calls, evaluator_calls, arrival_calls, search_calls, pursuit_calls
 
@@ -162,12 +193,20 @@ def test_visual_session_routes_to_one_pursuit_step_without_persistent_identity(m
 def test_visual_arrival_stops_without_pursuit_or_identity(monkeypatch):
     manager = BehaviorManager(robot_client=object())
     calls = []
-    evidence_value = {
-        "preview_result": {"fresh": "marvin"},
-        "target_lock_result": {},
-        "target_lock_snapshot": {"tracking_mode": "UNLOCKED"},
-        "selected_identity_id": None,
-    }
+    evidence_values = iter((
+        {
+            "preview_result": arrival_preview(0.56, "2026-09-26T16:00:08+00:00"),
+            "target_lock_result": {},
+            "target_lock_snapshot": {"tracking_mode": "UNLOCKED"},
+            "selected_identity_id": None,
+        },
+        {
+            "preview_result": arrival_preview(0.57, "2026-09-26T16:00:09+00:00"),
+            "target_lock_result": {},
+            "target_lock_snapshot": {"tracking_mode": "UNLOCKED"},
+            "selected_identity_id": None,
+        },
+    ))
     monkeypatch.setattr(
         behavior_manager_module, "evaluate_marvin_pursuit_state",
         lambda *args, **kwargs: {
@@ -185,20 +224,164 @@ def test_visual_arrival_stops_without_pursuit_or_identity(monkeypatch):
         },
     )
     monkeypatch.setattr(manager, "execute_marvin_pursuit_step", lambda *a, **k: calls.append(True))
-    result = manager.execute_find_marvin_controller(lambda: evidence_value, max_actions=1)
+    result = manager.execute_find_marvin_controller(
+        lambda: next(evidence_values), max_actions=1,
+        now="2026-09-26T16:00:10+00:00",
+    )
     assert result["arrived_at_marvin"] is True and result["actions_executed"] == 0
     assert calls == []
 
 
+def run_visual_preview_sequence(monkeypatch, previews, *, max_actions=2):
+    manager = BehaviorManager(robot_client=object())
+    events = []
+    preview_values = iter(previews)
+    pursuit_calls = []
+    search_calls = []
+
+    def provider():
+        value = next(preview_values)
+        events.append(("preview", value["source_timestamp"]))
+        return {
+            "preview_result": value,
+            "target_lock_result": {},
+            "target_lock_snapshot": {"tracking_mode": "UNLOCKED"},
+            "selected_identity_id": None,
+        }
+
+    def pursuit_step(*_args, **_kwargs):
+        events.append(("pursuit", None))
+        pursuit_calls.append(True)
+        return successful_pursuit()
+
+    def search_step(*_args, **_kwargs):
+        events.append(("search", None))
+        search_calls.append(True)
+        return successful_search()
+
+    def stop():
+        events.append(("stop", None))
+        return {"ok": True, "stopped": True}
+
+    monkeypatch.setattr(manager, "execute_marvin_pursuit_step", pursuit_step)
+    monkeypatch.setattr(manager, "execute_marvin_search_step", search_step)
+    result = manager.execute_find_marvin_controller(
+        provider,
+        max_actions=max_actions,
+        now="2026-09-26T16:00:10+00:00",
+        stop_after_action=stop,
+    )
+    return result, events, pursuit_calls, search_calls
+
+
+def test_live_bbox_jump_29583_65417_29375_does_not_complete_arrival(monkeypatch):
+    previews = [
+        arrival_preview(0.29583, "2026-09-26T16:00:08+00:00"),
+        arrival_preview(0.65417, "2026-09-26T16:00:09+00:00"),
+        arrival_preview(0.29375, "2026-09-26T16:00:09.500000+00:00"),
+    ]
+    result, events, pursuits, _searches = run_visual_preview_sequence(
+        monkeypatch, previews, max_actions=2,
+    )
+
+    assert result["arrived_at_marvin"] is False
+    assert result["reason"] == "find_marvin_action_limit_reached"
+    assert result["actions_executed"] == 2
+    assert result["history"][1]["selected_action"] == "confirm_arrival"
+    assert result["history"][1]["arrival"]["arrived_at_marvin"] is True
+    assert result["history"][2]["arrival_candidate_reset"] is True
+    assert result["history"][2]["arrival"]["arrived_at_marvin"] is False
+    assert len(pursuits) == 2
+    candidate_index = events.index(("preview", "2026-09-26T16:00:09+00:00"))
+    confirm_index = events.index(("preview", "2026-09-26T16:00:09.500000+00:00"))
+    assert events[candidate_index + 1:confirm_index] == [("stop", None)]
+
+
+def test_two_consecutive_independent_arrival_previews_complete_without_motion(monkeypatch):
+    result, events, pursuits, searches = run_visual_preview_sequence(
+        monkeypatch,
+        [
+            arrival_preview(0.56, "2026-09-26T16:00:08+00:00"),
+            arrival_preview(0.57, "2026-09-26T16:00:09+00:00"),
+        ],
+        max_actions=1,
+    )
+    assert result["arrived_at_marvin"] is result["completed"] is True
+    assert result["actions_executed"] == 0
+    assert result["arrival_observations_confirmed"] == 2
+    assert pursuits == searches == []
+    assert [event[0] for event in events] == ["preview", "stop", "preview"]
+
+
+def test_arrival_candidate_then_nonarrival_resets_and_replans_from_second_preview(monkeypatch):
+    result, events, pursuits, _searches = run_visual_preview_sequence(
+        monkeypatch,
+        [
+            arrival_preview(0.56, "2026-09-26T16:00:08+00:00"),
+            arrival_preview(0.40, "2026-09-26T16:00:09+00:00"),
+        ],
+        max_actions=1,
+    )
+    assert result["arrived_at_marvin"] is False
+    assert result["history"][1]["arrival_candidate_reset"] is True
+    assert result["actions_executed"] == len(pursuits) == 1
+    assert [event[0] for event in events] == ["preview", "stop", "preview", "pursuit", "stop"]
+
+
+@pytest.mark.parametrize("second", [
+    arrival_preview(0.56, "2026-09-26T16:00:00+00:00"),
+    arrival_preview(0.56, "2026-09-26T16:00:09+00:00", ambiguous=True),
+    arrival_preview(0.56, "2026-09-26T16:00:09+00:00", confirmed=False),
+])
+def test_stale_or_ambiguous_confirmation_cannot_complete_arrival(monkeypatch, second):
+    result, _events, _pursuits, _searches = run_visual_preview_sequence(
+        monkeypatch,
+        [arrival_preview(0.56, "2026-09-26T16:00:08+00:00"), second],
+        max_actions=1,
+    )
+    assert result["arrived_at_marvin"] is False
+    assert result["reason"] == "find_marvin_action_limit_reached"
+    assert result["history"][1]["arrival_candidate_reset"] is True
+
+
+def test_malformed_confirmation_geometry_resets_arrival_candidate(monkeypatch):
+    malformed = arrival_preview(0.56, "2026-09-26T16:00:09+00:00")
+    malformed["bbox"]["x2"] = malformed["bbox"]["x1"]
+    result, _events, _pursuits, _searches = run_visual_preview_sequence(
+        monkeypatch,
+        [arrival_preview(0.56, "2026-09-26T16:00:08+00:00"), malformed],
+        max_actions=1,
+    )
+    assert result["arrived_at_marvin"] is False
+    assert result["history"][1]["arrival_candidate_reset"] is True
+
+
+def test_same_source_timestamp_is_not_two_arrival_confirmations(monkeypatch):
+    stamp = "2026-09-26T16:00:09+00:00"
+    result, events, pursuits, searches = run_visual_preview_sequence(
+        monkeypatch,
+        [arrival_preview(0.56, stamp), arrival_preview(0.57, stamp)],
+        max_actions=1,
+    )
+    assert result["arrived_at_marvin"] is False
+    assert result["completed"] is False
+    assert result["reason"] == "find_marvin_arrival_confirmation_not_independent"
+    assert result["actions_executed"] == 0
+    assert pursuits == searches == []
+    assert [event[0] for event in events] == ["preview", "stop", "preview", "stop"]
+
+
 def test_arrival_stops_before_any_search_or_pursuit_executor(monkeypatch):
     result, providers, evaluations, arrivals, searches, pursuits = invoke(
-        monkeypatch, [pursuit()], arrivals=[arrived()], max_actions=1)
+        monkeypatch, [pursuit(), pursuit()], arrivals=[arrived(), arrived()], max_actions=1)
     assert result["ok"] is result["completed"] is result["arrived_at_marvin"] is True
     assert result["reason"] == "arrived_at_marvin"
     assert result["actions_executed"] == 0
-    assert len(providers) == len(evaluations) == len(arrivals) == 1
+    assert len(providers) == len(evaluations) == len(arrivals) == 2
     assert searches == pursuits == []
     assert result["history"][-1]["route"] == "arrival"
+    assert result["history"][-2]["route"] == "arrival_confirmation"
+    assert result["arrival_observations_confirmed"] == 2
 
 
 def test_arrival_claim_in_searching_state_fails_closed_without_motion(monkeypatch):
@@ -228,17 +411,18 @@ def test_search_then_ready_routes_one_executor_per_fresh_iteration(monkeypatch):
 
 def test_arrival_after_pursuit_uses_fresh_second_iteration_without_extra_action(monkeypatch):
     result, providers, evaluations, arrivals, searches, pursuits = invoke(
-        monkeypatch, [pursuit(), pursuit()], arrivals=[not_arrived(), arrived()], max_actions=2)
-    assert len(providers) == len(evaluations) == len(arrivals) == 2
+        monkeypatch, [pursuit(), pursuit(), pursuit()],
+        arrivals=[not_arrived(), arrived(), arrived()], max_actions=2)
+    assert len(providers) == len(evaluations) == len(arrivals) == 3
     assert searches == [] and len(pursuits) == result["actions_executed"] == 1
     assert result["completed"] is result["arrived_at_marvin"] is True
 
 
 def test_arrival_after_search_then_pursuit_stops_before_next_action(monkeypatch):
     result, _providers, _evaluations, arrivals, searches, pursuits = invoke(
-        monkeypatch, [pursuit("SEARCHING", False), pursuit(), pursuit()],
-        arrivals=[not_arrived(), not_arrived(), arrived()], max_actions=3)
-    assert len(arrivals) == 3 and len(searches) == len(pursuits) == 1
+        monkeypatch, [pursuit("SEARCHING", False), pursuit(), pursuit(), pursuit()],
+        arrivals=[not_arrived(), not_arrived(), arrived(), arrived()], max_actions=3)
+    assert len(arrivals) == 4 and len(searches) == len(pursuits) == 1
     assert result["actions_executed"] == 2 and result["reason"] == "arrived_at_marvin"
 
 
@@ -290,14 +474,14 @@ def test_autonomous_stop_callback_runs_after_every_action_before_fresh_preview(m
 def test_arrival_before_sixth_action_stops_without_exhausting_six_action_budget(monkeypatch):
     result, providers, evaluations, arrivals, searches, pursuits = invoke(
         monkeypatch,
-        [pursuit()] * 6,
-        arrivals=[not_arrived()] * 5 + [arrived()],
+        [pursuit()] * 7,
+        arrivals=[not_arrived()] * 5 + [arrived(), arrived()],
         max_actions=6,
         stop_after_action=lambda: {"ok": True},
     )
     assert result["completed"] is result["arrived_at_marvin"] is True
     assert result["actions_executed"] == len(pursuits) == 5
-    assert searches == [] and len(providers) == len(evaluations) == len(arrivals) == 6
+    assert searches == [] and len(providers) == len(evaluations) == len(arrivals) == 7
 
 
 def test_failed_post_action_stop_prevents_a_new_preview_or_action(monkeypatch):

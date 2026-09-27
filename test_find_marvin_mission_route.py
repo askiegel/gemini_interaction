@@ -173,6 +173,24 @@ def test_action_limit_is_safe_incomplete_not_arrival_success(tmp_path):
     assert runtime.mission_manager.get_active_mission() is None
 
 
+def test_unconfirmed_arrival_candidate_completes_only_as_safe_incomplete(tmp_path):
+    runtime, _behavior = make_runtime(
+        tmp_path,
+        controller_result(
+            reason="find_marvin_arrival_confirmation_not_independent",
+            completed=False,
+            arrived=False,
+        ),
+    )
+
+    runtime.submit_text("Find Marvin")
+    result = runtime.run_once()
+
+    assert result["mission_outcome"] == "safe_incomplete"
+    assert result["arrived_at_marvin"] is False
+    assert result["reason"] == "find_marvin_arrival_confirmation_not_independent"
+
+
 def test_invalid_or_failed_controller_result_fails_closed(tmp_path):
     runtime, behavior = make_runtime(
         tmp_path,

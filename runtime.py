@@ -397,7 +397,10 @@ class CognitiveRuntime:
                 state="ARRIVED_AT_MARVIN",
                 reason="arrived_at_marvin",
             )
-        if controller.get("reason") == "find_marvin_action_limit_reached":
+        if controller.get("reason") in {
+            "find_marvin_action_limit_reached",
+            "find_marvin_arrival_confirmation_not_independent",
+        }:
             return dict(
                 base,
                 ok=True,
@@ -405,7 +408,7 @@ class CognitiveRuntime:
                 arrived_at_marvin=False,
                 mission_outcome="safe_incomplete",
                 state="FIND_MARVIN_SAFE_INCOMPLETE",
-                reason="find_marvin_action_limit_reached",
+                reason=controller["reason"],
             )
         return dict(
             base,
