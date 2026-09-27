@@ -22,6 +22,25 @@ def successful_pursuit():
             "motion_executed": True, "replan_required": True}
 
 
+def nonphysical_stale_replan():
+    return {
+        "ok": True, "decision": "approach_forward", "executed_primitive": None,
+        "motion_executed": False, "replan_required": True,
+        "stale_replan": True, "stale_replan_classification": "NONPHYSICAL_STALE_REPLAN",
+        "action_budget_consumed": False,
+    }
+
+
+def physical_stale_replan():
+    return {
+        "ok": True, "decision": "approach_forward", "executed_primitive": "forward",
+        "motion_executed": True, "motion_possible": True, "replan_required": True,
+        "stale_replan": True,
+        "stale_replan_classification": "PHYSICAL_OR_UNCERTAIN_STALE_REPLAN",
+        "action_budget_consumed": True,
+    }
+
+
 def successful_search(action="turn_left"):
     return {"ok": True, "decision": "search_turn", "search_action": action,
             "executed_primitive": "guarded_turn_left", "motion_executed": True,
@@ -289,6 +308,52 @@ def test_failed_post_action_stop_prevents_a_new_preview_or_action(monkeypatch):
     assert result["reason"] == "find_marvin_post_action_stop_failed"
     assert result["actions_executed"] == 1
     assert len(providers) == len(pursuits) == 1 and searches == []
+
+
+def test_nonphysical_stale_replan_stops_then_requires_fresh_state_without_spending_budget(monkeypatch):
+    stops = []
+    result, providers, evaluations, _arrivals, searches, pursuits = invoke(
+        monkeypatch,
+        [pursuit(), pursuit()],
+        pursuit_steps=[nonphysical_stale_replan(), successful_pursuit()],
+        max_actions=1,
+        stop_after_action=lambda: stops.append(True) or {"ok": True},
+    )
+    assert result["ok"] is True and result["reason"] == "find_marvin_action_limit_reached"
+    assert result["actions_executed"] == 1 and result["stale_replans"] == 1
+    assert len(providers) == len(evaluations) == len(pursuits) == len(stops) == 2
+    assert searches == []
+    assert result["history"][0]["action_budget_consumed"] is False
+    assert result["history"][1]["action_budget_consumed"] is True
+
+
+def test_physical_or_uncertain_stale_replan_consumes_budget_without_pursuit_failure(monkeypatch):
+    stops = []
+    result, providers, evaluations, _arrivals, searches, pursuits = invoke(
+        monkeypatch,
+        [pursuit()], pursuit_steps=[physical_stale_replan()], max_actions=1,
+        stop_after_action=lambda: stops.append(True) or {"ok": True},
+    )
+    assert result["ok"] is True and result["reason"] == "find_marvin_action_limit_reached"
+    assert result["actions_executed"] == 1 and result["stale_replans"] == 0
+    assert len(providers) == len(evaluations) == len(pursuits) == len(stops) == 1
+    assert searches == [] and result["history"][0]["action_budget_consumed"] is True
+
+
+def test_second_nonphysical_stale_replan_terminates_with_finite_separate_cap(monkeypatch):
+    stops = []
+    result, providers, evaluations, _arrivals, searches, pursuits = invoke(
+        monkeypatch,
+        [pursuit(), pursuit()],
+        pursuit_steps=[nonphysical_stale_replan(), nonphysical_stale_replan()],
+        max_actions=1,
+        stop_after_action=lambda: stops.append(True) or {"ok": True},
+    )
+    assert result["ok"] is False
+    assert result["reason"] == "find_marvin_nonphysical_stale_replan_limit_reached"
+    assert result["actions_executed"] == 0 and result["stale_replans"] == 2
+    assert len(providers) == len(evaluations) == len(pursuits) == len(stops) == 2
+    assert searches == []
 
 
 def test_default_budget_stops_an_alternating_stream_at_six(monkeypatch):

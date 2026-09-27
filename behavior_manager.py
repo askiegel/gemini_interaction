@@ -518,6 +518,11 @@ class BehaviorManager:
     FIND_APPROACH_FORWARD_SPEED = 0.08
     FIND_APPROACH_FORWARD_SECONDS = 0.50
     FIND_APPROACH_MAX_CHUNKS = 4
+    # A stale LiDAR veto proven to have occurred before transport begins is
+    # not a physical action.  Permit one such fresh-perception replan in a
+    # bounded autonomous episode; every other executor attempt remains under
+    # the physical-action budget.
+    MAX_NONPHYSICAL_STALE_REPLANS = 1
     FIND_ARRIVAL_AREA = 75000.0
     MARVIN_ONE_STEP_LIDAR_REFRESH_MAX_ATTEMPTS = 3
     MARVIN_ONE_STEP_LIDAR_REFRESH_POLL_SECONDS = 0.05
@@ -1912,6 +1917,10 @@ class BehaviorManager:
             "reason": None,
             "max_actions": max_actions,
             "actions_executed": 0,
+            "stale_replans": 0,
+            "maximum_nonphysical_stale_replans": (
+                self.MAX_NONPHYSICAL_STALE_REPLANS
+            ),
             "history": [],
         }
         if (
@@ -1945,7 +1954,10 @@ class BehaviorManager:
 
         selected_identity_id = None
         search_history = []
-        for _action_index in range(max_actions):
+        # ``actions_executed`` counts physical or delivery-uncertain actions.
+        # A verified pre-transport stale veto can replan once without spending
+        # that budget, but this loop remains finite through its separate cap.
+        while base["actions_executed"] < max_actions:
             try:
                 evidence = state_provider()
             except Exception as exc:
@@ -2007,7 +2019,8 @@ class BehaviorManager:
                 "search_action": None,
                 "search_step_result": None,
                 "pursuit_step_result": None,
-                "action_index": base["actions_executed"] + 1,
+                "action_index": len(base["history"]) + 1,
+                "action_budget_consumed": False,
             }
             if selected_identity_id is None:
                 selected_identity_id = current_identity_id
@@ -2266,13 +2279,46 @@ class BehaviorManager:
                     history=list(base["history"]),
                     reason="find_marvin_post_action_stop_failed",
                 )
+            stale_replan = bool(
+                isinstance(step, dict) and step.get("stale_replan") is True
+            )
+            budget_consumed = not (
+                stale_replan
+                and isinstance(step, dict)
+                and step.get("action_budget_consumed") is False
+            )
+            history_entry["action_budget_consumed"] = budget_consumed
+            if stale_replan:
+                if not budget_consumed:
+                    base["actions_executed"] -= 1
+                    base["stale_replans"] += 1
+                    if (
+                        base["stale_replans"]
+                        > self.MAX_NONPHYSICAL_STALE_REPLANS
+                    ):
+                        return dict(
+                            base,
+                            history=list(base["history"]),
+                            reason="find_marvin_nonphysical_stale_replan_limit_reached",
+                        )
+                # STOP has completed.  The next loop iteration begins by
+                # obtaining a new Preview/state bundle; it never reuses this
+                # geometry or perception snapshot and never resends in-place.
+                continue
             if not isinstance(step, dict) or step.get("ok") is not True:
                 return dict(
                     base,
                     history=list(base["history"]),
                     reason="find_marvin_pursuit_step_failed",
                 )
-            if step.get("motion_executed") is not True:
+            if (
+                step.get("motion_executed") is not True
+                and not (
+                    stale_replan
+                    and step.get("motion_possible") is True
+                    and budget_consumed
+                )
+            ):
                 return dict(
                     base,
                     history=list(base["history"]),
@@ -2424,9 +2470,51 @@ class BehaviorManager:
             )
         base["forward_safety"] = safety
         if not self._marvin_pursuit_lidar_is_trusted(lidar, safety, session):
+            if self._marvin_lidar_reason_is_stale(lidar, safety):
+                return dict(
+                    base,
+                    ok=True,
+                    decision="approach_forward",
+                    executed_primitive=None,
+                    stale_replan=True,
+                    stale_replan_classification="NONPHYSICAL_STALE_REPLAN",
+                    action_budget_consumed=False,
+                    replan_required=True,
+                    reason="marvin_pursuit_pre_dispatch_lidar_stale",
+                )
             return dict(base, reason="marvin_pursuit_lidar_not_trusted")
 
         if safety.get("permitted") is True:
+            # The initial geometry check above establishes the route.  Refresh
+            # the same active producer-bound snapshot and interlock directly
+            # before transport so an expiring authorization is never reused.
+            dispatch = self._prepare_marvin_forward_dispatch(
+                expected_session=session,
+                now=now,
+            )
+            base["pre_dispatch_forward_safety"] = dispatch.get("safety")
+            base["pre_dispatch_interlock"] = dispatch.get("interlock")
+            if dispatch.get("status") == "nonphysical_stale_replan":
+                return dict(
+                    base,
+                    ok=True,
+                    decision="approach_forward",
+                    executed_primitive=None,
+                    stale_replan=True,
+                    stale_replan_classification="NONPHYSICAL_STALE_REPLAN",
+                    action_budget_consumed=False,
+                    replan_required=True,
+                    reason=dispatch.get("reason"),
+                )
+            if dispatch.get("status") != "ready":
+                return dict(
+                    base,
+                    decision="approach_forward",
+                    executed_primitive=None,
+                    reason=dispatch.get(
+                        "reason", "marvin_pursuit_pre_dispatch_not_authorized"
+                    ),
+                )
             try:
                 forward = self.robot.move_forward(
                     speed=self.FIND_APPROACH_FORWARD_SPEED,
@@ -2446,6 +2534,41 @@ class BehaviorManager:
                 speed=self.FIND_APPROACH_FORWARD_SPEED,
                 duration=self.FIND_APPROACH_FORWARD_SECONDS,
             )
+            classification = self._classify_marvin_forward_result(forward)
+            if classification == "NONPHYSICAL_STALE_REPLAN":
+                return dict(
+                    base,
+                    ok=True,
+                    decision="approach_forward",
+                    executed_primitive="forward",
+                    forward_result=forward,
+                    stale_replan=True,
+                    stale_replan_classification=classification,
+                    action_budget_consumed=False,
+                    replan_required=True,
+                    reason="marvin_pursuit_nonphysical_stale_replan",
+                )
+            if classification == "PHYSICAL_OR_UNCERTAIN_STALE_REPLAN":
+                transport = forward.get("transport_result") if isinstance(forward, dict) else None
+                bridge_completed = self._is_canonical_marvin_bounded_forward_result(
+                    transport,
+                    speed=self.FIND_APPROACH_FORWARD_SPEED,
+                    duration=self.FIND_APPROACH_FORWARD_SECONDS,
+                )
+                return dict(
+                    base,
+                    ok=True,
+                    decision="approach_forward",
+                    executed_primitive="forward",
+                    forward_result=forward,
+                    stale_replan=True,
+                    stale_replan_classification=classification,
+                    action_budget_consumed=True,
+                    motion_executed=bridge_completed,
+                    motion_possible=True,
+                    replan_required=True,
+                    reason="marvin_pursuit_physical_or_uncertain_stale_replan",
+                )
             forward_ok = bool(
                 isinstance(forward, dict)
                 and forward.get("ok") is True
@@ -2576,8 +2699,17 @@ class BehaviorManager:
             return result
         if result.get("executed") is True:
             return result
+        canonical = BehaviorManager._is_canonical_marvin_bounded_forward_result(
+            result, speed=speed, duration=duration,
+        )
+        return dict(result, executed=True) if canonical else result
+
+    @staticmethod
+    def _is_canonical_marvin_bounded_forward_result(result, *, speed, duration):
+        if not isinstance(result, dict) or result.get("ok") is not True:
+            return False
         try:
-            canonical = (
+            return bool(
                 result.get("action") == "motion"
                 and result.get("mode") == "bounded"
                 and result.get("automatic_stop") is True
@@ -2587,8 +2719,91 @@ class BehaviorManager:
                 and float(result.get("duration")) == float(duration)
             )
         except (TypeError, ValueError):
-            canonical = False
-        return dict(result, executed=True) if canonical else result
+            return False
+
+    @staticmethod
+    def _marvin_lidar_reason_is_stale(lidar, safety, interlock_reason=None):
+        stale_reasons = {"stale", "stale_lidar", "not_fresh"}
+        values = (
+            lidar.get("reason") if isinstance(lidar, dict) else None,
+            safety.get("reason") if isinstance(safety, dict) else None,
+            interlock_reason,
+        )
+        return any(value in stale_reasons for value in values)
+
+    @staticmethod
+    def _classify_marvin_forward_result(result):
+        """Classify only recognized stale outcomes; all others fail closed."""
+        if not isinstance(result, dict):
+            return "REAL_FAILURE"
+        stale_reason = result.get("reason") or result.get("error")
+        if stale_reason not in {"stale", "stale_lidar", "not_fresh"}:
+            return "REAL_FAILURE"
+        transport = result.get("transport_result")
+        transport_started = bool(
+            result.get("transport_attempted") is True
+            or result.get("forwarded") is True
+            or isinstance(transport, dict)
+            or result.get("delivery_uncertain") is True
+        )
+        if (
+            result.get("forwarded") is False
+            and not transport_started
+            and not isinstance(transport, dict)
+        ):
+            return "NONPHYSICAL_STALE_REPLAN"
+        return "PHYSICAL_OR_UNCERTAIN_STALE_REPLAN"
+
+    def _prepare_marvin_forward_dispatch(self, *, expected_session, now):
+        """Refresh current LiDAR/interlock immediately before Marvin forward.
+
+        This never acquires LiDAR itself.  It uses the active runtime worker's
+        producer-bound World Model snapshot and the already configured
+        interlock, preserving the normal freshness and geometry contracts.
+        """
+        result = {"status": "denied", "reason": None, "safety": None,
+                  "interlock": None}
+        if expected_session is None or self.world_model is None:
+            return dict(result, reason="lidar_producer_session_unavailable")
+        interlock = getattr(self.robot, "forward_interlock", None)
+        refresh = getattr(interlock, "refresh", None)
+        if not callable(refresh):
+            return dict(result, reason="forward_interlock_refresh_unavailable")
+        try:
+            lidar = self.world_model.get_lidar_obstacles(
+                expected_session=expected_session, now=now,
+            )
+            safety = evaluate_local_motion_safety(
+                lidar,
+                expected_session=expected_session,
+                linear_x=self.FIND_APPROACH_FORWARD_SPEED,
+                duration=self.FIND_APPROACH_FORWARD_SECONDS,
+                now=now,
+            )
+        except Exception as exc:
+            return dict(result, reason="marvin_pursuit_pre_dispatch_lidar_read_or_evaluation_failed",
+                        error=str(exc), error_type=type(exc).__name__)
+        result["safety"] = safety
+        if not self._marvin_pursuit_lidar_is_trusted(lidar, safety, expected_session):
+            if self._marvin_lidar_reason_is_stale(lidar, safety):
+                return dict(result, status="nonphysical_stale_replan",
+                            reason="marvin_pursuit_pre_dispatch_lidar_stale")
+            return dict(result, reason="marvin_pursuit_pre_dispatch_lidar_not_trusted")
+        if safety.get("permitted") is not True:
+            return dict(result, reason="marvin_pursuit_pre_dispatch_translation_vetoed")
+        try:
+            permitted, reason = refresh()
+        except Exception as exc:
+            return dict(result, reason="forward_interlock_refresh_failed",
+                        error=str(exc), error_type=type(exc).__name__)
+        result["interlock"] = {"permitted": permitted, "reason": reason,
+                               "producer_session": expected_session}
+        if permitted is not True:
+            if self._marvin_lidar_reason_is_stale(lidar, safety, reason):
+                return dict(result, status="nonphysical_stale_replan",
+                            reason="marvin_pursuit_pre_dispatch_interlock_stale")
+            return dict(result, reason=reason or "forward_interlock_not_permitted")
+        return dict(result, status="ready", reason="fresh_pre_dispatch_authorized")
 
     @staticmethod
     def _marvin_pursuit_lidar_is_trusted(lidar, safety, session):

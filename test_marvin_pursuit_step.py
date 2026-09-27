@@ -9,12 +9,23 @@ from behavior_manager import BehaviorManager
 SESSION = "marvin-pursuit-session"
 
 
+class Interlock:
+    def __init__(self, results=None):
+        self.results = iter(results or [(True, "fresh_clear")])
+        self.calls = 0
+
+    def refresh(self):
+        self.calls += 1
+        return next(self.results)
+
+
 class Robot:
-    def __init__(self, result=None, error=None):
+    def __init__(self, result=None, error=None, interlock=None):
         self.forward_calls = 0
         self.forward_requests = []
         self.result = result if result is not None else {"ok": True, "executed": True}
         self.error = error
+        self.forward_interlock = interlock or Interlock()
 
     def move_forward(self, *, speed, seconds):
         self.forward_calls += 1
@@ -74,6 +85,8 @@ def invoke(monkeypatch, *, pursuit=None, forward_safety=None, robot=None,
 
     def evaluate_safety(*args, **kwargs):
         safety_calls.append((args, kwargs))
+        if isinstance(forward_safety, list):
+            return forward_safety.pop(0)
         return safety(permitted=True) if forward_safety is None else forward_safety
 
     def avoid(**kwargs):
@@ -105,7 +118,9 @@ def test_ready_and_clear_dispatches_one_forward_then_requires_replan(monkeypatch
     assert result["decision"] == "approach_forward"
     assert robot.forward_calls == 1 and avoids == []
     assert robot.forward_requests == [(0.08, 0.50)]
-    assert world.calls == [(SESSION, 10.0)] and len(pursuit_calls) == len(safety_calls) == 1
+    assert world.calls == [(SESSION, 10.0), (SESSION, 10.0)]
+    assert len(pursuit_calls) == 1 and len(safety_calls) == 2
+    assert robot.forward_interlock.calls == 1
     assert_one_primitive(robot, avoids)
 
 
@@ -136,7 +151,7 @@ def test_visual_centered_uses_existing_lidar_gated_forward_path(monkeypatch):
         inputs=(visual_preview(centered=True), {}, {"tracking_mode": "UNLOCKED"}),
     )
     assert result["decision"] == "approach_forward"
-    assert robot.forward_calls == 1 and len(safety_calls) == 1 and avoids == []
+    assert robot.forward_calls == 1 and len(safety_calls) == 2 and avoids == []
     assert robot.forward_requests == [(0.08, 0.50)]
 
 
@@ -154,23 +169,65 @@ def test_canonical_bounded_bridge_result_is_normalized_and_replans(monkeypatch):
     assert robot.forward_requests == [(0.08, 0.50)] and avoids == []
 
 
-def test_partial_or_safety_invalidated_bridge_success_never_normalizes(monkeypatch):
+def test_partial_bridge_success_never_normalizes(monkeypatch):
     malformed = {
         "ok": True, "action": "motion", "mode": "bounded",
         "linear_x": 0.08, "angular_z": 0.0, "duration": 0.50,
         "automatic_stop": True,
     }
-    invalidated = {
-        **malformed, "returned_immediately": False,
-        "bounded_forward_invalidated": True,
-    }
-    for bridge_result in (malformed, invalidated, {"ok": False}):
+    for bridge_result in (malformed, {"ok": False}):
         result, robot, _world, _calls, _safety, avoids = invoke(
             monkeypatch, robot=Robot(result=bridge_result),
         )
         assert result["ok"] is result["motion_executed"] is False
         assert result["replan_required"] is False
         assert robot.forward_requests == [(0.08, 0.50)] and avoids == []
+
+
+def test_pre_dispatch_stale_veto_never_calls_robot_and_requests_replan(monkeypatch):
+    stale = {"permitted": False, "reason": "stale", "geometry": None}
+    result, robot, world, _calls, safety_calls, avoids = invoke(
+        monkeypatch, forward_safety=[safety(permitted=True), stale],
+    )
+    assert result["ok"] is True and result["motion_executed"] is False
+    assert result["replan_required"] is result["stale_replan"] is True
+    assert result["stale_replan_classification"] == "NONPHYSICAL_STALE_REPLAN"
+    assert result["action_budget_consumed"] is False
+    assert robot.forward_calls == 0 and avoids == []
+    assert world.calls == [(SESSION, 10.0), (SESSION, 10.0)]
+    assert len(safety_calls) == 2
+
+
+def test_post_transport_stale_invalidation_is_physical_or_uncertain_replan(monkeypatch):
+    bridge_result = {
+        "ok": False, "forwarded": True, "transport_attempted": True,
+        "bounded_forward_invalidated": True, "reason": "stale",
+        "transport_result": {
+            "ok": True, "action": "motion", "mode": "bounded",
+            "linear_x": 0.08, "angular_z": 0.0, "duration": 0.50,
+            "automatic_stop": True, "returned_immediately": False,
+        },
+    }
+    result, robot, _world, _calls, _safety, avoids = invoke(
+        monkeypatch, robot=Robot(result=bridge_result),
+    )
+    assert result["ok"] is result["replan_required"] is True
+    assert result["stale_replan_classification"] == "PHYSICAL_OR_UNCERTAIN_STALE_REPLAN"
+    assert result["action_budget_consumed"] is result["motion_executed"] is True
+    assert result["motion_possible"] is True
+    assert robot.forward_requests == [(0.08, 0.50)] and avoids == []
+
+
+def test_verified_no_transport_stale_result_is_nonphysical_replan(monkeypatch):
+    result, robot, _world, _calls, _safety, avoids = invoke(
+        monkeypatch,
+        robot=Robot(result={"ok": False, "forwarded": False, "reason": "stale"}),
+    )
+    assert result["ok"] is result["replan_required"] is True
+    assert result["motion_executed"] is False
+    assert result["stale_replan_classification"] == "NONPHYSICAL_STALE_REPLAN"
+    assert result["action_budget_consumed"] is False
+    assert robot.forward_calls == 1 and avoids == []
 
 
 def test_ready_and_trusted_blockage_calls_only_one_avoidance_step(monkeypatch):
