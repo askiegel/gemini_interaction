@@ -12,11 +12,13 @@ SESSION = "marvin-pursuit-session"
 class Robot:
     def __init__(self, result=None, error=None):
         self.forward_calls = 0
+        self.forward_requests = []
         self.result = result if result is not None else {"ok": True, "executed": True}
         self.error = error
 
-    def local_forward(self):
+    def move_forward(self, *, speed, seconds):
         self.forward_calls += 1
+        self.forward_requests.append((speed, seconds))
         if self.error:
             raise self.error
         return self.result
@@ -102,6 +104,7 @@ def test_ready_and_clear_dispatches_one_forward_then_requires_replan(monkeypatch
     assert result["ok"] is result["motion_executed"] is result["replan_required"] is True
     assert result["decision"] == "approach_forward"
     assert robot.forward_calls == 1 and avoids == []
+    assert robot.forward_requests == [(0.08, 0.50)]
     assert world.calls == [(SESSION, 10.0)] and len(pursuit_calls) == len(safety_calls) == 1
     assert_one_primitive(robot, avoids)
 
@@ -134,6 +137,7 @@ def test_visual_centered_uses_existing_lidar_gated_forward_path(monkeypatch):
     )
     assert result["decision"] == "approach_forward"
     assert robot.forward_calls == 1 and len(safety_calls) == 1 and avoids == []
+    assert robot.forward_requests == [(0.08, 0.50)]
 
 
 def test_ready_and_trusted_blockage_calls_only_one_avoidance_step(monkeypatch):

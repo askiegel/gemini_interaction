@@ -2428,7 +2428,10 @@ class BehaviorManager:
 
         if safety.get("permitted") is True:
             try:
-                forward = self.robot.local_forward()
+                forward = self.robot.move_forward(
+                    speed=self.FIND_APPROACH_FORWARD_SPEED,
+                    seconds=self.FIND_APPROACH_FORWARD_SECONDS,
+                )
             except Exception as exc:
                 return dict(
                     base,
@@ -2525,7 +2528,10 @@ class BehaviorManager:
         if safety.get("permitted") is not True:
             return dict(base, reason="marvin_single_approach_translation_vetoed")
         try:
-            forward = self.robot.local_forward()
+            forward = self.robot.move_forward(
+                speed=self.FIND_APPROACH_FORWARD_SPEED,
+                seconds=self.FIND_APPROACH_FORWARD_SECONDS,
+            )
         except Exception as exc:
             return dict(base, decision="approach_forward", executed_primitive="forward",
                         reason="marvin_single_approach_forward_exception",

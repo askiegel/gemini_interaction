@@ -24,10 +24,12 @@ def lidar():
 class Robot:
     def __init__(self):
         self.forward_calls = 0
+        self.forward_requests = []
         self.stop_calls = 0
 
-    def local_forward(self):
+    def move_forward(self, *, speed, seconds):
         self.forward_calls += 1
+        self.forward_requests.append((speed, seconds))
         return {"ok": True, "executed": True}
 
     def stop(self):
@@ -61,6 +63,7 @@ def test_behavior_uses_existing_lidar_safety_then_one_forward_without_avoidance(
         expected_lidar_session=SESSION, linear_speed=0.08, duration=0.50)
     assert result["ok"] is result["motion_executed"] is True
     assert robot.forward_calls == 1 and world.calls == [SESSION] and len(calls) == 1
+    assert robot.forward_requests == [(0.08, 0.50)]
     assert calls[0][1]["linear_x"] == 0.08 and calls[0][1]["duration"] == 0.50
     manager.execute_local_obstacle_avoidance_step.assert_not_called()
 
