@@ -57,12 +57,12 @@ def active_runtime():
 
 def test_capped_autonomous_run_uses_active_controller_and_stops_each_action():
     runtime, robot = active_runtime()
-    result = runtime.execute_bounded_find_marvin_autonomous(max_actions=3)
+    result = runtime.execute_bounded_find_marvin_autonomous(max_actions=6)
     assert result["ok"] is result["motion_executed"] is True
-    assert result["execution_authorized"] is True and result["actions_executed"] == 3
+    assert result["execution_authorized"] is True and result["actions_executed"] == 6
     assert len(runtime.behavior_manager.calls) == 1
     _provider, limit, dry_run, _stop = runtime.behavior_manager.calls[0]
-    assert limit == 3 and dry_run is False and robot.stop.call_count == 3
+    assert limit == 6 and dry_run is False and robot.stop.call_count == 6
     assert runtime.behavior_manager.target_lock.resolve.call_count == 0
     assert runtime.world_model.update_entity.call_count == 0
     assert robot.local_forward.call_count == 0
@@ -70,9 +70,10 @@ def test_capped_autonomous_run_uses_active_controller_and_stops_each_action():
 
 def test_cap_and_one_shot_guard_prevent_unbounded_or_repeated_runs():
     runtime, robot = active_runtime()
-    assert runtime.execute_bounded_find_marvin_autonomous(max_actions=4)["reason"] == "marvin_autonomous_action_limit_invalid"
+    for invalid in (0, -1, 7, 1.5, True):
+        assert runtime.execute_bounded_find_marvin_autonomous(max_actions=invalid)["reason"] == "marvin_autonomous_action_limit_invalid"
     assert runtime.behavior_manager.calls == [] and robot.stop.call_count == 0
-    assert runtime.execute_bounded_find_marvin_autonomous(max_actions=3)["ok"] is True
+    assert runtime.execute_bounded_find_marvin_autonomous(max_actions=6)["ok"] is True
     second = runtime.execute_bounded_find_marvin_autonomous(max_actions=1)
     assert second["reason"] == "marvin_autonomous_run_already_consumed"
     assert len(runtime.behavior_manager.calls) == 1
@@ -81,7 +82,7 @@ def test_cap_and_one_shot_guard_prevent_unbounded_or_repeated_runs():
 def test_runtime_refuses_missing_active_lidar_session_without_controller():
     runtime, robot = active_runtime()
     runtime.lidar_worker = SimpleNamespace(session=None, running=True)
-    result = runtime.execute_bounded_find_marvin_autonomous(max_actions=3)
+    result = runtime.execute_bounded_find_marvin_autonomous(max_actions=6)
     assert result["reason"] == "marvin_autonomous_lidar_session_unavailable"
     assert runtime.behavior_manager.calls == [] and robot.stop.call_count == 0
 
@@ -93,11 +94,11 @@ def test_endpoint_requires_exact_schema_and_only_delegates_to_bounded_runtime_me
     handler.server = SimpleNamespace(runtime=runtime)
     responses = []
     handler.send_json = lambda code, payload: responses.append((code, payload))
-    handler.require_json_request = Mock(return_value={"max_actions": 3})
+    handler.require_json_request = Mock(return_value={"max_actions": 6})
     handler.do_POST()
-    runtime.execute_bounded_find_marvin_autonomous.assert_called_once_with(max_actions=3)
+    runtime.execute_bounded_find_marvin_autonomous.assert_called_once_with(max_actions=6)
     assert responses == [(200, {"ok": True})]
-    handler.require_json_request = Mock(return_value={"max_actions": 3, "extra": True})
+    handler.require_json_request = Mock(return_value={"max_actions": 6, "extra": True})
     handler.do_POST()
     assert runtime.execute_bounded_find_marvin_autonomous.call_count == 1
     assert responses[-1][0] == 400

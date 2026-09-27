@@ -258,14 +258,27 @@ def test_autonomous_stop_callback_runs_after_every_action_before_fresh_preview(m
     stops = []
     result, providers, evaluations, _arrivals, searches, pursuits = invoke(
         monkeypatch,
-        [pursuit(), pursuit(), pursuit()],
-        max_actions=3,
+        [pursuit()] * 6,
+        max_actions=6,
         stop_after_action=lambda: stops.append(True) or {"ok": True},
     )
-    assert result["actions_executed"] == 3
-    assert len(providers) == len(evaluations) == len(stops) == 3
-    assert searches == [] and len(pursuits) == 3
+    assert result["actions_executed"] == 6
+    assert len(providers) == len(evaluations) == len(stops) == 6
+    assert searches == [] and len(pursuits) == 6
     assert all(entry["stop_result"] == {"ok": True} for entry in result["history"])
+
+
+def test_arrival_before_sixth_action_stops_without_exhausting_six_action_budget(monkeypatch):
+    result, providers, evaluations, arrivals, searches, pursuits = invoke(
+        monkeypatch,
+        [pursuit()] * 6,
+        arrivals=[not_arrived()] * 5 + [arrived()],
+        max_actions=6,
+        stop_after_action=lambda: {"ok": True},
+    )
+    assert result["completed"] is result["arrived_at_marvin"] is True
+    assert result["actions_executed"] == len(pursuits) == 5
+    assert searches == [] and len(providers) == len(evaluations) == len(arrivals) == 6
 
 
 def test_failed_post_action_stop_prevents_a_new_preview_or_action(monkeypatch):
