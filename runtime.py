@@ -2,6 +2,7 @@
 
 import argparse
 import json
+import math
 import signal
 import threading
 import time
@@ -18,6 +19,27 @@ from tracking_state import build_tracking_state, empty_tracking_state
 from vision_adapter import VisionAdapter
 from semantic_vision import SemanticVisionClient
 from world_model import WorldModel
+
+
+def _bounded_alignment_number(value, *, maximum):
+    return (
+        isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and math.isfinite(value)
+        and 0.0 < float(value) <= maximum
+    )
+
+
+def _marvin_alignment_lidar_is_current(value, session):
+    return (
+        isinstance(value, dict)
+        and value.get("available") is True
+        and value.get("valid") is True
+        and value.get("reason") == "fresh"
+        and value.get("producer_session") == session
+        and isinstance(value.get("local_motion_geometry"), dict)
+        and value["local_motion_geometry"].get("valid") is True
+    )
 
 
 class CognitiveRuntime:
@@ -92,6 +114,7 @@ class CognitiveRuntime:
         self.last_error: Optional[str] = None
         self.tracking_state: Dict[str, Any] = empty_tracking_state()
         self._state_lock = threading.RLock()
+        self._marvin_alignment_step_consumed = False
         self._last_runtime_state = None
         self._control_generation = 0
         self._behavior_execution_generation = None
@@ -240,6 +263,114 @@ class CognitiveRuntime:
             next_route=result.get("next_route", "none"),
             execution_authorized=False,
             motion_executed=False,
+        )
+
+    def execute_single_marvin_alignment(
+        self, *, direction, angular_speed, duration,
+    ):
+        """Execute one capped, guarded Marvin alignment turn and then stop.
+
+        This is intentionally not a controller, mission, or general motion
+        interface.  It delegates one angular-only request to the active
+        BehaviorManager so its in-memory LiDAR producer session is preserved.
+        """
+        base = {
+            "ok": False,
+            "action": "single_marvin_alignment_turn",
+            "execution_authorized": False,
+            "motion_executed": False,
+            "actions_executed": 0,
+            "direction": None,
+            "angular_speed": None,
+            "duration": None,
+            "producer_session": None,
+            "turn_result": None,
+            "stop_result": None,
+            "reason": None,
+        }
+        normalized_direction = (
+            direction.strip().upper() if isinstance(direction, str) else None
+        )
+        if normalized_direction not in {"LEFT", "RIGHT"}:
+            return dict(base, reason="marvin_alignment_direction_invalid")
+        if not _bounded_alignment_number(angular_speed, maximum=0.25):
+            return dict(base, reason="marvin_alignment_angular_speed_invalid")
+        if not _bounded_alignment_number(duration, maximum=0.50):
+            return dict(base, reason="marvin_alignment_duration_invalid")
+        base.update(
+            direction=normalized_direction,
+            angular_speed=float(angular_speed),
+            duration=float(duration),
+        )
+        if self.running is not True:
+            return dict(base, reason="marvin_alignment_runtime_not_running")
+        behavior = getattr(self, "behavior_manager", None)
+        execute_turn = getattr(behavior, "_execute_target_directed_turn", None)
+        robot = getattr(behavior, "robot", None)
+        stop = getattr(robot, "stop", None)
+        if not callable(execute_turn) or not callable(stop):
+            return dict(base, reason="marvin_alignment_guarded_turn_unavailable")
+        worker = getattr(self, "lidar_worker", None)
+        session = getattr(worker, "session", None)
+        if worker is None or worker.running is not True or not isinstance(session, str) or not session:
+            return dict(base, reason="marvin_alignment_lidar_session_unavailable")
+        base["producer_session"] = session
+        world_model = getattr(self, "world_model", None)
+        get_lidar = getattr(world_model, "get_lidar_obstacles", None)
+        if not callable(get_lidar):
+            return dict(base, reason="marvin_alignment_lidar_read_unavailable")
+        try:
+            lidar = get_lidar(expected_session=session)
+        except Exception as exc:
+            return dict(base, reason="marvin_alignment_lidar_read_failed", error=str(exc))
+        if not _marvin_alignment_lidar_is_current(lidar, session):
+            return dict(base, reason="marvin_alignment_lidar_not_current", lidar=lidar)
+
+        with self._state_lock:
+            if self._marvin_alignment_step_consumed:
+                return dict(base, reason="marvin_alignment_step_already_consumed")
+            self._marvin_alignment_step_consumed = True
+
+        base["execution_authorized"] = True
+        try:
+            turn = execute_turn(
+                normalized_direction,
+                float(angular_speed),
+                float(duration),
+                expected_lidar_session=session,
+            )
+        except Exception as exc:
+            try:
+                stop_result = stop()
+            except Exception as stop_exc:
+                stop_result = {"ok": False, "error": str(stop_exc)}
+            return dict(
+                base, actions_executed=1, turn_result=None,
+                stop_result=stop_result, reason="marvin_alignment_turn_exception",
+                error=str(exc), error_type=type(exc).__name__,
+            )
+        try:
+            stop_result = stop()
+        except Exception as exc:
+            stop_result = {"ok": False, "error": str(exc), "error_type": type(exc).__name__}
+        motion_executed = bool(
+            isinstance(turn, dict)
+            and turn.get("ok") is True
+            and turn.get("permitted") is True
+            and turn.get("confirmed_forwarded") is True
+        )
+        stop_ok = isinstance(stop_result, dict) and stop_result.get("ok") is True
+        return dict(
+            base,
+            ok=motion_executed and stop_ok,
+            motion_executed=motion_executed,
+            actions_executed=1,
+            turn_result=turn,
+            stop_result=stop_result,
+            reason=(
+                "marvin_alignment_turn_complete" if motion_executed and stop_ok
+                else "marvin_alignment_turn_or_stop_failed"
+            ),
         )
 
     def confirm_find_marvin_identity(self, *, confirm=False):

@@ -470,6 +470,7 @@ class RuntimeAPIHandler(BaseHTTPRequestHandler):
 
         supported_paths = {
             "/guarded-turn",
+            "/find-marvin/alignment-step",
             "/find-marvin/controller",
             "/find-marvin/confirm-identity",
             "/missions",
@@ -544,6 +545,21 @@ class RuntimeAPIHandler(BaseHTTPRequestHandler):
                     expected_lidar_session=producer_session,
                 )
                 self.send_json(200, result)
+                return
+
+            if path == "/find-marvin/alignment-step":
+                required_fields = {"direction", "angular_speed", "duration"}
+                if set(request_data) != required_fields:
+                    raise ValueError(
+                        "find-marvin/alignment-step requires exactly direction, "
+                        "angular_speed, and duration."
+                    )
+                result = self.server.runtime.execute_single_marvin_alignment(
+                    direction=request_data["direction"],
+                    angular_speed=request_data["angular_speed"],
+                    duration=request_data["duration"],
+                )
+                self.send_json(200 if result.get("ok") is True else 409, result)
                 return
 
             if path == "/find-marvin/controller":
