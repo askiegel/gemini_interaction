@@ -285,6 +285,20 @@ class RuntimeAPIHandler(BaseHTTPRequestHandler):
                 )
             return
 
+        if path == "/find-marvin/identity-episode":
+            try:
+                result = (
+                    self.server.runtime.behavior_manager
+                    .build_marvin_identity_episode_diagnostic()
+                )
+                self.send_json(200, result)
+            except Exception as exc:
+                self.send_json(
+                    500,
+                    {"ok": False, "error": str(exc)},
+                )
+            return
+
         if path == "/config":
             self.send_json(
                 200,

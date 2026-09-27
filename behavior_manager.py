@@ -1693,6 +1693,155 @@ class BehaviorManager:
             "identity_refresh": identity_refresh,
         }
 
+    def build_marvin_identity_episode_diagnostic(self, *, now=None):
+        """Read Marvin episode evidence without refresh, resolution, or action.
+
+        This is intentionally separate from the controller-state builder:
+        diagnostic callers may inspect the existing lock and World Model data,
+        but cannot refresh an entity or ask TargetLock to resolve one.
+        """
+        base = {
+            "preview_result": None,
+            "preview_marvin_continuity": None,
+            "entity_id": None,
+            "identity_id": None,
+        }
+        target_lock = getattr(self, "target_lock", None)
+        snapshot = getattr(target_lock, "snapshot", None)
+        if target_lock is None or not callable(snapshot):
+            return self._marvin_identity_episode_diagnostic_failure(
+                base, "marvin_target_lock_unavailable",
+            )
+        try:
+            lock_snapshot = snapshot()
+        except Exception:
+            return self._marvin_identity_episode_diagnostic_failure(
+                base, "marvin_target_lock_snapshot_unavailable",
+            )
+        if not isinstance(lock_snapshot, dict):
+            return self._marvin_identity_episode_diagnostic_failure(
+                base, "marvin_target_lock_snapshot_malformed",
+            )
+        entity_id = str(lock_snapshot.get("locked_entity_id") or "").strip() or None
+        identity_id = (
+            str(lock_snapshot.get("locked_identity_id") or "").strip() or None
+        )
+        base.update(entity_id=entity_id, identity_id=identity_id)
+        if lock_snapshot.get("tracking_mode") != TargetLock.MODE_LOCKED:
+            return self._marvin_identity_episode_diagnostic_failure(
+                base, "marvin_target_lock_not_locked",
+            )
+        if entity_id is None or identity_id is None:
+            return self._marvin_identity_episode_diagnostic_failure(
+                base, "marvin_target_lock_incomplete",
+            )
+
+        world_model = getattr(self, "world_model", None)
+        get_entities = getattr(world_model, "get_entities", None)
+        if not callable(get_entities):
+            return self._marvin_identity_episode_diagnostic_failure(
+                base, "marvin_world_model_read_unavailable",
+            )
+        try:
+            entities = get_entities()
+        except Exception:
+            return self._marvin_identity_episode_diagnostic_failure(
+                base, "marvin_world_model_read_failed",
+            )
+        matches = [
+            entity for entity in entities
+            if isinstance(entity, dict)
+            and entity.get("entity_id") == entity_id
+            and str(entity.get("label") or "").strip().lower() == "marvin"
+            and isinstance(entity.get("attributes"), dict)
+            and str(entity["attributes"].get("identity_id") or "").strip()
+            == identity_id
+        ] if isinstance(entities, list) else []
+        if not matches:
+            return self._marvin_identity_episode_diagnostic_failure(
+                base, "marvin_confirmed_entity_missing_or_mismatched",
+            )
+        if len(matches) != 1:
+            return self._marvin_identity_episode_diagnostic_failure(
+                base, "marvin_confirmed_entity_ambiguous",
+            )
+        attributes = matches[0]["attributes"]
+        operator_confirmed = (
+            attributes.get("operator_confirmed") is True
+            and attributes.get("identity_confirmation_source")
+            == "marvin_local_tracker_preview"
+            and bool(attributes.get("identity_confirmation_timestamp"))
+        )
+        if not operator_confirmed:
+            return self._marvin_identity_episode_diagnostic_failure(
+                base, "marvin_operator_confirmation_missing",
+            )
+        previous_confirmation = {
+            "ok": True,
+            "confirmed": True,
+            "identity_confirmed": True,
+            "entity_id": entity_id,
+            "identity_id": identity_id,
+            "confirmation_timestamp": attributes.get(
+                "identity_confirmation_timestamp"
+            ),
+            "preview_candidate": attributes.get("preview_candidate"),
+        }
+        try:
+            preview = self.preview_find_object(self.MARVIN_SEMANTIC_TARGET)
+        except Exception:
+            return self._marvin_identity_episode_diagnostic_failure(
+                base, "marvin_preview_unavailable",
+            )
+        continuity = self._marvin_preview_continuity_metadata(preview)
+        base.update(
+            preview_result=preview,
+            preview_marvin_continuity=continuity,
+        )
+        episode = evaluate_marvin_identity_episode(
+            previous_confirmation,
+            preview,
+            now=now,
+        )
+        return dict(
+            base,
+            identity_episode_continuity=episode,
+            accepted=episode.get("identity_continuity") is True,
+            reason=episode.get("reason"),
+        )
+
+    @staticmethod
+    def _marvin_preview_continuity_metadata(preview):
+        if not isinstance(preview, dict):
+            return None
+        value = preview.get("marvin_continuity")
+        if not isinstance(value, dict):
+            observation = preview.get("target_observation")
+            value = observation.get("marvin_continuity") if isinstance(observation, dict) else None
+        return dict(value) if isinstance(value, dict) else None
+
+    @staticmethod
+    def _marvin_identity_episode_diagnostic_failure(base, reason):
+        episode = {
+            "ok": False,
+            "identity_continuity": False,
+            "reason": reason,
+            "selected_identity_id": base["identity_id"],
+            "entity_id": base["entity_id"],
+            "episode_valid": False,
+            "marvin_continuity": {
+                "available": False,
+                "tracker_id": None,
+                "tracker_source": None,
+            },
+        }
+        return dict(
+            base,
+            identity_episode_continuity=episode,
+            accepted=False,
+            reason=reason,
+        )
+
     def execute_find_marvin_controller(
         self, state_provider, *, max_actions=FIND_MARVIN_CONTROLLER_MAX_ACTIONS,
         now=None, dry_run=False,
