@@ -1894,7 +1894,7 @@ class BehaviorManager:
 
     def execute_find_marvin_controller(
         self, state_provider, *, max_actions=FIND_MARVIN_CONTROLLER_MAX_ACTIONS,
-        now=None, dry_run=False,
+        now=None, dry_run=False, stop_after_action=None,
     ):
         """Run a finite sequence of fresh, one-step Marvin search/pursuit actions.
 
@@ -1924,6 +1924,24 @@ class BehaviorManager:
             return dict(base, reason="find_marvin_state_provider_unavailable")
         if not isinstance(dry_run, bool):
             return dict(base, reason="invalid_find_marvin_dry_run")
+        if stop_after_action is not None and not callable(stop_after_action):
+            return dict(base, reason="find_marvin_stop_callback_unavailable")
+
+        def stop_completed_action(history_entry):
+            """Stop before obtaining the next mandatory fresh observation."""
+            if stop_after_action is None:
+                return True
+            try:
+                stop_result = stop_after_action()
+            except Exception as exc:
+                history_entry["stop_result"] = {
+                    "ok": False,
+                    "error": str(exc),
+                    "error_type": type(exc).__name__,
+                }
+                return False
+            history_entry["stop_result"] = stop_result
+            return isinstance(stop_result, dict) and stop_result.get("ok") is True
 
         selected_identity_id = None
         search_history = []
@@ -2103,6 +2121,11 @@ class BehaviorManager:
                     )
                 except Exception as exc:
                     base["history"].append(history_entry)
+                    if not stop_completed_action(history_entry):
+                        return dict(
+                            base, history=list(base["history"]),
+                            reason="find_marvin_post_action_stop_failed",
+                        )
                     return dict(
                         base,
                         history=list(base["history"]),
@@ -2127,6 +2150,14 @@ class BehaviorManager:
                         step.get("replan_required") is True
                     )
                 base["history"].append(history_entry)
+                # An executor attempt is treated as potentially dispatched:
+                # the autonomous runtime stops before it inspects the result
+                # or obtains another Preview.
+                if not stop_completed_action(history_entry):
+                    return dict(
+                        base, history=list(base["history"]),
+                        reason="find_marvin_post_action_stop_failed",
+                    )
                 if not isinstance(step, dict) or step.get("ok") is not True:
                     return dict(
                         base, history=list(base["history"]),
@@ -2203,6 +2234,11 @@ class BehaviorManager:
                 )
             except Exception as exc:
                 base["history"].append(history_entry)
+                if not stop_completed_action(history_entry):
+                    return dict(
+                        base, history=list(base["history"]),
+                        reason="find_marvin_post_action_stop_failed",
+                    )
                 return dict(
                     base,
                     history=list(base["history"]),
@@ -2222,6 +2258,14 @@ class BehaviorManager:
                     step.get("replan_required") is True
                 )
             base["history"].append(history_entry)
+            # Treat a failed executor result as potentially dispatched too;
+            # STOP is required before the controller can return or replan.
+            if not stop_completed_action(history_entry):
+                return dict(
+                    base,
+                    history=list(base["history"]),
+                    reason="find_marvin_post_action_stop_failed",
+                )
             if not isinstance(step, dict) or step.get("ok") is not True:
                 return dict(
                     base,

@@ -41,7 +41,7 @@ def arrived(identity="marvin-1"):
 
 
 def invoke(monkeypatch, states, *, search_steps=None, pursuit_steps=None, max_actions=6,
-           identities=None, arrivals=None, dry_run=False):
+           identities=None, arrivals=None, dry_run=False, stop_after_action=None):
     manager = BehaviorManager(robot_client=object())
     provider_calls, evaluator_calls, arrival_calls, search_calls, pursuit_calls = [], [], [], [], []
     state_values = iter(states)
@@ -89,7 +89,8 @@ def invoke(monkeypatch, states, *, search_steps=None, pursuit_steps=None, max_ac
     monkeypatch.setattr(manager, "execute_marvin_search_step", search)
     monkeypatch.setattr(manager, "execute_marvin_pursuit_step", pursuit_step)
     result = manager.execute_find_marvin_controller(
-        provider, max_actions=max_actions, now=10.0, dry_run=dry_run)
+        provider, max_actions=max_actions, now=10.0, dry_run=dry_run,
+        stop_after_action=stop_after_action)
     return result, provider_calls, evaluator_calls, arrival_calls, search_calls, pursuit_calls
 
 
@@ -251,6 +252,30 @@ def test_global_budget_is_shared_across_search_and_pursuit(monkeypatch):
     assert result["reason"] == "find_marvin_action_limit_reached"
     assert len(searches) == len(pursuits) == 2
     assert result["actions_executed"] == len(searches) + len(pursuits) == 4
+
+
+def test_autonomous_stop_callback_runs_after_every_action_before_fresh_preview(monkeypatch):
+    stops = []
+    result, providers, evaluations, _arrivals, searches, pursuits = invoke(
+        monkeypatch,
+        [pursuit(), pursuit(), pursuit()],
+        max_actions=3,
+        stop_after_action=lambda: stops.append(True) or {"ok": True},
+    )
+    assert result["actions_executed"] == 3
+    assert len(providers) == len(evaluations) == len(stops) == 3
+    assert searches == [] and len(pursuits) == 3
+    assert all(entry["stop_result"] == {"ok": True} for entry in result["history"])
+
+
+def test_failed_post_action_stop_prevents_a_new_preview_or_action(monkeypatch):
+    result, providers, _evaluations, _arrivals, searches, pursuits = invoke(
+        monkeypatch, [pursuit(), pursuit()], max_actions=2,
+        stop_after_action=lambda: {"ok": False},
+    )
+    assert result["reason"] == "find_marvin_post_action_stop_failed"
+    assert result["actions_executed"] == 1
+    assert len(providers) == len(pursuits) == 1 and searches == []
 
 
 def test_default_budget_stops_an_alternating_stream_at_six(monkeypatch):

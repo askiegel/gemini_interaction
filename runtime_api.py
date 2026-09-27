@@ -472,6 +472,7 @@ class RuntimeAPIHandler(BaseHTTPRequestHandler):
             "/guarded-turn",
             "/find-marvin/alignment-step",
             "/find-marvin/approach-step",
+            "/find-marvin/autonomous-run",
             "/find-marvin/controller",
             "/find-marvin/confirm-identity",
             "/missions",
@@ -569,6 +570,18 @@ class RuntimeAPIHandler(BaseHTTPRequestHandler):
                     raise ValueError("find-marvin/approach-step requires exactly linear_speed and duration.")
                 result = self.server.runtime.execute_single_marvin_approach(
                     linear_speed=request_data["linear_speed"], duration=request_data["duration"])
+                self.send_json(200 if result.get("ok") is True else 409, result)
+                return
+
+            if path == "/find-marvin/autonomous-run":
+                if set(request_data) != {"max_actions"}:
+                    raise ValueError("find-marvin/autonomous-run requires exactly max_actions.")
+                max_actions = request_data["max_actions"]
+                if isinstance(max_actions, bool) or not isinstance(max_actions, int):
+                    raise ValueError("max_actions must be an integer.")
+                result = self.server.runtime.execute_bounded_find_marvin_autonomous(
+                    max_actions=max_actions,
+                )
                 self.send_json(200 if result.get("ok") is True else 409, result)
                 return
 

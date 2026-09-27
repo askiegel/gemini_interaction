@@ -62,6 +62,7 @@ class CognitiveRuntime:
     """
 
     LOOP_INTERVAL_SECONDS = 0.03
+    FIND_MARVIN_AUTONOMOUS_MAX_ACTIONS = 3
     def __init__(
         self,
         provider=None,
@@ -116,6 +117,7 @@ class CognitiveRuntime:
         self._state_lock = threading.RLock()
         self._marvin_alignment_step_consumed = False
         self._marvin_approach_step_consumed = False
+        self._marvin_autonomous_run_consumed = False
         self._last_runtime_state = None
         self._control_generation = 0
         self._behavior_execution_generation = None
@@ -264,6 +266,83 @@ class CognitiveRuntime:
             next_route=result.get("next_route", "none"),
             execution_authorized=False,
             motion_executed=False,
+        )
+
+    def execute_bounded_find_marvin_autonomous(self, *, max_actions):
+        """Run one explicitly-authorized, finite Marvin controller episode.
+
+        The controller obtains a new Preview after every action.  Forward
+        safety remains inside the active BehaviorManager immediately before
+        dispatch; this method deliberately does not cache or pre-authorize a
+        LiDAR snapshot.
+        """
+        base = {
+            "ok": False,
+            "action": "bounded_find_marvin_autonomous_run",
+            "execution_authorized": False,
+            "motion_executed": False,
+            "actions_executed": 0,
+            "max_actions": max_actions,
+            "controller_result": None,
+            "reason": None,
+        }
+        if (
+            not isinstance(max_actions, int)
+            or isinstance(max_actions, bool)
+            or not 0 < max_actions <= self.FIND_MARVIN_AUTONOMOUS_MAX_ACTIONS
+        ):
+            return dict(base, reason="marvin_autonomous_action_limit_invalid")
+        if self.running is not True:
+            return dict(base, reason="marvin_autonomous_runtime_not_running")
+        behavior = getattr(self, "behavior_manager", None)
+        controller = getattr(behavior, "execute_find_marvin_controller", None)
+        robot = getattr(behavior, "robot", None)
+        stop = getattr(robot, "stop", None)
+        worker = getattr(self, "lidar_worker", None)
+        session = getattr(worker, "session", None)
+        if not callable(controller) or not callable(stop):
+            return dict(base, reason="marvin_autonomous_controller_or_stop_unavailable")
+        if worker is None or worker.running is not True or not isinstance(session, str) or not session:
+            return dict(base, reason="marvin_autonomous_lidar_session_unavailable")
+        with self._state_lock:
+            if self._marvin_autonomous_run_consumed:
+                return dict(base, reason="marvin_autonomous_run_already_consumed")
+            self._marvin_autonomous_run_consumed = True
+        base["execution_authorized"] = True
+        try:
+            result = controller(
+                self.build_find_marvin_controller_state,
+                max_actions=max_actions,
+                dry_run=False,
+                stop_after_action=stop,
+            )
+        except Exception as exc:
+            return dict(
+                base,
+                reason="marvin_autonomous_controller_exception",
+                error=str(exc),
+                error_type=type(exc).__name__,
+            )
+        if not isinstance(result, dict):
+            return dict(base, reason="marvin_autonomous_controller_result_malformed")
+        history = result.get("history")
+        moved = bool(isinstance(history, list) and any(
+            isinstance(entry, dict)
+            and (
+                isinstance(entry.get("pursuit_step_result"), dict)
+                and entry["pursuit_step_result"].get("motion_executed") is True
+                or isinstance(entry.get("search_step_result"), dict)
+                and entry["search_step_result"].get("motion_executed") is True
+            )
+            for entry in history
+        ))
+        return dict(
+            base,
+            ok=result.get("ok") is True,
+            motion_executed=moved,
+            actions_executed=result.get("actions_executed", 0),
+            controller_result=result,
+            reason=result.get("reason", "marvin_autonomous_controller_complete"),
         )
 
     def execute_single_marvin_alignment(
