@@ -141,7 +141,7 @@ def test_preview_bridge_and_unrelated_extras_cannot_establish_arrival():
 def test_visual_session_reuses_calibrated_threshold_without_identity_authority():
     preview = {
         "ok": True, "preview": True, "authoritative": False,
-        "target": "marvin", "target_found": True, "identity_confirmed": True,
+        "target": "marvin", "target_found": True, "source": "marvin_local_tracker", "identity_confirmed": True,
         "source_timestamp": STAMP, "image_width": 640.0, "image_height": 480.0,
         "bbox": {"x1": 100.0, "y1": 100.0, "x2": 288.0, "y2": 364.0},
         "marvin_continuity": {"tracker_id": 9, "tracker_source": "diagnostic"},
@@ -156,7 +156,7 @@ def test_visual_session_reuses_calibrated_threshold_without_identity_authority()
 def test_visual_session_arrival_fails_closed_for_ambiguous_or_stale_preview():
     base = {
         "ok": True, "preview": True, "authoritative": False,
-        "target": "marvin", "target_found": True, "identity_confirmed": True,
+        "target": "marvin", "target_found": True, "source": "marvin_local_tracker", "identity_confirmed": True,
         "source_timestamp": STAMP, "image_width": 640.0, "image_height": 480.0,
         "bbox": {"x1": 100.0, "y1": 100.0, "x2": 288.0, "y2": 364.0},
     }

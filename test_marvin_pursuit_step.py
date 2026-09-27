@@ -42,7 +42,7 @@ def visual_preview(*, centered=False):
     x1, x2 = (270.0, 370.0) if centered else (400.0, 500.0)
     return {
         "ok": True, "preview": True, "authoritative": False,
-        "target": "marvin", "target_found": True, "identity_confirmed": True,
+        "target": "marvin", "target_found": True, "source": "marvin_local_tracker", "identity_confirmed": True,
         "source_timestamp": "2026-09-26T16:00:00+00:00",
         "image_width": 640.0, "image_height": 480.0,
         "bbox": {"x1": x1, "y1": 20.0, "x2": x2, "y2": 220.0},

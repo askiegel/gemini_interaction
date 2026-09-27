@@ -16,6 +16,7 @@ from marvin_preview_reacquisition import (
     DEFAULT_PREVIEW_MAX_AGE_SECONDS,
     evaluate_marvin_preview_reacquisition,
 )
+from marvin_preview_schema import normalize_marvin_preview
 
 
 SEARCHING = "SEARCHING"
@@ -185,15 +186,19 @@ def _preview_candidate(value, now, max_age_seconds):
         return False, "preview_unavailable"
     if not isinstance(value, dict):
         return False, "preview_malformed"
-    if (value.get("ok") is not True or value.get("preview") is not True
-            or value.get("authoritative") is not False
-            or str(value.get("target") or "").strip().lower() != "marvin"
-            or value.get("target_found") is not True
-            or value.get("identity_confirmed") is not True):
+    preview = normalize_marvin_preview(value)
+    if preview is None or (
+            preview.get("ok") is not True or preview.get("preview") is not True
+            or preview.get("authoritative") is not False
+            or preview.get("target") != "marvin"
+            or preview.get("source") != "marvin_local_tracker"
+            or preview.get("target_found") is not True
+            or preview.get("identity_confirmed") is not True
+            or preview.get("ambiguous") is True):
         return False, "preview_candidate_unavailable"
-    if not _bbox(value.get("bbox")):
+    if not _bbox(preview.get("bbox")):
         return False, "preview_geometry_malformed"
-    freshness = _fresh_timestamp(value.get("source_timestamp") or value.get("vision_timestamp"), now, max_age_seconds)
+    freshness = _fresh_timestamp(preview.get("source_timestamp") or preview.get("vision_timestamp"), now, max_age_seconds)
     if freshness in {"missing", "invalid"}:
         return False, "preview_timestamp_" + freshness
     return freshness == "fresh", "preview_candidate_stale" if freshness == "stale" else "preview_candidate_fresh"
@@ -203,13 +208,16 @@ def _visual_preview_geometry(value):
     """Return safe centering geometry from an already semantic-confirmed Preview."""
     if not isinstance(value, dict):
         return None, "preview_result_malformed"
-    if _preview_ambiguous(value):
+    preview = normalize_marvin_preview(value)
+    if preview is None:
+        return None, "preview_result_malformed"
+    if preview.get("ambiguous") is True:
         return None, "preview_target_ambiguous"
-    bbox = value.get("bbox")
+    bbox = preview.get("bbox")
     if not _bbox(bbox):
         return None, "preview_geometry_malformed"
-    width = value.get("image_width")
-    height = value.get("image_height")
+    width = preview.get("image_width")
+    height = preview.get("image_height")
     if not (_finite_positive(width) and _finite_positive(height)):
         return None, "preview_image_dimensions_malformed"
     x1, y1, x2, y2 = (float(bbox[key]) for key in ("x1", "y1", "x2", "y2"))
@@ -221,20 +229,6 @@ def _visual_preview_geometry(value):
         "image_width": float(width),
         "horizontal_error": cx - float(width) / 2.0,
     }, None
-
-
-def _preview_ambiguous(value):
-    if value.get("identity_ambiguous") is True or value.get("ambiguous") is True:
-        return True
-    for nested_name in ("tracking", "target_observation", "selected_proposal"):
-        nested = value.get(nested_name)
-        if isinstance(nested, dict) and (
-            nested.get("identity_ambiguous") is True
-            or nested.get("ambiguous") is True
-            or str(nested.get("identity_status") or "").strip().upper() == "AMBIGUOUS"
-        ):
-            return True
-    return False
 
 
 def _bridge_consistent(supplied, computed):

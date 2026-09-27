@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 import math
 
 from marvin_preview_reacquisition import DEFAULT_PREVIEW_MAX_AGE_SECONDS
+from marvin_preview_schema import normalize_marvin_preview
 
 
 MARVIN_ARRIVAL_HEIGHT_FRACTION = 0.545833
@@ -97,26 +98,28 @@ def evaluate_marvin_visual_arrival(
     result["visual_session_authorized"] = False
     if not _positive(max_age_seconds):
         return _fail(result, "invalid_max_age_seconds", ok=False)
-    if not isinstance(preview_result, dict):
+    preview = normalize_marvin_preview(preview_result)
+    if preview is None:
         return _fail(result, "preview_result_malformed", ok=False)
     if (
-        preview_result.get("ok") is not True
-        or preview_result.get("preview") is not True
-        or preview_result.get("authoritative") is not False
-        or str(preview_result.get("target") or "").strip().lower() != "marvin"
-        or preview_result.get("target_found") is not True
-        or preview_result.get("identity_confirmed") is not True
-        or _preview_ambiguous(preview_result)
+        preview.get("ok") is not True
+        or preview.get("preview") is not True
+        or preview.get("authoritative") is not False
+        or preview.get("target") != "marvin"
+        or preview.get("source") != "marvin_local_tracker"
+        or preview.get("target_found") is not True
+        or preview.get("identity_confirmed") is not True
+        or preview.get("ambiguous") is True
     ):
         return _fail(result, "preview_not_unambiguous_semantic_marvin")
     freshness = _freshness(
-        preview_result.get("source_timestamp") or preview_result.get("vision_timestamp"),
+        preview.get("source_timestamp") or preview.get("vision_timestamp"),
         now, max_age_seconds,
     )
     if freshness != "fresh":
         return _fail(result, "preview_timestamp_" + freshness)
     result["fresh"] = True
-    geometry = _geometry(preview_result)
+    geometry = _geometry(preview)
     if geometry is None:
         return _fail(result, "preview_geometry_invalid")
     result.update(geometry)
@@ -215,20 +218,6 @@ def _ambiguous(value):
     return (value.get("identity_ambiguous") is True
             or str(value.get("identity_status") or "").strip().upper()
             in {"AMBIGUOUS", "NEW_FRAME_CONFLICT", "IDENTITY_MISMATCH"})
-
-
-def _preview_ambiguous(value):
-    if value.get("identity_ambiguous") is True or value.get("ambiguous") is True:
-        return True
-    for name in ("tracking", "target_observation", "selected_proposal"):
-        nested = value.get(name)
-        if isinstance(nested, dict) and (
-            nested.get("identity_ambiguous") is True
-            or nested.get("ambiguous") is True
-            or str(nested.get("identity_status") or "").strip().upper() == "AMBIGUOUS"
-        ):
-            return True
-    return False
 
 
 def _number(value):
