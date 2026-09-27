@@ -471,6 +471,7 @@ class RuntimeAPIHandler(BaseHTTPRequestHandler):
         supported_paths = {
             "/guarded-turn",
             "/find-marvin/alignment-step",
+            "/find-marvin/approach-step",
             "/find-marvin/controller",
             "/find-marvin/confirm-identity",
             "/missions",
@@ -559,6 +560,15 @@ class RuntimeAPIHandler(BaseHTTPRequestHandler):
                     angular_speed=request_data["angular_speed"],
                     duration=request_data["duration"],
                 )
+                self.send_json(200 if result.get("ok") is True else 409, result)
+                return
+
+            if path == "/find-marvin/approach-step":
+                required_fields = {"linear_speed", "duration"}
+                if set(request_data) != required_fields:
+                    raise ValueError("find-marvin/approach-step requires exactly linear_speed and duration.")
+                result = self.server.runtime.execute_single_marvin_approach(
+                    linear_speed=request_data["linear_speed"], duration=request_data["duration"])
                 self.send_json(200 if result.get("ok") is True else 409, result)
                 return
 

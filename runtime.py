@@ -115,6 +115,7 @@ class CognitiveRuntime:
         self.tracking_state: Dict[str, Any] = empty_tracking_state()
         self._state_lock = threading.RLock()
         self._marvin_alignment_step_consumed = False
+        self._marvin_approach_step_consumed = False
         self._last_runtime_state = None
         self._control_generation = 0
         self._behavior_execution_generation = None
@@ -372,6 +373,64 @@ class CognitiveRuntime:
                 else "marvin_alignment_turn_or_stop_failed"
             ),
         )
+
+    def execute_single_marvin_approach(self, *, linear_speed, duration):
+        """Execute one capped active-runtime Marvin forward step, then stop."""
+        base = {"ok": False, "action": "single_marvin_approach_step",
+                "execution_authorized": False, "motion_executed": False,
+                "actions_executed": 0, "linear_speed": None, "duration": None,
+                "producer_session": None, "approach_result": None,
+                "stop_result": None, "reason": None}
+        if not _bounded_alignment_number(linear_speed, maximum=0.08):
+            return dict(base, reason="marvin_approach_linear_speed_invalid")
+        if not _bounded_alignment_number(duration, maximum=0.50):
+            return dict(base, reason="marvin_approach_duration_invalid")
+        if float(linear_speed) != 0.08 or float(duration) != 0.50:
+            return dict(base, reason="marvin_approach_parameters_not_calibrated")
+        base.update(linear_speed=float(linear_speed), duration=float(duration))
+        if self.running is not True:
+            return dict(base, reason="marvin_approach_runtime_not_running")
+        behavior = getattr(self, "behavior_manager", None)
+        approach = getattr(behavior, "execute_single_marvin_approach_step", None)
+        robot = getattr(behavior, "robot", None)
+        stop = getattr(robot, "stop", None)
+        if not callable(approach) or not callable(stop):
+            return dict(base, reason="marvin_approach_primitive_unavailable")
+        worker = getattr(self, "lidar_worker", None)
+        session = getattr(worker, "session", None)
+        if worker is None or worker.running is not True or not isinstance(session, str) or not session:
+            return dict(base, reason="marvin_approach_lidar_session_unavailable")
+        base["producer_session"] = session
+        get_lidar = getattr(getattr(self, "world_model", None), "get_lidar_obstacles", None)
+        if not callable(get_lidar):
+            return dict(base, reason="marvin_approach_lidar_read_unavailable")
+        try:
+            lidar = get_lidar(expected_session=session)
+        except Exception as exc:
+            return dict(base, reason="marvin_approach_lidar_read_failed", error=str(exc))
+        if not _marvin_alignment_lidar_is_current(lidar, session):
+            return dict(base, reason="marvin_approach_lidar_not_current", lidar=lidar)
+        with self._state_lock:
+            if getattr(self, "_marvin_approach_step_consumed", False):
+                return dict(base, reason="marvin_approach_step_already_consumed")
+            self._marvin_approach_step_consumed = True
+        base["execution_authorized"] = True
+        try:
+            approach_result = approach(expected_lidar_session=session,
+                                       linear_speed=float(linear_speed), duration=float(duration))
+        except Exception as exc:
+            approach_result = {"ok": False, "motion_executed": False, "error": str(exc)}
+        try:
+            stop_result = stop()
+        except Exception as exc:
+            stop_result = {"ok": False, "error": str(exc), "error_type": type(exc).__name__}
+        moved = bool(isinstance(approach_result, dict) and approach_result.get("motion_executed") is True)
+        stop_ok = isinstance(stop_result, dict) and stop_result.get("ok") is True
+        return dict(base, ok=moved and stop_ok, motion_executed=moved, actions_executed=1,
+                    approach_result=approach_result, stop_result=stop_result,
+                    reason=("marvin_approach_step_complete" if moved and stop_ok else
+                            (approach_result.get("reason", "marvin_approach_step_failed")
+                             if isinstance(approach_result, dict) else "marvin_approach_step_failed")))
 
     def confirm_find_marvin_identity(self, *, confirm=False):
         """Explicitly confirm one fresh Marvin Preview without motion."""

@@ -2455,6 +2455,48 @@ class BehaviorManager:
             reason=avoidance.get("reason", "marvin_pursuit_avoidance_failed"),
         )
 
+    def execute_single_marvin_approach_step(
+        self, *, expected_lidar_session, linear_speed, duration,
+    ):
+        """Run one fixed Marvin forward primitive, with no avoidance branch."""
+        base = {"ok": False, "decision": "no_motion", "executed_primitive": None,
+                "motion_executed": False, "forward_safety": None, "reason": None}
+        if (linear_speed != self.FIND_APPROACH_FORWARD_SPEED
+                or duration != self.FIND_APPROACH_FORWARD_SECONDS):
+            return dict(base, reason="marvin_single_approach_parameters_invalid")
+        if expected_lidar_session is None or self.world_model is None:
+            return dict(base, reason="lidar_producer_session_unavailable")
+        try:
+            lidar = self.world_model.get_lidar_obstacles(expected_session=expected_lidar_session)
+            safety = evaluate_local_motion_safety(
+                lidar, expected_session=expected_lidar_session,
+                linear_x=linear_speed, duration=duration,
+            )
+        except Exception as exc:
+            return dict(base, reason="marvin_single_approach_lidar_read_or_evaluation_failed",
+                        error=str(exc), error_type=type(exc).__name__)
+        base["forward_safety"] = safety
+        if not self._marvin_pursuit_lidar_is_trusted(lidar, safety, expected_lidar_session):
+            return dict(base, reason="marvin_single_approach_lidar_not_trusted")
+        if safety.get("permitted") is not True:
+            return dict(base, reason="marvin_single_approach_translation_vetoed")
+        try:
+            forward = self.robot.local_forward()
+        except Exception as exc:
+            return dict(base, decision="approach_forward", executed_primitive="forward",
+                        reason="marvin_single_approach_forward_exception",
+                        error=str(exc), error_type=type(exc).__name__)
+        forward_ok = bool(isinstance(forward, dict) and forward.get("ok") is True
+                          and forward.get("executed") is True)
+        if not forward_ok:
+            return dict(base, decision="approach_forward", executed_primitive="forward",
+                        forward_result=forward,
+                        reason=(forward.get("reason", "marvin_single_approach_forward_failed")
+                                if isinstance(forward, dict) else "marvin_single_approach_forward_failed"))
+        return dict(base, ok=True, decision="approach_forward", executed_primitive="forward",
+                    motion_executed=True, forward_result=forward,
+                    reason="marvin_single_approach_forward_complete")
+
     @staticmethod
     def _marvin_pursuit_lidar_is_trusted(lidar, safety, session):
         """Require the same validated producer-bound state used by safety."""
