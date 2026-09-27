@@ -38,6 +38,10 @@ def preview(**overrides):
         "source": "marvin_local_tracker",
         "source_timestamp": PREVIEW_TIME,
         "tracker_episode_id": EPISODE_ID,
+        "marvin_continuity": {
+            "tracker_id": 16,
+            "tracker_source": "marvin_continuity_botsort",
+        },
         "identity_ambiguous": False,
         "tracking": {
             "tracker_episode_id": EPISODE_ID,
@@ -69,6 +73,11 @@ def test_confirmed_identity_same_tracker_episode_allows_diagnostic_continuity():
         "selected_identity_id": IDENTITY_ID,
         "entity_id": ENTITY_ID,
         "episode_valid": True,
+        "marvin_continuity": {
+            "available": True,
+            "tracker_id": 16,
+            "tracker_source": "marvin_continuity_botsort",
+        },
     }
 
 
@@ -83,6 +92,17 @@ def test_stale_confirmation_fails_closed():
     result = evaluate(now="2026-09-26T20:01:00Z")
     assert result["identity_continuity"] is False
     assert result["reason"] == "confirmation_episode_expired"
+
+
+def test_missing_continuity_metadata_fails_closed_without_creating_identity():
+    candidate = preview()
+    candidate.pop("marvin_continuity")
+    result = evaluate(candidate=candidate)
+    assert result["identity_continuity"] is False
+    assert result["reason"] == "preview_marvin_continuity_missing_or_invalid"
+    assert result["marvin_continuity"]["available"] is False
+    assert result["selected_identity_id"] == IDENTITY_ID
+    assert result["selected_identity_id"] != "16"
 
 
 @pytest.mark.parametrize(

@@ -212,7 +212,7 @@ class RuntimeAPIHandler(BaseHTTPRequestHandler):
                     "tracker_seed_bbox", "tracker_seed_source",
                     "tracker_horizontal_padding_fraction",
                     "tracker_vertical_padding_fraction",
-                    "track_id", "tracker_source",
+                    "track_id", "tracker_source", "marvin_continuity",
                     "source_timestamp", "vision_timestamp", "detection_age_ms",
                     "entity_id", "identity_id", "identity_status",
                     "identity_ambiguous", "identity_match_score",

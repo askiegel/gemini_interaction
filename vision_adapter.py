@@ -356,7 +356,7 @@ class VisionAdapter:
             or self.last_payload.get("height")
         )
 
-        return {
+        normalized = {
             "label": label,
             "confidence": confidence,
             "cx": float(cx) if cx is not None else None,
@@ -388,6 +388,25 @@ class VisionAdapter:
             ),
             "raw_detection": detection,
         }
+        # This is transient tracker evidence supplied by the Vision Server.
+        # Keep it distinct from persistent identity fields and preserve it
+        # only when both parts of the provider contract are present.
+        marvin_continuity = detection.get("marvin_continuity")
+        if isinstance(marvin_continuity, dict):
+            tracker_id = marvin_continuity.get("tracker_id")
+            tracker_source = marvin_continuity.get("tracker_source")
+            if (
+                isinstance(tracker_id, int)
+                and not isinstance(tracker_id, bool)
+                and tracker_id >= 0
+                and isinstance(tracker_source, str)
+                and tracker_source.strip()
+            ):
+                normalized["marvin_continuity"] = {
+                    "tracker_id": tracker_id,
+                    "tracker_source": tracker_source.strip(),
+                }
+        return normalized
 
     def find_target(self, target_label: str) -> Dict[str, Any]:
         """

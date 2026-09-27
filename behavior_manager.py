@@ -3458,7 +3458,7 @@ class BehaviorManager:
                 "tracker_seed_bbox", "tracker_seed_source",
                 "tracker_horizontal_padding_fraction",
                 "tracker_vertical_padding_fraction", "confirmation_diagnostics",
-                "track_id", "tracker_source",
+                "track_id", "tracker_source", "marvin_continuity",
             ):
                 if key in observation:
                     result[key] = observation[key]
@@ -4081,6 +4081,11 @@ class BehaviorManager:
             value = yolo_candidate.get(key, raw_proposal.get(key))
             if value is not None:
                 tracker_metadata[key] = value
+        marvin_continuity = self._marvin_continuity_metadata(
+            yolo_candidate, raw_proposal,
+        )
+        if marvin_continuity is not None:
+            tracker_metadata["marvin_continuity"] = marvin_continuity
         return dict(
             confirmed,
             label="marvin",
@@ -4107,6 +4112,35 @@ class BehaviorManager:
             confirmation_diagnostics=diagnostics,
             **tracker_metadata,
         )
+
+    @staticmethod
+    def _marvin_continuity_metadata(*sources):
+        """Return validated, provider-supplied Marvin continuity metadata.
+
+        This intentionally does not derive an identifier from geometry, a
+        label, or any identity field.  Invalid or incomplete provider data is
+        omitted so consumers fail closed.
+        """
+        for source in sources:
+            if not isinstance(source, dict):
+                continue
+            value = source.get("marvin_continuity")
+            if not isinstance(value, dict):
+                continue
+            tracker_id = value.get("tracker_id")
+            tracker_source = value.get("tracker_source")
+            if (
+                isinstance(tracker_id, int)
+                and not isinstance(tracker_id, bool)
+                and tracker_id >= 0
+                and isinstance(tracker_source, str)
+                and tracker_source.strip()
+            ):
+                return {
+                    "tracker_id": tracker_id,
+                    "tracker_source": tracker_source.strip(),
+                }
+        return None
 
     @classmethod
     def _filter_marvin_proposal_geometry(cls, candidates, diagnostics=None):

@@ -27,6 +27,11 @@ def evaluate_marvin_identity_episode(
         "selected_identity_id": None,
         "entity_id": None,
         "episode_valid": False,
+        "marvin_continuity": {
+            "available": False,
+            "tracker_id": None,
+            "tracker_source": None,
+        },
     }
     if not isinstance(previous_confirmation, dict):
         return _invalid(result, "previous_confirmation_malformed")
@@ -86,6 +91,14 @@ def evaluate_marvin_identity_episode(
     ):
         return _fail(result, "preview_candidate_invalid")
 
+    # A tracker ID is diagnostic evidence only.  It is never promoted to an
+    # identity ID and cannot establish continuity on its own, but an episode
+    # evaluation must fail closed when the provider did not supply it.
+    marvin_continuity = _marvin_continuity(current_preview)
+    result["marvin_continuity"] = marvin_continuity
+    if not marvin_continuity["available"]:
+        return _fail(result, "preview_marvin_continuity_missing_or_invalid")
+
     current_episode_id = _episode_id(current_preview)
     if current_episode_id is None:
         return _fail(result, "preview_tracker_episode_missing")
@@ -139,6 +152,37 @@ def _episode_id(value):
         if normalized is not None:
             return normalized
     return None
+
+
+def _marvin_continuity(value):
+    if not isinstance(value, dict):
+        value = {}
+    observation = value.get("target_observation")
+    candidates = (value.get("marvin_continuity"),)
+    if isinstance(observation, dict):
+        candidates += (observation.get("marvin_continuity"),)
+    for candidate in candidates:
+        if not isinstance(candidate, dict):
+            continue
+        tracker_id = candidate.get("tracker_id")
+        tracker_source = candidate.get("tracker_source")
+        if (
+            isinstance(tracker_id, int)
+            and not isinstance(tracker_id, bool)
+            and tracker_id >= 0
+            and isinstance(tracker_source, str)
+            and tracker_source.strip()
+        ):
+            return {
+                "available": True,
+                "tracker_id": tracker_id,
+                "tracker_source": tracker_source.strip(),
+            }
+    return {
+        "available": False,
+        "tracker_id": None,
+        "tracker_source": None,
+    }
 
 
 def _nonempty(value):

@@ -10,6 +10,7 @@ from behavior_manager import BehaviorManager
 from mission_types import create_mission
 from runtime_api import RuntimeAPIHandler
 from tracking_state import build_tracking_state, empty_tracking_state
+from vision_adapter import VisionAdapter
 from voice_relay.server import FIND_OBJECT_PREVIEW_TIMEOUT_SECONDS, VoiceRelayHandler
 
 
@@ -38,6 +39,11 @@ class ReadOnlyRobot:
         if name in {"motion", "stop", "move_forward", "turn_left", "turn_right"}:
             raise AssertionError(f"preview called robot method {name}")
         raise AttributeError(name)
+
+
+class UntouchedTargetLock:
+    def __getattr__(self, name):
+        raise AssertionError(f"preview accessed TargetLock.{name}")
 
 
 class WorldModelObservation:
@@ -87,7 +93,7 @@ class CandidateVision:
             "image_width": item["image_width"],
             "image_height": item["image_height"],
         }
-        for key in ("track_id", "tracker_source"):
+        for key in ("track_id", "tracker_source", "marvin_continuity"):
             if key in item:
                 normalized[key] = item[key]
         return normalized
@@ -346,6 +352,77 @@ def test_marvin_preview_preserves_existing_proposal_tracker_metadata():
     assert status == 200
     assert payload["track_id"] == 77
     assert payload["tracker_source"] == "botsort_reid"
+
+
+def test_vision_adapter_normalizes_only_complete_marvin_continuity_metadata():
+    adapter = VisionAdapter.__new__(VisionAdapter)
+    adapter.last_payload = {}
+    detection = {
+        "label": "person", "confidence": 0.1,
+        "x1": 10, "y1": 20, "x2": 40, "y2": 100,
+        "marvin_continuity": {
+            "tracker_id": 16,
+            "tracker_source": "marvin_continuity_botsort",
+        },
+    }
+
+    normalized = adapter.normalize_detection(detection)
+
+    assert normalized["marvin_continuity"] == detection["marvin_continuity"]
+    assert normalized["identity_id"] is None
+    detection["marvin_continuity"] = {"tracker_id": 16}
+    assert "marvin_continuity" not in adapter.normalize_detection(detection)
+
+
+def test_marvin_preview_preserves_provider_continuity_metadata_without_identity_promotion():
+    vision = marvin_yolo_candidates()
+    for payload in vision.payloads:
+        payload["detections"][0]["marvin_continuity"] = {
+            "tracker_id": 16,
+            "tracker_source": "marvin_continuity_botsort",
+        }
+    world = WorldModelObservation({})
+    manager = BehaviorManager(
+        robot_client=ReadOnlyRobot(), vision_adapter=vision,
+        semantic_vision=MarvinSemanticVision(marvin_result()), world_model=world,
+    )
+    manager.target_lock = UntouchedTargetLock()
+    manager.TARGET_CONFIRMATION_POLL_SECONDS = 0
+    use_preview_tracker(manager)
+
+    result = manager.preview_find_object("marvin")
+    expected = {
+        "tracker_id": 16,
+        "tracker_source": "marvin_continuity_botsort",
+    }
+    assert result["marvin_continuity"] == expected
+    assert result["target_observation"]["marvin_continuity"] == expected
+    assert "identity_id" not in result
+    assert world.writes == 0
+    assert world.calls == []
+    status, payload = _call_runtime_preview(result)
+    assert status == 200
+    assert payload["marvin_continuity"] == expected
+
+
+def test_marvin_preview_omits_missing_or_malformed_continuity_metadata():
+    vision = marvin_yolo_candidates()
+    for payload in vision.payloads:
+        payload["detections"][0]["marvin_continuity"] = {
+            "tracker_id": "not-a-real-tracker-id",
+            "tracker_source": "marvin_continuity_botsort",
+        }
+    manager = BehaviorManager(
+        robot_client=ReadOnlyRobot(), vision_adapter=vision,
+        semantic_vision=MarvinSemanticVision(marvin_result()),
+    )
+    manager.TARGET_CONFIRMATION_POLL_SECONDS = 0
+    use_preview_tracker(manager)
+
+    result = manager.preview_find_object("marvin")
+
+    assert "marvin_continuity" not in result
+    assert "marvin_continuity" not in result["target_observation"]
 
 
 def test_marvin_preview_never_fabricates_missing_proposal_tracker_metadata():
