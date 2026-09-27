@@ -47,6 +47,7 @@ def active_runtime():
     value = object.__new__(CognitiveRuntime)
     value.running = True
     value._state_lock = threading.RLock()
+    value._marvin_controller_lock = threading.RLock()
     value._marvin_autonomous_run_consumed = False
     robot = Robot()
     value.behavior_manager = Behavior(robot)
@@ -85,6 +86,28 @@ def test_runtime_refuses_missing_active_lidar_session_without_controller():
     result = runtime.execute_bounded_find_marvin_autonomous(max_actions=6)
     assert result["reason"] == "marvin_autonomous_lidar_session_unavailable"
     assert runtime.behavior_manager.calls == [] and robot.stop.call_count == 0
+
+
+def test_direct_endpoint_cannot_overlap_normal_marvin_episode_lock():
+    runtime, robot = active_runtime()
+    runtime._marvin_controller_lock.acquire()
+    try:
+        results = []
+        thread = threading.Thread(
+            target=lambda: results.append(
+                runtime.execute_bounded_find_marvin_autonomous(max_actions=6)
+            ),
+        )
+        thread.start()
+        thread.join(timeout=2)
+    finally:
+        runtime._marvin_controller_lock.release()
+
+    assert not thread.is_alive()
+    result = results[0]
+    assert result["reason"] == "marvin_autonomous_controller_already_running"
+    assert runtime.behavior_manager.calls == []
+    assert robot.stop.call_count == 0
 
 
 def test_endpoint_requires_exact_schema_and_only_delegates_to_bounded_runtime_method():

@@ -63,6 +63,8 @@ class CognitiveRuntime:
 
     LOOP_INTERVAL_SECONDS = 0.03
     FIND_MARVIN_AUTONOMOUS_MAX_ACTIONS = 6
+    FIND_MARVIN_MAX_EPISODES = 3
+
     def __init__(
         self,
         provider=None,
@@ -118,6 +120,7 @@ class CognitiveRuntime:
         self._marvin_alignment_step_consumed = False
         self._marvin_approach_step_consumed = False
         self._marvin_autonomous_run_consumed = False
+        self._marvin_controller_lock = threading.RLock()
         self._last_runtime_state = None
         self._control_generation = 0
         self._behavior_execution_generation = None
@@ -274,7 +277,21 @@ class CognitiveRuntime:
         The controller obtains a new Preview after every action.  Forward
         safety remains inside the active BehaviorManager immediately before
         dispatch; this method deliberately does not cache or pre-authorize a
-        LiDAR snapshot.
+        LiDAR snapshot. This public test endpoint retains its one-shot guard.
+        """
+        return self._execute_bounded_find_marvin_episode(
+            max_actions=max_actions,
+            consume_one_shot=True,
+        )
+
+    def _execute_bounded_find_marvin_episode(
+        self, *, max_actions, consume_one_shot,
+    ):
+        """Execute exactly one existing bounded controller episode.
+
+        Normal Marvin mission continuation calls this private boundary with
+        ``consume_one_shot=False``; the dedicated autonomous test endpoint
+        continues to call the public one-shot wrapper above.
         """
         base = {
             "ok": False,
@@ -304,46 +321,53 @@ class CognitiveRuntime:
             return dict(base, reason="marvin_autonomous_controller_or_stop_unavailable")
         if worker is None or worker.running is not True or not isinstance(session, str) or not session:
             return dict(base, reason="marvin_autonomous_lidar_session_unavailable")
-        with self._state_lock:
-            if self._marvin_autonomous_run_consumed:
-                return dict(base, reason="marvin_autonomous_run_already_consumed")
-            self._marvin_autonomous_run_consumed = True
-        base["execution_authorized"] = True
+        controller_lock = getattr(self, "_marvin_controller_lock", None)
+        if controller_lock is None or not controller_lock.acquire(blocking=False):
+            return dict(base, reason="marvin_autonomous_controller_already_running")
         try:
-            result = controller(
-                self.build_find_marvin_controller_state,
-                max_actions=max_actions,
-                dry_run=False,
-                stop_after_action=stop,
-            )
-        except Exception as exc:
+            if consume_one_shot:
+                with self._state_lock:
+                    if self._marvin_autonomous_run_consumed:
+                        return dict(base, reason="marvin_autonomous_run_already_consumed")
+                    self._marvin_autonomous_run_consumed = True
+            base["execution_authorized"] = True
+            try:
+                result = controller(
+                    self.build_find_marvin_controller_state,
+                    max_actions=max_actions,
+                    dry_run=False,
+                    stop_after_action=stop,
+                )
+            except Exception as exc:
+                return dict(
+                    base,
+                    reason="marvin_autonomous_controller_exception",
+                    error=str(exc),
+                    error_type=type(exc).__name__,
+                )
+            if not isinstance(result, dict):
+                return dict(base, reason="marvin_autonomous_controller_result_malformed")
+            history = result.get("history")
+            moved = bool(isinstance(history, list) and any(
+                isinstance(entry, dict)
+                and (
+                    isinstance(entry.get("pursuit_step_result"), dict)
+                    and entry["pursuit_step_result"].get("motion_executed") is True
+                    or isinstance(entry.get("search_step_result"), dict)
+                    and entry["search_step_result"].get("motion_executed") is True
+                )
+                for entry in history
+            ))
             return dict(
                 base,
-                reason="marvin_autonomous_controller_exception",
-                error=str(exc),
-                error_type=type(exc).__name__,
+                ok=result.get("ok") is True,
+                motion_executed=moved,
+                actions_executed=result.get("actions_executed", 0),
+                controller_result=result,
+                reason=result.get("reason", "marvin_autonomous_controller_complete"),
             )
-        if not isinstance(result, dict):
-            return dict(base, reason="marvin_autonomous_controller_result_malformed")
-        history = result.get("history")
-        moved = bool(isinstance(history, list) and any(
-            isinstance(entry, dict)
-            and (
-                isinstance(entry.get("pursuit_step_result"), dict)
-                and entry["pursuit_step_result"].get("motion_executed") is True
-                or isinstance(entry.get("search_step_result"), dict)
-                and entry["search_step_result"].get("motion_executed") is True
-            )
-            for entry in history
-        ))
-        return dict(
-            base,
-            ok=result.get("ok") is True,
-            motion_executed=moved,
-            actions_executed=result.get("actions_executed", 0),
-            controller_result=result,
-            reason=result.get("reason", "marvin_autonomous_controller_complete"),
-        )
+        finally:
+            controller_lock.release()
 
     @staticmethod
     def _is_normal_marvin_find_mission(mission):
@@ -354,72 +378,286 @@ class CognitiveRuntime:
             == "marvin"
         )
 
-    def _execute_normal_marvin_find_mission(self, mission):
+    def _execute_normal_marvin_find_mission(
+        self, mission, *, control_generation=None,
+    ):
+        controller_lock = getattr(self, "_marvin_controller_lock", None)
+        if controller_lock is None or not controller_lock.acquire(blocking=False):
+            return {
+                "ok": False,
+                "completed": True,
+                "behavior": "FIND_OBJECT",
+                "target": "marvin",
+                "mission_route": "bounded_marvin_autonomous",
+                "mission_id": getattr(mission, "mission_id", None),
+                "arrived_at_marvin": False,
+                "mission_outcome": "safe_failure",
+                "state": "FIND_MARVIN_FAILED",
+                "reason": "marvin_autonomous_controller_already_running",
+            }
+        try:
+            return self._execute_normal_marvin_find_mission_locked(
+                mission,
+                control_generation=control_generation,
+            )
+        finally:
+            controller_lock.release()
+
+    def _execute_normal_marvin_find_mission_locked(
+        self, mission, *, control_generation=None,
+    ):
         """Delegate a normal Find-Marvin mission to the reviewed controller.
 
         The controller remains the only pursuit implementation.  This method
-        merely maps its terminal result onto the existing mission lifecycle;
-        in particular, a finite action-budget result is explicitly safe
-        incomplete rather than an arrival success.
+        is also the owner of bounded mission continuation. It starts another
+        fresh controller episode only after a verified safe action-limit
+        result; pursuit logic itself remains entirely in the controller.
         """
-        result = self.execute_bounded_find_marvin_autonomous(
-            max_actions=self.FIND_MARVIN_AUTONOMOUS_MAX_ACTIONS,
-        )
-        base = dict(
-            result if isinstance(result, dict) else {},
-            behavior="FIND_OBJECT",
-            target="marvin",
-            mission_route="bounded_marvin_autonomous",
-            mission_id=getattr(mission, "mission_id", None),
-        )
-        controller = base.get("controller_result")
-        if not isinstance(controller, dict) or base.get("ok") is not True:
-            return dict(
-                base,
-                ok=False,
-                completed=True,
-                arrived_at_marvin=False,
-                mission_outcome="safe_failure",
-                state="FIND_MARVIN_FAILED",
-                reason=base.get("reason", "find_marvin_controller_failed"),
+        mission_id = getattr(mission, "mission_id", None)
+        if control_generation is None:
+            with self._state_lock:
+                control_generation = self._control_generation
+
+        episode_results = []
+        total_actions = 0
+        total_stale_replans = 0
+        any_motion = False
+        last_controller = None
+
+        def result_base():
+            return {
+                "action": "bounded_find_marvin_autonomous_run",
+                "execution_authorized": bool(episode_results),
+                "behavior": "FIND_OBJECT",
+                "target": "marvin",
+                "mission_route": "bounded_marvin_autonomous",
+                "mission_id": mission_id,
+                "episodes_executed": len(episode_results),
+                "max_episodes": self.FIND_MARVIN_MAX_EPISODES,
+                "max_actions": self.FIND_MARVIN_AUTONOMOUS_MAX_ACTIONS,
+                "total_actions_executed": total_actions,
+                "actions_executed": total_actions,
+                "stale_replans": total_stale_replans,
+                "episode_results": list(episode_results),
+                "controller_result": last_controller,
+                "motion_executed": any_motion,
+            }
+
+        for episode_number in range(1, self.FIND_MARVIN_MAX_EPISODES + 1):
+            if not self._marvin_mission_context_is_current(
+                mission, control_generation,
+            ):
+                return dict(
+                    result_base(), ok=False, completed=True,
+                    arrived_at_marvin=False, mission_outcome="preempted",
+                    state="FIND_MARVIN_PREEMPTED",
+                    reason="find_marvin_mission_preempted",
+                )
+
+            episode = self._execute_bounded_find_marvin_episode(
+                max_actions=self.FIND_MARVIN_AUTONOMOUS_MAX_ACTIONS,
+                consume_one_shot=False,
             )
-        if (
-            controller.get("reason") == "arrived_at_marvin"
-            and controller.get("arrived_at_marvin") is True
-            and controller.get("completed") is True
-        ):
-            return dict(
-                base,
-                ok=True,
-                completed=True,
-                arrived_at_marvin=True,
-                mission_outcome="arrived_at_marvin",
-                state="ARRIVED_AT_MARVIN",
-                reason="arrived_at_marvin",
+            if not isinstance(episode, dict):
+                episode = {"ok": False, "reason": "marvin_episode_result_malformed"}
+            controller = episode.get("controller_result")
+            episode_record = {
+                "episode": episode_number,
+                "result": episode,
+            }
+            episode_results.append(episode_record)
+            last_controller = controller if isinstance(controller, dict) else None
+
+            count = episode.get("actions_executed", 0)
+            if not isinstance(count, int) or isinstance(count, bool) or not 0 <= count <= self.FIND_MARVIN_AUTONOMOUS_MAX_ACTIONS:
+                return dict(
+                    result_base(), ok=False, completed=True,
+                    arrived_at_marvin=False, mission_outcome="safe_failure",
+                    state="FIND_MARVIN_FAILED",
+                    reason="find_marvin_episode_action_count_invalid",
+                )
+            total_actions += count
+            episode_stale_replans = episode.get("controller_result", {}).get(
+                "stale_replans", 0,
+            ) if isinstance(episode.get("controller_result"), dict) else 0
+            if (
+                not isinstance(episode_stale_replans, int)
+                or isinstance(episode_stale_replans, bool)
+                or episode_stale_replans < 0
+            ):
+                return dict(
+                    result_base(), ok=False, completed=True,
+                    arrived_at_marvin=False, mission_outcome="safe_failure",
+                    state="FIND_MARVIN_FAILED",
+                    reason="find_marvin_episode_stale_replan_count_invalid",
+                )
+            total_stale_replans += episode_stale_replans
+            any_motion = any_motion or episode.get("motion_executed") is True
+
+            if not isinstance(controller, dict) or episode.get("ok") is not True:
+                return dict(
+                    result_base(), ok=False, completed=True,
+                    arrived_at_marvin=False, mission_outcome="safe_failure",
+                    state="FIND_MARVIN_FAILED",
+                    reason=episode.get("reason", "find_marvin_controller_failed"),
+                    controller_reason=(controller.get("reason") if isinstance(controller, dict) else None),
+                )
+
+            if (
+                controller.get("reason") == "arrived_at_marvin"
+                and controller.get("arrived_at_marvin") is True
+                and controller.get("completed") is True
+            ):
+                return dict(
+                    result_base(), ok=True, completed=True,
+                    arrived_at_marvin=True,
+                    mission_outcome="arrived_at_marvin",
+                    state="ARRIVED_AT_MARVIN",
+                    reason="arrived_at_marvin",
+                    completion_reason="arrived_at_marvin",
+                )
+
+            if controller.get("reason") != "find_marvin_action_limit_reached":
+                if controller.get("reason") == "find_marvin_arrival_confirmation_not_independent":
+                    return dict(
+                        result_base(), ok=True, completed=True,
+                        arrived_at_marvin=False,
+                        mission_outcome="safe_incomplete",
+                        state="FIND_MARVIN_SAFE_INCOMPLETE",
+                        reason=controller["reason"],
+                        completion_reason=controller["reason"],
+                    )
+                return dict(
+                    result_base(), ok=False, completed=True,
+                    arrived_at_marvin=False, mission_outcome="safe_failure",
+                    state="FIND_MARVIN_FAILED",
+                    reason="find_marvin_controller_terminal_result_unrecognized",
+                    controller_reason=controller.get("reason"),
+                )
+
+            if not self._marvin_episode_is_safe_action_limit(episode, controller):
+                return dict(
+                    result_base(), ok=False, completed=True,
+                    arrived_at_marvin=False, mission_outcome="safe_failure",
+                    state="FIND_MARVIN_FAILED",
+                    reason="find_marvin_action_limit_result_not_safely_stopped",
+                )
+
+            if episode_number == self.FIND_MARVIN_MAX_EPISODES:
+                return dict(
+                    result_base(), ok=True, completed=True,
+                    arrived_at_marvin=False,
+                    mission_outcome="safe_incomplete",
+                    state="FIND_MARVIN_SAFE_INCOMPLETE",
+                    reason="find_marvin_mission_episode_limit_reached",
+                    completion_reason="find_marvin_mission_episode_limit_reached",
+                )
+
+            # The prior controller has already stopped after every executor
+            # attempt. Verify that stop and the Bridge state before permitting
+            # a new controller episode; the next call obtains a fresh Preview
+            # and has an episode-local arrival/stale-replan state.
+            if not self._marvin_mission_context_is_current(
+                mission, control_generation,
+            ):
+                return dict(
+                    result_base(), ok=False, completed=True,
+                    arrived_at_marvin=False, mission_outcome="preempted",
+                    state="FIND_MARVIN_PREEMPTED",
+                    reason="find_marvin_mission_preempted",
             )
-        if controller.get("reason") in {
-            "find_marvin_action_limit_reached",
-            "find_marvin_arrival_confirmation_not_independent",
-        }:
-            return dict(
-                base,
-                ok=True,
-                completed=True,
-                arrived_at_marvin=False,
-                mission_outcome="safe_incomplete",
-                state="FIND_MARVIN_SAFE_INCOMPLETE",
-                reason=controller["reason"],
-            )
+            bridge_status = self._marvin_bridge_ready_and_stopped()
+            if not isinstance(bridge_status, dict) or bridge_status.get("ok") is not True:
+                return dict(
+                    result_base(), ok=False, completed=True,
+                    arrived_at_marvin=False, mission_outcome="safe_failure",
+                    state="FIND_MARVIN_FAILED",
+                    reason="find_marvin_episode_bridge_not_ready_or_stopped",
+                    bridge_status=bridge_status,
+                )
+            if not self._marvin_mission_context_is_current(
+                mission, control_generation,
+            ):
+                return dict(
+                    result_base(), ok=False, completed=True,
+                    arrived_at_marvin=False, mission_outcome="preempted",
+                    state="FIND_MARVIN_PREEMPTED",
+                    reason="find_marvin_mission_preempted",
+                )
+
+        # The bounded loop always returns from an explicit terminal branch.
         return dict(
-            base,
-            ok=False,
-            completed=True,
-            arrived_at_marvin=False,
-            mission_outcome="safe_failure",
+            result_base(), ok=False, completed=True,
+            arrived_at_marvin=False, mission_outcome="safe_failure",
             state="FIND_MARVIN_FAILED",
-            reason="find_marvin_controller_terminal_result_unrecognized",
-            controller_reason=controller.get("reason"),
+            reason="find_marvin_mission_episode_loop_exited_unexpectedly",
         )
+
+    def _marvin_mission_context_is_current(self, mission, control_generation):
+        with self._state_lock:
+            active = self.mission_manager.get_active_mission()
+            return bool(
+                self.running is True
+                and control_generation == self._control_generation
+                and self._is_normal_marvin_find_mission(mission)
+                and active is not None
+                and active.mission_id == getattr(mission, "mission_id", None)
+            )
+
+    @staticmethod
+    def _marvin_episode_is_safe_action_limit(episode, controller):
+        if (
+            episode.get("ok") is not True
+            or episode.get("execution_authorized") is not True
+            or controller.get("ok") is not True
+            or controller.get("completed") is not False
+            or controller.get("arrived_at_marvin") is not False
+            or controller.get("reason") != "find_marvin_action_limit_reached"
+            or controller.get("actions_executed") != CognitiveRuntime.FIND_MARVIN_AUTONOMOUS_MAX_ACTIONS
+        ):
+            return False
+        history = controller.get("history")
+        if not isinstance(history, list) or not history:
+            return False
+        counted = 0
+        for entry in history:
+            if not isinstance(entry, dict):
+                return False
+            attempted = entry.get("action_budget_consumed") is True
+            candidate_stop = entry.get("selected_action") == "confirm_arrival"
+            if attempted:
+                counted += 1
+            if attempted or candidate_stop:
+                stop = entry.get("stop_result")
+                if not isinstance(stop, dict) or stop.get("ok") is not True:
+                    return False
+        return counted == CognitiveRuntime.FIND_MARVIN_AUTONOMOUS_MAX_ACTIONS
+
+    def _marvin_bridge_ready_and_stopped(self):
+        status_reader = getattr(self.robot_client, "status", None)
+        if not callable(status_reader):
+            return {"ok": False, "reason": "bridge_status_unavailable"}
+        try:
+            status = status_reader()
+        except Exception as exc:
+            return {"ok": False, "reason": "bridge_status_error", "error": str(exc)}
+        if not isinstance(status, dict):
+            return {"ok": False, "reason": "bridge_status_malformed"}
+        motion = status.get("motion")
+        if not isinstance(motion, dict):
+            return {"ok": False, "reason": "bridge_motion_state_missing"}
+        ready = (
+            status.get("ok") is True
+            and status.get("ros_ready") is True
+            and motion.get("linear_x") == 0
+            and motion.get("angular_z") == 0
+            and motion.get("streaming") is False
+        )
+        return status if ready else {
+            "ok": False,
+            "reason": "bridge_not_ready_or_not_stopped",
+            "status": status,
+        }
 
     def execute_single_marvin_alignment(
         self, *, direction, angular_speed, duration,
@@ -803,7 +1041,10 @@ class CognitiveRuntime:
 
         try:
             if self._is_normal_marvin_find_mission(mission):
-                result = self._execute_normal_marvin_find_mission(mission)
+                result = self._execute_normal_marvin_find_mission(
+                    mission,
+                    control_generation=control_generation,
+                )
             else:
                 result = self.behavior_manager.execute(mission)
 
