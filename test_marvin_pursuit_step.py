@@ -140,6 +140,39 @@ def test_visual_centered_uses_existing_lidar_gated_forward_path(monkeypatch):
     assert robot.forward_requests == [(0.08, 0.50)]
 
 
+def test_canonical_bounded_bridge_result_is_normalized_and_replans(monkeypatch):
+    bridge_result = {
+        "ok": True, "action": "motion", "mode": "bounded",
+        "linear_x": 0.08, "angular_z": 0.0, "duration": 0.50,
+        "automatic_stop": True, "returned_immediately": False,
+    }
+    result, robot, _world, _calls, _safety, avoids = invoke(
+        monkeypatch, robot=Robot(result=bridge_result),
+    )
+    assert result["ok"] is result["motion_executed"] is result["replan_required"] is True
+    assert result["forward_result"]["executed"] is True
+    assert robot.forward_requests == [(0.08, 0.50)] and avoids == []
+
+
+def test_partial_or_safety_invalidated_bridge_success_never_normalizes(monkeypatch):
+    malformed = {
+        "ok": True, "action": "motion", "mode": "bounded",
+        "linear_x": 0.08, "angular_z": 0.0, "duration": 0.50,
+        "automatic_stop": True,
+    }
+    invalidated = {
+        **malformed, "returned_immediately": False,
+        "bounded_forward_invalidated": True,
+    }
+    for bridge_result in (malformed, invalidated, {"ok": False}):
+        result, robot, _world, _calls, _safety, avoids = invoke(
+            monkeypatch, robot=Robot(result=bridge_result),
+        )
+        assert result["ok"] is result["motion_executed"] is False
+        assert result["replan_required"] is False
+        assert robot.forward_requests == [(0.08, 0.50)] and avoids == []
+
+
 def test_ready_and_trusted_blockage_calls_only_one_avoidance_step(monkeypatch):
     result, robot, _world, _pursuit, _safety, avoids = invoke(
         monkeypatch, forward_safety=safety(permitted=False),

@@ -2441,6 +2441,11 @@ class BehaviorManager:
                     error=str(exc),
                     error_type=type(exc).__name__,
                 )
+            forward = self._normalize_marvin_bounded_forward_result(
+                forward,
+                speed=self.FIND_APPROACH_FORWARD_SPEED,
+                duration=self.FIND_APPROACH_FORWARD_SECONDS,
+            )
             forward_ok = bool(
                 isinstance(forward, dict)
                 and forward.get("ok") is True
@@ -2536,6 +2541,11 @@ class BehaviorManager:
             return dict(base, decision="approach_forward", executed_primitive="forward",
                         reason="marvin_single_approach_forward_exception",
                         error=str(exc), error_type=type(exc).__name__)
+        forward = self._normalize_marvin_bounded_forward_result(
+            forward,
+            speed=linear_speed,
+            duration=duration,
+        )
         forward_ok = bool(isinstance(forward, dict) and forward.get("ok") is True
                           and forward.get("executed") is True)
         if not forward_ok:
@@ -2546,6 +2556,39 @@ class BehaviorManager:
         return dict(base, ok=True, decision="approach_forward", executed_primitive="forward",
                     motion_executed=True, forward_result=forward,
                     reason="marvin_single_approach_forward_complete")
+
+    @staticmethod
+    def _normalize_marvin_bounded_forward_result(result, *, speed, duration):
+        """Normalize only a complete, accepted bounded Bridge forward result.
+
+        ``RobotBridgeClient.move_forward`` returns the Bridge ``/motion``
+        schema, while older local-forward callers returned ``executed``.
+        A canonical bounded result is promoted to that internal field only
+        after its exact speed, duration, non-streaming completion, and
+        automatic-stop evidence have all been verified.
+        """
+        if not isinstance(result, dict) or result.get("ok") is not True:
+            return result
+        if result.get("error") or any(result.get(key) is False for key in (
+            "forwarded", "confirmed_forwarded", "normal_completion",
+            "transport_accepted", "transport_began", "transport_returned",
+        )) or result.get("bounded_forward_invalidated") is True:
+            return result
+        if result.get("executed") is True:
+            return result
+        try:
+            canonical = (
+                result.get("action") == "motion"
+                and result.get("mode") == "bounded"
+                and result.get("automatic_stop") is True
+                and result.get("returned_immediately") is False
+                and float(result.get("linear_x")) == float(speed)
+                and float(result.get("angular_z")) == 0.0
+                and float(result.get("duration")) == float(duration)
+            )
+        except (TypeError, ValueError):
+            canonical = False
+        return dict(result, executed=True) if canonical else result
 
     @staticmethod
     def _marvin_pursuit_lidar_is_trusted(lidar, safety, session):

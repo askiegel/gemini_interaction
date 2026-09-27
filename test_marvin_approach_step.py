@@ -22,15 +22,16 @@ def lidar():
 
 
 class Robot:
-    def __init__(self):
+    def __init__(self, result=None):
         self.forward_calls = 0
         self.forward_requests = []
         self.stop_calls = 0
+        self.result = result if result is not None else {"ok": True, "executed": True}
 
     def move_forward(self, *, speed, seconds):
         self.forward_calls += 1
         self.forward_requests.append((speed, seconds))
-        return {"ok": True, "executed": True}
+        return self.result
 
     def stop(self):
         self.stop_calls += 1
@@ -80,6 +81,22 @@ def test_behavior_blocked_or_untrusted_lidar_vetoes_without_forward_or_avoidance
             expected_lidar_session=SESSION, linear_speed=0.08, duration=0.50)
         assert result["motion_executed"] is False and robot.forward_calls == 0
         manager.execute_local_obstacle_avoidance_step.assert_not_called()
+
+
+def test_one_shot_accepts_only_complete_canonical_bounded_bridge_success(monkeypatch):
+    canonical = {
+        "ok": True, "action": "motion", "mode": "bounded",
+        "linear_x": 0.08, "angular_z": 0.0, "duration": 0.50,
+        "automatic_stop": True, "returned_immediately": False,
+    }
+    robot, world = Robot(canonical), World()
+    manager = BehaviorManager(robot_client=robot, world_model=world)
+    monkeypatch.setattr(behavior_manager_module, "evaluate_local_motion_safety", lambda *_a, **_k: safety())
+    result = manager.execute_single_marvin_approach_step(
+        expected_lidar_session=SESSION, linear_speed=0.08, duration=0.50)
+    assert result["ok"] is result["motion_executed"] is True
+    assert result["forward_result"]["executed"] is True
+    assert robot.forward_requests == [(0.08, 0.50)]
 
 
 class RuntimeBehavior:
