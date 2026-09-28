@@ -70,6 +70,14 @@ def evaluate_marvin_arrival(
         return _fail(result, "target_lock_geometry_invalid")
     result.update(geometry)
     result["geometry_valid"] = True
+    arrival_geometry = _arrival_geometry(
+        target_lock_result.get("bbox"),
+        target_lock_result.get("image_width"),
+        target_lock_result.get("image_height"),
+    )
+    result.update(arrival_geometry)
+    if not result["arrival_geometry_valid"]:
+        return _fail(result, "target_lock_arrival_geometry_clipped")
     result["area_threshold_met"] = (
         result["area_fraction"] >= MARVIN_ARRIVAL_AREA_FRACTION
     )
@@ -125,6 +133,12 @@ def evaluate_marvin_visual_arrival(
     result.update(geometry)
     result["geometry_valid"] = True
     result["visual_session_authorized"] = True
+    arrival_geometry = _arrival_geometry(
+        preview.get("bbox"), preview.get("image_width"), preview.get("image_height"),
+    )
+    result.update(arrival_geometry)
+    if not result["arrival_geometry_valid"]:
+        return _fail(result, "preview_arrival_geometry_clipped")
     result["area_threshold_met"] = result["area_fraction"] >= MARVIN_ARRIVAL_AREA_FRACTION
     if result["height_fraction"] < MARVIN_ARRIVAL_HEIGHT_FRACTION:
         return _fail(result, "marvin_visual_standoff_not_reached")
@@ -140,6 +154,8 @@ def _base_result(selected_identity_id):
         "identity_authorized": False,
         "fresh": False,
         "geometry_valid": False,
+        "arrival_geometry_valid": False,
+        "arrival_geometry_clipped_edges": [],
         "bbox_width": None,
         "bbox_height": None,
         "width_fraction": None,
@@ -175,6 +191,40 @@ def _geometry(value):
         "width_fraction": bbox_width / width,
         "height_fraction": bbox_height / height,
         "area_fraction": (bbox_width * bbox_height) / (width * height),
+    }
+
+
+def marvin_arrival_geometry_valid(bbox, image_width, image_height):
+    """Return whether a valid bbox is strictly inside all image boundaries.
+
+    Boundary-touching detections remain usable by pursuit, but their visible
+    height cannot reliably establish physical distance/arrival.
+    """
+    return _arrival_geometry(bbox, image_width, image_height)[
+        "arrival_geometry_valid"
+    ]
+
+
+def _arrival_geometry(bbox, image_width, image_height):
+    edges = []
+    if _geometry({
+        "bbox": bbox,
+        "image_width": image_width,
+        "image_height": image_height,
+    }) is None:
+        return {"arrival_geometry_valid": False, "arrival_geometry_clipped_edges": edges}
+    x1, y1, x2, y2 = (bbox[key] for key in ("x1", "y1", "x2", "y2"))
+    if x1 <= 0:
+        edges.append("left")
+    if y1 <= 0:
+        edges.append("top")
+    if x2 >= image_width:
+        edges.append("right")
+    if y2 >= image_height:
+        edges.append("bottom")
+    return {
+        "arrival_geometry_valid": not edges,
+        "arrival_geometry_clipped_edges": edges,
     }
 
 

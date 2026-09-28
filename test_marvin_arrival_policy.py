@@ -10,6 +10,7 @@ from marvin_arrival_policy import (
     MARVIN_ARRIVAL_HEIGHT_FRACTION,
     evaluate_marvin_arrival,
     evaluate_marvin_visual_arrival,
+    marvin_arrival_geometry_valid,
 )
 
 
@@ -166,6 +167,44 @@ def test_visual_session_arrival_fails_closed_for_ambiguous_or_stale_preview():
     assert not evaluate_marvin_visual_arrival(
         dict(base, source_timestamp="2026-09-26T15:59:56+00:00"), now=STAMP,
     )["arrived_at_marvin"]
+
+
+def test_arrival_geometry_rejects_boundary_contact_on_each_image_edge():
+    interior = {"x1": 1, "y1": 1, "x2": 639, "y2": 479}
+    assert marvin_arrival_geometry_valid(interior, 640, 480)
+    for edge, bbox in (
+        ("left", dict(interior, x1=0)),
+        ("top", dict(interior, y1=0)),
+        ("right", dict(interior, x2=640)),
+        ("bottom", dict(interior, y2=480)),
+    ):
+        assert not marvin_arrival_geometry_valid(bbox, 640, 480), edge
+
+
+def test_clipped_oversized_visual_preview_cannot_authorize_arrival():
+    preview = {
+        "ok": True, "preview": True, "authoritative": False,
+        "target": "marvin", "target_found": True, "source": "marvin_local_tracker",
+        "identity_confirmed": True, "source_timestamp": STAMP,
+        "image_width": 640.0, "image_height": 480.0,
+        "bbox": {"x1": 200.0, "y1": 0.0, "x2": 400.0, "y2": 375.0},
+    }
+    value = evaluate_marvin_visual_arrival(preview, now=STAMP)
+    assert value["height_fraction"] == 0.78125
+    assert value["geometry_valid"] is True
+    assert value["visual_session_authorized"] is True
+    assert value["arrival_geometry_valid"] is False
+    assert value["arrival_geometry_clipped_edges"] == ["top"]
+    assert value["arrived_at_marvin"] is False
+    assert value["reason"] == "preview_arrival_geometry_clipped"
+
+
+def test_clipped_locked_bbox_cannot_authorize_persistent_arrival():
+    clipped = lock(bbox={"x1": 100, "y1": 0, "x2": 288, "y2": 364})
+    value = evaluate(clipped)
+    assert value["geometry_valid"] is True
+    assert value["arrival_geometry_valid"] is False
+    assert value["arrived_at_marvin"] is False
 
 
 def test_deterministic_and_inputs_not_mutated():

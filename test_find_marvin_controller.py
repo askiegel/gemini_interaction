@@ -16,6 +16,7 @@ def evidence(identity="marvin-1", preview_result=None):
 def arrival_preview(height_fraction, timestamp, *, ambiguous=False, confirmed=True):
     image_height = 480.0
     bbox_height = round(float(height_fraction) * image_height)
+    bbox_y1 = max(1.0, (image_height - bbox_height) / 2.0)
     return {
         "ok": True,
         "preview": True,
@@ -30,9 +31,9 @@ def arrival_preview(height_fraction, timestamp, *, ambiguous=False, confirmed=Tr
         "image_height": image_height,
         "bbox": {
             "x1": 200.0,
-            "y1": image_height - bbox_height,
+            "y1": bbox_y1,
             "x2": 400.0,
-            "y2": image_height,
+            "y2": bbox_y1 + bbox_height,
         },
     }
 
@@ -311,6 +312,59 @@ def test_two_consecutive_independent_arrival_previews_complete_without_motion(mo
     assert result["arrival_observations_confirmed"] == 2
     assert pursuits == searches == []
     assert [event[0] for event in events] == ["preview", "stop", "preview"]
+
+
+def test_far_unclipped_preview_is_not_arrival(monkeypatch):
+    result, _events, _pursuits, _searches = run_visual_preview_sequence(
+        monkeypatch,
+        [arrival_preview(0.3167, "2026-09-26T16:00:08+00:00")],
+        max_actions=1,
+    )
+    assert result["arrived_at_marvin"] is False
+    assert result["history"][0]["arrival"]["arrival_geometry_valid"] is True
+    assert result["history"][0]["arrival"]["reason"] == "marvin_visual_standoff_not_reached"
+
+
+def test_two_consecutive_clipped_oversized_previews_cannot_complete_arrival(monkeypatch):
+    previews = [
+        arrival_preview(0.78125, "2026-09-26T16:00:08+00:00"),
+        arrival_preview(0.81667, "2026-09-26T16:00:09+00:00"),
+    ]
+    for preview in previews:
+        bbox_height = preview["bbox"]["y2"] - preview["bbox"]["y1"]
+        preview["bbox"]["y1"] = 0.0
+        preview["bbox"]["y2"] = bbox_height
+    result, events, pursuits, _searches = run_visual_preview_sequence(
+        monkeypatch, previews, max_actions=2,
+    )
+    assert result["arrived_at_marvin"] is False
+    assert result["reason"] == "find_marvin_action_limit_reached"
+    assert result["actions_executed"] == 2
+    assert all(
+        entry["arrival"]["arrived_at_marvin"] is False
+        and entry["arrival"]["reason"] == "preview_arrival_geometry_clipped"
+        for entry in result["history"]
+    )
+    assert len(pursuits) == 2
+    assert [event[0] for event in events] == ["preview", "pursuit", "stop", "preview", "pursuit", "stop"]
+
+
+def test_unclipped_candidate_followed_by_clipped_frame_resets_without_arrival(monkeypatch):
+    clipped = arrival_preview(0.57, "2026-09-26T16:00:09+00:00")
+    bbox_height = clipped["bbox"]["y2"] - clipped["bbox"]["y1"]
+    clipped["bbox"]["y1"] = 0.0
+    clipped["bbox"]["y2"] = bbox_height
+    result, events, pursuits, _searches = run_visual_preview_sequence(
+        monkeypatch,
+        [arrival_preview(0.56, "2026-09-26T16:00:08+00:00"), clipped],
+        max_actions=1,
+    )
+    assert result["arrived_at_marvin"] is False
+    assert result["history"][0]["selected_action"] == "confirm_arrival"
+    assert result["history"][1]["arrival_candidate_reset"] is True
+    assert result["history"][1]["arrival"]["reason"] == "preview_arrival_geometry_clipped"
+    assert result["actions_executed"] == len(pursuits) == 1
+    assert [event[0] for event in events] == ["preview", "stop", "preview", "pursuit", "stop"]
 
 
 def test_arrival_candidate_then_nonarrival_resets_and_replans_from_second_preview(monkeypatch):
