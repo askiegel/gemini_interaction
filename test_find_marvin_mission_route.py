@@ -314,6 +314,86 @@ def test_safe_action_limit_continues_with_fresh_episode_and_arrival_terminates(t
     assert runtime.mission_manager.get_active_mission() is None
 
 
+def test_mixed_six_action_episode_with_search_turns_passes_stop_accounting(tmp_path):
+    limit = controller_result(
+        reason="find_marvin_action_limit_reached",
+        completed=False, arrived=False, actions=6,
+    )
+    action_types = (
+        "approach_forward", "approach_forward", "search_turn",
+        "align_right", "search_turn", "approach_forward",
+    )
+    limit["history"] = [
+        {
+            "route": "search" if action == "search_turn" else "pursuit",
+            "selected_action": action,
+            "action_budget_consumed": True,
+            "stop_result": {"ok": True},
+        }
+        for action in action_types
+    ]
+    arrival = controller_result(
+        reason="arrived_at_marvin", completed=True, arrived=True, actions=0,
+        arrival_observations_confirmed=2,
+    )
+    runtime, behavior = make_runtime(tmp_path, [limit, arrival])
+    runtime.submit_text("Find Marvin")
+
+    result = runtime.run_once()
+
+    assert len(behavior.controller_calls) == 2
+    assert result["episodes_executed"] == 2
+    assert result["episode_results"][0]["result"]["controller_result"][
+        "actions_executed"
+    ] == 6
+    assert all(entry["action_budget_consumed"] for entry in limit["history"])
+    assert all(entry["stop_result"]["ok"] for entry in limit["history"])
+    assert result["arrived_at_marvin"] is True
+
+
+@pytest.mark.parametrize(
+    "motion_update",
+    [
+        {"linear_x": 0.01},
+        {"angular_z": 0.01},
+        {"streaming": True},
+        {"linear_x": "malformed"},
+        {"motion": None},
+    ],
+)
+def test_mixed_action_episode_requires_current_bridge_stopped_state(
+    tmp_path, motion_update,
+):
+    limit = controller_result(
+        reason="find_marvin_action_limit_reached",
+        completed=False, arrived=False, actions=6,
+    )
+    limit["history"] = [
+        {
+            "selected_action": "search_turn" if i in (2, 4) else "pursuit",
+            "action_budget_consumed": True,
+            "stop_result": {"ok": True},
+        }
+        for i in range(6)
+    ]
+    runtime, behavior = make_runtime(tmp_path, [limit, controller_result(
+        reason="arrived_at_marvin", completed=True, arrived=True,
+    )])
+    status = runtime.robot_client.status()
+    if "motion" in motion_update:
+        status["motion"] = motion_update["motion"]
+    else:
+        status["motion"].update(motion_update)
+    runtime.robot_client.status = lambda: status
+    runtime.submit_text("Find Marvin")
+
+    result = runtime.run_once()
+
+    assert len(behavior.controller_calls) == 1
+    assert result["mission_outcome"] == "safe_failure"
+    assert result["reason"] == "find_marvin_episode_bridge_not_ready_or_stopped"
+
+
 def test_two_action_limited_episodes_then_arrival_succeeds_on_third(tmp_path):
     limit = controller_result(
         reason="find_marvin_action_limit_reached",
@@ -453,6 +533,39 @@ def test_action_limit_with_missing_stop_evidence_does_not_continue(tmp_path):
         reason="arrived_at_marvin", completed=True, arrived=True, actions=0,
     )])
     runtime.submit_text("Find Marvin")
+    result = runtime.run_once()
+
+    assert len(behavior.controller_calls) == 1
+    assert result["mission_outcome"] == "safe_failure"
+    assert result["reason"] == "find_marvin_action_limit_result_not_safely_stopped"
+
+
+@pytest.mark.parametrize("stop_result", [None, {"ok": False}])
+def test_search_action_without_successful_stop_evidence_blocks_continuation(
+    tmp_path, stop_result,
+):
+    unsafe_limit = controller_result(
+        reason="find_marvin_action_limit_reached",
+        completed=False, arrived=False, actions=6,
+    )
+    unsafe_limit["history"] = [
+        {
+            "route": "search" if i == 2 else "pursuit",
+            "selected_action": "search_turn" if i == 2 else "approach_forward",
+            "action_budget_consumed": True,
+            "stop_result": {"ok": True},
+        }
+        for i in range(6)
+    ]
+    if stop_result is None:
+        unsafe_limit["history"][2].pop("stop_result")
+    else:
+        unsafe_limit["history"][2]["stop_result"] = stop_result
+    runtime, behavior = make_runtime(tmp_path, [unsafe_limit, controller_result(
+        reason="arrived_at_marvin", completed=True, arrived=True,
+    )])
+    runtime.submit_text("Find Marvin")
+
     result = runtime.run_once()
 
     assert len(behavior.controller_calls) == 1

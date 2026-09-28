@@ -59,7 +59,10 @@ def test_left_plan_dispatches_one_canonical_left_guarded_turn(monkeypatch):
     result, manager, planner_calls, turns = invoke(monkeypatch, planned("turn_left"))
     assert result["ok"] is result["motion_executed"] is result["replan_required"] is True
     assert result["executed_primitive"] == "guarded_turn_left"
-    assert turns == [(("LEFT", manager.SEARCH_TURN_SPEED, manager.SEARCH_TURN_SECONDS), {"expected_lidar_session": SESSION, "now": 10.0})]
+    assert turns == [(("LEFT", 0.25, 0.50), {"expected_lidar_session": SESSION, "now": 10.0})]
+    assert manager.MARVIN_SEARCH_TURN_SPEED == 0.25
+    assert manager.MARVIN_SEARCH_TURN_SECONDS == 0.50
+    assert abs(turns[0][0][1]) <= 0.25 and turns[0][0][2] <= 0.50
     assert len(planner_calls) == 1
     assert_one_turn(turns)
 
@@ -67,7 +70,8 @@ def test_left_plan_dispatches_one_canonical_left_guarded_turn(monkeypatch):
 def test_right_plan_dispatches_one_canonical_right_guarded_turn(monkeypatch):
     result, manager, _planner, turns = invoke(monkeypatch, planned("turn_right"))
     assert result["executed_primitive"] == "guarded_turn_right"
-    assert turns[0][0] == ("RIGHT", manager.SEARCH_TURN_SPEED, manager.SEARCH_TURN_SECONDS)
+    assert turns[0][0] == ("RIGHT", 0.25, 0.50)
+    assert abs(turns[0][0][1]) <= 0.25 and turns[0][0][2] <= 0.50
     assert result["replan_required"] is True
     assert_one_turn(turns)
 
@@ -133,3 +137,11 @@ def test_coordinator_has_no_pursuit_loop_or_direct_transport():
     ):
         assert forbidden not in coordinator.lower()
     assert coordinator.count("self.execute_guarded_turn(") == 1
+
+
+def test_marvin_search_limits_are_separate_from_generic_find_object_search():
+    manager = BehaviorManager(robot_client=object())
+    assert manager.MARVIN_SEARCH_TURN_SPEED == 0.25
+    assert manager.MARVIN_SEARCH_TURN_SECONDS == 0.50
+    assert manager.SEARCH_TURN_SPEED == 0.30
+    assert manager.SEARCH_TURN_SECONDS == 1.0

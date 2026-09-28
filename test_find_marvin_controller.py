@@ -153,6 +153,22 @@ def test_searching_and_reacquire_route_only_to_search(monkeypatch):
         assert pursuits == [] and result["reason"] == "find_marvin_action_limit_reached"
 
 
+def test_search_dispatch_attempt_consumes_budget_and_requires_stop(monkeypatch):
+    stops = []
+    result, _providers, _evaluations, _arrivals, searches, pursuits = invoke(
+        monkeypatch,
+        [pursuit("SEARCHING", False)],
+        max_actions=1,
+        stop_after_action=lambda: stops.append(True) or {"ok": False},
+    )
+    assert len(searches) == 1 and pursuits == []
+    assert result["actions_executed"] == 1
+    assert result["history"][0]["action_budget_consumed"] is True
+    assert result["history"][0]["stop_result"] == {"ok": False}
+    assert stops == [True]
+    assert result["reason"] == "find_marvin_post_action_stop_failed"
+
+
 def test_ready_authorized_routes_only_to_pursuit(monkeypatch):
     result, _providers, _evaluations, _arrivals, searches, pursuits = invoke(monkeypatch, [pursuit()], max_actions=1)
     assert searches == [] and len(pursuits) == result["actions_executed"] == 1
@@ -455,12 +471,17 @@ def test_nonrouting_states_execute_no_executor(monkeypatch):
 
 
 def test_search_then_ready_routes_one_executor_per_fresh_iteration(monkeypatch):
+    stops = []
     result, providers, evaluations, _arrivals, searches, pursuits = invoke(
-        monkeypatch, [pursuit("SEARCHING", False), pursuit()], max_actions=2)
+        monkeypatch, [pursuit("SEARCHING", False), pursuit()], max_actions=2,
+        stop_after_action=lambda: stops.append(True) or {"ok": True})
     assert len(providers) == len(evaluations) == 2
     assert len(searches) == len(pursuits) == 1
     assert [entry["route"] for entry in result["history"]] == ["search", "pursuit"]
     assert result["actions_executed"] == 2
+    assert len(stops) == 2
+    assert result["history"][0]["action_budget_consumed"] is True
+    assert result["history"][0]["stop_result"]["ok"] is True
 
 
 def test_nested_preview_schema_search_reacquires_then_returns_to_pursuit(monkeypatch):

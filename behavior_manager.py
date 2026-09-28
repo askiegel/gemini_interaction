@@ -489,6 +489,8 @@ class BehaviorManager:
 
     SEARCH_TURN_SPEED = 0.30
     SEARCH_TURN_SECONDS = 1.0
+    MARVIN_SEARCH_TURN_SPEED = 0.25
+    MARVIN_SEARCH_TURN_SECONDS = 0.50
     SEARCH_MAX_TURN_CHUNKS = 3
     SEARCH_DIRECTION = "LEFT"
     TARGET_CONFIRMATION_MAX_FRAMES = 3
@@ -1490,8 +1492,8 @@ class BehaviorManager:
         try:
             guarded_turn = self.execute_guarded_turn(
                 direction,
-                self.SEARCH_TURN_SPEED,
-                self.SEARCH_TURN_SECONDS,
+                self.MARVIN_SEARCH_TURN_SPEED,
+                self.MARVIN_SEARCH_TURN_SECONDS,
                 expected_lidar_session=session,
                 now=now,
             )
@@ -2243,6 +2245,10 @@ class BehaviorManager:
                 # An executor-side exception may occur after dispatch, so the
                 # request consumes a shared bounded action opportunity first.
                 base["actions_executed"] += 1
+                # Once dispatch is attempted, delivery may be uncertain even
+                # if the executor does not confirm motion. Record the shared
+                # physical/delivery-uncertain action opportunity consistently.
+                history_entry["action_budget_consumed"] = True
                 try:
                     step = self.execute_marvin_search_step(
                         pursuit,
