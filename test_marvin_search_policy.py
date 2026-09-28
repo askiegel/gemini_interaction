@@ -8,6 +8,7 @@ from marvin_search_policy import (
     DEFAULT_MAX_SEARCH_ACTIONS,
     plan_marvin_search_step,
 )
+from marvin_pursuit_state import evaluate_marvin_pursuit_state
 
 
 STAMP = "2026-09-25T12:00:00+00:00"
@@ -21,7 +22,8 @@ def preview(**updates):
     value = {
         "ok": True, "preview": True, "authoritative": False,
         "target": "marvin", "target_found": True,
-        "identity_confirmed": True, "source_timestamp": STAMP,
+        "source": "marvin_local_tracker", "identity_confirmed": True,
+        "source_timestamp": STAMP, "image_width": 640, "image_height": 480,
         "bbox": {"x1": 10, "y1": 20, "x2": 100, "y2": 200},
     }
     value.update(updates)
@@ -36,6 +38,27 @@ def test_searching_fresh_candidate_hands_back_without_scan_motion():
     result = plan(state(), preview_result=preview())
     assert result["selected_search_action"] == "preview_only"
     assert result["candidate_available"] is True and result["reacquired"] is False
+    assert result["preview_status"] == "fresh_candidate"
+
+
+def test_search_accepts_dashboard_style_nested_tracking_preview():
+    live_shape = {
+        "ok": True, "preview": True, "authoritative": False,
+        "target": "marvin", "identity_confirmed": True,
+        "source_timestamp": STAMP, "source": "marvin_local_tracker",
+        "tracking": {
+            "active": True, "target_label": "marvin",
+            "vision_timestamp": STAMP, "source": "marvin_local_tracker",
+            "image_width": 640, "image_height": 480,
+            "bbox": {"x1": 247, "y1": 239, "x2": 387, "y2": 395},
+            "identity_ambiguous": False,
+        },
+    }
+    result = plan(state(), preview_result=live_shape)
+    assert result["reason"] == "marvin_candidate_requires_identity_confirmation"
+    assert result["preview_status"] == "fresh_candidate"
+    assert result["candidate_available"] is True
+    assert result["selected_search_action"] == "preview_only"
 
 
 def test_searching_empty_preview_plans_first_then_next_deterministic_scan():
@@ -90,7 +113,45 @@ def test_stale_preview_is_not_accepted_and_malformed_preview_fails_closed():
     stale = plan(state(), preview_result=preview(source_timestamp="2026-09-25T11:59:56+00:00"))
     malformed = plan(state(), preview_result=preview(bbox=None))
     assert stale["candidate_available"] is False and stale["selected_search_action"] == "turn_left"
+    assert stale["preview_status"] == "stale"
     assert malformed["selected_search_action"] == "fail_closed"
+    assert malformed["preview_status"] == "malformed"
+
+
+def test_no_target_stale_ambiguous_and_unconfirmed_are_bounded_noncandidate_states():
+    cases = (
+        (preview(target_found=False, identity_confirmed=False), "no_target"),
+        (preview(ambiguous=True), "ambiguous"),
+        (preview(identity_confirmed=False), "unconfirmed"),
+        (preview(source_timestamp="2026-09-25T11:59:56+00:00"), "stale"),
+    )
+    for candidate, expected_status in cases:
+        result = plan(state(), preview_result=candidate)
+        assert result["preview_status"] == expected_status
+        assert result["candidate_available"] is False
+        assert result["selected_search_action"] == "turn_left"
+
+
+def test_fresh_reacquired_nested_preview_returns_to_normal_visual_pursuit():
+    live_shape = {
+        "ok": True, "preview": True, "authoritative": False,
+        "target": "marvin", "identity_confirmed": True,
+        "source_timestamp": STAMP, "source": "marvin_local_tracker",
+        "tracking": {
+            "active": True, "target_label": "marvin",
+            "vision_timestamp": STAMP, "source": "marvin_local_tracker",
+            "image_width": 640, "image_height": 480,
+            "bbox": {"x1": 247, "y1": 239, "x2": 387, "y2": 395},
+            "identity_ambiguous": False,
+        },
+    }
+    search = plan(state(), preview_result=live_shape)
+    pursuit = evaluate_marvin_pursuit_state(
+        live_shape, {}, {"tracking_mode": "UNLOCKED"}, now=STAMP,
+    )
+    assert search["selected_search_action"] == "preview_only"
+    assert pursuit["state"] == "VISUAL_READY_TO_APPROACH"
+    assert pursuit["pursuit_authorized"] is True
 
 
 def test_selected_identity_is_preserved_and_outputs_are_deterministic_without_mutation():

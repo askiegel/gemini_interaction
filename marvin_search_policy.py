@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 import math
 
 from marvin_preview_reacquisition import DEFAULT_PREVIEW_MAX_AGE_SECONDS
+from marvin_preview_schema import normalize_marvin_preview
 
 
 DEFAULT_MAX_SEARCH_ACTIONS = 4
@@ -46,6 +47,7 @@ def plan_marvin_search_step(
         "selected_identity_id": _nonempty(selected_identity_id),
         "reacquired": False,
         "candidate_available": False,
+        "preview_status": None,
     }
     if not _valid_limit(max_search_actions):
         return dict(base, reason="invalid_marvin_search_action_limit")
@@ -73,6 +75,7 @@ def plan_marvin_search_step(
     preview_status = _preview_status(
         preview_result, now=now, max_age_seconds=max_preview_age_seconds,
     )
+    result["preview_status"] = preview_status
     if preview_status == "malformed":
         return dict(result, reason="marvin_search_preview_malformed")
     candidate_available = preview_status == "fresh_candidate"
@@ -144,17 +147,36 @@ def _preview_status(value, *, now, max_age_seconds):
         return "unavailable"
     if not isinstance(value, dict):
         return "malformed"
-    if (value.get("ok") is not True or value.get("preview") is not True
-            or value.get("authoritative") is not False
-            or str(value.get("target") or "").strip().lower() != "marvin"):
+    preview = normalize_marvin_preview(value)
+    if preview is None:
         return "malformed"
-    if value.get("target_found") is not True or value.get("identity_confirmed") is not True:
+    if value.get("ok") is not True:
         return "unavailable"
-    if not _valid_bbox(value.get("bbox")):
+    if (preview.get("preview") is not True
+            or preview.get("authoritative") is not False
+            or preview.get("target") != "marvin"):
         return "malformed"
-    timestamp = _parse_timestamp(value.get("source_timestamp") or value.get("vision_timestamp"))
+    if preview.get("target_found") is not True:
+        return "no_target"
+    if preview.get("ambiguous") is True:
+        return "ambiguous"
+    if (preview.get("identity_confirmed") is not True
+            or preview.get("source") != "marvin_local_tracker"):
+        return "unconfirmed"
+    bbox = preview.get("bbox")
+    width, height = preview.get("image_width"), preview.get("image_height")
+    if (not _valid_bbox(bbox) or not _valid_positive(width)
+            or not _valid_positive(height)
+            or not (0 <= bbox["x1"] < bbox["x2"] <= width
+                    and 0 <= bbox["y1"] < bbox["y2"] <= height)):
+        return "malformed"
+    timestamp = _parse_timestamp(
+        preview.get("source_timestamp") or preview.get("vision_timestamp")
+    )
     current = _parse_timestamp(now) if now is not None else datetime.now(timezone.utc)
-    if timestamp is None or current is None:
+    if timestamp is None:
+        return "malformed"
+    if current is None:
         return "malformed"
     age = (current - timestamp).total_seconds()
     if not math.isfinite(age) or age < -1.0:

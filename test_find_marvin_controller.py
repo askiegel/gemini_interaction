@@ -463,6 +463,80 @@ def test_search_then_ready_routes_one_executor_per_fresh_iteration(monkeypatch):
     assert result["actions_executed"] == 2
 
 
+def test_nested_preview_schema_search_reacquires_then_returns_to_pursuit(monkeypatch):
+    manager = BehaviorManager(robot_client=object())
+    manager.lidar_session = "offline-search-session"
+    stamp_one = "2026-09-26T16:00:08+00:00"
+    stamp_two = "2026-09-26T16:00:09+00:00"
+    absent = {
+        "ok": True, "preview": True, "authoritative": False,
+        "target": "marvin", "identity_confirmed": False,
+        "source_timestamp": stamp_one,
+        "tracking": {
+            "active": False, "target_label": "marvin",
+            "source": "marvin_local_tracker", "vision_timestamp": stamp_one,
+            "image_width": 640, "image_height": 480, "bbox": None,
+        },
+    }
+    reacquired = {
+        "ok": True, "preview": True, "authoritative": False,
+        "target": "marvin", "identity_confirmed": True,
+        "source_timestamp": stamp_two,
+        "tracking": {
+            "active": True, "target_label": "marvin",
+            "source": "marvin_local_tracker", "vision_timestamp": stamp_two,
+            "image_width": 640, "image_height": 480,
+            "bbox": {"x1": 247, "y1": 239, "x2": 387, "y2": 395},
+            "identity_ambiguous": False,
+        },
+    }
+    evidence_values = iter((absent, reacquired))
+    events = []
+    pursuit_inputs = []
+
+    def provider():
+        value = next(evidence_values)
+        events.append(("preview", value["source_timestamp"]))
+        return {
+            "preview_result": value,
+            "target_lock_result": {},
+            "target_lock_snapshot": {"tracking_mode": "UNLOCKED"},
+            "selected_identity_id": None,
+        }
+
+    def guarded_turn(*args, **kwargs):
+        events.append(("guarded_turn", args[0]))
+        return {"ok": True, "permitted": True, "confirmed_forwarded": True}
+
+    def pursuit_step(preview_value, *_args, **_kwargs):
+        pursuit_inputs.append(preview_value)
+        events.append(("pursuit", None))
+        return successful_pursuit()
+
+    def stop():
+        events.append(("stop", None))
+        return {"ok": True, "stopped": True}
+
+    monkeypatch.setattr(manager, "execute_guarded_turn", guarded_turn)
+    monkeypatch.setattr(manager, "execute_marvin_pursuit_step", pursuit_step)
+    result = manager.execute_find_marvin_controller(
+        provider, max_actions=2, now="2026-09-26T16:00:10+00:00",
+        stop_after_action=stop,
+    )
+
+    assert result["reason"] == "find_marvin_action_limit_reached"
+    assert [entry["route"] for entry in result["history"]] == ["search", "pursuit"]
+    assert result["history"][0]["search_step_result"]["planner"]["preview_status"] == "no_target"
+    assert result["history"][0]["search_action"] == "turn_left"
+    assert result["history"][1]["pursuit_state"] == "VISUAL_READY_TO_APPROACH"
+    assert result["history"][1]["pursuit_authorized"] is True
+    assert pursuit_inputs == [reacquired]
+    assert events == [
+        ("preview", stamp_one), ("guarded_turn", "LEFT"), ("stop", None),
+        ("preview", stamp_two), ("pursuit", None), ("stop", None),
+    ]
+
+
 def test_arrival_after_pursuit_uses_fresh_second_iteration_without_extra_action(monkeypatch):
     result, providers, evaluations, arrivals, searches, pursuits = invoke(
         monkeypatch, [pursuit(), pursuit(), pursuit()],
