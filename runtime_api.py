@@ -470,6 +470,7 @@ class RuntimeAPIHandler(BaseHTTPRequestHandler):
 
         supported_paths = {
             "/guarded-turn",
+            "/active-localization/scan",
             "/find-marvin/alignment-step",
             "/find-marvin/approach-step",
             "/find-marvin/autonomous-run",
@@ -547,6 +548,15 @@ class RuntimeAPIHandler(BaseHTTPRequestHandler):
                     expected_lidar_session=producer_session,
                 )
                 self.send_json(200, result)
+                return
+
+            if path == "/active-localization/scan":
+                if request_data:
+                    raise ValueError(
+                        "active-localization/scan requires an empty JSON object."
+                    )
+                result = self.server.runtime.run_bounded_active_localization()
+                self.send_json(200 if result.get("ok") is True else 409, result)
                 return
 
             if path == "/find-marvin/alignment-step":

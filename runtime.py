@@ -16,6 +16,7 @@ from mission_manager import MissionManager
 from provider_factory import create_provider
 from robot_bridge.client import RobotBridgeClient
 from tracking_state import build_tracking_state, empty_tracking_state
+from tony2_localization_facade import Tony2LocalizationFacade
 from vision_adapter import VisionAdapter
 from semantic_vision import SemanticVisionClient
 from world_model import WorldModel
@@ -64,6 +65,9 @@ class CognitiveRuntime:
     LOOP_INTERVAL_SECONDS = 0.03
     FIND_MARVIN_AUTONOMOUS_MAX_ACTIONS = 6
     FIND_MARVIN_MAX_EPISODES = 4
+    MAX_ACTIVE_LOCALIZATION_TURNS = 6
+    ACTIVE_LOCALIZATION_TURN_SPEED = 0.25
+    ACTIVE_LOCALIZATION_TURN_DURATION = 0.50
 
     def __init__(
         self,
@@ -76,6 +80,7 @@ class CognitiveRuntime:
         loop_interval=None,
         lidar_worker_factory=None,
         semantic_vision=None,
+        localization_facade=None,
     ):
         self.config = None
 
@@ -96,6 +101,9 @@ class CognitiveRuntime:
 
         self.robot_client = robot_client or RobotBridgeClient(
             timeout=15.0,
+        )
+        self.localization_facade = (
+            localization_facade or Tony2LocalizationFacade()
         )
 
         self.behavior_manager = behavior_manager or BehaviorManager(
@@ -121,6 +129,7 @@ class CognitiveRuntime:
         self._marvin_approach_step_consumed = False
         self._marvin_autonomous_run_consumed = False
         self._marvin_controller_lock = threading.RLock()
+        self._active_localization_lock = threading.Lock()
         self._last_runtime_state = None
         self._control_generation = 0
         self._behavior_execution_generation = None
@@ -658,6 +667,246 @@ class CognitiveRuntime:
             "reason": "bridge_not_ready_or_not_stopped",
             "status": status,
         }
+
+    @staticmethod
+    def _active_localization_pose_is_trusted(status):
+        """Require the same canonical Tony2 authority used by navigation."""
+        if not isinstance(status, dict):
+            return False
+        navigation = status.get("navigation")
+        telemetry = status.get("telemetry")
+        pose = telemetry.get("pose") if isinstance(telemetry, dict) else None
+        position = pose.get("position") if isinstance(pose, dict) else None
+        values = (
+            position.get("x") if isinstance(position, dict) else None,
+            position.get("y") if isinstance(position, dict) else None,
+            pose.get("yaw_radians") if isinstance(pose, dict) else None,
+            telemetry.get("age_seconds") if isinstance(telemetry, dict) else None,
+        )
+        return bool(
+            status.get("ok") is True
+            and status.get("authoritative") is True
+            and status.get("read_only") is True
+            and status.get("source") == "tony2_navigation_amcl"
+            and isinstance(navigation, dict)
+            and navigation.get("localization_validated") is True
+            and navigation.get("transform_ready") is True
+            and isinstance(telemetry, dict)
+            and telemetry.get("available") is True
+            and isinstance(pose, dict)
+            and pose.get("frame_id") == "map"
+            and all(
+                isinstance(value, (int, float))
+                and not isinstance(value, bool)
+                and math.isfinite(value)
+                for value in values
+            )
+            and 0.0 <= float(values[-1]) < 3.0
+        )
+
+    @staticmethod
+    def _active_localization_is_recoverable(status):
+        navigation = status.get("navigation") if isinstance(status, dict) else None
+        return bool(
+            isinstance(navigation, dict)
+            and navigation.get("localization_state")
+            == "ACTIVE_LOCALIZATION_REQUIRED"
+            and navigation.get("localization_validated") is False
+            and navigation.get("goal_submission_enabled") is False
+            and navigation.get("goal_active") is False
+        )
+
+    def _active_localization_lidar_is_current(self):
+        worker = getattr(self, "lidar_worker", None)
+        session = getattr(worker, "session", None)
+        if (
+            worker is None
+            or worker.running is not True
+            or not isinstance(session, str)
+            or not session
+        ):
+            return None, None
+        try:
+            state = self.world_model.get_lidar_obstacles(
+                expected_session=session,
+            )
+        except Exception:
+            return session, None
+        return (
+            session,
+            state if _marvin_alignment_lidar_is_current(state, session) else None,
+        )
+
+    def _active_localization_has_behavior_owner(self):
+        """Do not overlap an active mission or another behavior execution."""
+        with self._state_lock:
+            active = self.mission_manager.get_active_mission()
+            return (
+                active is not None
+                or self._behavior_execution_generation is not None
+            )
+
+    def run_bounded_active_localization(self):
+        """Obtain LiDAR viewpoints through at most six guarded in-place turns.
+
+        Tony2 remains the sole authority for AMCL lifecycle and canonical map
+        pose validation.  This method owns only the bounded physical scan and
+        never calls a Home seed or a navigation-goal API.
+        """
+        base = {
+            "ok": False,
+            "action": "bounded_active_localization",
+            "turns_executed": 0,
+            "turn_history": [],
+            "last_turn_direction": None,
+            "last_localization_result": None,
+            "localized": False,
+            "terminal_reason": None,
+        }
+        if not self._active_localization_lock.acquire(blocking=False):
+            return dict(
+                base,
+                terminal_reason="ACTIVE_LOCALIZATION_TURN_BLOCKED",
+                reason="active_localization_already_running",
+            )
+        try:
+            if self.running is not True:
+                return dict(
+                    base,
+                    terminal_reason="ACTIVE_LOCALIZATION_TURN_BLOCKED",
+                    reason="cognitive_runtime_not_running",
+                )
+            if self._active_localization_has_behavior_owner():
+                return dict(
+                    base,
+                    terminal_reason="ACTIVE_LOCALIZATION_TURN_BLOCKED",
+                    reason="physical_behavior_already_active",
+                )
+            status = self.localization_facade.get_localization_status()
+            base["last_localization_result"] = status
+            if self._active_localization_pose_is_trusted(status):
+                return dict(base, ok=True, localized=True,
+                            terminal_reason="ACTIVE_LOCALIZATION_SUCCESS",
+                            reason="canonical_localization_already_validated")
+            if not self._active_localization_is_recoverable(status):
+                return dict(
+                    base,
+                    terminal_reason="ACTIVE_LOCALIZATION_HARD_FAILURE",
+                    reason="localization_not_recoverable",
+                )
+
+            for turn_index in range(self.MAX_ACTIVE_LOCALIZATION_TURNS):
+                status = self.localization_facade.get_localization_status()
+                base["last_localization_result"] = status
+                if self._active_localization_pose_is_trusted(status):
+                    return dict(base, ok=True, localized=True,
+                                terminal_reason="ACTIVE_LOCALIZATION_SUCCESS",
+                                reason="canonical_localization_validated")
+                if not self._active_localization_is_recoverable(status):
+                    return dict(
+                        base,
+                        terminal_reason="ACTIVE_LOCALIZATION_HARD_FAILURE",
+                        reason="localization_not_recoverable",
+                    )
+                if self._active_localization_has_behavior_owner():
+                    return dict(
+                        base,
+                        terminal_reason="ACTIVE_LOCALIZATION_TURN_BLOCKED",
+                        reason="physical_behavior_already_active",
+                    )
+                bridge_before = self._marvin_bridge_ready_and_stopped()
+                if bridge_before.get("ok") is not True:
+                    return dict(
+                        base,
+                        terminal_reason="ACTIVE_LOCALIZATION_BRIDGE_NOT_STOPPED",
+                        reason="bridge_not_ready_or_not_stopped",
+                        bridge_status=bridge_before,
+                    )
+                session, lidar = self._active_localization_lidar_is_current()
+                if lidar is None:
+                    return dict(
+                        base,
+                        terminal_reason="ACTIVE_LOCALIZATION_LIDAR_NOT_READY",
+                        reason="lidar_not_fresh_or_geometry_invalid",
+                    )
+
+                direction = "LEFT" if turn_index % 2 == 0 else "RIGHT"
+                base["last_turn_direction"] = direction
+                try:
+                    turn_result = self.behavior_manager.execute_guarded_turn(
+                        direction,
+                        self.ACTIVE_LOCALIZATION_TURN_SPEED,
+                        self.ACTIVE_LOCALIZATION_TURN_DURATION,
+                        expected_lidar_session=session,
+                    )
+                except Exception as exc:
+                    turn_result = {"ok": False, "error": str(exc)}
+                base["turns_executed"] += 1
+                turn_entry = {
+                    "index": turn_index + 1,
+                    "direction": direction,
+                    "linear_x": 0.0,
+                    "angular_speed": self.ACTIVE_LOCALIZATION_TURN_SPEED,
+                    "duration": self.ACTIVE_LOCALIZATION_TURN_DURATION,
+                    "turn_result": turn_result,
+                }
+
+                try:
+                    stop_result = self.robot_client.stop()
+                except Exception as exc:
+                    stop_result = {"ok": False, "error": str(exc)}
+                turn_entry["stop_result"] = stop_result
+                base["turn_history"].append(turn_entry)
+                if not isinstance(stop_result, dict) or stop_result.get("ok") is not True:
+                    return dict(
+                        base,
+                        terminal_reason="ACTIVE_LOCALIZATION_STOP_FAILED",
+                        reason="stop_command_failed",
+                    )
+                bridge_after = self._marvin_bridge_ready_and_stopped()
+                turn_entry["bridge_after_stop"] = bridge_after
+                if bridge_after.get("ok") is not True:
+                    return dict(
+                        base,
+                        terminal_reason="ACTIVE_LOCALIZATION_STOP_FAILED",
+                        reason="bridge_not_stopped_after_turn",
+                    )
+                if not (
+                    isinstance(turn_result, dict)
+                    and turn_result.get("ok") is True
+                    and turn_result.get("permitted") is True
+                    and turn_result.get("confirmed_forwarded") is True
+                ):
+                    return dict(
+                        base,
+                        terminal_reason="ACTIVE_LOCALIZATION_TURN_BLOCKED",
+                        reason="guarded_turn_failed",
+                    )
+
+                retry = self.localization_facade.retry_global_localization()
+                base["last_localization_result"] = retry
+                status = self.localization_facade.get_localization_status()
+                base["last_localization_result"] = status
+                if self._active_localization_pose_is_trusted(status):
+                    return dict(base, ok=True, localized=True,
+                                terminal_reason="ACTIVE_LOCALIZATION_SUCCESS",
+                                reason="canonical_localization_validated",
+                                localization_retry=retry)
+                if not self._active_localization_is_recoverable(status):
+                    return dict(
+                        base,
+                        terminal_reason="ACTIVE_LOCALIZATION_HARD_FAILURE",
+                        reason="localization_retry_failed",
+                        localization_retry=retry,
+                    )
+
+            return dict(
+                base,
+                terminal_reason="ACTIVE_LOCALIZATION_EXHAUSTED",
+                reason="active_localization_turn_budget_exhausted",
+            )
+        finally:
+            self._active_localization_lock.release()
 
     def execute_single_marvin_alignment(
         self, *, direction, angular_speed, duration,
