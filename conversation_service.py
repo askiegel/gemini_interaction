@@ -4,6 +4,7 @@ import argparse
 import inspect
 import json
 import os
+import re
 from dataclasses import asdict, dataclass, replace
 from typing import Any, Callable, Dict, Optional
 
@@ -17,6 +18,16 @@ from provider_factory import create_provider
 from robot_addressing import AddressedCommand, RobotAddressParser
 from robot_fleet import load_robot_fleet
 from robot_identity import RobotIdentity, get_robot_identity
+from remember_current_location import (
+    RememberLocationNameError,
+    parse_remember_current_location,
+)
+from remember_current_location_service import (
+    RememberCurrentLocationService,
+)
+from current_localized_pose import CurrentLocalizedPoseProvider
+from search_waypoint_capture import SearchWaypointCaptureService
+from search_waypoint_registry import SearchWaypointRegistry
 from world_model import WorldModel
 from world_query_service import (
     WorldQueryError,
@@ -46,6 +57,7 @@ class ConversationServiceResult:
     requires_confirmation: bool
     mission_submitted: bool
     mission_submission: Optional[Dict[str, Any]]
+    command_result: Optional[Dict[str, Any]] = None
     world_query: Optional[Dict[str, Any]] = None
     robot_id: Optional[str] = None
     addressing: Optional[Dict[str, Any]] = None
@@ -80,6 +92,7 @@ class ConversationService:
         world_query_service: Optional[WorldQueryService] = None,
         local_identity: Optional[RobotIdentity] = None,
         address_parser: Optional[RobotAddressParser] = None,
+        remember_location_service: Optional[RememberCurrentLocationService] = None,
     ):
         if conversation_manager is None:
             raise ValueError(
@@ -125,6 +138,7 @@ class ConversationService:
             )
 
         self.address_parser = address_parser
+        self.remember_location_service = remember_location_service
 
     def process_text(
         self,
@@ -168,6 +182,22 @@ class ConversationService:
                 "A robot name was recognized, but no command followed it."
             )
 
+        try:
+            remember_intent = parse_remember_current_location(
+                self._original_case_command_text(addressed),
+            )
+        except RememberLocationNameError as exc:
+            return self._remember_failure_result(
+                reason=exc.reason,
+                addressed=addressed,
+            )
+
+        if remember_intent is not None:
+            return self._process_remember_current_location(
+                remember_intent=remember_intent,
+                addressed=addressed,
+            )
+
         result = self._process_local_text(
             command_text=addressed.command_text,
             original_text=addressed.original_text,
@@ -182,6 +212,89 @@ class ConversationService:
             accepted=True,
             ignored=False,
         )
+
+    @staticmethod
+    def _original_case_command_text(addressed: AddressedCommand) -> str:
+        """Preserve a requested waypoint's display-name case after addressing."""
+        original = addressed.original_text.strip()
+        alias = addressed.matched_alias
+        if not addressed.explicitly_addressed or not alias:
+            return original
+        prefix = re.compile(
+            r"^\s*" + re.escape(alias) + r"(?:\s|[,;:!\-])+",
+            re.IGNORECASE,
+        )
+        matched = prefix.match(original)
+        return original[matched.end():].strip() if matched else addressed.command_text
+
+    def _process_remember_current_location(self, *, remember_intent, addressed):
+        service = self.remember_location_service
+        if service is None:
+            return self._remember_failure_result(
+                reason="LOCALIZATION_NOT_READY",
+                addressed=addressed,
+            )
+        result = service.execute(
+            waypoint_id=remember_intent.waypoint_id,
+            name=remember_intent.name,
+        )
+        if result.ok:
+            reply = (
+                f"Okay, I remembered this location as "
+                f"{remember_intent.name}."
+            )
+        else:
+            reply = self._remember_failure_reply(result.reason)
+        return ConversationServiceResult(
+            reply=reply,
+            decision_type="COMMAND",
+            mission_type=None,
+            query_type=None,
+            target=None,
+            requires_confirmation=False,
+            mission_submitted=False,
+            mission_submission=None,
+            command_result=result.to_dict(),
+            world_query=None,
+            robot_id=self.local_identity.id,
+            addressing=addressed.to_dict(),
+            accepted=result.ok,
+            ignored=False,
+        )
+
+    def _remember_failure_result(self, *, reason, addressed):
+        return ConversationServiceResult(
+            reply=self._remember_failure_reply(reason),
+            decision_type="COMMAND",
+            mission_type=None,
+            query_type=None,
+            target=None,
+            requires_confirmation=False,
+            mission_submitted=False,
+            mission_submission=None,
+            command_result={
+                "ok": False,
+                "intent": "REMEMBER_CURRENT_LOCATION",
+                "reason": reason,
+                "waypoint": None,
+            },
+            world_query=None,
+            robot_id=self.local_identity.id,
+            addressing=addressed.to_dict(),
+            accepted=False,
+            ignored=False,
+        )
+
+    @staticmethod
+    def _remember_failure_reply(reason):
+        replies = {
+            "NO_NAME": "Please provide a location name to remember.",
+            "INVALID_NAME": "That location name is invalid.",
+            "DUPLICATE_WAYPOINT": "That location name already exists.",
+            "STALE_POSE": "I cannot save this location because my current localized pose is stale.",
+            "LOCALIZATION_NOT_READY": "I cannot save this location because I do not have a trusted current map pose.",
+        }
+        return replies.get(reason, "I could not save that location safely.")
 
     def _process_local_text(
         self,
@@ -396,6 +509,7 @@ class ConversationService:
 def create_conversation_service(
     runtime_url: str = DEFAULT_RUNTIME_URL,
     max_history_turns: int = 12,
+    localized_pose_status_reader=None,
 ) -> ConversationService:
     """
     Build the production Conversation Service from project configuration.
@@ -410,12 +524,22 @@ def create_conversation_service(
 
     world_model = WorldModel()
 
+    remember_location_service = None
+    if localized_pose_status_reader is not None:
+        remember_location_service = RememberCurrentLocationService(
+            SearchWaypointCaptureService(
+                SearchWaypointRegistry(),
+                CurrentLocalizedPoseProvider(localized_pose_status_reader),
+            )
+        )
+
     return ConversationService(
         conversation_manager=manager,
         runtime_url=runtime_url,
         world_query_service=WorldQueryService(
             world_model=world_model,
         ),
+        remember_location_service=remember_location_service,
     )
 
 

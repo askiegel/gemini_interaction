@@ -78,6 +78,9 @@ def get_conversation_service():
         if _CONVERSATION_SERVICE is None:
             _CONVERSATION_SERVICE = create_conversation_service(
                 runtime_url=COGNITIVE_RUNTIME_URL,
+                localized_pose_status_reader=(
+                    lambda: get_tony2_navigation_runtime().live_pose_status()
+                ),
             )
 
     return _CONVERSATION_SERVICE

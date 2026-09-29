@@ -14,6 +14,10 @@ MAX_LOCALIZED_POSE_AGE_SECONDS = 3.0
 class LocalizedPoseUnavailableError(RuntimeError):
     """Raised when the existing localization authority cannot prove a pose safe."""
 
+    def __init__(self, message: str, *, reason: str = "LOCALIZATION_NOT_READY"):
+        super().__init__(message)
+        self.reason = reason
+
 
 @dataclass(frozen=True)
 class CurrentLocalizedPose:
@@ -103,7 +107,10 @@ class CurrentLocalizedPoseProvider:
             telemetry.get("age_seconds"), "localized pose age_seconds"
         )
         if age_seconds < 0.0 or age_seconds >= self._max_pose_age_seconds:
-            raise LocalizedPoseUnavailableError("Current localized pose is stale.")
+            raise LocalizedPoseUnavailableError(
+                "Current localized pose is stale.",
+                reason="STALE_POSE",
+            )
 
         timestamp = telemetry.get("received_at")
         if not isinstance(timestamp, str) or not timestamp:
