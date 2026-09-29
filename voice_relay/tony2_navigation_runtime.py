@@ -244,6 +244,7 @@ class Tony2NavigationRuntime:
         self._stop_generation = 0
         self._stopping = False
         self._localization_validated = False
+        self._localization_state = "UNLOCALIZED"
         self._localization_attempt = None
 
         self._active_motion_lease = None
@@ -1135,6 +1136,7 @@ class Tony2NavigationRuntime:
             "motion_egress_idle":
                 motion_egress_idle,
             "localization_validated": localization_validated,
+            "localization_state": self._localization_state,
             "goal_submission_enabled": (
                 runtime_ready
                 and localization_validated
@@ -1237,6 +1239,7 @@ class Tony2NavigationRuntime:
         # before replacing the runtime or rejecting a partial runtime.
         with self._motion_lock:
             self._localization_validated = False
+            self._localization_state = "UNLOCALIZED"
             self._localization_attempt = None
 
         if (
@@ -1472,6 +1475,7 @@ class Tony2NavigationRuntime:
 
         with self._motion_lock:
             self._localization_validated = False
+            self._localization_state = "UNLOCALIZED"
             self._localization_attempt = None
             self._stop_generation += 1
             self._stopping = True
@@ -1617,6 +1621,9 @@ class Tony2NavigationRuntime:
 
         with self._motion_lock:
             self._localization_validated = False
+            self._localization_state = (
+                "HOME_LOCALIZING" if seed_pose else "GLOBAL_LOCALIZING"
+            )
             attempt = object()
             self._localization_attempt = attempt
 
@@ -1864,6 +1871,14 @@ class Tony2NavigationRuntime:
         if payload.get(
             "trusted"
         ) is not True:
+            if not seed_pose and payload.get("global_localization_requested") is True:
+                with self._motion_lock:
+                    self._localization_state = "ACTIVE_LOCALIZATION_REQUIRED"
+                return {
+                    "action": "ACTIVE_LOCALIZATION_REQUIRED",
+                    "localization": payload,
+                    "navigation": self.status(),
+                }
             stopped = self.stop()
 
             return {
@@ -1930,6 +1945,7 @@ class Tony2NavigationRuntime:
                     "a runtime lifecycle change or newer initialization."
                 )
             self._localization_validated = True
+            self._localization_state = "LOCALIZED"
 
         return {
             "action":

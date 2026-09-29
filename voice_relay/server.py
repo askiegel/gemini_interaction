@@ -1577,8 +1577,10 @@ class VoiceRelayHandler(BaseHTTPRequestHandler):
             and navigation.get("localization_validated") is True
             and navigation.get("transform_ready") is True
         )
-        if not trusted:
+        if result.get("action") == "ACTIVE_LOCALIZATION_REQUIRED":
             return 503, {"ok": False, "reason": "ACTIVE_LOCALIZATION_REQUIRED", "initialization": localization, "navigation": navigation}
+        if not trusted:
+            return 503, {"ok": False, "reason": "GLOBAL_LOCALIZATION_FAILED", "initialization": localization, "navigation": navigation}
         return 200, {"ok": True, "action": "navigation_initialize_global_localization", "initialization": localization, "navigation": navigation}
 
 
