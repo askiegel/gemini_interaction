@@ -193,14 +193,28 @@ class SearchWaypointRegistry:
         except KeyError as exc:
             raise UnknownWaypointError(f"Unknown waypoint ID: {identifier}") from exc
 
+    def validate_new_waypoint(
+        self, *, waypoint_id: object, name: object,
+    ) -> None:
+        """Validate a new definition without mutating durable registry state."""
+        with self._lock:
+            identifier = self._validate_text("waypoint_id", waypoint_id)
+            self._validate_text("name", name)
+            if identifier in self._waypoints:
+                raise DuplicateWaypointError(
+                    f"Waypoint ID already exists: {identifier}"
+                )
+
     def add_waypoint(
         self, *, waypoint_id: str, name: str, x: float, y: float, yaw: float,
         active: bool = True,
     ) -> SearchWaypoint:
         with self._lock:
+            self.validate_new_waypoint(
+                waypoint_id=waypoint_id,
+                name=name,
+            )
             identifier = self._validate_text("waypoint_id", waypoint_id)
-            if identifier in self._waypoints:
-                raise DuplicateWaypointError(f"Waypoint ID already exists: {identifier}")
             timestamp = self._timestamp()
             waypoint = SearchWaypoint(
                 waypoint_id=identifier,
