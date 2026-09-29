@@ -621,6 +621,12 @@ class BehaviorManager:
         self._guarded_turn_owner_generation = None
         self._guarded_turn_monitor = None
         self._marvin_identity_confirmation_lock = threading.Lock()
+        # Preview continuity is process-local, and can only be established by
+        # a successful Gemini selection.  Provider tracker metadata is never
+        # an identity by itself; it merely proves that a fresh candidate is
+        # still the same one as that already-semantic-confirmed session.
+        self._marvin_preview_continuity_lock = threading.Lock()
+        self._marvin_preview_continuity = None
         # Optional runtime-owned hook for live, dashboard-facing telemetry.
         # BehaviorManager remains usable without a runtime callback.
         self.tracking_state_callback = None
@@ -4743,6 +4749,27 @@ class BehaviorManager:
         )
         if not candidates:
             raise ValueError("marvin_yolo_proposal_geometry_invalid")
+
+        continuity_candidate = self._marvin_preview_continuity_candidate(
+            candidates,
+        )
+        if continuity_candidate is not None:
+            try:
+                return self._acquire_marvin_tracker_observation_from_candidate(
+                    continuity_candidate,
+                    diagnostics,
+                    identity_source="marvin_session_continuity",
+                    execution_guard=execution_guard,
+                    episode=episode,
+                    before_tracker_initialization=(
+                        before_tracker_initialization
+                    ),
+                )
+            except Exception:
+                # Fresh tracker confirmation remains mandatory.  A failed
+                # continuity attempt cannot retain semantic authority.
+                self._clear_marvin_preview_continuity()
+
         if execution_guard is not None:
             execution_guard()
         frame = semantic_vision.fetch_frame()
@@ -4766,6 +4793,44 @@ class BehaviorManager:
         if type(selected_index) is not int or not 0 <= selected_index < len(candidates):
             raise ValueError("marvin_candidate_selection_index_invalid")
         yolo_candidate = candidates[selected_index]
+        result = self._acquire_marvin_tracker_observation_from_candidate(
+            yolo_candidate,
+            diagnostics,
+            identity_source=identity.get(
+                "source", "gemini_marvin_candidate_selection"
+            ),
+            execution_guard=execution_guard,
+            episode=episode,
+            before_tracker_initialization=before_tracker_initialization,
+            frame=frame,
+        )
+        self._set_marvin_preview_continuity(result)
+        return result
+
+    def _acquire_marvin_tracker_observation_from_candidate(
+        self,
+        yolo_candidate,
+        diagnostics,
+        *,
+        identity_source,
+        execution_guard=None,
+        episode=None,
+        before_tracker_initialization=None,
+        frame=None,
+    ):
+        """Confirm fresh local-tracker geometry for one selected proposal."""
+        semantic_vision = self.semantic_vision
+        if frame is None:
+            if execution_guard is not None:
+                execution_guard()
+            frame = semantic_vision.fetch_frame()
+        if not isinstance(yolo_candidate, dict):
+            raise ValueError("marvin_yolo_candidate_invalid")
+        if (
+            frame.width != int(yolo_candidate["image_width"])
+            or frame.height != int(yolo_candidate["image_height"])
+        ):
+            raise ValueError("marvin_yolo_frame_dimensions_changed")
         bbox = MarvinLocalTracker._validate_bbox(
             yolo_candidate.get("bbox"),
             int(yolo_candidate["image_width"]),
@@ -4838,9 +4903,7 @@ class BehaviorManager:
             proposal_support=yolo_candidate.get("proposal_support"),
             detector_confidence=yolo_candidate.get("confidence"),
             geometry_source="yolo_proposal",
-            identity_source=identity.get(
-                "source", "gemini_marvin_candidate_selection"
-            ),
+            identity_source=identity_source,
             identity_confirmed=True,
             yolo_seed_bbox=yolo_bbox,
             tracker_seed_bbox=tracker_seed_bbox,
@@ -4854,6 +4917,41 @@ class BehaviorManager:
             confirmation_diagnostics=diagnostics,
             **tracker_metadata,
         )
+
+    def _marvin_preview_continuity_candidate(self, candidates):
+        """Return one current proposal only when it matches session authority."""
+        with self._marvin_preview_continuity_lock:
+            authority = self._marvin_preview_continuity
+            authority = dict(authority) if isinstance(authority, dict) else None
+        if authority is None:
+            return None
+        matches = []
+        for candidate in candidates:
+            continuity = self._marvin_continuity_metadata(candidate)
+            if (
+                continuity == authority
+                and candidate.get("identity_ambiguous") is not True
+            ):
+                matches.append(candidate)
+        # More than one current proposal carrying the authority is ambiguous.
+        if len(matches) == 1:
+            return matches[0]
+        # A missing, changed, or ambiguous provider continuity record ends
+        # this session.  The caller must re-establish semantic identity.
+        self._clear_marvin_preview_continuity()
+        return None
+
+    def _set_marvin_preview_continuity(self, observation):
+        continuity = self._marvin_continuity_metadata(observation)
+        if continuity is None:
+            self._clear_marvin_preview_continuity()
+            return
+        with self._marvin_preview_continuity_lock:
+            self._marvin_preview_continuity = continuity
+
+    def _clear_marvin_preview_continuity(self):
+        with self._marvin_preview_continuity_lock:
+            self._marvin_preview_continuity = None
 
     @staticmethod
     def _marvin_continuity_metadata(*sources):
@@ -4871,16 +4969,20 @@ class BehaviorManager:
                 continue
             tracker_id = value.get("tracker_id")
             tracker_source = value.get("tracker_source")
+            tracker_generation = value.get("tracker_generation")
             if (
                 isinstance(tracker_id, int)
                 and not isinstance(tracker_id, bool)
                 and tracker_id >= 0
                 and isinstance(tracker_source, str)
                 and tracker_source.strip()
+                and isinstance(tracker_generation, str)
+                and tracker_generation.strip()
             ):
                 return {
                     "tracker_id": tracker_id,
                     "tracker_source": tracker_source.strip(),
+                    "tracker_generation": tracker_generation.strip(),
                 }
         return None
 

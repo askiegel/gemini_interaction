@@ -7,10 +7,14 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from behavior_manager import BehaviorManager
+from marvin_arrival_policy import evaluate_marvin_visual_arrival
 from mission_types import create_mission
 from runtime_api import RuntimeAPIHandler
 from tracking_state import build_tracking_state, empty_tracking_state
 from vision_adapter import VisionAdapter
+
+
+CONTINUITY_GENERATION = "vision-generation-a"
 from voice_relay.server import FIND_OBJECT_PREVIEW_TIMEOUT_SECONDS, VoiceRelayHandler
 
 
@@ -93,7 +97,10 @@ class CandidateVision:
             "image_width": item["image_width"],
             "image_height": item["image_height"],
         }
-        for key in ("track_id", "tracker_source", "marvin_continuity"):
+        for key in (
+            "track_id", "tracker_source", "marvin_continuity",
+            "identity_ambiguous",
+        ):
             if key in item:
                 normalized[key] = item[key]
         return normalized
@@ -186,6 +193,32 @@ def marvin_yolo_candidates():
             }],
         },
     ])
+
+
+def marvin_yolo_candidates_with_continuity(*continuities):
+    payloads = []
+    for index, continuity in enumerate(continuities, start=1):
+        if isinstance(continuity, int):
+            continuity = (CONTINUITY_GENERATION, continuity)
+        generation, tracker_id = continuity
+        for frame in range(3):
+            payload = {
+                "timestamp": f"continuity-{index}-{frame}",
+                "camera_running": True,
+                "detections": [{
+                    "label": "teddy bear", "confidence": 0.11,
+                    "x1": 402, "y1": 102, "x2": 502, "y2": 302,
+                    "center_x": 452, "center_y": 202, "area": 20000,
+                    "image_width": 640, "image_height": 480,
+                    "marvin_continuity": {
+                        "tracker_id": tracker_id,
+                        "tracker_source": "marvin_continuity_botsort",
+                        "tracker_generation": generation,
+                    },
+                }],
+            }
+            payloads.append(payload)
+    return CandidateVision(payloads)
 
 
 class PreviewTracker:
@@ -363,6 +396,7 @@ def test_vision_adapter_normalizes_only_complete_marvin_continuity_metadata():
         "marvin_continuity": {
             "tracker_id": 16,
             "tracker_source": "marvin_continuity_botsort",
+            "tracker_generation": CONTINUITY_GENERATION,
         },
     }
 
@@ -380,6 +414,7 @@ def test_marvin_preview_preserves_provider_continuity_metadata_without_identity_
         payload["detections"][0]["marvin_continuity"] = {
             "tracker_id": 16,
             "tracker_source": "marvin_continuity_botsort",
+            "tracker_generation": CONTINUITY_GENERATION,
         }
     world = WorldModelObservation({})
     manager = BehaviorManager(
@@ -394,6 +429,7 @@ def test_marvin_preview_preserves_provider_continuity_metadata_without_identity_
     expected = {
         "tracker_id": 16,
         "tracker_source": "marvin_continuity_botsort",
+        "tracker_generation": CONTINUITY_GENERATION,
     }
     assert result["marvin_continuity"] == expected
     assert result["target_observation"]["marvin_continuity"] == expected
@@ -403,6 +439,258 @@ def test_marvin_preview_preserves_provider_continuity_metadata_without_identity_
     status, payload = _call_runtime_preview(result)
     assert status == 200
     assert payload["marvin_continuity"] == expected
+
+
+def test_marvin_preview_reuses_semantic_authority_for_stable_continuity():
+    semantic = MarvinSemanticVision(marvin_result())
+    manager = BehaviorManager(
+        robot_client=ReadOnlyRobot(),
+        vision_adapter=marvin_yolo_candidates_with_continuity(16, 16),
+        semantic_vision=semantic,
+    )
+    manager.TARGET_CONFIRMATION_POLL_SECONDS = 0
+    use_preview_tracker(manager)
+
+    first = manager.preview_find_object("marvin")
+    second = manager.preview_find_object("marvin")
+
+    assert first["identity_source"] == "gemini_marvin_candidate_selection"
+    assert second["identity_source"] == "marvin_session_continuity"
+    assert second["identity_confirmed"] is True
+    assert second["marvin_continuity"] == {
+        "tracker_id": 16,
+        "tracker_source": "marvin_continuity_botsort",
+        "tracker_generation": CONTINUITY_GENERATION,
+    }
+    assert semantic.calls == [
+        "frame", "select_marvin_candidate", "frame", "frame",
+        "frame", "frame", "frame",
+    ]
+
+
+def test_marvin_preview_lost_continuity_falls_back_to_one_gemini_selection():
+    semantic = MarvinSemanticVision(marvin_result())
+    manager = BehaviorManager(
+        robot_client=ReadOnlyRobot(),
+        vision_adapter=marvin_yolo_candidates_with_continuity(16, 17),
+        semantic_vision=semantic,
+    )
+    manager.TARGET_CONFIRMATION_POLL_SECONDS = 0
+    use_preview_tracker(manager)
+
+    first = manager.preview_find_object("marvin")
+    second = manager.preview_find_object("marvin")
+
+    assert first["identity_source"] == "gemini_marvin_candidate_selection"
+    assert second["identity_source"] == "gemini_marvin_candidate_selection"
+    assert semantic.calls.count("select_marvin_candidate") == 2
+    assert manager._marvin_preview_continuity == {
+        "tracker_id": 17,
+        "tracker_source": "marvin_continuity_botsort",
+        "tracker_generation": CONTINUITY_GENERATION,
+    }
+
+
+def test_marvin_preview_generation_change_forces_gemini_reacquisition():
+    semantic = MarvinSemanticVision(marvin_result())
+    manager = BehaviorManager(
+        robot_client=ReadOnlyRobot(),
+        vision_adapter=marvin_yolo_candidates_with_continuity(
+            ("generation-a", 1), ("generation-b", 1),
+        ),
+        semantic_vision=semantic,
+    )
+    manager.TARGET_CONFIRMATION_POLL_SECONDS = 0
+    use_preview_tracker(manager)
+
+    manager.preview_find_object("marvin")
+    second = manager.preview_find_object("marvin")
+
+    assert second["identity_source"] == "gemini_marvin_candidate_selection"
+    assert semantic.calls.count("select_marvin_candidate") == 2
+    assert manager._marvin_preview_continuity == {
+        "tracker_generation": "generation-b",
+        "tracker_source": "marvin_continuity_botsort",
+        "tracker_id": 1,
+    }
+
+
+def test_marvin_preview_source_change_forces_gemini_reacquisition():
+    semantic = MarvinSemanticVision(marvin_result())
+    vision = marvin_yolo_candidates_with_continuity(16, 16)
+    for payload in vision.payloads[3:]:
+        payload["detections"][0]["marvin_continuity"]["tracker_source"] = "other_tracker"
+    manager = BehaviorManager(
+        robot_client=ReadOnlyRobot(), vision_adapter=vision,
+        semantic_vision=semantic,
+    )
+    manager.TARGET_CONFIRMATION_POLL_SECONDS = 0
+    use_preview_tracker(manager)
+
+    manager.preview_find_object("marvin")
+    second = manager.preview_find_object("marvin")
+
+    assert second["identity_source"] == "gemini_marvin_candidate_selection"
+    assert semantic.calls.count("select_marvin_candidate") == 2
+
+
+@pytest.mark.parametrize("generation", [None, "", 7])
+def test_marvin_preview_missing_or_malformed_generation_cannot_reuse(generation):
+    semantic = MarvinSemanticVision(marvin_result())
+    vision = marvin_yolo_candidates_with_continuity(16, 16)
+    for payload in vision.payloads[3:]:
+        payload["detections"][0]["marvin_continuity"]["tracker_generation"] = generation
+    manager = BehaviorManager(
+        robot_client=ReadOnlyRobot(), vision_adapter=vision,
+        semantic_vision=semantic,
+    )
+    manager.TARGET_CONFIRMATION_POLL_SECONDS = 0
+    use_preview_tracker(manager)
+
+    manager.preview_find_object("marvin")
+    second = manager.preview_find_object("marvin")
+
+    assert second["identity_source"] == "gemini_marvin_candidate_selection"
+    assert semantic.calls.count("select_marvin_candidate") == 2
+
+
+def test_marvin_preview_stable_continuity_uses_new_tracker_geometry():
+    semantic = MarvinSemanticVision(marvin_result())
+    manager = BehaviorManager(
+        robot_client=ReadOnlyRobot(),
+        vision_adapter=marvin_yolo_candidates_with_continuity(16, 16),
+        semantic_vision=semantic,
+    )
+    manager.TARGET_CONFIRMATION_POLL_SECONDS = 0
+    box_sets = iter((
+        [{"x1": 270, "y1": 110, "x2": 370, "y2": 330}] * 2,
+        [{"x1": 350, "y1": 110, "x2": 450, "y2": 330}] * 2,
+    ))
+    manager.marvin_local_tracker_factory = (
+        lambda frame, bbox: PreviewTracker(frame, bbox, next(box_sets))
+    )
+
+    first = manager.preview_find_object("marvin")
+    second = manager.preview_find_object("marvin")
+
+    assert second["identity_source"] == "marvin_session_continuity"
+    assert first["bbox"] == {"x1": 270, "y1": 110, "x2": 370, "y2": 330}
+    assert second["bbox"] == {"x1": 350, "y1": 110, "x2": 450, "y2": 330}
+    assert second["horizontal_error"] == 80.0
+
+
+def test_marvin_preview_cached_continuity_ambiguity_forces_gemini():
+    semantic = MarvinSemanticVision(marvin_result())
+    vision = marvin_yolo_candidates_with_continuity(16, 16)
+    for payload in vision.payloads[3:]:
+        payload["detections"][0]["identity_ambiguous"] = True
+    manager = BehaviorManager(
+        robot_client=ReadOnlyRobot(), vision_adapter=vision,
+        semantic_vision=semantic,
+    )
+    manager.TARGET_CONFIRMATION_POLL_SECONDS = 0
+    use_preview_tracker(manager)
+
+    manager.preview_find_object("marvin")
+    second = manager.preview_find_object("marvin")
+
+    assert second["identity_source"] == "gemini_marvin_candidate_selection"
+    assert semantic.calls.count("select_marvin_candidate") == 2
+
+
+def test_marvin_preview_cached_continuity_malformed_proposal_fails_closed():
+    semantic = MarvinSemanticVision(marvin_result())
+    vision = marvin_yolo_candidates_with_continuity(16)
+    vision.payloads.extend([{
+        "timestamp": f"bad-{index}", "camera_running": True,
+        "detections": [{
+            "label": "teddy bear", "confidence": 0.11,
+            "x1": 500, "y1": 100, "x2": 400, "y2": 300,
+            "image_width": 640, "image_height": 480,
+            "marvin_continuity": {
+                "tracker_id": 16,
+                "tracker_source": "marvin_continuity_botsort",
+                "tracker_generation": CONTINUITY_GENERATION,
+            },
+        }],
+    } for index in range(3)])
+    manager = BehaviorManager(
+        robot_client=ReadOnlyRobot(), vision_adapter=vision,
+        semantic_vision=semantic,
+    )
+    manager.TARGET_CONFIRMATION_POLL_SECONDS = 0
+    use_preview_tracker(manager)
+
+    manager.preview_find_object("marvin")
+    second = manager.preview_find_object("marvin")
+
+    assert second["ok"] is False
+    assert second["target_found"] is False
+    assert "bbox" not in second or second["bbox"] is None
+    assert semantic.calls.count("select_marvin_candidate") == 1
+
+
+def test_marvin_preview_cached_continuity_stale_proposal_fails_closed():
+    semantic = MarvinSemanticVision(marvin_result())
+    vision = marvin_yolo_candidates_with_continuity(16)
+    vision.payloads.extend([vision.payloads[-1]] * 3)
+    manager = BehaviorManager(
+        robot_client=ReadOnlyRobot(), vision_adapter=vision,
+        semantic_vision=semantic,
+    )
+    manager.TARGET_CONFIRMATION_POLL_SECONDS = 0
+    use_preview_tracker(manager)
+
+    manager.preview_find_object("marvin")
+    second = manager.preview_find_object("marvin")
+
+    assert second["ok"] is False
+    assert second["target_found"] is False
+    assert semantic.calls.count("select_marvin_candidate") == 1
+
+
+def test_marvin_preview_fast_path_tracker_failure_has_no_result():
+    semantic = MarvinSemanticVision(marvin_result())
+    manager = BehaviorManager(
+        robot_client=ReadOnlyRobot(),
+        vision_adapter=marvin_yolo_candidates_with_continuity(16, 16),
+        semantic_vision=semantic,
+    )
+    manager.TARGET_CONFIRMATION_POLL_SECONDS = 0
+    factories = iter((
+        lambda frame, bbox: PreviewTracker(frame, bbox),
+        lambda _frame, _bbox: type("LostTracker", (), {"update": lambda self, frame: None})(),
+        lambda _frame, _bbox: type("LostTracker", (), {"update": lambda self, frame: None})(),
+    ))
+    manager.marvin_local_tracker_factory = lambda frame, bbox: next(factories)(frame, bbox)
+
+    manager.preview_find_object("marvin")
+    second = manager.preview_find_object("marvin")
+
+    assert second["ok"] is False
+    assert second["target_found"] is False
+    assert manager._marvin_preview_continuity is None
+
+
+def test_marvin_preview_fast_path_remains_usable_by_arrival_policy():
+    semantic = MarvinSemanticVision(marvin_result())
+    manager = BehaviorManager(
+        robot_client=ReadOnlyRobot(),
+        vision_adapter=marvin_yolo_candidates_with_continuity(16, 16),
+        semantic_vision=semantic,
+    )
+    manager.TARGET_CONFIRMATION_POLL_SECONDS = 0
+    use_preview_tracker(manager)
+
+    manager.preview_find_object("marvin")
+    second = manager.preview_find_object("marvin")
+    arrival = evaluate_marvin_visual_arrival(
+        second, now=second["source_timestamp"],
+    )
+
+    assert second["identity_source"] == "marvin_session_continuity"
+    assert arrival["visual_session_authorized"] is True
+    assert arrival["geometry_valid"] is True
 
 
 def test_marvin_preview_omits_missing_or_malformed_continuity_metadata():

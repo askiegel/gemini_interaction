@@ -395,16 +395,20 @@ class VisionAdapter:
         if isinstance(marvin_continuity, dict):
             tracker_id = marvin_continuity.get("tracker_id")
             tracker_source = marvin_continuity.get("tracker_source")
+            tracker_generation = marvin_continuity.get("tracker_generation")
             if (
                 isinstance(tracker_id, int)
                 and not isinstance(tracker_id, bool)
                 and tracker_id >= 0
                 and isinstance(tracker_source, str)
                 and tracker_source.strip()
+                and isinstance(tracker_generation, str)
+                and tracker_generation.strip()
             ):
                 normalized["marvin_continuity"] = {
                     "tracker_id": tracker_id,
                     "tracker_source": tracker_source.strip(),
+                    "tracker_generation": tracker_generation.strip(),
                 }
         return normalized
 
