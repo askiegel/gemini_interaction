@@ -1308,8 +1308,6 @@ class VoiceRelayHandler(BaseHTTPRequestHandler):
             "navigation": navigation,
         }
 
-
-
     def navigation_compute_path(
         self,
         payload,
@@ -1521,6 +1519,67 @@ class VoiceRelayHandler(BaseHTTPRequestHandler):
         response["action"] = "navigation_goal"
 
         return status_code, response
+
+    def navigation_initialize_global_localization(self):
+        """Attempt stationary AMCL global localization without a Home seed."""
+        runtime = get_tony2_navigation_runtime()
+        bridge = request_json(
+            "GET", f"{ROBOT_BRIDGE_URL}/status", timeout=3.0,
+        )
+        motion = ((bridge.get("data") or {}).get("motion") or {})
+        if not (
+            bridge.get("ok")
+            and (bridge.get("data") or {}).get("ros_ready") is True
+            and motion.get("linear_x") == 0
+            and motion.get("angular_z") == 0
+            and motion.get("streaming") is False
+        ):
+            return 503, {
+                "ok": False, "reason": "BRIDGE_NOT_STOPPED",
+                "navigation": runtime.status(),
+            }
+        vision = request_json("GET", VISION_SERVER_URL, timeout=3.0)
+        vision_data = vision.get("data") or {}
+        if not (
+            vision.get("ok")
+            and vision_data.get("camera_running") is True
+            and vision_data.get("last_error") is None
+        ):
+            return 503, {
+                "ok": False, "reason": "CAMERA_NOT_READY",
+                "navigation": runtime.status(),
+            }
+        status = runtime.status()
+        if status.get("goal_active") is True:
+            return 503, {"ok": False, "reason": "NAVIGATION_GOAL_ACTIVE", "navigation": status}
+        if not (
+            status.get("running") is True
+            and status.get("map_server_enabled") is True
+            and status.get("localization_enabled") is True
+        ):
+            return 503, {"ok": False, "reason": "LOCALIZATION_STACK_NOT_READY", "navigation": status}
+        try:
+            result = runtime.initialize_global_localization()
+        except Exception as exc:
+            return 503, {"ok": False, "reason": "GLOBAL_LOCALIZATION_FAILED", "error": str(exc), "navigation": runtime.status()}
+        localization = result.get("localization") if isinstance(result, dict) else None
+        navigation = result.get("navigation", runtime.status()) if isinstance(result, dict) else runtime.status()
+        trusted = bool(
+            result.get("action") == "OPERATOR_POSE_VALIDATED"
+            and isinstance(localization, dict)
+            and localization.get("trusted") is True
+            and localization.get("global_localization_requested") is True
+            and localization.get("initial_pose_supplied") is False
+            and localization.get("seed_pose_used") is False
+            and localization.get("stationary_required") is True
+            and localization.get("navigation_goal_executed") is False
+            and localization.get("motion_enabled") is False
+            and navigation.get("localization_validated") is True
+            and navigation.get("transform_ready") is True
+        )
+        if not trusted:
+            return 503, {"ok": False, "reason": "ACTIVE_LOCALIZATION_REQUIRED", "initialization": localization, "navigation": navigation}
+        return 200, {"ok": True, "action": "navigation_initialize_global_localization", "initialization": localization, "navigation": navigation}
 
 
     def mapping_pose_status(self):
@@ -4192,6 +4251,11 @@ class VoiceRelayHandler(BaseHTTPRequestHandler):
             status_code, payload = (
                 self.navigation_initialize_localization()
             )
+            self.send_json(status_code, payload)
+            return
+
+        if path == "/dashboard/navigation-initialize-global-localization":
+            status_code, payload = self.navigation_initialize_global_localization()
             self.send_json(status_code, payload)
             return
 
