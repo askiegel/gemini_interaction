@@ -63,7 +63,7 @@ class CognitiveRuntime:
 
     LOOP_INTERVAL_SECONDS = 0.03
     FIND_MARVIN_AUTONOMOUS_MAX_ACTIONS = 6
-    FIND_MARVIN_MAX_EPISODES = 3
+    FIND_MARVIN_MAX_EPISODES = 4
 
     def __init__(
         self,

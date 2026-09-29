@@ -200,16 +200,16 @@ def test_action_limit_is_safe_incomplete_not_arrival_success(tmp_path):
     runtime.submit_text("Find Marvin")
     result = runtime.run_once()
 
-    assert len(behavior.controller_calls) == 3
+    assert len(behavior.controller_calls) == 4
     assert result["ok"] is True and result["completed"] is True
     assert result["mission_outcome"] == "safe_incomplete"
     assert result["arrived_at_marvin"] is False
     assert result["reason"] == "find_marvin_mission_episode_limit_reached"
-    assert result["episodes_executed"] == 3
-    assert result["total_actions_executed"] == 18
-    assert result["max_episodes"] == 3
+    assert result["episodes_executed"] == 4
+    assert result["total_actions_executed"] == 24
+    assert result["max_episodes"] == 4
     assert result["max_actions"] == 6
-    assert [entry["episode"] for entry in result["episode_results"]] == [1, 2, 3]
+    assert [entry["episode"] for entry in result["episode_results"]] == [1, 2, 3, 4]
     assert all(
         entry["result"]["controller_result"]["reason"]
         == "find_marvin_action_limit_reached"
@@ -275,7 +275,11 @@ def test_stop_preempts_marvin_route_without_a_second_controller_execution(tmp_pa
 
 def test_mission_route_leaves_reviewed_safety_limits_owned_by_runtime():
     assert CognitiveRuntime.FIND_MARVIN_AUTONOMOUS_MAX_ACTIONS == 6
-    assert CognitiveRuntime.FIND_MARVIN_MAX_EPISODES == 3
+    assert CognitiveRuntime.FIND_MARVIN_MAX_EPISODES == 4
+    assert (
+        CognitiveRuntime.FIND_MARVIN_AUTONOMOUS_MAX_ACTIONS
+        * CognitiveRuntime.FIND_MARVIN_MAX_EPISODES
+    ) == 24
 
 
 def test_safe_action_limit_continues_with_fresh_episode_and_arrival_terminates(tmp_path):
@@ -306,7 +310,7 @@ def test_safe_action_limit_continues_with_fresh_episode_and_arrival_terminates(t
     assert all(call["max_actions"] == 6 for call in behavior.controller_calls)
     assert result["episodes_executed"] == 2
     assert result["total_actions_executed"] == 6
-    assert result["max_actions"] == 6 and result["max_episodes"] == 3
+    assert result["max_actions"] == 6 and result["max_episodes"] == 4
     assert result["arrived_at_marvin"] is True
     assert result["mission_outcome"] == "arrived_at_marvin"
     assert result["reason"] == "arrived_at_marvin"
@@ -412,7 +416,7 @@ def test_two_action_limited_episodes_then_arrival_succeeds_on_third(tmp_path):
     assert behavior.state_provider_calls == 3
     assert result["episodes_executed"] == 3
     assert result["total_actions_executed"] == 12
-    assert result["max_actions"] == 6 and result["max_episodes"] == 3
+    assert result["max_actions"] == 6 and result["max_episodes"] == 4
     assert result["arrived_at_marvin"] is True
     assert result["mission_outcome"] == "arrived_at_marvin"
 
@@ -482,16 +486,21 @@ def test_episode_arrival_candidate_is_not_carried_into_next_episode(tmp_path):
         completed=False, arrived=False, actions=6,
         arrival_observations_confirmed=0,
     )
-    runtime, behavior = make_runtime(tmp_path, [first, second, third])
+    fourth = controller_result(
+        reason="find_marvin_action_limit_reached",
+        completed=False, arrived=False, actions=6,
+        arrival_observations_confirmed=0,
+    )
+    runtime, behavior = make_runtime(tmp_path, [first, second, third, fourth])
     runtime.submit_text("Find Marvin")
     result = runtime.run_once()
 
-    assert len(behavior.controller_calls) == 3
-    assert behavior.state_provider_calls == 3
-    assert result["episodes_executed"] == 3
+    assert len(behavior.controller_calls) == 4
+    assert behavior.state_provider_calls == 4
+    assert result["episodes_executed"] == 4
     assert result["mission_outcome"] == "safe_incomplete"
-    assert result["total_actions_executed"] == 18
-    assert result["max_actions"] == 6 and result["max_episodes"] == 3
+    assert result["total_actions_executed"] == 24
+    assert result["max_actions"] == 6 and result["max_episodes"] == 4
     assert result["reason"] == "find_marvin_mission_episode_limit_reached"
     assert result["episode_results"][0]["result"]["controller_result"][
         "arrival_candidate_timestamp"
@@ -500,6 +509,30 @@ def test_episode_arrival_candidate_is_not_carried_into_next_episode(tmp_path):
         "arrival_candidate_timestamp" not in call
         for call in behavior.controller_calls
     )
+
+
+def test_arrival_during_fourth_episode_terminates_without_consuming_remaining_budget(tmp_path):
+    limit = controller_result(
+        reason="find_marvin_action_limit_reached",
+        completed=False, arrived=False, actions=6,
+    )
+    arrival = controller_result(
+        reason="arrived_at_marvin",
+        completed=True, arrived=True, actions=2,
+        arrival_observations_confirmed=2,
+    )
+    runtime, behavior = make_runtime(tmp_path, [limit, limit, limit, arrival])
+
+    runtime.submit_text("Find Marvin")
+    result = runtime.run_once()
+
+    assert len(behavior.controller_calls) == 4
+    assert [call["max_actions"] for call in behavior.controller_calls] == [6, 6, 6, 6]
+    assert result["episodes_executed"] == 4
+    assert result["total_actions_executed"] == 20
+    assert result["arrived_at_marvin"] is True
+    assert result["mission_outcome"] == "arrived_at_marvin"
+    assert result["reason"] == "arrived_at_marvin"
 
 
 def test_bridge_failure_between_episodes_prevents_continuation(tmp_path):
