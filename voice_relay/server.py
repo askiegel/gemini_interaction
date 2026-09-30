@@ -1563,7 +1563,10 @@ class VoiceRelayHandler(BaseHTTPRequestHandler):
         except Exception as exc:
             return 503, {"ok": False, "reason": "GLOBAL_LOCALIZATION_FAILED", "error": str(exc), "navigation": runtime.status()}
         localization = result.get("localization") if isinstance(result, dict) else None
-        navigation = result.get("navigation", runtime.status()) if isinstance(result, dict) else runtime.status()
+        # The runtime publishes localization_validated immediately before it
+        # returns.  Do not reuse its pre-publication diagnostic snapshot when
+        # selecting this endpoint's HTTP result.
+        navigation = runtime.status()
         trusted = bool(
             result.get("action") == "OPERATOR_POSE_VALIDATED"
             and isinstance(localization, dict)
