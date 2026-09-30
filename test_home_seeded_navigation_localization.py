@@ -280,6 +280,12 @@ def test_global_wrapper_remains_unseeded():
     from unittest.mock import patch
     from voice_relay.tony2_navigation_runtime import Tony2NavigationRuntime
     runtime = Tony2NavigationRuntime()
-    with patch.object(runtime, "initialize_operator_pose") as initialize:
+    with patch.object(runtime, "_initialize_operator_pose") as initialize:
         runtime.initialize_global_localization()
-    initialize.assert_called_once_with(0.0, 0.0, 0.0, seed_pose=False)
+    initialize.assert_called_once_with(
+        0.0,
+        0.0,
+        0.0,
+        seed_pose=False,
+        allow_recoverable_global_retry=True,
+    )

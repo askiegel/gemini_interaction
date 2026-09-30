@@ -1583,11 +1583,12 @@ class Tony2NavigationRuntime:
 
         This remains the deliberate recovery path.
         """
-        return self.initialize_operator_pose(
+        return self._initialize_operator_pose(
             0.0,
             0.0,
             0.0,
             seed_pose=False,
+            allow_recoverable_global_retry=True,
         )
 
 
@@ -1611,6 +1612,24 @@ class Tony2NavigationRuntime:
         yaw,
         seed_pose=False,
     ):
+        """Set one seeded operator pose under the single-init guard."""
+        return self._initialize_operator_pose(
+            x,
+            y,
+            yaw,
+            seed_pose=seed_pose,
+            allow_recoverable_global_retry=False,
+        )
+
+    def _initialize_operator_pose(
+        self,
+        x,
+        y,
+        yaw,
+        seed_pose=False,
+        *,
+        allow_recoverable_global_retry=False,
+    ):
         """
         Set and validate one stationary operator AMCL pose.
 
@@ -1620,6 +1639,8 @@ class Tony2NavigationRuntime:
         """
 
         with self._motion_lock:
+            prior_localization_state = self._localization_state
+            prior_localization_validated = self._localization_validated
             self._localization_validated = False
             self._localization_state = (
                 "HOME_LOCALIZING" if seed_pose else "GLOBAL_LOCALIZING"
@@ -1711,11 +1732,23 @@ class Tony2NavigationRuntime:
         if status.get(
             "transform_ready"
         ) is True:
-            raise RuntimeError(
-                "Tony2 localization is already initialized; "
-                "stop and restart before setting a new "
-                "operator pose."
+            recoverable_global_retry = (
+                # Only the private unseeded global wrapper can resume the
+                # same unresolved AMCL session.  Seeded/operator pose
+                # initialization remains single-initialization guarded.
+                not seed_pose
+                and allow_recoverable_global_retry
+                and prior_localization_state
+                == "ACTIVE_LOCALIZATION_REQUIRED"
+                and prior_localization_validated is False
+                and status.get("localization_validated") is False
             )
+            if not recoverable_global_retry:
+                raise RuntimeError(
+                    "Tony2 localization is already initialized; "
+                    "stop and restart before setting a new "
+                    "operator pose."
+                )
 
         if status.get(
             "goal_submission_enabled"
