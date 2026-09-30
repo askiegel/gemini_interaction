@@ -471,6 +471,7 @@ class RuntimeAPIHandler(BaseHTTPRequestHandler):
         supported_paths = {
             "/guarded-turn",
             "/active-localization/scan",
+            "/local-reactive-step",
             "/find-marvin/alignment-step",
             "/find-marvin/approach-step",
             "/find-marvin/autonomous-run",
@@ -557,6 +558,23 @@ class RuntimeAPIHandler(BaseHTTPRequestHandler):
                     )
                 result = self.server.runtime.run_bounded_active_localization()
                 self.send_json(200 if result.get("ok") is True else 409, result)
+                return
+
+            if path == "/local-reactive-step":
+                if request_data:
+                    raise ValueError(
+                        "local-reactive-step requires an empty JSON object."
+                    )
+                result = self.server.runtime.run_local_reactive_step()
+                safe_stop = bool(
+                    isinstance(result, dict)
+                    and result.get("decision") == "STOP_BLOCKED"
+                    and result.get("bridge_stopped") is True
+                )
+                self.send_json(
+                    200 if result.get("ok") is True or safe_stop else 409,
+                    result,
+                )
                 return
 
             if path == "/find-marvin/alignment-step":
