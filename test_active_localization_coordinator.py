@@ -92,8 +92,9 @@ class _Behavior:
         self.succeeds = succeeds
         self.calls = []
 
-    def execute_guarded_turn(self, direction, angular_speed, duration, *, expected_lidar_session):
-        self.calls.append((direction, angular_speed, duration, expected_lidar_session))
+    def execute_guarded_turn(self, direction, angular_speed, duration, *, expected_lidar_session,
+                             safety_mode="LEGACY_BROAD_SIDE"):
+        self.calls.append((direction, angular_speed, duration, expected_lidar_session, safety_mode))
         return {
             "ok": self.succeeds,
             "permitted": self.succeeds,
@@ -152,7 +153,9 @@ def test_recoverable_state_turns_left_stops_then_retries_to_success():
     result = runtime.run_bounded_active_localization()
     assert result["ok"] is True
     assert result["terminal_reason"] == "ACTIVE_LOCALIZATION_SUCCESS"
-    assert runtime.behavior_manager.calls == [("LEFT", 0.25, 0.50, "lidar-session")]
+    assert runtime.behavior_manager.calls == [
+        ("LEFT", 0.25, 0.50, "lidar-session", "ROTATIONAL_SWEPT_FOOTPRINT")
+    ]
     assert runtime.robot_client.stop_calls == 1
     assert runtime.localization_facade.retry_calls == 1
     assert result["turn_history"][0]["linear_x"] == 0.0

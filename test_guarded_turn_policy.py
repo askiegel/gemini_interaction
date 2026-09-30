@@ -7,6 +7,7 @@ import pytest
 from guarded_turn_policy import (
     MAX_ABSOLUTE_ANGULAR_SPEED,
     MAX_TURN_DURATION_SECONDS,
+    ROTATIONAL_SWEPT_FOOTPRINT,
     validate_guarded_turn,
 )
 from local_motion_safety_envelope import build_local_motion_lidar_geometry
@@ -240,6 +241,26 @@ def test_minimum_clearance_can_drive_caution_with_clear_robust_metric():
     assert result["reason"] == "turn_side_not_clear"
     assert result["left_robust_clearance_m"] == pytest.approx(1.287)
     assert result["left_minimum_clearance_m"] == pytest.approx(0.55)
+
+
+def test_rotational_mode_uses_base_geometry_not_broad_caution_label():
+    state = snapshot(left="CAUTION", front_left="CAUTION")
+    result = validate_guarded_turn(
+        "LEFT", .25, .5, state, expected_session="session-1", now=10.0,
+        safety_mode=ROTATIONAL_SWEPT_FOOTPRINT,
+    )
+    assert result["permitted"] is True
+    assert result["reason"] == "rotational_swept_footprint_clear"
+    assert result["rotational_swept_footprint"]["requested_angle_radians"] == pytest.approx(.125)
+
+
+def test_invalid_rotational_safety_mode_fails_closed():
+    result = validate_guarded_turn(
+        "LEFT", .25, .5, snapshot(), expected_session="session-1", now=10.0,
+        safety_mode="not-a-mode",
+    )
+    assert result["permitted"] is False
+    assert result["reason"] == "invalid_turn_safety_mode"
 
 
 def test_no_physical_execution_interface_is_used():

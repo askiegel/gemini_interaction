@@ -838,6 +838,7 @@ class CognitiveRuntime:
                         self.ACTIVE_LOCALIZATION_TURN_SPEED,
                         self.ACTIVE_LOCALIZATION_TURN_DURATION,
                         expected_lidar_session=session,
+                        safety_mode="ROTATIONAL_SWEPT_FOOTPRINT",
                     )
                 except Exception as exc:
                     turn_result = {"ok": False, "error": str(exc)}

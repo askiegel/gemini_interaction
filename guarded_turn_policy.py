@@ -4,12 +4,16 @@ import math
 
 from lidar_perception import read_lidar_state
 from local_motion_safety_envelope import evaluate_local_motion_safety
+from rotational_swept_footprint import evaluate_rotational_swept_footprint
 
 
 MAX_ABSOLUTE_ANGULAR_SPEED = 1.0
 MAX_TURN_DURATION_SECONDS = 1.0
 TURN_DIRECTIONS = {"LEFT", "RIGHT"}
 TRUSTWORTHY_FRONT_STATES = {"CLEAR", "CAUTION", "BLOCKED"}
+LEGACY_BROAD_SIDE = "LEGACY_BROAD_SIDE"
+ROTATIONAL_SWEPT_FOOTPRINT = "ROTATIONAL_SWEPT_FOOTPRINT"
+TURN_SAFETY_MODES = {LEGACY_BROAD_SIDE, ROTATIONAL_SWEPT_FOOTPRINT}
 
 
 def _finite(value):
@@ -55,7 +59,7 @@ def _front_status(sector):
 
 
 def _result(*, permitted, reason, direction, angular_z, duration,
-            state, relevant, local_motion_safety=None):
+            state, relevant, local_motion_safety=None, rotational_safety=None):
     unknown = ("UNKNOWN", None, False, None)
     return {
         "permitted": permitted,
@@ -80,11 +84,12 @@ def _result(*, permitted, reason, direction, angular_z, duration,
         "right_minimum_clearance_m": relevant.get("right", unknown)[3],
         "front_right_minimum_clearance_m": relevant.get("front_right", unknown)[3],
         "local_motion_safety": local_motion_safety,
+        "rotational_swept_footprint": rotational_safety,
     }
 
 
 def validate_guarded_turn(direction, angular_speed, duration, state, *, expected_session, now=None,
-                          target_directed=False):
+                          target_directed=False, safety_mode=LEGACY_BROAD_SIDE):
     """Validate a bounded turn without authorizing or executing it.
 
     STOP remains unconditional and is intentionally outside this policy.
@@ -106,6 +111,9 @@ def validate_guarded_turn(direction, angular_speed, duration, state, *, expected
     if duration_value > MAX_TURN_DURATION_SECONDS:
         return _result(permitted=False, reason="duration_exceeds_limit", direction=direction,
                        angular_z=None, duration=duration_value, state=state, relevant={})
+    if safety_mode not in TURN_SAFETY_MODES:
+        return _result(permitted=False, reason="invalid_turn_safety_mode", direction=direction,
+                       angular_z=None, duration=duration_value, state=state, relevant={})
 
     validated = read_lidar_state(state, expected_session=expected_session, now=now)
     sectors = validated.get("sectors") if isinstance(validated, dict) else None
@@ -115,9 +123,9 @@ def validate_guarded_turn(direction, angular_speed, duration, state, *, expected
                        direction=direction, angular_z=None, duration=duration_value,
                        state=validated, relevant={})
 
-    # Target-directed turns use the forward corridor while retaining a
-    # directional side veto for BLOCKED sectors. Broad side CLEAR requirements
-    # remain the policy for search/avoidance turns.
+    # Sector summaries remain diagnostics.  Legacy callers retain their
+    # established broad-sector policy; rotational-scan callers use the
+    # base-frame swept footprint as the static turn authority.
     relevant_names = (
         ("left", "front_left") if direction == "LEFT" else ("right", "front_right")
     )
@@ -125,28 +133,39 @@ def validate_guarded_turn(direction, angular_speed, duration, state, *, expected
     relevant["front"] = _front_status(sectors.get("front"))
     for name in ("left", "front_left", "right", "front_right"):
         relevant.setdefault(name, _sector_status(sectors.get(name)))
-    if not relevant["front"][2]:
+    if safety_mode == LEGACY_BROAD_SIDE and not relevant["front"][2]:
         return _result(permitted=False, reason="front_not_trustworthy", direction=direction,
                        angular_z=None, duration=duration_value, state=validated, relevant=relevant)
-    if target_directed and relevant["front"][0] != "CLEAR":
+    if (safety_mode == LEGACY_BROAD_SIDE and target_directed
+            and relevant["front"][0] != "CLEAR"):
         return _result(permitted=False, reason="front_not_clear", direction=direction,
                        angular_z=None, duration=duration_value, state=validated, relevant=relevant)
-    if target_directed:
-        side_clear = all(
-            isinstance(sectors.get(name), dict)
-            and sectors[name].get("available") is True
-            and sectors[name].get("state") in {"CLEAR", "CAUTION"}
-            and _finite(sectors[name].get("robust_clearance_m"))
-            and _finite(sectors[name].get("minimum_clearance_m"))
-            for name in relevant_names
-        )
-        if not side_clear:
+    rotational_safety = None
+    if safety_mode == LEGACY_BROAD_SIDE:
+        if target_directed:
+            side_clear = all(
+                isinstance(sectors.get(name), dict)
+                and sectors[name].get("available") is True
+                and sectors[name].get("state") in {"CLEAR", "CAUTION"}
+                and _finite(sectors[name].get("robust_clearance_m"))
+                and _finite(sectors[name].get("minimum_clearance_m"))
+                for name in relevant_names
+            )
+            if not side_clear:
+                return _result(permitted=False, reason="turn_side_not_clear", direction=direction,
+                               angular_z=None, duration=duration_value, state=validated, relevant=relevant)
+        elif not all(relevant[name][2] for name in relevant_names):
             return _result(permitted=False, reason="turn_side_not_clear", direction=direction,
                            angular_z=None, duration=duration_value, state=validated, relevant=relevant)
-    elif not all(relevant[name][2] for name in relevant_names):
-        return _result(permitted=False, reason="turn_side_not_clear", direction=direction,
-                       angular_z=None, duration=duration_value, state=validated, relevant=relevant)
-
+    else:
+        rotational_safety = evaluate_rotational_swept_footprint(
+            validated, expected_session=expected_session, direction=direction,
+            angular_speed=angular_value, duration=duration_value, now=now,
+        )
+        if not rotational_safety["permitted"]:
+            return _result(permitted=False, reason=rotational_safety["reason"], direction=direction,
+                           angular_z=None, duration=duration_value, state=validated,
+                           relevant=relevant, rotational_safety=rotational_safety)
     signed_speed = angular_value if direction == "LEFT" else -angular_value
     envelope = evaluate_local_motion_safety(
         validated, expected_session=expected_session, angular_z=signed_speed,
@@ -155,8 +174,11 @@ def validate_guarded_turn(direction, angular_speed, duration, state, *, expected
     if not envelope["permitted"]:
         return _result(permitted=False, reason=envelope["reason"], direction=direction,
                        angular_z=None, duration=duration_value, state=validated,
-                       relevant=relevant, local_motion_safety=envelope)
-    return _result(permitted=True, reason="turn_side_clear_advisory", direction=direction,
+                       relevant=relevant, local_motion_safety=envelope,
+                       rotational_safety=rotational_safety)
+    return _result(permitted=True, reason=("rotational_swept_footprint_clear"
+                                           if safety_mode == ROTATIONAL_SWEPT_FOOTPRINT
+                                           else "turn_side_clear_advisory"), direction=direction,
                    angular_z=signed_speed, duration=duration_value,
                    state=validated, relevant=relevant,
-                   local_motion_safety=envelope)
+                   local_motion_safety=envelope, rotational_safety=rotational_safety)

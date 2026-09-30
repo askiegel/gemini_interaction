@@ -63,6 +63,7 @@ class _GuardedTurnMonitor:
         initial_validation,
         now=None,
         target_directed=None,
+        safety_mode="LEGACY_BROAD_SIDE",
     ):
         self.world_model = world_model
         self.robot = robot
@@ -73,6 +74,7 @@ class _GuardedTurnMonitor:
         self.generation = generation
         self.now = now
         self.target_directed = bool(target_directed)
+        self.safety_mode = safety_mode
         self._lock = threading.RLock()
         self._stop = threading.Event()
         self._thread = None
@@ -218,6 +220,7 @@ class _GuardedTurnMonitor:
             expected_session=self.expected_session,
             now=self.now,
             target_directed=self.target_directed,
+            safety_mode=self.safety_mode,
         )
 
     def _run(self):
@@ -1084,6 +1087,7 @@ class BehaviorManager:
         expected_lidar_session,
         now=None,
         target_directed=None,
+        safety_mode="LEGACY_BROAD_SIDE",
     ):
         """Validate and execute one explicit bounded turn request.
 
@@ -1114,6 +1118,7 @@ class BehaviorManager:
             expected_session=expected_lidar_session,
             now=now,
             target_directed=target_directed,
+            safety_mode=safety_mode,
         )
         result = dict(validation)
         result.update(
@@ -1180,6 +1185,7 @@ class BehaviorManager:
                 initial_validation=validation,
                 now=now,
                 target_directed=target_directed,
+                safety_mode=safety_mode,
             )
             self._guarded_turn_owner_generation = generation
             self._guarded_turn_monitor = monitor
