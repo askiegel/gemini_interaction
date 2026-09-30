@@ -20,6 +20,13 @@ from tony2_localization_facade import Tony2LocalizationFacade
 from vision_adapter import VisionAdapter
 from semantic_vision import SemanticVisionClient
 from world_model import WorldModel
+from local_reactive_obstacle_avoidance import (
+    FORWARD_CLEAR,
+    STOP_BLOCKED,
+    TURN_LEFT,
+    TURN_RIGHT,
+    decide_forward_reaction,
+)
 
 
 def _bounded_alignment_number(value, *, maximum):
@@ -68,6 +75,7 @@ class CognitiveRuntime:
     MAX_ACTIVE_LOCALIZATION_TURNS = 6
     ACTIVE_LOCALIZATION_TURN_SPEED = 0.25
     ACTIVE_LOCALIZATION_TURN_DURATION = 0.50
+    MAX_LOCAL_REACTIVE_ACTIONS_PER_STEP = 1
 
     def __init__(
         self,
@@ -130,6 +138,8 @@ class CognitiveRuntime:
         self._marvin_autonomous_run_consumed = False
         self._marvin_controller_lock = threading.RLock()
         self._active_localization_lock = threading.Lock()
+        self._local_reactive_step_lock = threading.Lock()
+        self._physical_action_lock = threading.Lock()
         self._last_runtime_state = None
         self._control_generation = 0
         self._behavior_execution_generation = None
@@ -746,6 +756,185 @@ class CognitiveRuntime:
                 or self._behavior_execution_generation is not None
             )
 
+    def _local_reactive_navigation_goal_active(self):
+        """Read only the goal-active flag; localization itself is irrelevant.
+
+        A local step does not require AMCL, a map, or a valid global pose, but
+        it must not overlap a navigation goal controlled by Tony2.
+        """
+        facade = getattr(self, "localization_facade", None)
+        reader = getattr(facade, "get_localization_status", None)
+        if not callable(reader):
+            return None
+        try:
+            status = reader()
+        except Exception:
+            return None
+        navigation = status.get("navigation") if isinstance(status, dict) else None
+        if not isinstance(navigation, dict):
+            return None
+        return navigation.get("goal_active") is True
+
+    def _local_reactive_lidar_state(self):
+        worker = getattr(self, "lidar_worker", None)
+        session = getattr(worker, "session", None)
+        if (
+            worker is None
+            or worker.running is not True
+            or not isinstance(session, str)
+            or not session
+        ):
+            return None, None
+        reader = getattr(getattr(self, "world_model", None), "get_lidar_obstacles", None)
+        if not callable(reader):
+            return session, None
+        try:
+            return session, reader(expected_session=session)
+        except Exception:
+            return session, None
+
+    def run_local_reactive_step(self):
+        """Sense, decide, execute no more than one local guarded action, stop.
+
+        This is intentionally not a loop.  The next action always requires a
+        separate invocation and fresh local LiDAR state.
+        """
+        base = {
+            "ok": False,
+            "action": "local_reactive_step",
+            "max_physical_actions": self.MAX_LOCAL_REACTIVE_ACTIONS_PER_STEP,
+            "decision": None,
+            "action_attempted": False,
+            "action_executed": False,
+            "reason": None,
+            "decision_evidence": None,
+            "executor_result": None,
+            "stop_result": None,
+            "bridge_stopped": False,
+        }
+        step_lock = getattr(self, "_local_reactive_step_lock", None)
+        physical_lock = getattr(self, "_physical_action_lock", None)
+        if step_lock is None or physical_lock is None:
+            return dict(base, reason="local_reactive_locks_unavailable")
+        if not step_lock.acquire(blocking=False):
+            return dict(base, reason="local_reactive_step_already_running")
+        physical_acquired = False
+        try:
+            if self.running is not True:
+                return dict(base, reason="cognitive_runtime_not_running")
+            if self._active_localization_has_behavior_owner():
+                return dict(base, reason="physical_behavior_already_active")
+            if not physical_lock.acquire(blocking=False):
+                return dict(base, reason="physical_behavior_already_active")
+            physical_acquired = True
+            if self._active_localization_lock.locked():
+                return dict(base, reason="active_localization_already_running")
+            navigation_goal_active = self._local_reactive_navigation_goal_active()
+            if navigation_goal_active is None:
+                return dict(base, reason="navigation_goal_state_unavailable")
+            if navigation_goal_active:
+                return dict(base, reason="navigation_goal_active")
+            bridge_before = self._marvin_bridge_ready_and_stopped()
+            if bridge_before.get("ok") is not True:
+                return dict(base, reason="bridge_not_ready_or_not_stopped",
+                            bridge_before=bridge_before)
+            session, lidar = self._local_reactive_lidar_state()
+            if session is None or lidar is None:
+                return dict(base, reason="lidar_producer_session_or_state_unavailable")
+            decision = decide_forward_reaction(
+                lidar, expected_session=session,
+            )
+            if not isinstance(decision, dict):
+                return dict(base, reason="local_reactive_decision_malformed")
+            selected = decision.get("decision")
+            result = dict(base, decision=selected, decision_evidence=decision)
+            behavior = getattr(self, "behavior_manager", None)
+            if selected == STOP_BLOCKED:
+                return self._finish_local_reactive_step(
+                    result, reason="local_reactive_stop_blocked",
+                )
+            if selected not in {FORWARD_CLEAR, TURN_LEFT, TURN_RIGHT}:
+                return self._finish_local_reactive_step(
+                    result, reason="local_reactive_decision_not_actionable",
+                )
+            if selected == FORWARD_CLEAR:
+                executor = getattr(behavior, "execute_guarded_local_forward", None)
+                if not callable(executor):
+                    return self._finish_local_reactive_step(
+                        result, reason="guarded_local_forward_unavailable",
+                    )
+                try:
+                    execution = executor(expected_lidar_session=session)
+                except Exception as exc:
+                    execution = {"ok": False, "motion_executed": False,
+                                 "reason": "guarded_local_forward_exception",
+                                 "error": str(exc)}
+                action_executed = bool(
+                    isinstance(execution, dict)
+                    and execution.get("motion_executed") is True
+                )
+            else:
+                executor = getattr(behavior, "execute_guarded_turn", None)
+                if not callable(executor):
+                    return self._finish_local_reactive_step(
+                        result, reason="guarded_turn_unavailable",
+                    )
+                direction = "LEFT" if selected == TURN_LEFT else "RIGHT"
+                try:
+                    execution = executor(
+                        direction,
+                        self.ACTIVE_LOCALIZATION_TURN_SPEED,
+                        self.ACTIVE_LOCALIZATION_TURN_DURATION,
+                        expected_lidar_session=session,
+                        safety_mode="ROTATIONAL_SWEPT_FOOTPRINT",
+                    )
+                except Exception as exc:
+                    execution = {"ok": False, "motion_executed": False,
+                                 "reason": "guarded_turn_exception",
+                                 "error": str(exc)}
+                action_executed = bool(
+                    isinstance(execution, dict)
+                    and execution.get("ok") is True
+                    and execution.get("permitted") is True
+                    and execution.get("confirmed_forwarded") is True
+                )
+            result.update(
+                action_attempted=True,
+                action_executed=action_executed,
+                executor_result=execution,
+            )
+            return self._finish_local_reactive_step(
+                result,
+                reason=(
+                    "local_reactive_action_complete"
+                    if action_executed else "local_reactive_executor_vetoed"
+                ),
+            )
+        finally:
+            if physical_acquired:
+                physical_lock.release()
+            step_lock.release()
+
+    def _finish_local_reactive_step(self, result, *, reason):
+        """Issue STOP and require the canonical Bridge-zero proof."""
+        try:
+            stop_result = self.robot_client.stop()
+        except Exception as exc:
+            stop_result = {"ok": False, "error": str(exc)}
+        bridge_after = self._marvin_bridge_ready_and_stopped()
+        bridge_stopped = bridge_after.get("ok") is True
+        return dict(
+            result,
+            ok=bool(result.get("action_executed") is True
+                    and isinstance(stop_result, dict)
+                    and stop_result.get("ok") is True
+                    and bridge_stopped),
+            reason=(reason if bridge_stopped else "bridge_not_stopped_after_local_reactive_step"),
+            stop_result=stop_result,
+            bridge_stopped=bridge_stopped,
+            bridge_after_stop=bridge_after,
+        )
+
     def run_bounded_active_localization(self):
         """Obtain LiDAR viewpoints through at most six guarded in-place turns.
 
@@ -768,6 +957,17 @@ class CognitiveRuntime:
                 base,
                 terminal_reason="ACTIVE_LOCALIZATION_TURN_BLOCKED",
                 reason="active_localization_already_running",
+            )
+        physical_lock = getattr(self, "_physical_action_lock", None)
+        if physical_lock is None:
+            physical_lock = threading.Lock()
+            self._physical_action_lock = physical_lock
+        if not physical_lock.acquire(blocking=False):
+            self._active_localization_lock.release()
+            return dict(
+                base,
+                terminal_reason="ACTIVE_LOCALIZATION_TURN_BLOCKED",
+                reason="physical_behavior_already_active",
             )
         try:
             if self.running is not True:
@@ -907,6 +1107,7 @@ class CognitiveRuntime:
                 reason="active_localization_turn_budget_exhausted",
             )
         finally:
+            physical_lock.release()
             self._active_localization_lock.release()
 
     def execute_single_marvin_alignment(

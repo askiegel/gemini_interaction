@@ -2819,6 +2819,21 @@ class BehaviorManager:
                     motion_executed=True, forward_result=forward,
                     reason="marvin_single_approach_forward_complete")
 
+    def execute_guarded_local_forward(self, *, expected_lidar_session, now=None):
+        """Run the established single bounded forward primitive for local use.
+
+        This is deliberately a semantic-free delegate, not another motion
+        implementation.  It retains the existing 0.08 m/s, 0.50 s forward
+        values, local-motion envelope check, and forward-interlock dispatch
+        gate owned by ``execute_single_marvin_approach_step``.
+        """
+        del now  # The delegated primitive obtains its own current snapshot.
+        return self.execute_single_marvin_approach_step(
+            expected_lidar_session=expected_lidar_session,
+            linear_speed=self.FIND_APPROACH_FORWARD_SPEED,
+            duration=self.FIND_APPROACH_FORWARD_SECONDS,
+        )
+
     @staticmethod
     def _normalize_marvin_bounded_forward_result(result, *, speed, duration):
         """Normalize only a complete, accepted bounded Bridge forward result.
