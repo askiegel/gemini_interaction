@@ -76,6 +76,7 @@ class CognitiveRuntime:
     ACTIVE_LOCALIZATION_TURN_SPEED = 0.25
     ACTIVE_LOCALIZATION_TURN_DURATION = 0.50
     MAX_LOCAL_REACTIVE_ACTIONS_PER_STEP = 1
+    MAX_REACTIVE_STEPS = 4
 
     def __init__(
         self,
@@ -139,6 +140,7 @@ class CognitiveRuntime:
         self._marvin_controller_lock = threading.RLock()
         self._active_localization_lock = threading.Lock()
         self._local_reactive_step_lock = threading.Lock()
+        self._bounded_local_reactive_avoidance_lock = threading.Lock()
         self._physical_action_lock = threading.Lock()
         self._last_runtime_state = None
         self._control_generation = 0
@@ -934,6 +936,125 @@ class CognitiveRuntime:
             bridge_stopped=bridge_stopped,
             bridge_after_stop=bridge_after,
         )
+
+    def run_bounded_local_reactive_avoidance(self):
+        """Run at most four fully stopped, LiDAR-re-sensed local reactions.
+
+        This method deliberately owns no motion implementation.  Each cycle
+        delegates to ``run_local_reactive_step()``, which remains responsible
+        for sensing, deciding, guarded execution, STOP, and Bridge-zero
+        verification.  The episode lock only prevents overlapping bounded
+        episodes; it never holds the physical-action lock across cycles.
+        """
+        base = {
+            "ok": False,
+            "action": "bounded_local_reactive_avoidance",
+            "terminal_state": None,
+            "reason": None,
+            "steps_attempted": 0,
+            "physical_actions": 0,
+            "max_steps": self.MAX_REACTIVE_STEPS,
+            "turns_executed": 0,
+            "forward_steps_executed": 0,
+            "bridge_stopped": False,
+            "history": [],
+        }
+        episode_lock = getattr(self, "_bounded_local_reactive_avoidance_lock", None)
+        if episode_lock is None:
+            return dict(base, terminal_state="EXECUTION_FAILED",
+                        reason="bounded_reactive_episode_lock_unavailable")
+        if not episode_lock.acquire(blocking=False):
+            return dict(base, terminal_state="OWNERSHIP_REJECTED",
+                        reason="bounded_reactive_avoidance_already_running")
+
+        ownership_reasons = {
+            "physical_behavior_already_active",
+            "active_localization_already_running",
+            "navigation_goal_active",
+            "local_reactive_step_already_running",
+        }
+        try:
+            if self.running is not True:
+                return dict(base, terminal_state="OWNERSHIP_REJECTED",
+                            reason="cognitive_runtime_not_running")
+
+            for step_number in range(1, self.MAX_REACTIVE_STEPS + 1):
+                step_result = self.run_local_reactive_step()
+                if not isinstance(step_result, dict):
+                    return dict(
+                        base,
+                        terminal_state="EXECUTION_FAILED",
+                        reason="local_reactive_step_result_malformed",
+                    )
+
+                decision = step_result.get("decision")
+                action_attempted = step_result.get("action_attempted") is True
+                action_executed = step_result.get("action_executed") is True
+                bridge_stopped = step_result.get("bridge_stopped") is True
+                history_entry = {
+                    "step": step_number,
+                    "decision": decision,
+                    "action_attempted": action_attempted,
+                    "action_executed": action_executed,
+                    "reason": step_result.get("reason"),
+                    "bridge_stopped": bridge_stopped,
+                }
+                base["history"].append(history_entry)
+                base["steps_attempted"] = step_number
+                base["bridge_stopped"] = bridge_stopped
+
+                # A pre-ownership rejection must not command STOP against the
+                # legitimate current owner.  End this episode without a retry.
+                if step_result.get("reason") in ownership_reasons:
+                    return dict(base, terminal_state="OWNERSHIP_REJECTED",
+                                reason=step_result.get("reason"))
+
+                # Account for transport as soon as the single-step authority
+                # reports it.  A later STOP/Bridge failure does not erase the
+                # fact that this bounded physical action happened.
+                if action_executed:
+                    base["physical_actions"] += 1
+                    if decision in {TURN_LEFT, TURN_RIGHT}:
+                        base["turns_executed"] += 1
+                    elif decision == FORWARD_CLEAR:
+                        base["forward_steps_executed"] += 1
+
+                # No next sense/action is permitted until the preceding
+                # single-step owner has completed STOP and Bridge-zero proof.
+                if not bridge_stopped:
+                    return dict(base, terminal_state="EXECUTION_FAILED",
+                                reason="bridge_not_stopped_after_reactive_cycle")
+
+                if decision == STOP_BLOCKED:
+                    return dict(base, ok=True, terminal_state="BLOCKED",
+                                reason=step_result.get("reason"))
+
+                if action_attempted and not action_executed:
+                    terminal_state = (
+                        "SAFETY_VETO"
+                        if step_result.get("reason") == "local_reactive_executor_vetoed"
+                        else "EXECUTION_FAILED"
+                    )
+                    return dict(base, terminal_state=terminal_state,
+                                reason=step_result.get("reason"))
+
+                if not action_executed:
+                    return dict(base, terminal_state="EXECUTION_FAILED",
+                                reason="local_reactive_action_not_executed")
+
+                # A successful first forward action is sufficient.  Likewise,
+                # after one or more avoidance turns, a fresh FORWARD_CLEAR
+                # decision proves a newly clear local path and ends the episode.
+                if decision == FORWARD_CLEAR:
+                    return dict(base, ok=True, terminal_state="PATH_CLEAR",
+                                reason="guarded_forward_completed")
+
+            # Every successful single step already issued STOP and verified the
+            # Bridge before this bounded budget can be exhausted.
+            return dict(base, ok=True, terminal_state="MAX_STEPS_REACHED",
+                        reason="reactive_step_budget_exhausted")
+        finally:
+            episode_lock.release()
 
     def run_bounded_active_localization(self):
         """Obtain LiDAR viewpoints through at most six guarded in-place turns.
