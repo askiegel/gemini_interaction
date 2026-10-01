@@ -141,6 +141,9 @@ class CognitiveRuntime:
         self._active_localization_lock = threading.Lock()
         self._local_reactive_step_lock = threading.Lock()
         self._bounded_local_reactive_avoidance_lock = threading.Lock()
+        # This lock serializes only high-level routing.  Lower coordinators
+        # retain their own ownership locks while they perform physical work.
+        self._local_progress_with_avoidance_lock = threading.Lock()
         self._physical_action_lock = threading.Lock()
         self._last_runtime_state = None
         self._control_generation = 0
@@ -1055,6 +1058,160 @@ class CognitiveRuntime:
                         reason="reactive_step_budget_exhausted")
         finally:
             episode_lock.release()
+
+    def run_local_progress_with_avoidance(self):
+        """Attempt one local forward-progress unit without adding motion paths.
+
+        The initial LiDAR decision is a routing decision only.  A clear path
+        delegates once to the existing single-step coordinator; a turnable
+        obstruction delegates once to the existing four-step bounded episode.
+        Neither branch carries cached motion authorization into its delegate.
+        """
+        base = {
+            "ok": False,
+            "action": "local_progress_with_avoidance",
+            "terminal_state": None,
+            "mode": None,
+            "reason": None,
+            "initial_decision": None,
+            "initial_decision_evidence": None,
+            "physical_actions": 0,
+            "max_physical_actions": self.MAX_REACTIVE_STEPS,
+            "bridge_stopped": None,
+            "nested_result": None,
+        }
+        handoff_lock = getattr(self, "_local_progress_with_avoidance_lock", None)
+        if handoff_lock is None:
+            return dict(base, terminal_state="LOCAL_PROGRESS_EXECUTION_FAILED",
+                        reason="local_progress_handoff_lock_unavailable")
+        if not handoff_lock.acquire(blocking=False):
+            return dict(base, terminal_state="LOCAL_PROGRESS_OWNERSHIP_REJECTED",
+                        reason="local_progress_with_avoidance_already_running")
+
+        ownership_reasons = {
+            "physical_behavior_already_active",
+            "active_localization_already_running",
+            "navigation_goal_active",
+            "local_reactive_step_already_running",
+            "bounded_reactive_avoidance_already_running",
+        }
+        try:
+            if self.running is not True:
+                return dict(base, terminal_state="LOCAL_PROGRESS_OWNERSHIP_REJECTED",
+                            reason="cognitive_runtime_not_running")
+
+            producer_session, lidar_state = self._local_reactive_lidar_state()
+            if producer_session is None or lidar_state is None:
+                return dict(base, terminal_state="LOCAL_PROGRESS_EXECUTION_FAILED",
+                            reason="lidar_producer_session_or_state_unavailable")
+            decision_result = decide_forward_reaction(
+                lidar_state,
+                expected_session=producer_session,
+            )
+            if not isinstance(decision_result, dict):
+                return dict(base, terminal_state="LOCAL_PROGRESS_EXECUTION_FAILED",
+                            reason="local_progress_decision_malformed")
+
+            decision = decision_result.get("decision")
+            base.update(
+                initial_decision=decision,
+                initial_decision_evidence=decision_result,
+            )
+            if decision == STOP_BLOCKED:
+                return dict(
+                    base,
+                    ok=True,
+                    terminal_state="LOCAL_PROGRESS_BLOCKED",
+                    mode="NO_MOTION",
+                    reason=decision_result.get("reason", "local_progress_stop_blocked"),
+                )
+
+            if decision == FORWARD_CLEAR:
+                step_result = self.run_local_reactive_step()
+                if not isinstance(step_result, dict):
+                    return dict(
+                        base,
+                        terminal_state="LOCAL_PROGRESS_EXECUTION_FAILED",
+                        mode="DIRECT_FORWARD",
+                        reason="local_reactive_step_result_malformed",
+                    )
+                executed = step_result.get("action_executed") is True
+                bridge_stopped = step_result.get("bridge_stopped") is True
+                direct = dict(
+                    base,
+                    mode="DIRECT_FORWARD",
+                    nested_result=step_result,
+                    physical_actions=1 if executed else 0,
+                    bridge_stopped=bridge_stopped,
+                )
+                if step_result.get("reason") in ownership_reasons:
+                    return dict(direct,
+                                terminal_state="LOCAL_PROGRESS_OWNERSHIP_REJECTED",
+                                reason=step_result.get("reason"))
+                if not bridge_stopped:
+                    return dict(direct,
+                                terminal_state="LOCAL_PROGRESS_EXECUTION_FAILED",
+                                reason="bridge_not_stopped_after_direct_local_progress")
+                if step_result.get("decision") == STOP_BLOCKED:
+                    return dict(direct, ok=True,
+                                terminal_state="LOCAL_PROGRESS_BLOCKED",
+                                reason=step_result.get("reason"))
+                if step_result.get("action_attempted") is True and not executed:
+                    terminal = (
+                        "LOCAL_PROGRESS_SAFETY_VETO"
+                        if step_result.get("reason") == "local_reactive_executor_vetoed"
+                        else "LOCAL_PROGRESS_EXECUTION_FAILED"
+                    )
+                    return dict(direct, terminal_state=terminal,
+                                reason=step_result.get("reason"))
+                if executed and step_result.get("decision") == FORWARD_CLEAR:
+                    return dict(direct, ok=True,
+                                terminal_state="LOCAL_PROGRESS_COMPLETE",
+                                reason="guarded_forward_completed")
+                return dict(direct, terminal_state="LOCAL_PROGRESS_EXECUTION_FAILED",
+                            reason="direct_local_progress_not_completed")
+
+            if decision not in {TURN_LEFT, TURN_RIGHT}:
+                return dict(base, terminal_state="LOCAL_PROGRESS_EXECUTION_FAILED",
+                            reason="local_progress_decision_unknown")
+
+            bounded_result = self.run_bounded_local_reactive_avoidance()
+            if not isinstance(bounded_result, dict):
+                return dict(base, terminal_state="LOCAL_PROGRESS_EXECUTION_FAILED",
+                            mode="BOUNDED_AVOIDANCE",
+                            reason="bounded_reactive_result_malformed")
+            physical_actions = bounded_result.get("physical_actions")
+            if (not isinstance(physical_actions, int)
+                    or isinstance(physical_actions, bool)
+                    or not 0 <= physical_actions <= self.MAX_REACTIVE_STEPS):
+                return dict(base, terminal_state="LOCAL_PROGRESS_EXECUTION_FAILED",
+                            mode="BOUNDED_AVOIDANCE",
+                            nested_result=bounded_result,
+                            reason="bounded_reactive_physical_action_count_invalid")
+            bounded = dict(
+                base,
+                mode="BOUNDED_AVOIDANCE",
+                nested_result=bounded_result,
+                physical_actions=physical_actions,
+                bridge_stopped=bounded_result.get("bridge_stopped") is True,
+            )
+            terminal_map = {
+                "PATH_CLEAR": ("LOCAL_PROGRESS_COMPLETE", True),
+                "BLOCKED": ("LOCAL_PROGRESS_BLOCKED", True),
+                "SAFETY_VETO": ("LOCAL_PROGRESS_SAFETY_VETO", False),
+                "MAX_STEPS_REACHED": ("LOCAL_PROGRESS_MAX_STEPS_REACHED", True),
+                "OWNERSHIP_REJECTED": ("LOCAL_PROGRESS_OWNERSHIP_REJECTED", False),
+                "EXECUTION_FAILED": ("LOCAL_PROGRESS_EXECUTION_FAILED", False),
+            }
+            mapped = terminal_map.get(bounded_result.get("terminal_state"))
+            if mapped is None:
+                return dict(bounded, terminal_state="LOCAL_PROGRESS_EXECUTION_FAILED",
+                            reason="bounded_reactive_terminal_state_unknown")
+            terminal_state, ok = mapped
+            return dict(bounded, ok=ok, terminal_state=terminal_state,
+                        reason=bounded_result.get("reason"))
+        finally:
+            handoff_lock.release()
 
     def run_bounded_active_localization(self):
         """Obtain LiDAR viewpoints through at most six guarded in-place turns.
