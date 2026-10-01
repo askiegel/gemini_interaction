@@ -91,7 +91,7 @@ def test_clear_front_returns_forward_clear_without_turn_evaluation():
 
 
 def test_blocked_front_with_more_usable_left_space_turns_left():
-    result = _decide(_state((0.60, 0.0), (0.20, -0.50)))
+    result = _decide(_state((0.46, 0.0), (0.20, -0.50)))
     assert result["decision"] == TURN_LEFT
     assert result["forward"]["permitted"] is False
     assert result["left"]["permitted"] is True
@@ -100,7 +100,7 @@ def test_blocked_front_with_more_usable_left_space_turns_left():
 
 
 def test_blocked_front_with_more_usable_right_space_turns_right():
-    result = _decide(_state((0.60, 0.0), (0.20, 0.50)))
+    result = _decide(_state((0.46, 0.0), (0.20, 0.50)))
     assert result["decision"] == TURN_RIGHT
     assert result["left"]["permitted"] is True
     assert result["right"]["permitted"] is True
@@ -108,7 +108,7 @@ def test_blocked_front_with_more_usable_right_space_turns_right():
 
 
 def test_equal_safe_sides_use_documented_left_tie_breaker():
-    snapshot = _state((0.60, 0.0))
+    snapshot = _state((0.46, 0.0))
     _set_side_clearance(snapshot, left=1.0, right=1.0)
     result = _decide(snapshot)
     assert result["decision"] == TURN_LEFT
@@ -129,18 +129,18 @@ def test_front_and_both_turns_blocked_returns_stop():
     lambda value: value["local_motion_geometry"]["points"].append({"x_m": math.nan, "y_m": 0.0}),
 ])
 def test_stale_invalid_missing_or_nonfinite_geometry_fails_closed(mutator):
-    result = _decide((lambda snapshot: (mutator(snapshot), snapshot)[1])(_state((0.60, 0.0))))
+    result = _decide((lambda snapshot: (mutator(snapshot), snapshot)[1])(_state((0.46, 0.0))))
     assert result["decision"] == STOP_BLOCKED
 
 
 def test_human_like_front_obstacle_left_clear_right_constrained_turns_left():
-    result = _decide(_state((0.60, 0.0), (0.20, -0.50)))
+    result = _decide(_state((0.46, 0.0), (0.20, -0.50)))
     assert result["decision"] == TURN_LEFT
     assert result["right"]["relevant_clearance_m"] == pytest.approx(math.hypot(0.20, -0.50))
 
 
 def test_pure_local_decision_needs_no_map_camera_or_world_model_and_mutates_nothing():
-    snapshot = _state((0.60, 0.0))
+    snapshot = _state((0.46, 0.0))
     original = copy.deepcopy(snapshot)
     result = _decide(snapshot)
     assert result["decision"] == TURN_LEFT

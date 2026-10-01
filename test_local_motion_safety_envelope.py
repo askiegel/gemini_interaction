@@ -81,12 +81,62 @@ def test_base_link_transform_accounts_for_lidar_offset_and_yaw():
     assert point["y_m"] == pytest.approx(LIDAR_TO_BASE_Y_M)
 
 
-def test_scanner_clear_range_can_still_violate_base_link_protected_radius():
+def test_scanner_range_can_still_violate_total_base_link_protected_radius():
     payload = scan()
-    set_robot_bearing(payload, 0, 0.70)  # >0.67 from scanner, <0.67 from base.
+    set_robot_bearing(payload, 0, 0.50)  # Base point is inside the 0.45 m tube.
     result = evaluate(payload, linear_x=0.1)
     assert result["permitted"] is False
     assert result["reason"] == "translation_protected_region_violated"
+
+
+@pytest.mark.parametrize("distance", [
+    0.44, 0.45,
+])
+def test_forward_translation_uses_exact_total_base_frame_protected_radius(
+        distance):
+    result = evaluate_geometry(
+        geometry_with_point(distance, 0.0), linear_x=0.08,
+    )
+    assert result["permitted"] is False
+    assert result["reason"] == "translation_protected_region_violated"
+    assert result["protected_radius_m"] == pytest.approx(0.45)
+    assert result["total_protected_radius_m"] == pytest.approx(0.45)
+
+
+def test_point_outside_total_radius_can_still_intersect_bounded_endpoint_tube():
+    # This preserves the bounded-endpoint reasoning: 0.46 m from the starting
+    # base is outside 0.45 m, but only 0.42 m from the 0.04 m forward endpoint.
+    result = evaluate_geometry(geometry_with_point(0.46, 0.0), linear_x=0.08)
+    assert result["permitted"] is False
+    assert result["reason"] == "translation_protected_region_violated"
+
+
+def test_point_at_046m_outside_forward_approach_does_not_veto_from_radius_alone():
+    result = evaluate_geometry(geometry_with_point(0.0, 0.46), linear_x=0.08)
+    assert result["permitted"] is True
+    assert result["reason"] == "protected_region_clear"
+
+
+def test_live_0567m_front_point_is_outside_total_translation_tube():
+    result = evaluate_geometry(
+        geometry_with_point(0.567, 0.013), linear_x=0.08,
+    )
+    assert result["permitted"] is True
+    assert result["reason"] == "protected_region_clear"
+
+
+@pytest.mark.parametrize("bearing", [60, 90, 135, 180])
+def test_point_inside_radius_but_outside_forward_approach_does_not_veto(
+        bearing):
+    distance = 0.44
+    radians = math.radians(bearing)
+    result = evaluate_geometry(
+        geometry_with_point(distance * math.cos(radians),
+                            distance * math.sin(radians)),
+        linear_x=0.08,
+    )
+    assert result["permitted"] is True
+    assert result["reason"] == "protected_region_clear"
 
 
 @pytest.mark.parametrize("bearing,command", [
@@ -95,15 +145,18 @@ def test_scanner_clear_range_can_still_violate_base_link_protected_radius():
     (45, {"linear_x": 0.1, "linear_y": 0.1}),
 ])
 def test_directional_obstacle_blocks_its_translation(bearing, command):
-    payload = scan()
-    set_robot_bearing(payload, bearing, 0.50)
-    result = evaluate(payload, **command)
+    radians = math.radians(bearing)
+    result = evaluate_geometry(
+        geometry_with_point(0.40 * math.cos(radians),
+                            0.40 * math.sin(radians)),
+        **command,
+    )
     assert result["permitted"] is False
     assert result["reason"] == "translation_protected_region_violated"
 
 
 def test_live_table_leg_only_vetoes_motion_toward_its_left_front_direction():
-    geometry = geometry_with_point(0.362, 0.479)
+    geometry = geometry_with_point(0.25, 0.35)
     expected = {
         "forward": ({"linear_x": 0.1}, True),
         "reverse": ({"linear_x": -0.1}, True),
@@ -120,10 +173,10 @@ def test_live_table_leg_only_vetoes_motion_toward_its_left_front_direction():
 
 
 @pytest.mark.parametrize("x_m,y_m,blocking,nonblocking", [
-    (0.60, 0.0, {"linear_x": 0.1}, ({"linear_x": -0.1},)),
-    (-0.60, 0.0, {"linear_x": -0.1}, ({"linear_x": 0.1},)),
-    (0.0, 0.60, {"linear_y": 0.1}, ({"linear_x": 0.1}, {"linear_y": -0.1})),
-    (0.0, -0.60, {"linear_y": -0.1}, ({"linear_x": 0.1}, {"linear_y": 0.1})),
+    (0.44, 0.0, {"linear_x": 0.1}, ({"linear_x": -0.1},)),
+    (-0.44, 0.0, {"linear_x": -0.1}, ({"linear_x": 0.1},)),
+    (0.0, 0.44, {"linear_y": 0.1}, ({"linear_x": 0.1}, {"linear_y": -0.1})),
+    (0.0, -0.44, {"linear_y": -0.1}, ({"linear_x": 0.1}, {"linear_y": 0.1})),
 ])
 def test_cardinal_obstacle_only_blocks_translation_toward_it(
         x_m, y_m, blocking, nonblocking):
@@ -134,10 +187,10 @@ def test_cardinal_obstacle_only_blocks_translation_toward_it(
 
 
 @pytest.mark.parametrize("x_m,y_m,toward,away", [
-    (0.50, 0.50, {"linear_x": 0.1, "linear_y": 0.1}, {"linear_x": -0.1, "linear_y": -0.1}),
-    (0.50, -0.50, {"linear_x": 0.1, "linear_y": -0.1}, {"linear_x": -0.1, "linear_y": 0.1}),
-    (-0.50, 0.50, {"linear_x": -0.1, "linear_y": 0.1}, {"linear_x": 0.1, "linear_y": -0.1}),
-    (-0.50, -0.50, {"linear_x": -0.1, "linear_y": -0.1}, {"linear_x": 0.1, "linear_y": 0.1}),
+    (0.30, 0.30, {"linear_x": 0.1, "linear_y": 0.1}, {"linear_x": -0.1, "linear_y": -0.1}),
+    (0.30, -0.30, {"linear_x": 0.1, "linear_y": -0.1}, {"linear_x": -0.1, "linear_y": 0.1}),
+    (-0.30, 0.30, {"linear_x": -0.1, "linear_y": 0.1}, {"linear_x": 0.1, "linear_y": -0.1}),
+    (-0.30, -0.30, {"linear_x": -0.1, "linear_y": -0.1}, {"linear_x": 0.1, "linear_y": 0.1}),
 ])
 def test_diagonal_obstacle_blocks_only_substantial_toward_component(
         x_m, y_m, toward, away):

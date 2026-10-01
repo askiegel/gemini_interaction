@@ -11,12 +11,13 @@ import math
 from voice_relay.lidar_sectors import finite_number, is_mayday_self_return
 
 
-# Approved operational safety parameter; not a measured chassis/stance radius.
+# Inner hard collision radius; not a measured chassis/stance radius.  This is
+# retained as a fail-closed current-footprint check and does not expand the
+# approved total translation safety zone.
 MAYDAY_OPERATIONAL_FOOTPRINT_RADIUS_M = 0.22
-LOCAL_LIDAR_SAFETY_CLEARANCE_M = 0.45
-LOCAL_LIDAR_PROTECTED_RADIUS_M = (
-    MAYDAY_OPERATIONAL_FOOTPRINT_RADIUS_M + LOCAL_LIDAR_SAFETY_CLEARANCE_M
-)
+# Approved total base-frame radius for the directional translation swept tube.
+# It is deliberately not an additional margin beyond the operational footprint.
+LOCAL_LIDAR_PROTECTED_RADIUS_M = 0.45
 
 # Authoritative Mini Pupper 2 base_link -> lidar_link transform.
 LIDAR_TO_BASE_X_M = -0.078701
@@ -192,7 +193,7 @@ def evaluate_local_motion_safety(state, *, expected_session, linear_x=0.0,
     validated = read_lidar_state(state, expected_session=expected_session, now=now)
     result = {"permitted": False, "reason": None,
               "operational_footprint_radius_m": MAYDAY_OPERATIONAL_FOOTPRINT_RADIUS_M,
-              "required_clearance_m": LOCAL_LIDAR_SAFETY_CLEARANCE_M,
+              "total_protected_radius_m": LOCAL_LIDAR_PROTECTED_RADIUS_M,
               "protected_radius_m": LOCAL_LIDAR_PROTECTED_RADIUS_M,
               "required_sectors": [], "geometry": None}
     if not validated.get("available") or not validated.get("valid"):

@@ -82,7 +82,7 @@ def test_live_table_leg_does_not_unnecessarily_trigger_avoidance():
 
 
 def test_centered_front_blocker_selects_deterministic_safe_side():
-    result = plan(state((0.60, 0.0)))
+    result = plan(state((0.46, 0.0)))
     assert result["candidate_evaluations"]["forward"]["permitted"] is False
     assert result["candidate_evaluations"]["left_turn"]["permitted"] is True
     assert result["selected_action"] == "forward_left"
@@ -90,7 +90,7 @@ def test_centered_front_blocker_selects_deterministic_safe_side():
 
 
 def test_front_left_path_blocker_prefers_right_side_avoidance():
-    result = plan(state((0.60, 0.25)))
+    result = plan(state((0.42, 0.25)))
     assert result["candidate_evaluations"]["forward"]["permitted"] is False
     assert result["blocking_point"]["y_m"] > 0
     assert result["selected_action"] == "forward_right"
@@ -98,7 +98,7 @@ def test_front_left_path_blocker_prefers_right_side_avoidance():
 
 
 def test_front_right_path_blocker_prefers_left_side_avoidance():
-    result = plan(state((0.60, -0.25)))
+    result = plan(state((0.42, -0.25)))
     assert result["candidate_evaluations"]["forward"]["permitted"] is False
     assert result["blocking_point"]["y_m"] < 0
     assert result["selected_action"] == "forward_left"
@@ -106,7 +106,7 @@ def test_front_right_path_blocker_prefers_left_side_avoidance():
 
 
 def test_denied_left_candidate_selects_permitted_right_candidate():
-    result = plan(state((0.60, 0.0), (0.45, 0.45)))
+    result = plan(state((0.46, 0.0), (0.30, 0.30)))
     assert result["candidate_evaluations"]["forward_left"]["permitted"] is False
     assert result["candidate_evaluations"]["forward_right"]["permitted"] is True
     assert result["selected_action"] == "forward_right"
@@ -114,7 +114,7 @@ def test_denied_left_candidate_selects_permitted_right_candidate():
 
 
 def test_denied_right_candidate_selects_permitted_left_candidate():
-    result = plan(state((0.60, 0.0), (0.45, -0.45)))
+    result = plan(state((0.46, 0.0), (0.30, -0.30)))
     assert result["candidate_evaluations"]["forward_right"]["permitted"] is False
     assert result["candidate_evaluations"]["forward_left"]["permitted"] is True
     assert result["selected_action"] == "forward_left"
@@ -122,7 +122,7 @@ def test_denied_right_candidate_selects_permitted_left_candidate():
 
 
 def test_both_sides_with_footprint_violation_fails_closed():
-    result = plan(state((0.60, 0.25), (0.60, -0.25), (0.10, 0.0)))
+    result = plan(state((0.42, 0.25), (0.42, -0.25), (0.10, 0.0)))
     assert result["selected_action"] is None
     assert result["reason"] == "operational_footprint_violated"
     assert all(not item["permitted"]
@@ -147,7 +147,7 @@ def test_untrusted_or_malformed_lidar_never_selects_action(mutator, reason):
 
 
 def test_identical_state_returns_identical_recommendation_without_mutation():
-    snapshot = state((0.60, 0.25))
+    snapshot = state((0.42, 0.25))
     original = copy.deepcopy(snapshot)
     first = plan(snapshot)
     second = plan(snapshot)
