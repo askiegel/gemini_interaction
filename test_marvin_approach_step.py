@@ -83,6 +83,28 @@ def test_behavior_blocked_or_untrusted_lidar_vetoes_without_forward_or_avoidance
         manager.execute_local_obstacle_avoidance_step.assert_not_called()
 
 
+def test_precise_translation_veto_prevents_transport_even_if_front_is_clear(monkeypatch):
+    robot, world = Robot(), World()
+    manager = BehaviorManager(robot_client=robot, world_model=world)
+    clear_front_diagnostic = {
+        **lidar(),
+        "sectors": {"front": {"available": True, "state": "CLEAR"}},
+    }
+    world.value = clear_front_diagnostic
+    monkeypatch.setattr(
+        behavior_manager_module,
+        "evaluate_local_motion_safety",
+        lambda *_args, **_kwargs: safety(False),
+    )
+
+    result = manager.execute_single_marvin_approach_step(
+        expected_lidar_session=SESSION, linear_speed=0.08, duration=0.50,
+    )
+
+    assert result["reason"] == "marvin_single_approach_translation_vetoed"
+    assert robot.forward_calls == 0
+
+
 def test_one_shot_accepts_only_complete_canonical_bounded_bridge_success(monkeypatch):
     canonical = {
         "ok": True, "action": "motion", "mode": "bounded",

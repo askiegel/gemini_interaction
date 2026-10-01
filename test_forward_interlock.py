@@ -42,9 +42,9 @@ class FakeInterlock:
     ("CLEAR", 0.30, True, True, "fresh_clear"),
     ("CLEAR", 0.300001, True, True, "stale_lidar"),
     ("CLEAR", -0.1, True, True, "stale_lidar"),
-    ("CAUTION", 0.1, True, True, "front_not_clear"),
-    ("BLOCKED", 0.1, True, True, "front_not_clear"),
-    ("UNKNOWN", 0.1, True, True, "front_not_clear"),
+    ("CAUTION", 0.1, True, True, "fresh_clear"),
+    ("BLOCKED", 0.1, True, True, "fresh_clear"),
+    ("UNKNOWN", 0.1, True, True, "front_unavailable_or_unknown"),
     ("CLEAR", 0.1, False, False, "fresh"),
     ("CLEAR", 0.1, True, False, "fresh"),
 ])
@@ -108,11 +108,13 @@ def test_bounded_forward_uses_pending_guard_and_clears_on_completion():
     interlock.stop()
 
 
-@pytest.mark.parametrize("front,reason", [
-    ("CAUTION", "front_not_clear"),
-    ("BLOCKED", "front_not_clear"),
-])
-def test_bounded_forward_denied_before_transport(front, reason):
+@pytest.mark.parametrize("front", ["CAUTION", "BLOCKED"])
+def test_bounded_forward_health_gate_allows_nonclear_diagnostic_front_state(front):
+    """The precise swept-geometry gate is an upstream guarded-forward precondition.
+
+    This test verifies the interlock does not apply the old sector-state rule
+    a second time after that geometry approval.
+    """
     current = state(front=front)
     interlock = ForwardMotionInterlock(
         lambda **_: current,
@@ -128,14 +130,29 @@ def test_bounded_forward_denied_before_transport(front, reason):
 
     result = client.move_forward(speed=0.08, seconds=0.50)
 
-    assert result["ok"] is False
-    assert result["error"] == reason
-    client._request.assert_not_called()
+    assert result["ok"] is True
+    client._request.assert_called_once()
+    interlock.stop()
+
+
+@pytest.mark.parametrize("age", [None, float("nan"), float("inf"), "0.1", True])
+def test_nonfinite_or_invalid_effective_age_remains_fail_closed(age):
+    permitted, reason = evaluate_lidar_state(state(age=age), "s")
+    assert permitted is False
+    assert reason == "invalid_effective_age"
+
+
+def test_unstarted_monitor_cannot_authorize_positive_dispatch():
+    interlock = ForwardMotionInterlock(
+        lambda **_: state(), expected_session="s", stop_callback=Mock(),
+    )
+    with pytest.raises(PermissionError, match="not_started"):
+        interlock.begin_positive_dispatch(streaming=False)
     interlock.stop()
 
 
 @pytest.mark.parametrize(("invalidation", "reason"), [
-    ("front", "front_not_clear"),
+    ("front_unavailable", "front_unavailable_or_unknown"),
     ("stale", "stale_lidar"),
 ])
 def test_bounded_forward_pending_invalidation_stops_and_does_not_replay(
@@ -172,8 +189,8 @@ def test_bounded_forward_pending_invalidation_stops_and_does_not_replay(
     )
     thread.start()
     assert entered.wait(1)
-    if invalidation == "front":
-        current["sectors"]["front"]["state"] = "CAUTION"
+    if invalidation == "front_unavailable":
+        current["sectors"]["front"]["available"] = False
     else:
         current["effective_age_seconds"] = 0.31
     interlock.refresh()
@@ -456,7 +473,7 @@ def test_rotation_and_stop_are_not_gated():
     assert [call.args[1] for call in client._request.call_args_list] == ["/motion", "/stop"]
 
 
-def test_monitor_stops_active_stream_without_new_command():
+def test_monitor_keeps_active_stream_for_caution_but_stops_on_unknown_front_data():
     current = state()
     stop = Mock(return_value={"ok": True})
     interlock = ForwardMotionInterlock(lambda **_: current, expected_session="s", stop_callback=stop, interval=0.01)
@@ -467,6 +484,9 @@ def test_monitor_stops_active_stream_without_new_command():
     generation = interlock.begin_positive_dispatch(streaming=True)
     assert interlock.finalize_positive_dispatch(generation, {"ok": True})
     current["sectors"]["front"]["state"] = "CAUTION"
+    time.sleep(0.05)
+    assert not stop.called
+    current["sectors"]["front"]["state"] = "UNKNOWN"
     deadline = time.time() + 1
     while not stop.called and time.time() < deadline:
         time.sleep(0.005)
@@ -476,8 +496,8 @@ def test_monitor_stops_active_stream_without_new_command():
     interlock.stop()
 
 
-@pytest.mark.parametrize("unsafe", ["CAUTION", "BLOCKED"])
-def test_active_stream_unsafe_transition_explicitly_stops(unsafe):
+@pytest.mark.parametrize("unsafe", ["UNKNOWN"])
+def test_active_stream_missing_or_unknown_front_evidence_explicitly_stops(unsafe):
     current = state()
     stop = Mock(return_value={"ok": True})
     interlock = ForwardMotionInterlock(lambda **_: current, expected_session="s", stop_callback=stop)
@@ -525,7 +545,7 @@ def test_stop_failure_leaves_inhibited_and_new_clear_needs_new_request():
     interlock.refresh()
     generation = interlock.begin_positive_dispatch(streaming=True)
     interlock.finalize_positive_dispatch(generation, {"ok": True})
-    current["sectors"]["front"]["state"] = "BLOCKED"
+    current["sectors"]["front"]["state"] = "UNKNOWN"
     interlock.refresh()
     assert interlock.status()["inhibited"] and interlock.status()["last_stop_error"]
     current["sectors"]["front"]["state"] = "CLEAR"
@@ -542,8 +562,8 @@ def test_pending_guard_serializes_inhibition_before_dispatch():
     interlock = ForwardMotionInterlock(lambda **_: current, expected_session="s", stop_callback=stop)
     interlock.refresh()
     generation = interlock.begin_positive_dispatch(streaming=True)
-    current["sectors"]["front"]["state"] = "CAUTION"
-    assert interlock.refresh() == (False, "front_not_clear")
+    current["sectors"]["front"]["state"] = "UNKNOWN"
+    assert interlock.refresh() == (False, "front_unavailable_or_unknown")
     assert interlock.status()["inhibited"]
     assert interlock.finalize_positive_dispatch(generation, {"ok": True}) is False
     assert stop.call_count == 2
@@ -606,7 +626,7 @@ def test_cross_thread_invalidated_transport_has_two_stop_phases(outcome, stop_fa
     motion_thread.start()
     try:
         assert entered.wait(1)
-        current["sectors"]["front"]["state"] = "BLOCKED"
+        current["sectors"]["front"]["state"] = "UNKNOWN"
         monitor = threading.Thread(target=interlock.refresh)
         monitor.start()
         monitor.join(1)
@@ -662,7 +682,7 @@ def test_clear_transport_becomes_active_then_unsafe_stops_once():
     assert interlock.status()["active_forward"]
     assert not interlock.status()["pending_forward"]
     assert [call.args[1] for call in client._request.call_args_list] == ["/motion"]
-    current["sectors"]["front"]["state"] = "BLOCKED"
+    current["sectors"]["front"]["state"] = "UNKNOWN"
     monitor = threading.Thread(target=interlock.refresh)
     monitor.start()
     monitor.join(1)
@@ -728,7 +748,7 @@ def test_motion_dispatch_does_not_read_lidar_or_world_model():
 
 
 def test_new_clear_request_can_rearm_without_replay():
-    current = state(front="CAUTION")
+    current = state(front="UNKNOWN")
     stop = Mock(return_value={"ok": True})
     interlock = ForwardMotionInterlock(lambda **_: current, expected_session="s", stop_callback=stop)
     interlock.refresh()
@@ -758,4 +778,4 @@ def test_reason_and_malformed_state_are_fail_closed():
     assert evaluate_lidar_state(malformed, "s") == (False, "malformed_lidar_state")
     contradictory = state()
     contradictory["sectors"]["front"]["available"] = False
-    assert evaluate_lidar_state(contradictory, "s") == (False, "front_not_clear")
+    assert evaluate_lidar_state(contradictory, "s") == (False, "front_unavailable_or_unknown")

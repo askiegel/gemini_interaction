@@ -1,4 +1,11 @@
-"""Fail-closed local LiDAR prerequisite for positive streaming motion."""
+"""Fail-closed LiDAR health watchdog for positive streaming motion.
+
+Collision geometry is deliberately not decided here.  Guarded bounded forward
+motion performs its just-in-time base-frame swept-path check before reaching
+the Robot Bridge client.  This interlock independently watches whether the
+producer-bound LiDAR state remains readable, valid, and fresh while positive
+motion is pending or active.
+"""
 
 import copy
 import math
@@ -28,8 +35,13 @@ def evaluate_lidar_state(state, expected_session):
         return False, "invalid_effective_age"
     if age < 0 or age > MAXIMUM_EFFECTIVE_AGE_SECONDS:
         return False, "stale_lidar"
-    if front.get("available") is not True or front.get("state") != "CLEAR":
-        return False, "front_not_clear"
+    # A missing or unknown front sector is incomplete monitoring evidence and
+    # must remain fail-closed.  CAUTION/BLOCKED are diagnostic obstacle labels,
+    # however, not a second collision authority: guarded forward dispatch has
+    # already passed evaluate_local_motion_safety()'s current base-frame swept
+    # geometry immediately before transport.
+    if front.get("available") is not True or front.get("state") == "UNKNOWN":
+        return False, "front_unavailable_or_unknown"
     return True, "fresh_clear"
 
 
