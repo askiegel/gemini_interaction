@@ -472,6 +472,7 @@ class RuntimeAPIHandler(BaseHTTPRequestHandler):
             "/guarded-turn",
             "/active-localization/scan",
             "/local-reactive-step",
+            "/local-reactive-avoidance",
             "/find-marvin/alignment-step",
             "/find-marvin/approach-step",
             "/find-marvin/autonomous-run",
@@ -575,6 +576,28 @@ class RuntimeAPIHandler(BaseHTTPRequestHandler):
                     200 if result.get("ok") is True or safe_stop else 409,
                     result,
                 )
+                return
+
+            if path == "/local-reactive-avoidance":
+                if request_data:
+                    raise ValueError(
+                        "local-reactive-avoidance requires an empty JSON object."
+                    )
+                result = self.server.runtime.run_bounded_local_reactive_avoidance()
+                terminal_state = (
+                    result.get("terminal_state")
+                    if isinstance(result, dict) else None
+                )
+                safe_terminal = (
+                    terminal_state in {
+                        "PATH_CLEAR",
+                        "BLOCKED",
+                        "MAX_STEPS_REACHED",
+                        "SAFETY_VETO",
+                    }
+                    and result.get("bridge_stopped") is True
+                )
+                self.send_json(200 if safe_terminal else 409, result)
                 return
 
             if path == "/find-marvin/alignment-step":
