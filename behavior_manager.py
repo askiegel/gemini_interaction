@@ -637,6 +637,9 @@ class BehaviorManager:
         # direct/offline BehaviorManager use; CognitiveRuntime installs it so
         # STOP can invalidate a multi-action FIND_OBJECT execution.
         self.execution_authorization_provider = None
+        # Runtime installs this only for mission-owned local forward progress.
+        # Standalone BehaviorManager use retains its existing behavior.
+        self.local_progress_with_avoidance_handler = None
 
     def _publish_tracking_state(self, result):
         callback = getattr(self, "tracking_state_callback", None)
@@ -6354,6 +6357,13 @@ class BehaviorManager:
         clearance_forward_post_confirmation_diagnostics = None
         centering_total_attempted = centering_attempted
         centering_total_completed = centering_completed
+        local_progress_calls = 0
+        local_progress_physical_actions = 0
+        max_local_progress_physical_actions = (
+            self.FIND_APPROACH_MAX_CHUNKS
+            + self.FIND_AVOIDANCE_MAX_TURN_CHUNKS
+        )
+        local_progress_history = []
         current = observation
 
         def target_telemetry(target, previous=None):
@@ -6456,6 +6466,15 @@ class BehaviorManager:
                 "clearance_forward_post_confirmation_diagnostics": (
                     clearance_forward_post_confirmation_diagnostics
                 ),
+                "local_progress_calls": local_progress_calls,
+                "local_progress_physical_actions": (
+                    local_progress_physical_actions
+                ),
+                "physical_actions": local_progress_physical_actions,
+                "maximum_local_progress_physical_actions": (
+                    max_local_progress_physical_actions
+                ),
+                "local_progress_history": list(local_progress_history),
             })
             value.update(fields)
             self._publish_tracking_state(value)
@@ -6781,6 +6800,199 @@ class BehaviorManager:
                         **telemetry,
                     )
                 telemetry = target_telemetry(current, telemetry)
+                continue
+
+            local_progress_handler = getattr(
+                self, "local_progress_with_avoidance_handler", None
+            )
+            if callable(local_progress_handler):
+                if local_progress_physical_actions >= max_local_progress_physical_actions:
+                    return result(
+                        ok=False,
+                        completed=True,
+                        state="APPROACH_BLOCKED",
+                        reason="local_progress_physical_action_budget_exhausted",
+                        **telemetry,
+                    )
+                if not self._execution_is_current():
+                    return result(
+                        ok=False,
+                        completed=True,
+                        target_found=False,
+                        state="PREEMPTED",
+                        reason="FIND_OBJECT execution was preempted.",
+                        **telemetry,
+                    )
+
+                local_progress_calls += 1
+                approach_attempted += 1
+                try:
+                    local_progress_result = local_progress_handler()
+                except Exception as exc:
+                    local_progress_result = {
+                        "ok": False,
+                        "terminal_state": "LOCAL_PROGRESS_EXECUTION_FAILED",
+                        "reason": "local_progress_handoff_exception",
+                        "error": str(exc),
+                        "error_type": type(exc).__name__,
+                        "physical_actions": 0,
+                    }
+                if not isinstance(local_progress_result, dict):
+                    local_progress_result = {
+                        "ok": False,
+                        "terminal_state": "LOCAL_PROGRESS_EXECUTION_FAILED",
+                        "reason": "local_progress_handoff_result_malformed",
+                        "physical_actions": 0,
+                    }
+                nested_actions = local_progress_result.get("physical_actions")
+                if (not isinstance(nested_actions, int)
+                        or isinstance(nested_actions, bool)
+                        or nested_actions < 0):
+                    return result(
+                        ok=False,
+                        completed=True,
+                        state="APPROACH_FAILED",
+                        reason="local_progress_physical_action_count_invalid",
+                        local_progress_result=local_progress_result,
+                        **telemetry,
+                    )
+                local_progress_physical_actions += nested_actions
+                if nested_actions > self.FIND_APPROACH_MAX_CHUNKS:
+                    return result(
+                        ok=False,
+                        completed=True,
+                        state="APPROACH_FAILED",
+                        reason="local_progress_exceeded_single_episode_action_limit",
+                        local_progress_result=local_progress_result,
+                        **telemetry,
+                    )
+                if local_progress_physical_actions > max_local_progress_physical_actions:
+                    return result(
+                        ok=False,
+                        completed=True,
+                        state="APPROACH_FAILED",
+                        reason="local_progress_exceeded_find_object_action_budget",
+                        local_progress_result=local_progress_result,
+                        **telemetry,
+                    )
+                progress_record = {
+                    "request_index": local_progress_calls,
+                    "terminal_state": local_progress_result.get("terminal_state"),
+                    "mode": local_progress_result.get("mode"),
+                    "physical_actions": nested_actions,
+                    "reason": local_progress_result.get("reason"),
+                    "nested_result": local_progress_result,
+                }
+                local_progress_history.append(progress_record)
+                step = {
+                    "step_index": approach_attempted,
+                    "local_progress_result": local_progress_result,
+                    "physical_actions": nested_actions,
+                    "post_motion_confirmation_status": None,
+                    "post_motion_confirmation_diagnostics": None,
+                }
+                approach_steps.append(step)
+                approach_result = local_progress_result
+                terminal = local_progress_result.get("terminal_state")
+                if terminal != "LOCAL_PROGRESS_COMPLETE":
+                    state = {
+                        "LOCAL_PROGRESS_BLOCKED": "APPROACH_BLOCKED",
+                        "LOCAL_PROGRESS_SAFETY_VETO": "APPROACH_BLOCKED",
+                        "LOCAL_PROGRESS_EXECUTION_FAILED": "APPROACH_FAILED",
+                        "LOCAL_PROGRESS_OWNERSHIP_REJECTED": "APPROACH_BLOCKED",
+                        "LOCAL_PROGRESS_MAX_STEPS_REACHED": "APPROACH_BLOCKED",
+                    }.get(terminal, "APPROACH_FAILED")
+                    return result(
+                        ok=False,
+                        completed=True,
+                        state=state,
+                        reason=local_progress_result.get(
+                            "reason", terminal or "local_progress_failed"
+                        ),
+                        local_progress_result=local_progress_result,
+                        **telemetry,
+                    )
+                if nested_actions <= 0:
+                    return result(
+                        ok=False,
+                        completed=True,
+                        state="APPROACH_FAILED",
+                        reason="local_progress_completed_without_physical_action",
+                        local_progress_result=local_progress_result,
+                        **telemetry,
+                    )
+                approach_completed += 1
+
+                post_cutoff = post_motion_cutoff(current)
+                if self._vision_timestamp_is_iso(post_cutoff):
+                    post_cutoff = datetime.now(timezone.utc).isoformat()
+                confirmed, confirmation_status, confirmation_diagnostics = (
+                    self._confirm_find_target_with_semantic(
+                        target_name,
+                        minimum_timestamp=post_cutoff,
+                        return_diagnostics=True,
+                        confirmation_window_seconds=(
+                            self.FIND_POST_MOTION_CONFIRMATION_WINDOW_SECONDS
+                        ),
+                    )
+                )
+                step["post_motion_confirmation_status"] = confirmation_status
+                step["post_motion_confirmation_diagnostics"] = confirmation_diagnostics
+                if confirmed is None:
+                    return result(
+                        ok=False,
+                        completed=True,
+                        target_found=False,
+                        state="TARGET_LOST_AFTER_APPROACH",
+                        reason="Target was not freshly re-confirmed after local progress.",
+                        confirmation_status=confirmation_status,
+                        confirmation_diagnostics=confirmation_diagnostics,
+                        local_progress_result=local_progress_result,
+                        **telemetry,
+                    )
+                promoted = self._promote_confirmed_target(confirmed)
+                if promoted is None:
+                    return result(
+                        ok=False,
+                        completed=True,
+                        target_found=False,
+                        state="TARGET_LOST_AFTER_APPROACH",
+                        reason="Target promotion failed after local progress.",
+                        confirmation_status=confirmation_status,
+                        confirmation_diagnostics=confirmation_diagnostics,
+                        local_progress_result=local_progress_result,
+                        **telemetry,
+                    )
+                current = promoted
+                telemetry = target_telemetry(current, telemetry)
+
+                # A bounded episode owns its complete movement budget.  Return
+                # to the caller after fresh target perception; never add a
+                # fifth action or start another avoidance episode here.
+                if local_progress_result.get("mode") == "BOUNDED_AVOIDANCE":
+                    return result(
+                        ok=True,
+                        completed=False,
+                        state="APPROACH_AVOIDANCE_COMPLETE",
+                        reason="Bounded local avoidance completed and target was freshly re-confirmed; Find Object continues with perception.",
+                        confirmation_status=confirmation_status,
+                        confirmation_diagnostics=confirmation_diagnostics,
+                        local_progress_result=local_progress_result,
+                        approach_result=local_progress_result,
+                        **telemetry,
+                    )
+                if approach_completed >= self.FIND_APPROACH_MAX_CHUNKS:
+                    return result(
+                        ok=True,
+                        completed=True,
+                        state="APPROACH_SEQUENCE_COMPLETE",
+                        reason="Bounded approach sequence completed and target was freshly re-confirmed.",
+                        confirmation_status=confirmation_status,
+                        confirmation_diagnostics=confirmation_diagnostics,
+                        local_progress_result=local_progress_result,
+                        approach_result=local_progress_result,
+                        **telemetry,
+                    )
                 continue
 
             interlock = getattr(self.robot, "forward_interlock", None)

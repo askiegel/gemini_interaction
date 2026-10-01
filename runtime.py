@@ -148,6 +148,8 @@ class CognitiveRuntime:
         self._last_runtime_state = None
         self._control_generation = 0
         self._behavior_execution_generation = None
+        self._behavior_execution_thread_id = None
+        self._find_object_progress_context = threading.local()
         self._lidar_lifecycle_lock = threading.RLock()
         self._lidar_started = False
         self._lidar_stopped = False
@@ -159,6 +161,9 @@ class CognitiveRuntime:
         )
         self.behavior_manager.execution_authorization_provider = (
             self._behavior_execution_is_current
+        )
+        self.behavior_manager.local_progress_with_avoidance_handler = (
+            self._run_find_object_local_progress
         )
         try:
             factory = lidar_worker_factory or LidarPerceptionWorker
@@ -756,10 +761,63 @@ class CognitiveRuntime:
         """Do not overlap an active mission or another behavior execution."""
         with self._state_lock:
             active = self.mission_manager.get_active_mission()
+            authorized_mission_id = getattr(
+                getattr(self, "_find_object_progress_context", None),
+                "mission_id",
+                None,
+            )
+            authorized_find_object = bool(
+                authorized_mission_id is not None
+                and active is not None
+                and getattr(active, "mission_id", None) == authorized_mission_id
+                and getattr(active, "mission_type", None) == "FIND_OBJECT"
+                and getattr(self, "_behavior_execution_generation", None)
+                == getattr(self, "_control_generation", None)
+                and getattr(self, "_behavior_execution_thread_id", None)
+                == threading.get_ident()
+            )
+            if authorized_find_object:
+                return False
             return (
                 active is not None
                 or self._behavior_execution_generation is not None
             )
+
+    def _run_find_object_local_progress(self):
+        """Route the active Find Object owner through the generic coordinator."""
+        with self._state_lock:
+            active = self.mission_manager.get_active_mission()
+            authorized = bool(
+                active is not None
+                and getattr(active, "mission_type", None) == "FIND_OBJECT"
+                and self._behavior_execution_generation == self._control_generation
+                and self._behavior_execution_thread_id == threading.get_ident()
+            )
+            mission_id = getattr(active, "mission_id", None) if authorized else None
+        if not authorized:
+            return {
+                "ok": False,
+                "action": "local_progress_with_avoidance",
+                "terminal_state": "LOCAL_PROGRESS_OWNERSHIP_REJECTED",
+                "mode": None,
+                "reason": "find_object_behavior_ownership_unavailable",
+                "physical_actions": 0,
+                "max_physical_actions": self.MAX_REACTIVE_STEPS,
+                "bridge_stopped": None,
+                "nested_result": None,
+            }
+        previous = getattr(self._find_object_progress_context, "mission_id", None)
+        self._find_object_progress_context.mission_id = mission_id
+        try:
+            return self.run_local_progress_with_avoidance()
+        finally:
+            if previous is None:
+                try:
+                    del self._find_object_progress_context.mission_id
+                except AttributeError:
+                    pass
+            else:
+                self._find_object_progress_context.mission_id = previous
 
     def _local_reactive_navigation_goal_active(self):
         """Read only the goal-active flag; localization itself is irrelevant.
@@ -1759,6 +1817,7 @@ class CognitiveRuntime:
             mission_id = mission.mission_id
             control_generation = self._control_generation
             self._behavior_execution_generation = control_generation
+            self._behavior_execution_thread_id = threading.get_ident()
 
             self.world_model.update_robot_state(
                 runtime_state="EXECUTING",
@@ -1804,11 +1863,13 @@ class CognitiveRuntime:
                 # the robot, and persisted the authoritative stopped state.
                 if self._behavior_execution_generation == control_generation:
                     self._behavior_execution_generation = None
+                    self._behavior_execution_thread_id = None
                 return self.last_result
 
             self.last_result = result
             self.last_error = execution_error
             self._behavior_execution_generation = None
+            self._behavior_execution_thread_id = None
             self.tracking_state = build_tracking_state(
                 result,
                 previous=self.tracking_state,
