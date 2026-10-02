@@ -2107,7 +2107,7 @@
     let marvinCenteringSubmitting = false;
     let marvinGuardedApproachSubmitting = false;
 
-    function findMarvinPreflight(status) {
+    function findMarvinReadiness(status, {requireClearFront = true} = {}) {
         const runtime = status.runtime || {};
         const missions = status.missions || {};
         const lidar = runtime.lidar || {};
@@ -2117,6 +2117,7 @@
         const safe = (
             runtime.connected === true
             && runtime.running === true
+            && runtime.state === "IDLE"
             && !missions.active
             && missions.queue_count === 0
             && runtime.last_error === null
@@ -2124,11 +2125,16 @@
             && lidar.available === true
             && lidar.valid === true
             && lidar.reason === "fresh"
-            && lidar.front_state === "CLEAR"
+            && ["CLEAR", "CAUTION", "BLOCKED"].includes(lidar.front_state)
+            && lidar.session_matches === true
+            && lidar.local_motion_geometry_valid === true
+            && lidar.required_sectors_valid === true
+            && (!requireClearFront || lidar.front_state === "CLEAR")
             && interlock.configured === true
             && interlock.monitor_running === true
             && interlock.forward_permitted === true
             && interlock.reason === "fresh_clear"
+            && interlock.producer_session === lidar.producer_session
             && interlock.active_forward === false
             && interlock.pending_forward === false
             && robot.connected === true
@@ -2146,6 +2152,10 @@
         };
     }
 
+    function findMarvinPreflight(status) {
+        return findMarvinReadiness(status, {requireClearFront: true});
+    }
+
     function marvinOneStepPreflight(status) {
         const ordinary = findMarvinPreflight(status);
         const runtime = status.runtime || {};
@@ -2153,6 +2163,10 @@
         return runtime.state === "IDLE"
             ? {safe: true, reason: "One-step Marvin test ready."}
             : {safe: false, reason: "Runtime must be IDLE for one-step test."};
+    }
+
+    function findMarvinMissionPreflight(status) {
+        return findMarvinReadiness(status, {requireClearFront: false});
     }
 
     function marvinRotationalPreflight(status) {
@@ -2789,7 +2803,7 @@
             const lastResult =
                 missions.last_result || {};
 
-            const preflight = findMarvinPreflight(status);
+            const preflight = findMarvinMissionPreflight(status);
             elements.findMarvinButton.disabled = (
                 findMarvinSubmitting || !preflight.safe
             );

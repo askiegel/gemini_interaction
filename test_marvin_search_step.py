@@ -59,7 +59,10 @@ def test_left_plan_dispatches_one_canonical_left_guarded_turn(monkeypatch):
     result, manager, planner_calls, turns = invoke(monkeypatch, planned("turn_left"))
     assert result["ok"] is result["motion_executed"] is result["replan_required"] is True
     assert result["executed_primitive"] == "guarded_turn_left"
-    assert turns == [(("LEFT", 0.25, 0.50), {"expected_lidar_session": SESSION, "now": 10.0})]
+    assert turns == [(("LEFT", 0.25, 0.50), {
+        "expected_lidar_session": SESSION, "now": 10.0,
+        "safety_mode": behavior_manager_module.ROTATIONAL_SWEPT_FOOTPRINT,
+    })]
     assert manager.MARVIN_SEARCH_TURN_SPEED == 0.25
     assert manager.MARVIN_SEARCH_TURN_SECONDS == 0.50
     assert abs(turns[0][0][1]) <= 0.25 and turns[0][0][2] <= 0.50
@@ -71,6 +74,7 @@ def test_right_plan_dispatches_one_canonical_right_guarded_turn(monkeypatch):
     result, manager, _planner, turns = invoke(monkeypatch, planned("turn_right"))
     assert result["executed_primitive"] == "guarded_turn_right"
     assert turns[0][0] == ("RIGHT", 0.25, 0.50)
+    assert turns[0][1]["safety_mode"] == behavior_manager_module.ROTATIONAL_SWEPT_FOOTPRINT
     assert abs(turns[0][0][1]) <= 0.25 and turns[0][0][2] <= 0.50
     assert result["replan_required"] is True
     assert_one_turn(turns)

@@ -141,7 +141,10 @@ def test_visual_off_center_dispatches_one_guarded_alignment_before_any_forward(m
     assert result["ok"] is result["motion_executed"] is result["replan_required"] is True
     assert result["decision"] == "align_right"
     assert robot.forward_calls == 0
-    assert turns == [(("RIGHT", 0.25, 0.50), {"expected_lidar_session": SESSION})]
+    assert turns == [(("RIGHT", 0.25, 0.50), {
+        "expected_lidar_session": SESSION,
+        "safety_mode": behavior_manager_module.ROTATIONAL_SWEPT_FOOTPRINT,
+    })]
 
 
 def test_visual_centered_uses_existing_lidar_gated_forward_path(monkeypatch):

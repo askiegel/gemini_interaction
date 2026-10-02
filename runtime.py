@@ -27,6 +27,10 @@ from local_reactive_obstacle_avoidance import (
     TURN_RIGHT,
     decide_forward_reaction,
 )
+from local_motion_safety_envelope import (
+    MINIMUM_VALID_SAMPLES_PER_REQUIRED_SECTOR,
+    OCTANT_SECTORS,
+)
 
 
 def _bounded_alignment_number(value, *, maximum):
@@ -1863,14 +1867,36 @@ class CognitiveRuntime:
             state.update(available=False, valid=False)
             if state.get("reason") == "fresh":
                 state["reason"] = "worker_not_running"
+        geometry = state.get("local_motion_geometry")
+        geometry_sectors = (
+            geometry.get("sectors") if isinstance(geometry, dict) else None
+        )
+        required_sectors_valid = bool(
+            isinstance(geometry, dict)
+            and geometry.get("valid") is True
+            and isinstance(geometry_sectors, dict)
+            and all(
+                isinstance(geometry_sectors.get(name), dict)
+                and geometry_sectors[name].get("valid_sample_count", 0)
+                >= MINIMUM_VALID_SAMPLES_PER_REQUIRED_SECTOR
+                for name, _, _ in OCTANT_SECTORS
+            )
+        )
         return {
             "running": running,
             "producer_session": session,
+            "session_matches": bool(
+                session and state.get("producer_session") == session
+            ),
             "acquisition_sequence": worker.sequence if worker is not None else 0,
             "available": state.get("available", False),
             "valid": state.get("valid", False),
             "reason": state.get("reason"),
             "effective_age_seconds": state.get("effective_age_seconds"),
+            "local_motion_geometry_valid": bool(
+                isinstance(geometry, dict) and geometry.get("valid") is True
+            ),
+            "required_sectors_valid": required_sectors_valid,
             "front_state": (
                 state.get("sectors", {}).get("front", {}).get("state", "UNKNOWN")
                 if state.get("valid") else "UNKNOWN"

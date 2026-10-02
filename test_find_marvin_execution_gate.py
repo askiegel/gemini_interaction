@@ -88,14 +88,17 @@ def test_find_marvin_live_submission_posts_marvin_target_after_preflight():
     handler = _handler()
     handler.dashboard_status = lambda: {
         "runtime": {
-            "connected": True, "running": True, "last_error": None,
+            "connected": True, "running": True, "state": "IDLE", "last_error": None,
             "lidar": {
                 "running": True, "available": True, "valid": True,
                 "reason": "fresh", "front_state": "CLEAR",
+                "producer_session": "lidar-session", "session_matches": True,
+                "local_motion_geometry_valid": True, "required_sectors_valid": True,
             },
             "forward_interlock": {
                 "configured": True, "monitor_running": True,
                 "forward_permitted": True, "reason": "fresh_clear",
+                "producer_session": "lidar-session",
                 "active_forward": False, "pending_forward": False,
             },
         },

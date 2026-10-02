@@ -18,12 +18,17 @@ def safe_status():
         "runtime": {
             "connected": True,
             "running": True,
+            "state": "IDLE",
             "last_error": None,
             "lidar": {
                 "running": True,
                 "available": True,
                 "valid": True,
                 "reason": "fresh",
+                "producer_session": "lidar-session",
+                "session_matches": True,
+                "local_motion_geometry_valid": True,
+                "required_sectors_valid": True,
                 "front_state": "CLEAR",
             },
             "forward_interlock": {
@@ -31,6 +36,7 @@ def safe_status():
                 "monitor_running": True,
                 "forward_permitted": True,
                 "reason": "fresh_clear",
+                "producer_session": "lidar-session",
                 "active_forward": False,
                 "pending_forward": False,
             },
@@ -99,6 +105,69 @@ def test_unsafe_preflight_never_forwards_mission():
     request.assert_not_called()
 
 
+def test_normal_mission_admits_healthy_caution_or_blocked_front():
+    for front_state in ("CAUTION", "BLOCKED"):
+        handler = object.__new__(VoiceRelayHandler)
+        status = safe_status()
+        status["runtime"]["lidar"]["front_state"] = front_state
+        handler.dashboard_status = lambda status=status: status
+        with patch(
+            "voice_relay.server.request_json",
+            return_value={"status_code": 202, "data": {"accepted": True}},
+        ) as request:
+            status_code, payload = handler.submit_find_marvin(execute=True)
+        assert status_code == 202
+        assert payload["accepted"] is True
+        request.assert_called_once()
+
+
+def test_normal_mission_rejects_bad_lidar_session_or_incomplete_geometry():
+    for field, value, reason in (
+        ("session_matches", False, "LiDAR producer session does not match"),
+        ("local_motion_geometry_valid", False, "LiDAR local geometry is invalid"),
+        ("required_sectors_valid", False, "LiDAR required sectors are incomplete"),
+    ):
+        handler = object.__new__(VoiceRelayHandler)
+        status = safe_status()
+        status["runtime"]["lidar"][field] = value
+        handler.dashboard_status = lambda status=status: status
+        with patch("voice_relay.server.request_json") as request:
+            status_code, payload = handler.submit_find_marvin(execute=True)
+        assert status_code == 409
+        assert reason in payload["reasons"]
+        request.assert_not_called()
+
+
+def test_normal_mission_rejects_unknown_front_as_missing_sector_evidence():
+    handler = object.__new__(VoiceRelayHandler)
+    status = safe_status()
+    status["runtime"]["lidar"]["front_state"] = "UNKNOWN"
+    handler.dashboard_status = lambda: status
+    with patch("voice_relay.server.request_json") as request:
+        status_code, payload = handler.submit_find_marvin(execute=True)
+    assert status_code == 409
+    assert "LiDAR front sector is unavailable" in payload["reasons"]
+    request.assert_not_called()
+
+
+def test_normal_mission_still_rejects_unhealthy_lidar():
+    for field, value, reason in (
+        ("running", False, "LiDAR worker is not running"),
+        ("available", False, "LiDAR is unavailable"),
+        ("valid", False, "LiDAR is invalid"),
+        ("reason", "stale", "LiDAR is not fresh"),
+    ):
+        handler = object.__new__(VoiceRelayHandler)
+        status = safe_status()
+        status["runtime"]["lidar"][field] = value
+        handler.dashboard_status = lambda status=status: status
+        with patch("voice_relay.server.request_json") as request:
+            status_code, payload = handler.submit_find_marvin(execute=True)
+        assert status_code == 409
+        assert reason in payload["reasons"]
+        request.assert_not_called()
+
+
 def test_missing_or_malformed_preflight_fields_fail_closed():
     handler = object.__new__(VoiceRelayHandler)
     handler.dashboard_status = lambda: {
@@ -148,6 +217,10 @@ def test_find_marvin_button_and_client_preflight_exist():
     assert "Find Marvin" in HTML
     assert "Marvin (teddy bear)" in HTML
     assert "function findMarvinPreflight(status)" in HTML
+    assert "function findMarvinMissionPreflight(status)" in HTML
+    assert 'findMarvinReadiness(status, {requireClearFront: false})' in HTML
+    assert "const preflight = findMarvinMissionPreflight(status);" in HTML
+    assert "const ordinary = findMarvinPreflight(status);" in HTML
     assert "&& !missions.active" in HTML
     assert "findMarvinButton.disabled" in HTML
     assert 'fetch("/dashboard/find-marvin"' in HTML

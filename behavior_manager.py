@@ -1074,6 +1074,7 @@ class BehaviorManager:
 
     def _execute_target_directed_turn(
         self, direction, angular_speed, duration, *, expected_lidar_session,
+        safety_mode="LEGACY_BROAD_SIDE",
     ):
         previous = getattr(self, "_target_directed_turn_context", False)
         self._target_directed_turn_context = True
@@ -1083,6 +1084,7 @@ class BehaviorManager:
                 angular_speed,
                 duration,
                 expected_lidar_session=expected_lidar_session,
+                safety_mode=safety_mode,
             )
         finally:
             self._target_directed_turn_context = previous
@@ -1517,6 +1519,7 @@ class BehaviorManager:
                 self.MARVIN_SEARCH_TURN_SECONDS,
                 expected_lidar_session=session,
                 now=now,
+                safety_mode=ROTATIONAL_SWEPT_FOOTPRINT,
             )
         except Exception as exc:
             return dict(
@@ -2687,6 +2690,7 @@ class BehaviorManager:
                     self.MARVIN_CENTERING_TURN_SPEED,
                     duration,
                     expected_lidar_session=session,
+                    safety_mode=ROTATIONAL_SWEPT_FOOTPRINT,
                 )
             except Exception as exc:
                 return dict(
@@ -3774,6 +3778,7 @@ class BehaviorManager:
                                 direction, self.MARVIN_CENTERING_TURN_SPEED,
                                 self.MARVIN_CENTERING_TURN_DURATION,
                                 expected_lidar_session=session,
+                                safety_mode=ROTATIONAL_SWEPT_FOOTPRINT,
                             )
                             common["turn_chunks_attempted"] = 1
                             common["centering_turn_chunks_attempted"] = 1
@@ -4091,6 +4096,7 @@ class BehaviorManager:
                                 direction, self.MARVIN_CENTERING_TURN_SPEED,
                                 turn_duration,
                                 expected_lidar_session=session,
+                                safety_mode=ROTATIONAL_SWEPT_FOOTPRINT,
                             )
                         except Exception:
                             turn = {"ok": False}
