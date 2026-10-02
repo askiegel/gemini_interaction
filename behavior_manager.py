@@ -643,6 +643,9 @@ class BehaviorManager:
         # Runtime installs this only for mission-owned local forward progress.
         # Standalone BehaviorManager use retains its existing behavior.
         self.local_progress_with_avoidance_handler = None
+        # Find Marvin uses the same handoff only after its pursuit policy has
+        # authorized a local forward-progress request.
+        self.marvin_local_progress_with_avoidance_handler = None
 
     def _publish_tracking_state(self, result):
         callback = getattr(self, "tracking_state_callback", None)
@@ -1976,11 +1979,19 @@ class BehaviorManager:
 
         selected_identity_id = None
         arrival_candidate_timestamp = None
+        local_progress_completed = False
+        last_local_progress_result = None
         search_history = []
         # ``actions_executed`` counts physical or delivery-uncertain actions.
         # A verified pre-transport stale veto can replan once without spending
         # that budget, but this loop remains finite through its separate cap.
-        while base["actions_executed"] < max_actions:
+        # A successful local-progress handoff must always be followed by one
+        # fresh identity/perception observation, even when its nested actions
+        # consumed the final outer action slots.
+        while (
+            base["actions_executed"] < max_actions
+            or local_progress_completed
+        ):
             try:
                 evidence = state_provider()
             except Exception as exc:
@@ -2247,6 +2258,25 @@ class BehaviorManager:
                 arrival_candidate_timestamp = None
                 base["arrival_observations_confirmed"] = 0
 
+            if local_progress_completed:
+                history_entry.update(
+                    route="post_progress_reassessment",
+                    selected_action="perception_reassessment",
+                    local_progress_result=last_local_progress_result,
+                )
+                base["history"].append(history_entry)
+                return dict(
+                    base,
+                    ok=True,
+                    completed=False,
+                    arrived_at_marvin=False,
+                    history=list(base["history"]),
+                    reason="marvin_local_progress_complete",
+                    local_progress_result=last_local_progress_result,
+                    post_progress_pursuit_state=pursuit.get("state"),
+                    selected_identity_id=current_identity_id,
+                )
+
             state = pursuit.get("state")
             authorized = pursuit.get("pursuit_authorized") is True
             if state in {"SEARCHING", "REACQUIRE_REQUIRED"}:
@@ -2381,6 +2411,9 @@ class BehaviorManager:
             # bounded action opportunity and cannot be retried implicitly.
             base["actions_executed"] += 1
             try:
+                action_budget_remaining = max_actions - (
+                    base["actions_executed"] - 1
+                )
                 step = self.execute_marvin_pursuit_step(
                     preview,
                     lock_result,
@@ -2389,6 +2422,9 @@ class BehaviorManager:
                     identity_evidence=evidence.get("identity_evidence"),
                     bridge_result=evidence.get("bridge_result"),
                     now=now,
+                    local_progress_action_budget_remaining=(
+                        action_budget_remaining
+                    ),
                 )
             except Exception as exc:
                 base["history"].append(history_entry)
@@ -2405,6 +2441,42 @@ class BehaviorManager:
                     error_type=type(exc).__name__,
                 )
             history_entry["pursuit_step_result"] = step
+            nested_action_count = (
+                step.get("local_progress_physical_actions")
+                if isinstance(step, dict) else None
+            )
+            if (
+                isinstance(step, dict)
+                and step.get("local_progress_budget_blocked") is True
+            ):
+                base["actions_executed"] -= 1
+                history_entry["action_budget_consumed"] = False
+            if nested_action_count is not None:
+                if (
+                    not isinstance(nested_action_count, int)
+                    or isinstance(nested_action_count, bool)
+                    or not 0 <= nested_action_count <= 4
+                    or nested_action_count > action_budget_remaining
+                ):
+                    base["history"].append(history_entry)
+                    if not stop_completed_action(history_entry):
+                        return dict(
+                            base,
+                            history=list(base["history"]),
+                            reason="find_marvin_post_action_stop_failed",
+                        )
+                    return dict(
+                        base,
+                        history=list(base["history"]),
+                        reason="find_marvin_local_progress_action_count_invalid",
+                    )
+                # Replace the controller's reserved one-step opportunity with
+                # the actual nested physical-action count.
+                base["actions_executed"] += nested_action_count - 1
+                history_entry["action_budget_consumed"] = (
+                    nested_action_count > 0
+                )
+                history_entry["action_budget_count"] = nested_action_count
             if isinstance(step, dict):
                 history_entry["selected_action"] = step.get(
                     "decision", "pursuit_step",
@@ -2418,7 +2490,10 @@ class BehaviorManager:
             base["history"].append(history_entry)
             # Treat a failed executor result as potentially dispatched too;
             # STOP is required before the controller can return or replan.
-            if not stop_completed_action(history_entry):
+            if (
+                (not isinstance(step, dict) or step.get("stop_required") is not False)
+                and not stop_completed_action(history_entry)
+            ):
                 return dict(
                     base,
                     history=list(base["history"]),
@@ -2427,12 +2502,46 @@ class BehaviorManager:
             stale_replan = bool(
                 isinstance(step, dict) and step.get("stale_replan") is True
             )
-            budget_consumed = not (
-                stale_replan
-                and isinstance(step, dict)
-                and step.get("action_budget_consumed") is False
+            budget_consumed = (
+                step.get("local_progress_physical_actions", 0) > 0
+                if isinstance(step, dict)
+                and "local_progress_physical_actions" in step
+                else False
+                if isinstance(step, dict)
+                and step.get("local_progress_budget_blocked") is True
+                else not (
+                    stale_replan
+                    and isinstance(step, dict)
+                    and step.get("action_budget_consumed") is False
+                )
             )
             history_entry["action_budget_consumed"] = budget_consumed
+            if (
+                isinstance(step, dict)
+                and step.get("local_progress_terminal")
+                and step.get("local_progress_terminal")
+                != "LOCAL_PROGRESS_COMPLETE"
+            ):
+                terminal = step["local_progress_terminal"]
+                return dict(
+                    base,
+                    ok=True,
+                    completed=False,
+                    arrived_at_marvin=False,
+                    history=list(base["history"]),
+                    reason="marvin_local_progress_terminal",
+                    local_progress_terminal=terminal,
+                    local_progress_result=step.get("local_progress_result"),
+                )
+            if isinstance(step, dict) and step.get("local_progress_budget_blocked") is True:
+                return dict(
+                    base,
+                    ok=True,
+                    completed=False,
+                    arrived_at_marvin=False,
+                    history=list(base["history"]),
+                    reason="marvin_local_progress_action_budget_insufficient",
+                )
             if stale_replan:
                 if not budget_consumed:
                     base["actions_executed"] -= 1
@@ -2475,6 +2584,14 @@ class BehaviorManager:
                     history=list(base["history"]),
                     reason="find_marvin_pursuit_step_replan_required",
                 )
+            if (
+                step.get("local_progress_terminal")
+                == "LOCAL_PROGRESS_COMPLETE"
+            ):
+                local_progress_completed = True
+                last_local_progress_result = step.get(
+                    "local_progress_result",
+                )
 
         return dict(
             base,
@@ -2507,12 +2624,14 @@ class BehaviorManager:
         identity_evidence=None,
         bridge_result=None,
         now=None,
+        local_progress_action_budget_remaining=None,
     ):
-        """Execute at most one bounded primitive for a current Marvin state.
+        """Execute one bounded Marvin decision from current identity evidence.
 
         This intentionally has no mission loop, search behavior, or cached
-        authority.  Every invocation evaluates the supplied current Preview
-        and TargetLock evidence before it reads current LiDAR.
+        authority. Every invocation evaluates current Preview/TargetLock
+        evidence. Alignment remains its existing turn path; an authorized
+        approach uses the runtime-owned local-progress handoff when installed.
         """
         pursuit = evaluate_marvin_pursuit_state(
             preview_result,
@@ -2594,6 +2713,118 @@ class BehaviorManager:
                     else (turn.get("reason", "marvin_visual_alignment_denied")
                           if isinstance(turn, dict) else "marvin_visual_alignment_denied")
                 ),
+            )
+        local_progress_handler = getattr(
+            self, "marvin_local_progress_with_avoidance_handler", None,
+        )
+        if callable(local_progress_handler):
+            if (
+                not isinstance(local_progress_action_budget_remaining, int)
+                or isinstance(local_progress_action_budget_remaining, bool)
+                or local_progress_action_budget_remaining < 4
+            ):
+                return dict(
+                    base,
+                    decision="local_progress_budget_blocked",
+                    local_progress_budget_blocked=True,
+                    action_budget_consumed=False,
+                    stop_required=False,
+                    reason="marvin_local_progress_action_budget_insufficient",
+                )
+            try:
+                local_progress = local_progress_handler(
+                    remaining_actions=local_progress_action_budget_remaining,
+                )
+            except Exception as exc:
+                return dict(
+                    base,
+                    decision="local_progress_handoff",
+                    local_progress_physical_actions=0,
+                    local_progress_terminal="LOCAL_PROGRESS_EXECUTION_FAILED",
+                    action_budget_consumed=False,
+                    stop_required=True,
+                    reason="marvin_local_progress_handoff_exception",
+                    error=str(exc),
+                    error_type=type(exc).__name__,
+                )
+            if not isinstance(local_progress, dict):
+                return dict(
+                    base,
+                    decision="local_progress_handoff",
+                    local_progress_physical_actions=0,
+                    local_progress_terminal="LOCAL_PROGRESS_EXECUTION_FAILED",
+                    action_budget_consumed=False,
+                    stop_required=True,
+                    reason="marvin_local_progress_handoff_result_malformed",
+                )
+            terminal = local_progress.get("terminal_state")
+            physical_actions = local_progress.get("physical_actions")
+            valid_count = (
+                isinstance(physical_actions, int)
+                and not isinstance(physical_actions, bool)
+                and 0 <= physical_actions <= 4
+                and physical_actions <= local_progress_action_budget_remaining
+            )
+            if not valid_count:
+                return dict(
+                    base,
+                    decision="local_progress_handoff",
+                    local_progress_result=local_progress,
+                    local_progress_physical_actions=0,
+                    local_progress_terminal="LOCAL_PROGRESS_EXECUTION_FAILED",
+                    action_budget_consumed=False,
+                    stop_required=True,
+                    reason="marvin_local_progress_action_count_invalid",
+                )
+            if terminal == "LOCAL_PROGRESS_COMPLETE":
+                if physical_actions < 1 or local_progress.get("bridge_stopped") is not True:
+                    terminal = "LOCAL_PROGRESS_EXECUTION_FAILED"
+                else:
+                    return dict(
+                        base,
+                        ok=True,
+                        decision="local_progress_handoff",
+                        executed_primitive="local_progress_with_avoidance",
+                        motion_executed=True,
+                        replan_required=True,
+                        local_progress_result=local_progress,
+                        local_progress_physical_actions=physical_actions,
+                        local_progress_terminal=terminal,
+                        reason="marvin_local_progress_complete",
+                    )
+            terminal_reasons = {
+                "LOCAL_PROGRESS_BLOCKED",
+                "LOCAL_PROGRESS_SAFETY_VETO",
+                "LOCAL_PROGRESS_EXECUTION_FAILED",
+                "LOCAL_PROGRESS_OWNERSHIP_REJECTED",
+                "LOCAL_PROGRESS_MAX_STEPS_REACHED",
+            }
+            if terminal in terminal_reasons:
+                return dict(
+                    base,
+                    ok=True,
+                    decision="local_progress_handoff",
+                    executed_primitive=None,
+                    motion_executed=physical_actions > 0,
+                    replan_required=False,
+                    local_progress_result=local_progress,
+                    local_progress_physical_actions=physical_actions,
+                    local_progress_terminal=terminal,
+                    action_budget_consumed=physical_actions > 0,
+                    stop_required=(
+                        terminal != "LOCAL_PROGRESS_OWNERSHIP_REJECTED"
+                        or physical_actions > 0
+                    ),
+                    reason=local_progress.get("reason", terminal.lower()),
+                )
+            return dict(
+                base,
+                decision="local_progress_handoff",
+                local_progress_result=local_progress,
+                local_progress_physical_actions=physical_actions,
+                local_progress_terminal="LOCAL_PROGRESS_EXECUTION_FAILED",
+                action_budget_consumed=physical_actions > 0,
+                reason="marvin_local_progress_terminal_unknown",
             )
         try:
             lidar = self.world_model.get_lidar_obstacles(

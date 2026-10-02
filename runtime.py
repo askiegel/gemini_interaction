@@ -150,6 +150,7 @@ class CognitiveRuntime:
         self._behavior_execution_generation = None
         self._behavior_execution_thread_id = None
         self._find_object_progress_context = threading.local()
+        self._find_marvin_progress_context = threading.local()
         self._lidar_lifecycle_lock = threading.RLock()
         self._lidar_started = False
         self._lidar_stopped = False
@@ -164,6 +165,9 @@ class CognitiveRuntime:
         )
         self.behavior_manager.local_progress_with_avoidance_handler = (
             self._run_find_object_local_progress
+        )
+        self.behavior_manager.marvin_local_progress_with_avoidance_handler = (
+            self._run_find_marvin_local_progress
         )
         try:
             factory = lidar_worker_factory or LidarPerceptionWorker
@@ -556,6 +560,66 @@ class CognitiveRuntime:
                         reason=controller["reason"],
                         completion_reason=controller["reason"],
                     )
+                if controller.get("reason") == "marvin_local_progress_terminal":
+                    terminal = controller.get("local_progress_terminal")
+                    progress = controller.get("local_progress_result")
+                    common = dict(
+                        result_base(),
+                        completed=True,
+                        arrived_at_marvin=False,
+                        mission_outcome="safe_incomplete",
+                        local_progress_terminal=terminal,
+                        local_progress_result=progress,
+                    )
+                    if terminal == "LOCAL_PROGRESS_EXECUTION_FAILED":
+                        return dict(
+                            common,
+                            ok=False,
+                            mission_outcome="safe_failure",
+                            state="FIND_MARVIN_FAILED",
+                            reason=(
+                                progress.get("reason", terminal.lower())
+                                if isinstance(progress, dict) else terminal.lower()
+                            ),
+                        )
+                    return dict(
+                        common,
+                        ok=True,
+                        state="FIND_MARVIN_SAFE_INCOMPLETE",
+                        reason=(
+                            progress.get("reason", terminal.lower())
+                            if isinstance(progress, dict) else terminal.lower()
+                        ),
+                        completion_reason=terminal,
+                    )
+                if controller.get("reason") == "marvin_local_progress_action_budget_insufficient":
+                    return dict(
+                        result_base(),
+                        ok=True,
+                        completed=True,
+                        arrived_at_marvin=False,
+                        mission_outcome="safe_incomplete",
+                        state="FIND_MARVIN_SAFE_INCOMPLETE",
+                        reason=controller["reason"],
+                        completion_reason=controller["reason"],
+                    )
+                if controller.get("reason") == "marvin_local_progress_complete":
+                    return dict(
+                        result_base(),
+                        ok=True,
+                        completed=True,
+                        arrived_at_marvin=False,
+                        mission_outcome="safe_incomplete",
+                        state="FIND_MARVIN_SAFE_INCOMPLETE",
+                        reason=controller["reason"],
+                        completion_reason="local_progress_reassessment_required",
+                        post_progress_pursuit_state=controller.get(
+                            "post_progress_pursuit_state",
+                        ),
+                        local_progress_result=controller.get(
+                            "local_progress_result",
+                        ),
+                    )
                 return dict(
                     result_base(), ok=False, completed=True,
                     arrived_at_marvin=False, mission_outcome="safe_failure",
@@ -653,6 +717,49 @@ class CognitiveRuntime:
             if not isinstance(entry, dict):
                 return False
             attempted = entry.get("action_budget_consumed") is True
+            nested_count = entry.get("action_budget_count")
+            if nested_count is not None:
+                if (
+                    not isinstance(nested_count, int)
+                    or isinstance(nested_count, bool)
+                    or not 0 <= nested_count <= CognitiveRuntime.MAX_REACTIVE_STEPS
+                    or attempted != (nested_count > 0)
+                ):
+                    return False
+                counted += nested_count
+                if nested_count > 0:
+                    step = entry.get("pursuit_step_result")
+                    progress = (
+                        step.get("local_progress_result")
+                        if isinstance(step, dict) else None
+                    )
+                    if not isinstance(progress, dict) or progress.get("bridge_stopped") is not True:
+                        return False
+                    nested = progress.get("nested_result")
+                    nested_history = (
+                        nested.get("history") if isinstance(nested, dict) else None
+                    )
+                    if progress.get("mode") == "BOUNDED_AVOIDANCE":
+                        if (
+                            not isinstance(nested_history, list)
+                            or sum(
+                                1 for cycle in nested_history
+                                if isinstance(cycle, dict)
+                                and cycle.get("action_executed") is True
+                            ) != nested_count
+                            or any(
+                                not isinstance(cycle, dict)
+                                or cycle.get("bridge_stopped") is not True
+                                for cycle in nested_history
+                            )
+                        ):
+                            return False
+                candidate_stop = entry.get("selected_action") == "confirm_arrival"
+                if nested_count > 0 or candidate_stop:
+                    stop = entry.get("stop_result")
+                    if not isinstance(stop, dict) or stop.get("ok") is not True:
+                        return False
+                continue
             candidate_stop = entry.get("selected_action") == "confirm_arrival"
             if attempted:
                 counted += 1
@@ -776,7 +883,23 @@ class CognitiveRuntime:
                 and getattr(self, "_behavior_execution_thread_id", None)
                 == threading.get_ident()
             )
-            if authorized_find_object:
+            marvin_context = getattr(
+                self, "_find_marvin_progress_context", None,
+            )
+            marvin_mission_id = getattr(
+                marvin_context, "mission_id", None,
+            )
+            authorized_find_marvin = bool(
+                marvin_mission_id is not None
+                and active is not None
+                and self._is_normal_marvin_find_mission(active)
+                and getattr(active, "mission_id", None) == marvin_mission_id
+                and getattr(self, "_behavior_execution_generation", None)
+                == getattr(self, "_control_generation", None)
+                and getattr(self, "_behavior_execution_thread_id", None)
+                == threading.get_ident()
+            )
+            if authorized_find_object or authorized_find_marvin:
                 return False
             return (
                 active is not None
@@ -818,6 +941,66 @@ class CognitiveRuntime:
                     pass
             else:
                 self._find_object_progress_context.mission_id = previous
+
+    def _run_find_marvin_local_progress(self, *, remaining_actions):
+        """Authorize one handoff only for the active normal Find Marvin owner."""
+        base = {
+            "ok": False,
+            "action": "local_progress_with_avoidance",
+            "terminal_state": "LOCAL_PROGRESS_OWNERSHIP_REJECTED",
+            "mode": None,
+            "reason": "find_marvin_behavior_ownership_unavailable",
+            "physical_actions": 0,
+            "max_physical_actions": self.MAX_REACTIVE_STEPS,
+            "bridge_stopped": None,
+            "nested_result": None,
+        }
+        with self._state_lock:
+            active = self.mission_manager.get_active_mission()
+            authorized = bool(
+                self._is_normal_marvin_find_mission(active)
+                and getattr(self, "_behavior_execution_generation", None)
+                == getattr(self, "_control_generation", None)
+                and getattr(self, "_behavior_execution_thread_id", None)
+                == threading.get_ident()
+            )
+            mission_id = getattr(active, "mission_id", None) if authorized else None
+        if not authorized:
+            return base
+        if (
+            not isinstance(remaining_actions, int)
+            or isinstance(remaining_actions, bool)
+            or remaining_actions < self.MAX_REACTIVE_STEPS
+        ):
+            return dict(
+                base,
+                terminal_state="LOCAL_PROGRESS_EXECUTION_FAILED",
+                reason="marvin_local_progress_action_budget_insufficient",
+            )
+        context = self._find_marvin_progress_context
+        previous_mission_id = getattr(context, "mission_id", None)
+        previous_remaining_actions = getattr(
+            context, "remaining_actions", None,
+        )
+        context.mission_id = mission_id
+        context.remaining_actions = remaining_actions
+        try:
+            return self.run_local_progress_with_avoidance()
+        finally:
+            if previous_mission_id is None:
+                try:
+                    del context.mission_id
+                except AttributeError:
+                    pass
+            else:
+                context.mission_id = previous_mission_id
+            if previous_remaining_actions is None:
+                try:
+                    del context.remaining_actions
+                except AttributeError:
+                    pass
+            else:
+                context.remaining_actions = previous_remaining_actions
 
     def _local_reactive_navigation_goal_active(self):
         """Read only the goal-active flag; localization itself is irrelevant.
