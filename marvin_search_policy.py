@@ -163,6 +163,12 @@ def _preview_status(value, *, now, max_age_seconds):
     if (preview.get("identity_confirmed") is not True
             or preview.get("source") != "marvin_local_tracker"):
         return "unconfirmed"
+    # A semantic/tracker-confirmed Preview remains inspectable, but it is not
+    # a usable Marvin search candidate unless it is compatible with the
+    # Marvin visual-session motion-authority contract.  Missing legacy fields
+    # fail closed here too, so they cannot suppress bounded search turns.
+    if preview.get("motion_authorized_marvin_candidate") is not True:
+        return "no_target"
     bbox = preview.get("bbox")
     width, height = preview.get("image_width"), preview.get("image_height")
     if (not _valid_bbox(bbox) or not _valid_positive(width)

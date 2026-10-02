@@ -3,6 +3,8 @@
 from copy import deepcopy
 import inspect
 
+import pytest
+
 from marvin_search_policy import (
     DEFAULT_LOCAL_SCAN_PLAN,
     DEFAULT_MAX_SEARCH_ACTIONS,
@@ -23,6 +25,7 @@ def preview(**updates):
         "ok": True, "preview": True, "authoritative": False,
         "target": "marvin", "target_found": True,
         "source": "marvin_local_tracker", "identity_confirmed": True,
+        "motion_authorized_marvin_candidate": True,
         "source_timestamp": STAMP, "image_width": 640, "image_height": 480,
         "bbox": {"x1": 10, "y1": 20, "x2": 100, "y2": 200},
     }
@@ -35,7 +38,7 @@ def plan(current, **kwargs):
 
 
 def test_searching_fresh_candidate_hands_back_without_scan_motion():
-    result = plan(state(), preview_result=preview())
+    result = plan(state(), preview_result=preview(proposal_label="teddy bear"))
     assert result["selected_search_action"] == "preview_only"
     assert result["candidate_available"] is True and result["reacquired"] is False
     assert result["preview_status"] == "fresh_candidate"
@@ -45,6 +48,7 @@ def test_search_accepts_dashboard_style_nested_tracking_preview():
     live_shape = {
         "ok": True, "preview": True, "authoritative": False,
         "target": "marvin", "identity_confirmed": True,
+        "motion_authorized_marvin_candidate": True,
         "source_timestamp": STAMP, "source": "marvin_local_tracker",
         "tracking": {
             "active": True, "target_label": "marvin",
@@ -130,6 +134,30 @@ def test_no_target_stale_ambiguous_and_unconfirmed_are_bounded_noncandidate_stat
         assert result["preview_status"] == expected_status
         assert result["candidate_available"] is False
         assert result["selected_search_action"] == "turn_left"
+
+
+@pytest.mark.parametrize("label", ("laptop", "chair", "suitcase"))
+def test_incompatible_confirmed_preview_does_not_suppress_bounded_search(label):
+    candidate = preview(
+        proposal_label=label,
+        motion_authorized_marvin_candidate=False,
+        confirmation_diagnostics={"confirmation_status": "target_confirmed"},
+        tracking={"active": True, "target_label": "marvin"},
+    )
+    result = plan(state(), preview_result=candidate)
+    assert result["preview_status"] == "no_target"
+    assert result["candidate_available"] is False
+    assert result["selected_search_action"] == "turn_left"
+    assert result["selected_search_action"] != "preview_only"
+
+
+def test_missing_motion_authority_field_is_no_target_and_does_not_suppress_search():
+    legacy = preview(proposal_label="teddy bear")
+    legacy.pop("motion_authorized_marvin_candidate")
+    result = plan(state(), preview_result=legacy)
+    assert result["preview_status"] == "no_target"
+    assert result["candidate_available"] is False
+    assert result["selected_search_action"] == "turn_left"
 
 
 def test_fresh_reacquired_nested_preview_returns_to_normal_visual_pursuit():
