@@ -25,6 +25,7 @@ def arrival_preview(height_fraction, timestamp, *, ambiguous=False, confirmed=Tr
         "target_found": True,
         "source": "marvin_local_tracker",
         "identity_confirmed": confirmed,
+        "motion_authorized_marvin_candidate": True,
         "ambiguous": ambiguous,
         "source_timestamp": timestamp,
         "image_width": 640.0,
@@ -502,6 +503,7 @@ def test_nested_preview_schema_search_reacquires_then_returns_to_pursuit(monkeyp
     reacquired = {
         "ok": True, "preview": True, "authoritative": False,
         "target": "marvin", "identity_confirmed": True,
+        "motion_authorized_marvin_candidate": True,
         "source_timestamp": stamp_two,
         "tracking": {
             "active": True, "target_label": "marvin",

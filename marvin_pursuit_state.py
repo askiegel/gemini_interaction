@@ -194,6 +194,7 @@ def _preview_candidate(value, now, max_age_seconds):
             or preview.get("source") != "marvin_local_tracker"
             or preview.get("target_found") is not True
             or preview.get("identity_confirmed") is not True
+            or preview.get("motion_authorized_marvin_candidate") is not True
             or preview.get("ambiguous") is True):
         return False, "preview_candidate_unavailable"
     if not _bbox(preview.get("bbox")):

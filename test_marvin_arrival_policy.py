@@ -143,6 +143,7 @@ def test_visual_session_reuses_calibrated_threshold_without_identity_authority()
     preview = {
         "ok": True, "preview": True, "authoritative": False,
         "target": "marvin", "target_found": True, "source": "marvin_local_tracker", "identity_confirmed": True,
+        "motion_authorized_marvin_candidate": True,
         "source_timestamp": STAMP, "image_width": 640.0, "image_height": 480.0,
         "bbox": {"x1": 100.0, "y1": 100.0, "x2": 288.0, "y2": 364.0},
         "marvin_continuity": {"tracker_id": 9, "tracker_source": "diagnostic"},
@@ -158,6 +159,7 @@ def test_visual_session_arrival_fails_closed_for_ambiguous_or_stale_preview():
     base = {
         "ok": True, "preview": True, "authoritative": False,
         "target": "marvin", "target_found": True, "source": "marvin_local_tracker", "identity_confirmed": True,
+        "motion_authorized_marvin_candidate": True,
         "source_timestamp": STAMP, "image_width": 640.0, "image_height": 480.0,
         "bbox": {"x1": 100.0, "y1": 100.0, "x2": 288.0, "y2": 364.0},
     }
@@ -185,7 +187,8 @@ def test_clipped_oversized_visual_preview_cannot_authorize_arrival():
     preview = {
         "ok": True, "preview": True, "authoritative": False,
         "target": "marvin", "target_found": True, "source": "marvin_local_tracker",
-        "identity_confirmed": True, "source_timestamp": STAMP,
+        "identity_confirmed": True, "motion_authorized_marvin_candidate": True,
+        "source_timestamp": STAMP,
         "image_width": 640.0, "image_height": 480.0,
         "bbox": {"x1": 200.0, "y1": 0.0, "x2": 400.0, "y2": 375.0},
     }
@@ -197,6 +200,24 @@ def test_clipped_oversized_visual_preview_cannot_authorize_arrival():
     assert value["arrival_geometry_clipped_edges"] == ["top"]
     assert value["arrived_at_marvin"] is False
     assert value["reason"] == "preview_arrival_geometry_clipped"
+
+
+def test_incompatible_or_legacy_visual_preview_cannot_establish_arrival():
+    base = {
+        "ok": True, "preview": True, "authoritative": False,
+        "target": "marvin", "target_found": True,
+        "source": "marvin_local_tracker", "identity_confirmed": True,
+        "source_timestamp": STAMP, "image_width": 640.0, "image_height": 480.0,
+        "bbox": {"x1": 100.0, "y1": 100.0, "x2": 288.0, "y2": 364.0},
+    }
+    for preview in (
+        dict(base),
+        dict(base, proposal_label="chair", motion_authorized_marvin_candidate=False),
+        dict(base, proposal_label="suitcase", motion_authorized_marvin_candidate=False),
+    ):
+        value = evaluate_marvin_visual_arrival(preview, now=STAMP)
+        assert value["arrived_at_marvin"] is False
+        assert value["visual_session_authorized"] is False
 
 
 def test_clipped_locked_bbox_cannot_authorize_persistent_arrival():

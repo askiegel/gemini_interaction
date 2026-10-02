@@ -43,6 +43,11 @@ def normalize_marvin_preview(value):
             )
         ),
         "identity_confirmed": value.get("identity_confirmed") is True,
+        # Preview visibility and visual-session motion authority are distinct.
+        # Missing or malformed legacy fields deliberately fail closed.
+        "motion_authorized_marvin_candidate": (
+            value.get("motion_authorized_marvin_candidate") is True
+        ),
         "source": value.get("source") or tracking.get("source"),
         "source_timestamp": value.get("source_timestamp") or tracking.get("vision_timestamp"),
         "vision_timestamp": value.get("vision_timestamp") or tracking.get("vision_timestamp"),

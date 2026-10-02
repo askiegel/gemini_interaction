@@ -51,11 +51,12 @@ def ready(**updates):
     return value
 
 
-def visual_preview(*, centered=False):
+def visual_preview(*, centered=False, motion_authorized=True):
     x1, x2 = (270.0, 370.0) if centered else (400.0, 500.0)
     return {
         "ok": True, "preview": True, "authoritative": False,
         "target": "marvin", "target_found": True, "source": "marvin_local_tracker", "identity_confirmed": True,
+        "motion_authorized_marvin_candidate": motion_authorized,
         "source_timestamp": "2026-09-26T16:00:00+00:00",
         "image_width": 640.0, "image_height": 480.0,
         "bbox": {"x1": x1, "y1": 20.0, "x2": x2, "y2": 220.0},
@@ -156,6 +157,34 @@ def test_visual_centered_uses_existing_lidar_gated_forward_path(monkeypatch):
     assert result["decision"] == "approach_forward"
     assert robot.forward_calls == 1 and len(safety_calls) == 2 and avoids == []
     assert robot.forward_requests == [(0.08, 0.50)]
+
+
+def test_incompatible_visual_preview_cannot_turn_or_enter_local_progress_handoff(monkeypatch):
+    for label, centered in (("chair", False), ("suitcase", True)):
+        robot = Robot()
+        manager = BehaviorManager(robot_client=robot, world_model=World())
+        manager.lidar_session = SESSION
+        turns, handoffs = [], []
+        monkeypatch.setattr(
+            manager, "_execute_target_directed_turn",
+            lambda *args, **kwargs: turns.append((args, kwargs)),
+        )
+        manager.marvin_local_progress_with_avoidance_handler = (
+            lambda **kwargs: handoffs.append(kwargs)
+        )
+        preview = visual_preview(
+            centered=centered, motion_authorized=False,
+        )
+        preview["proposal_label"] = label
+        result = manager.execute_marvin_pursuit_step(
+            preview, {}, {"tracking_mode": "UNLOCKED"},
+            now="2026-09-26T16:00:00+00:00",
+            local_progress_action_budget_remaining=4,
+        )
+        assert result["reason"] == "marvin_pursuit_not_authorized"
+        assert result["motion_executed"] is False
+        assert robot.forward_calls == 0
+        assert turns == handoffs == []
 
 
 def test_canonical_bounded_bridge_result_is_normalized_and_replans(monkeypatch):

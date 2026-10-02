@@ -17,7 +17,9 @@ STAMP = "2026-09-25T12:00:00+00:00"
 def preview(**updates):
     value = {"ok": True, "preview": True, "authoritative": False,
              "target": "marvin", "target_found": True, "source": "marvin_local_tracker",
-             "identity_confirmed": True, "source_timestamp": STAMP,
+             "identity_confirmed": True,
+             "motion_authorized_marvin_candidate": True,
+             "source_timestamp": STAMP,
              "bbox": {"x1": 10, "y1": 20, "x2": 100, "y2": 200},
              "tracking": {"target_label": "marvin", "bbox": {"x1": 10, "y1": 20, "x2": 100, "y2": 200}}}
     value.update(updates)
@@ -83,6 +85,25 @@ def test_visual_session_fails_closed_on_ambiguous_preview():
     assert value["pursuit_authorized"] is False
 
 
+def test_missing_or_incompatible_motion_authority_cannot_authorize_visual_session():
+    geometry = {
+        "image_width": 640.0, "image_height": 480.0,
+        "bbox": {"x1": 400.0, "y1": 20.0, "x2": 500.0, "y2": 220.0},
+    }
+    legacy = preview(**geometry)
+    legacy.pop("motion_authorized_marvin_candidate")
+    for candidate in (
+        legacy,
+        preview(**dict(geometry, proposal_label="chair",
+                       motion_authorized_marvin_candidate=False)),
+        preview(**dict(geometry, proposal_label="suitcase",
+                       motion_authorized_marvin_candidate=False)),
+    ):
+        value = evaluate(candidate, None, snapshot())
+        assert value["state"] == SEARCHING
+        assert value["pursuit_authorized"] is False
+
+
 def live_preview(*, centered=False, **updates):
     """Exact public Preview shape captured during 2026-09-27 preflight."""
     tracking_bbox = (
@@ -93,6 +114,7 @@ def live_preview(*, centered=False, **updates):
         "ok": True, "preview": True, "authoritative": False,
         "source": "marvin_local_tracker", "target": "marvin",
         "identity_confirmed": True,
+        "motion_authorized_marvin_candidate": True,
         "source_timestamp": STAMP, "vision_timestamp": STAMP,
         "marvin_continuity": {
             "tracker_id": 13, "tracker_source": "marvin_continuity_botsort",

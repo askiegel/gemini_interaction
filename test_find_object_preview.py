@@ -374,6 +374,7 @@ def test_marvin_preview_uses_one_semantic_acquisition_after_yolo_fails():
     assert semantic.calls == ["frame", "select_marvin_candidate", "frame", "frame"]
     assert semantic.selection_candidates[0][0]["proposal_label"] == "toilet"
     assert result["proposal_label"] == "toilet"
+    assert result["motion_authorized_marvin_candidate"] is False
     assert result["geometry_source"] == "yolo_proposal"
     assert result["identity_source"] == "gemini_marvin_candidate_selection"
     assert result["yolo_seed_bbox"] == {"x1": 402, "y1": 102, "x2": 502, "y2": 302}
@@ -467,6 +468,31 @@ def test_marvin_filters_person_before_selecting_non_person_candidate():
     ]
     assert result["proposal_label"] == "teddy bear"
     assert result["identity_confirmed"] is True
+    assert result["motion_authorized_marvin_candidate"] is True
+
+
+@pytest.mark.parametrize("label", ["chair", "suitcase"])
+def test_incompatible_marvin_proposal_remains_preview_only(label):
+    vision = CandidateVision([
+        proposal_frame(
+            f"{label}-{index}", (label, 0.1, 390 + index, 100, 490 + index, 300),
+        )
+        for index in range(1, 4)
+    ])
+    manager = BehaviorManager(
+        robot_client=ReadOnlyRobot(), vision_adapter=vision,
+        semantic_vision=MarvinSemanticVision(marvin_result(candidate_index=0)),
+    )
+    manager.TARGET_CONFIRMATION_POLL_SECONDS = 0
+    use_preview_tracker(manager)
+
+    result = manager.preview_find_object("marvin")
+
+    assert result["ok"] is True
+    assert result["authoritative"] is False
+    assert result["proposal_label"] == label
+    assert result["identity_confirmed"] is True
+    assert result["motion_authorized_marvin_candidate"] is False
 
 
 def test_person_cannot_add_support_to_overlapping_non_person_cluster():

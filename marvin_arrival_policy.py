@@ -117,6 +117,7 @@ def evaluate_marvin_visual_arrival(
         or preview.get("source") != "marvin_local_tracker"
         or preview.get("target_found") is not True
         or preview.get("identity_confirmed") is not True
+        or preview.get("motion_authorized_marvin_candidate") is not True
         or preview.get("ambiguous") is True
     ):
         return _fail(result, "preview_not_unambiguous_semantic_marvin")

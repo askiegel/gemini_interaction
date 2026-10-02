@@ -209,6 +209,7 @@ class RuntimeAPIHandler(BaseHTTPRequestHandler):
                     "detector_target", "detector_confidence", "geometry_source",
                     "identity_source", "identity_confirmed", "yolo_seed_bbox",
                     "proposal_label", "proposal_confidence", "proposal_support",
+                    "motion_authorized_marvin_candidate",
                     "tracker_seed_bbox", "tracker_seed_source",
                     "tracker_horizontal_padding_fraction",
                     "tracker_vertical_padding_fraction",

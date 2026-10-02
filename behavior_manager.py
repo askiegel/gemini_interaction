@@ -4467,6 +4467,7 @@ class BehaviorManager:
                 "detector_target", "geometry_source", "identity_source",
                 "identity_confirmed", "yolo_seed_bbox", "detector_confidence",
                 "proposal_label", "proposal_confidence", "proposal_support",
+                "motion_authorized_marvin_candidate",
                 "tracker_seed_bbox", "tracker_seed_source",
                 "tracker_horizontal_padding_fraction",
                 "tracker_vertical_padding_fraction", "confirmation_diagnostics",
@@ -5171,6 +5172,11 @@ class BehaviorManager:
             geometry_source="yolo_proposal",
             identity_source=identity_source,
             identity_confirmed=True,
+            motion_authorized_marvin_candidate=(
+                self._marvin_motion_authorized_candidate(
+                    yolo_candidate, confirmed,
+                )
+            ),
             yolo_seed_bbox=yolo_bbox,
             tracker_seed_bbox=tracker_seed_bbox,
             tracker_seed_source="bounded_yolo_proposal_expansion",
@@ -5182,6 +5188,30 @@ class BehaviorManager:
             ),
             confirmation_diagnostics=diagnostics,
             **tracker_metadata,
+        )
+
+    def _marvin_motion_authorized_candidate(self, candidate, confirmed):
+        """Return Marvin visual-session motion compatibility, fail-closed.
+
+        Semantic selection and local tracking remain visible through the
+        non-authoritative Preview. Directing Marvin visual-session motion
+        additionally requires the documented detector alias.
+        """
+        alias = str(self.MARVIN_DETECTOR_ALIAS or "").strip().casefold()
+        label = str(
+            candidate.get("proposal_label", candidate.get("label", ""))
+            if isinstance(candidate, dict) else ""
+        ).strip().casefold()
+        return bool(
+            alias == "teddy bear"
+            and label == alias
+            and isinstance(confirmed, dict)
+            and confirmed.get("found") is True
+            and confirmed.get("stale") is not True
+            and confirmed.get("source") == "marvin_local_tracker"
+            and confirmed.get("identity_ambiguous") is not True
+            and self._target_bbox(confirmed) is not None
+            and self._target_is_fresh_and_acquired(confirmed)
         )
 
     def _marvin_preview_continuity_candidate(self, candidates):

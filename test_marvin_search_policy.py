@@ -136,6 +136,9 @@ def test_fresh_reacquired_nested_preview_returns_to_normal_visual_pursuit():
     live_shape = {
         "ok": True, "preview": True, "authoritative": False,
         "target": "marvin", "identity_confirmed": True,
+        # This nested dashboard shape models a valid reacquired teddy-bear
+        # Marvin Preview emitted by BehaviorManager.
+        "motion_authorized_marvin_candidate": True,
         "source_timestamp": STAMP, "source": "marvin_local_tracker",
         "tracking": {
             "active": True, "target_label": "marvin",
