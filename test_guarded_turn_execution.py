@@ -7,6 +7,7 @@ import time
 
 import behavior_manager as behavior_manager_module
 from behavior_manager import BehaviorManager
+from guarded_turn_policy import ROTATIONAL_SWEPT_FOOTPRINT
 from local_obstacle_policy import recommend_local_avoidance
 from local_motion_safety_envelope import build_local_motion_lidar_geometry
 
@@ -147,7 +148,7 @@ def manager(state, robot=None):
 
 
 def execute(state, direction="LEFT", speed=0.5, duration=0.4, robot=None,
-            target_directed=False):
+            target_directed=False, safety_mode="LEGACY_BROAD_SIDE"):
     return manager(state, robot).execute_guarded_turn(
         direction,
         speed,
@@ -155,6 +156,7 @@ def execute(state, direction="LEFT", speed=0.5, duration=0.4, robot=None,
         expected_lidar_session=SESSION,
         now=10.0,
         target_directed=target_directed,
+        safety_mode=safety_mode,
     )
 
 
@@ -229,6 +231,57 @@ def test_denials_make_zero_motion_calls():
         assert result["stop_fallback_attempted"] is False
         assert robot.motion_calls == []
         assert robot.stop_calls == 0
+
+
+def test_rotational_mode_allows_legacy_caution_when_base_circle_is_clear():
+    state = snapshot(left="CAUTION", front_left="CLEAR")
+    state["sectors"]["left"].update(
+        robust_clearance_m=1.211,
+        minimum_clearance_m=0.521,
+    )
+    robot = FakeRobot()
+
+    result = execute(
+        state,
+        speed=0.30,
+        duration=1.0,
+        robot=robot,
+        safety_mode=ROTATIONAL_SWEPT_FOOTPRINT,
+    )
+
+    assert result["permitted"] is True
+    assert result["rotational_swept_footprint"]["protected_radius_m"] == 0.45
+    assert robot.motion_calls == [{
+        "linear_x": 0.0,
+        "angular_z": 0.30,
+        "duration": 1.0,
+        "streaming": False,
+    }]
+
+
+def test_rotational_violation_denies_before_transport_in_rotational_mode():
+    state = snapshot(left="CAUTION", front_left="CLEAR")
+    state["local_motion_geometry"]["points"].append({
+        "x_m": 0.44,
+        "y_m": 0.0,
+        "distance_m": 0.44,
+        "robot_bearing_deg": 0.0,
+    })
+    robot = FakeRobot()
+
+    result = execute(
+        state,
+        speed=0.30,
+        duration=1.0,
+        robot=robot,
+        safety_mode=ROTATIONAL_SWEPT_FOOTPRINT,
+    )
+
+    assert result["permitted"] is False
+    assert result["reason"] == "rotational_protected_region_violated"
+    assert result["transport_attempted"] is False
+    assert robot.motion_calls == []
+    assert robot.stop_calls == 0
 
 
 def test_stale_unavailable_and_session_mismatch_deny_before_transport():

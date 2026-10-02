@@ -9,6 +9,7 @@ import pytest
 
 import behavior_manager as behavior_module
 from behavior_manager import BehaviorManager
+from guarded_turn_policy import ROTATIONAL_SWEPT_FOOTPRINT
 from mission_types import create_mission
 from runtime import CognitiveRuntime
 from tracking_state import build_tracking_state, empty_tracking_state
@@ -321,15 +322,21 @@ def guarded_search_manager(observations, turn_results=None):
     manager.FIND_APPROACH_MAX_CHUNKS = 1
     manager.lidar_session = "session-1"
     calls = []
+    safety_modes = []
     results = list(turn_results or [])
 
-    def execute_guarded_turn(direction, speed, duration, *, expected_lidar_session, now=None):
+    def execute_guarded_turn(
+        direction, speed, duration, *, expected_lidar_session, now=None,
+        safety_mode="LEGACY_BROAD_SIDE",
+    ):
         calls.append((direction, speed, duration, expected_lidar_session))
+        safety_modes.append(safety_mode)
         if results:
             return dict(results.pop(0))
         return {"ok": True, "permitted": True, "reason": "completed"}
 
     manager.execute_guarded_turn = execute_guarded_turn
+    manager.guarded_turn_safety_modes = safety_modes
     return manager, robot, vision, calls
 
 
@@ -466,7 +473,8 @@ def test_guarded_search_denial_stops_without_replay():
     assert result["turn_chunks_attempted"] == 1
     assert result["turn_chunks_completed"] == 0
     assert result["last_guarded_turn_result"]["reason"] == "stale_lidar"
-    assert len(calls) == 1
+    assert calls == [("LEFT", 0.30, 1.0, "session-1")]
+    assert manager.guarded_turn_safety_modes[0] == ROTATIONAL_SWEPT_FOOTPRINT
 
 
 def test_guarded_search_failure_after_successful_chunk_stops_immediately():
@@ -1717,15 +1725,21 @@ def make_centering_manager(observations, candidate_payloads, turn_results=None):
     manager.FIND_APPROACH_MAX_CHUNKS = 1
     manager.lidar_session = "session-1"
     calls = []
+    safety_modes = []
     results = list(turn_results or [])
 
-    def turn(direction, speed, duration, *, expected_lidar_session, now=None):
+    def turn(
+        direction, speed, duration, *, expected_lidar_session, now=None,
+        safety_mode="LEGACY_BROAD_SIDE",
+    ):
         calls.append((direction, speed, duration, expected_lidar_session))
+        safety_modes.append(safety_mode)
         if results:
             return dict(results.pop(0))
         return {"ok": True, "permitted": True, "reason": "completed"}
 
     manager.execute_guarded_turn = turn
+    manager.guarded_turn_safety_modes = safety_modes
     return manager, vision, calls
 
 
@@ -2977,6 +2991,7 @@ def test_search_and_centering_counters_remain_separate():
         failed_search + acquired + centered + post_approach,
     )
     result = manager.execute(_mission())
+    assert manager.guarded_turn_safety_modes[0] == ROTATIONAL_SWEPT_FOOTPRINT
     assert result["state"] == "APPROACH_STEP_COMPLETE"
     assert result["turn_chunks_attempted"] == 1
     assert result["turn_chunks_completed"] == 1

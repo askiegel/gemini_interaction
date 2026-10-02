@@ -4,7 +4,10 @@ import time
 from datetime import datetime, timezone
 
 from robot_bridge.client import RobotBridgeClient
-from guarded_turn_policy import validate_guarded_turn
+from guarded_turn_policy import (
+    ROTATIONAL_SWEPT_FOOTPRINT,
+    validate_guarded_turn,
+)
 from local_obstacle_policy import (
     plan_local_obstacle_avoidance,
     recommend_local_avoidance,
@@ -7922,6 +7925,7 @@ class BehaviorManager:
                     self.SEARCH_TURN_SPEED,
                     self.SEARCH_TURN_SECONDS,
                     expected_lidar_session=session,
+                    safety_mode=ROTATIONAL_SWEPT_FOOTPRINT,
                 )
             except Exception as exc:
                 return dict(

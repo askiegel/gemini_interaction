@@ -46,11 +46,12 @@ _DEFAULT_STATE = object()
 
 
 def turn(direction, state=_DEFAULT_STATE, speed=0.5, duration=0.4,
-         target_directed=False):
+         target_directed=False, safety_mode="LEGACY_BROAD_SIDE"):
     return validate_guarded_turn(
         direction, speed, duration, snapshot() if state is _DEFAULT_STATE else state,
         expected_session="session-1", now=10.0,
         target_directed=target_directed,
+        safety_mode=safety_mode,
     )
 
 
@@ -244,14 +245,68 @@ def test_minimum_clearance_can_drive_caution_with_clear_robust_metric():
 
 
 def test_rotational_mode_uses_base_geometry_not_broad_caution_label():
-    state = snapshot(left="CAUTION", front_left="CAUTION")
+    state = snapshot(left="CAUTION", front_left="CLEAR")
+    state["sectors"]["left"].update(
+        robust_clearance_m=1.211,
+        minimum_clearance_m=0.521,
+    )
+    legacy = turn("LEFT", state)
     result = validate_guarded_turn(
         "LEFT", .25, .5, state, expected_session="session-1", now=10.0,
         safety_mode=ROTATIONAL_SWEPT_FOOTPRINT,
     )
+    assert legacy["permitted"] is False
+    assert legacy["reason"] == "turn_side_not_clear"
     assert result["permitted"] is True
     assert result["reason"] == "rotational_swept_footprint_clear"
     assert result["rotational_swept_footprint"]["requested_angle_radians"] == pytest.approx(.125)
+
+
+def test_rotational_mode_blocks_point_inside_protected_circle():
+    state = snapshot(left="CAUTION", front_left="CLEAR")
+    state["local_motion_geometry"]["points"].append({
+        "x_m": 0.44,
+        "y_m": 0.0,
+        "distance_m": 0.44,
+        "robot_bearing_deg": 0.0,
+    })
+
+    result = turn(
+        "LEFT", state, duration=1.0,
+        safety_mode=ROTATIONAL_SWEPT_FOOTPRINT,
+    )
+
+    assert result["permitted"] is False
+    assert result["reason"] == "rotational_protected_region_violated"
+    assert result["rotational_swept_footprint"]["protected_radius_m"] == 0.45
+
+
+@pytest.mark.parametrize("failure", [
+    "stale",
+    "unavailable",
+    "invalid",
+    "wrong_session",
+    "malformed_geometry",
+])
+def test_rotational_mode_remains_fail_closed_for_untrusted_lidar(failure):
+    state = snapshot(left="CAUTION", front_left="CLEAR")
+    if failure == "stale":
+        state["age_at_receipt_seconds"] = 0.31
+    elif failure == "unavailable":
+        state["available"] = False
+    elif failure == "invalid":
+        state["valid"] = False
+    elif failure == "wrong_session":
+        state["producer_session"] = "different-session"
+    elif failure == "malformed_geometry":
+        state["local_motion_geometry"] = {"valid": False, "points": []}
+
+    result = turn(
+        "LEFT", state, duration=1.0,
+        safety_mode=ROTATIONAL_SWEPT_FOOTPRINT,
+    )
+
+    assert result["permitted"] is False
 
 
 def test_invalid_rotational_safety_mode_fails_closed():
