@@ -236,6 +236,138 @@ def test_unconfirmed_arrival_candidate_completes_only_as_safe_incomplete(tmp_pat
     assert result["reason"] == "find_marvin_arrival_confirmation_not_independent"
 
 
+def test_bounded_search_exhaustion_completes_as_safe_incomplete(tmp_path):
+    history = []
+    for search_action in ("turn_left", "turn_right", "turn_right", "turn_left"):
+        history.append({
+            "route": "search",
+            "selected_action": search_action,
+            "search_action": search_action,
+            "action_budget_consumed": True,
+            "search_step_result": {
+                "ok": True, "motion_executed": True,
+                "replan_required": True,
+                "decision": search_action,
+                "search_action": search_action,
+                "planner": {"selected_search_action": search_action},
+            },
+            "stop_result": {"ok": True},
+        })
+    history.append({
+        "route": "search",
+        "selected_action": "search_complete",
+        "action_budget_consumed": True,
+        "search_step_result": {
+            "ok": True,
+            "decision": "search_complete",
+            "motion_executed": False,
+            "planner": {
+                "completed": True,
+                "selected_search_action": "search_complete",
+            },
+        },
+        "stop_result": {"ok": True},
+    })
+    controller = {
+        "ok": True,
+        "completed": False,
+        "arrived_at_marvin": False,
+        "reason": "find_marvin_search_complete",
+        "actions_executed": 5,
+        "history": history,
+    }
+    runtime, behavior = make_runtime(tmp_path, controller)
+
+    runtime.submit_text("Find Marvin")
+    result = runtime.run_once()
+
+    assert len(behavior.controller_calls) == 1
+    assert result["ok"] is True and result["completed"] is True
+    assert result["mission_outcome"] == "safe_incomplete"
+    assert result["state"] == "FIND_MARVIN_SAFE_INCOMPLETE"
+    assert result["reason"] == "find_marvin_search_exhausted"
+    assert result["completion_reason"] == "find_marvin_search_exhausted"
+    assert result["arrived_at_marvin"] is False
+    assert result["total_actions_executed"] == 5
+    assert runtime.mission_manager.get_active_mission() is None
+
+
+def test_search_exhaustion_without_successful_terminal_stop_still_fails(tmp_path):
+    controller = {
+        "ok": True,
+        "completed": False,
+        "arrived_at_marvin": False,
+        "reason": "find_marvin_search_complete",
+        "actions_executed": 1,
+        "history": [{
+            "route": "search",
+            "selected_action": "search_complete",
+            "action_budget_consumed": True,
+            "search_step_result": {
+                "ok": True,
+                "decision": "search_complete",
+                "motion_executed": False,
+                "planner": {
+                    "completed": True,
+                    "selected_search_action": "search_complete",
+                },
+            },
+            "stop_result": {"ok": False},
+        }],
+    }
+    runtime, _behavior = make_runtime(tmp_path, controller)
+
+    runtime.submit_text("Find Marvin")
+    result = runtime.run_once()
+
+    assert result["mission_outcome"] == "safe_failure"
+    assert result["state"] == "FIND_MARVIN_FAILED"
+    assert result["reason"] == "find_marvin_controller_terminal_result_unrecognized"
+
+
+def test_search_turn_safety_failure_remains_failure(tmp_path):
+    runtime, _behavior = make_runtime(tmp_path, {
+        "ok": False,
+        "completed": False,
+        "arrived_at_marvin": False,
+        "reason": "find_marvin_search_guarded_turn_failed",
+        "actions_executed": 1,
+        "history": [{
+            "route": "search",
+            "selected_action": "search_turn",
+            "action_budget_consumed": True,
+            "search_step_result": {
+                "ok": False,
+                "reason": "rotational_safety_rejected",
+                "motion_executed": False,
+            },
+            "stop_result": {"ok": True},
+        }],
+    })
+
+    runtime.submit_text("Find Marvin")
+    result = runtime.run_once()
+
+    assert result["mission_outcome"] == "safe_failure"
+    assert result["state"] == "FIND_MARVIN_FAILED"
+    assert result["reason"] == "find_marvin_search_guarded_turn_failed"
+
+
+def test_unknown_controller_terminal_remains_failure(tmp_path):
+    runtime, _behavior = make_runtime(tmp_path, controller_result(
+        reason="unrecognized_controller_terminal",
+        completed=False,
+        arrived=False,
+    ))
+
+    runtime.submit_text("Find Marvin")
+    result = runtime.run_once()
+
+    assert result["mission_outcome"] == "safe_failure"
+    assert result["state"] == "FIND_MARVIN_FAILED"
+    assert result["reason"] == "find_marvin_controller_terminal_result_unrecognized"
+
+
 def test_invalid_or_failed_controller_result_fails_closed(tmp_path):
     runtime, behavior = make_runtime(
         tmp_path,

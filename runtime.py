@@ -555,6 +555,20 @@ class CognitiveRuntime:
                 )
 
             if controller.get("reason") != "find_marvin_action_limit_reached":
+                if (
+                    controller.get("reason") == "find_marvin_search_complete"
+                    and self._marvin_search_exhaustion_is_safe(controller)
+                ):
+                    return dict(
+                        result_base(),
+                        ok=True,
+                        completed=True,
+                        arrived_at_marvin=False,
+                        mission_outcome="safe_incomplete",
+                        state="FIND_MARVIN_SAFE_INCOMPLETE",
+                        reason="find_marvin_search_exhausted",
+                        completion_reason="find_marvin_search_exhausted",
+                    )
                 if controller.get("reason") == "find_marvin_arrival_confirmation_not_independent":
                     return dict(
                         result_base(), ok=True, completed=True,
@@ -689,6 +703,52 @@ class CognitiveRuntime:
             state="FIND_MARVIN_FAILED",
             reason="find_marvin_mission_episode_loop_exited_unexpectedly",
         )
+
+    @staticmethod
+    def _marvin_search_exhaustion_is_safe(controller):
+        """Recognize only a completed, stopped bounded search-plan result."""
+        history = controller.get("history")
+        if (
+            controller.get("completed") is not False
+            or controller.get("arrived_at_marvin") is not False
+            or not isinstance(history, list)
+            or not history
+        ):
+            return False
+        terminal = history[-1]
+        search_step = (
+            terminal.get("search_step_result")
+            if isinstance(terminal, dict) else None
+        )
+        planner = (
+            search_step.get("planner")
+            if isinstance(search_step, dict) else None
+        )
+        if not (
+            terminal.get("route") == "search"
+            and terminal.get("selected_action") == "search_complete"
+            and isinstance(terminal.get("stop_result"), dict)
+            and terminal["stop_result"].get("ok") is True
+            and isinstance(search_step, dict)
+            and search_step.get("ok") is True
+            and search_step.get("decision") == "search_complete"
+            and search_step.get("motion_executed") is False
+            and isinstance(planner, dict)
+            and planner.get("completed") is True
+            and planner.get("selected_search_action") == "search_complete"
+        ):
+            return False
+        for entry in history:
+            if not isinstance(entry, dict):
+                return False
+            if entry.get("action_budget_consumed") is True:
+                stop_result = entry.get("stop_result")
+                if not (
+                    isinstance(stop_result, dict)
+                    and stop_result.get("ok") is True
+                ):
+                    return False
+        return True
 
     def _marvin_mission_context_is_current(self, mission, control_generation):
         with self._state_lock:
