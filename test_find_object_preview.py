@@ -8,6 +8,7 @@ from unittest.mock import patch
 
 from behavior_manager import BehaviorManager
 from marvin_arrival_policy import evaluate_marvin_visual_arrival
+from marvin_pursuit_state import evaluate_marvin_pursuit_state
 from mission_types import create_mission
 from runtime_api import RuntimeAPIHandler
 from tracking_state import build_tracking_state, empty_tracking_state
@@ -221,6 +222,29 @@ def marvin_yolo_candidates_with_continuity(*continuities):
     return CandidateVision(payloads)
 
 
+def proposal_frame(timestamp, *detections):
+    return {
+        "timestamp": timestamp,
+        "camera_running": True,
+        "detections": [
+            {
+                "label": label,
+                "confidence": confidence,
+                "x1": x1,
+                "y1": y1,
+                "x2": x2,
+                "y2": y2,
+                "center_x": (x1 + x2) / 2,
+                "center_y": (y1 + y2) / 2,
+                "area": (x2 - x1) * (y2 - y1),
+                "image_width": 640,
+                "image_height": 480,
+            }
+            for label, confidence, x1, y1, x2, y2 in detections
+        ],
+    }
+
+
 class PreviewTracker:
     def __init__(self, _frame, seed_bbox, boxes=None):
         self.seed_bbox = dict(seed_bbox)
@@ -359,6 +383,140 @@ def test_marvin_preview_uses_one_semantic_acquisition_after_yolo_fails():
     assert vision.queries == []
     assert vision.process_calls == 0
     assert world.writes == 0
+
+
+def test_marvin_person_only_proposal_fails_before_semantics_or_tracker():
+    vision = CandidateVision([
+        proposal_frame(
+            f"person-{index}",
+            ("person", 0.127, 378, 30, 617, 401),
+        )
+        for index in range(1, 4)
+    ])
+    semantic = MarvinSemanticVision(marvin_result())
+    manager = BehaviorManager(
+        robot_client=ReadOnlyRobot(), vision_adapter=vision,
+        semantic_vision=semantic,
+    )
+    manager.TARGET_CONFIRMATION_POLL_SECONDS = 0
+    manager.marvin_local_tracker_factory = lambda *_args: (_ for _ in ()).throw(
+        AssertionError("person proposal initialized Marvin tracker")
+    )
+
+    result = manager.preview_find_object("marvin")
+
+    assert result["ok"] is False
+    assert result["target_found"] is False
+    assert "marvin_person_proposal_rejected" in result["reason"]
+    assert result.get("identity_confirmed") is not True
+    assert result.get("confirmation_status") != "target_confirmed"
+    assert semantic.selection_candidates == []
+    assert semantic.calls == []
+    assert vision.proposal_calls == 3
+    pursuit = evaluate_marvin_pursuit_state(
+        result, None, None, now="2026-09-19T12:00:03+00:00",
+    )
+    assert pursuit["pursuit_authorized"] is False
+
+
+def test_three_frame_person_support_cannot_confirm_marvin():
+    vision = CandidateVision([
+        proposal_frame(
+            f"person-support-{index}",
+            ("person", 0.9, 200 + index, 80, 350 + index, 400),
+        )
+        for index in range(1, 4)
+    ])
+    semantic = MarvinSemanticVision(marvin_result())
+    manager = BehaviorManager(
+        robot_client=ReadOnlyRobot(), vision_adapter=vision,
+        semantic_vision=semantic,
+    )
+    manager.TARGET_CONFIRMATION_POLL_SECONDS = 0
+
+    result = manager.preview_find_object("marvin")
+
+    assert result["ok"] is False
+    assert "marvin_person_proposal_rejected" in result["reason"]
+    assert semantic.selection_candidates == []
+    assert vision.proposal_calls == 3
+
+
+def test_marvin_filters_person_before_selecting_non_person_candidate():
+    frames = []
+    for index in range(1, 4):
+        frames.append(proposal_frame(
+            f"mixed-{index}",
+            ("person", 0.99, 80, 50, 240, 420),
+            ("teddy bear", 0.2, 390 + index, 100, 490 + index, 300),
+        ))
+    vision = CandidateVision(frames)
+    semantic = MarvinSemanticVision(marvin_result(candidate_index=0))
+    manager = BehaviorManager(
+        robot_client=ReadOnlyRobot(), vision_adapter=vision,
+        semantic_vision=semantic,
+    )
+    manager.TARGET_CONFIRMATION_POLL_SECONDS = 0
+    use_preview_tracker(manager)
+
+    result = manager.preview_find_object("marvin")
+
+    assert result["ok"] is True
+    assert [item["proposal_label"] for item in semantic.selection_candidates[0]] == [
+        "teddy bear",
+    ]
+    assert result["proposal_label"] == "teddy bear"
+    assert result["identity_confirmed"] is True
+
+
+def test_person_cannot_add_support_to_overlapping_non_person_cluster():
+    vision = CandidateVision([
+        proposal_frame(
+            f"overlap-{index}",
+            ("person", 0.9, 200, 100, 400, 350),
+            *(
+                [("teddy bear", 0.2, 205, 105, 395, 345)]
+                if index == 1 else []
+            ),
+        )
+        for index in range(1, 4)
+    ])
+    semantic = MarvinSemanticVision(marvin_result())
+    manager = BehaviorManager(
+        robot_client=ReadOnlyRobot(), vision_adapter=vision,
+        semantic_vision=semantic,
+    )
+    manager.TARGET_CONFIRMATION_POLL_SECONDS = 0
+
+    result = manager.preview_find_object("marvin")
+
+    assert result["ok"] is False
+    assert result.get("identity_confirmed") is not True
+    assert semantic.selection_candidates == []
+    assert vision.proposal_calls == 3
+
+
+def test_generic_find_object_person_world_model_path_is_unchanged():
+    observation = {
+        "found": True,
+        "stale": False,
+        "label": "person",
+        "confidence": 0.8,
+        "cx": 320.0,
+        "cy": 240.0,
+        "area": 20000.0,
+        "image_width": 640.0,
+        "image_height": 480.0,
+        "bbox": {"x1": 220, "y1": 140, "x2": 420, "y2": 340},
+    }
+    world = WorldModelObservation(observation)
+    manager = BehaviorManager(robot_client=ReadOnlyRobot(), world_model=world)
+
+    result = manager.preview_find_object("person")
+
+    assert result["ok"] is True
+    assert result["target_label"] == "person"
+    assert result["source"] == "world_model"
 
 
 def test_marvin_preview_preserves_existing_proposal_tracker_metadata():

@@ -5007,6 +5007,8 @@ class BehaviorManager:
             )
         )
         if not candidates:
+            if status == "person_proposals_rejected":
+                raise ValueError("marvin_person_proposal_rejected")
             raise ValueError("marvin_yolo_proposal_" + str(status))
         candidates = self._filter_marvin_proposal_geometry(
             candidates, diagnostics,
@@ -5335,12 +5337,15 @@ class BehaviorManager:
             "terminal_reason": None,
             "qualified_support_reached": False,
             "detector_target": None,
+            "marvin_person_proposals_rejected": 0,
         }
         started = time.monotonic()
         seen_timestamps = set()
+        person_timestamps = set()
         last_timestamp = None
         clusters = []
         actionable_seen = False
+        person_proposal_seen = False
 
         def finish(candidates, status, reason=None):
             diagnostics["confirmation_status"] = status
@@ -5414,6 +5419,15 @@ class BehaviorManager:
                     continue
                 if not isinstance(normalized, dict):
                     continue
+                # A detector-labeled person cannot provide geometry authority
+                # for Marvin. Filter before the class-agnostic temporal
+                # clustering below, so person boxes cannot add support to or
+                # alter a compatible proposal's representative geometry.
+                if str(normalized.get("label") or "").strip().casefold() == "person":
+                    person_proposal_seen = True
+                    person_timestamps.add(timestamp)
+                    diagnostics["marvin_person_proposals_rejected"] += 1
+                    continue
                 normalized.update({
                     "found": True,
                     "stale": False,
@@ -5429,6 +5443,8 @@ class BehaviorManager:
                     observations.append(normalized)
                     actionable_seen = True
             if not observations:
+                if len(person_timestamps) >= self.TARGET_CONFIRMATION_MAX_FRAMES:
+                    break
                 time.sleep(self.TARGET_CONFIRMATION_POLL_SECONDS)
                 continue
 
@@ -5474,6 +5490,12 @@ class BehaviorManager:
             if len(cluster["timestamps"]) >= self.TARGET_CONFIRMATION_MIN_SUPPORT
         ]
         if not eligible:
+            if not actionable_seen and person_proposal_seen:
+                return finish(
+                    [],
+                    "person_proposals_rejected",
+                    "marvin_person_proposal_rejected",
+                )
             return finish(
                 [],
                 "target_reconfirmation_failed" if actionable_seen else "target_lost",
