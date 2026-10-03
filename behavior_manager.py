@@ -4696,6 +4696,7 @@ class BehaviorManager:
                 return dict(
                     base,
                     source_frame_stamp_ns=observation.get("source_frame_stamp_ns"),
+                    motion_authorized_marvin_candidate=False,
                     reason=observation.get("reason", "Marvin was not found in the current camera frame."),
                 )
             result = self._build_find_object_preview(
@@ -5313,7 +5314,16 @@ class BehaviorManager:
         if execution_guard is not None:
             execution_guard()
         if not isinstance(identity, dict) or identity.get("confirmed") is not True:
-            raise ValueError("marvin_identity_not_confirmed")
+            # The source stamp identifies the camera observation, not the
+            # semantic result. Preserve it on a negative preview without
+            # promoting the candidate or granting any motion authority.
+            return {
+                "found": False,
+                "source_frame_stamp_ns": diagnostics.get(
+                    "latest_source_frame_stamp_ns"
+                ),
+                "reason": "marvin_identity_not_confirmed",
+            }
         selected_index = identity.get("candidate_index")
         if type(selected_index) is not int or not 0 <= selected_index < len(candidates):
             raise ValueError("marvin_candidate_selection_index_invalid")
@@ -5688,8 +5698,10 @@ class BehaviorManager:
             source_frame_stamp_ns = payload.get("source_frame_stamp_ns")
             if type(source_frame_stamp_ns) is not int or source_frame_stamp_ns < 0:
                 source_frame_stamp_ns = None
-            if source_frame_stamp_ns is not None:
-                diagnostics["latest_source_frame_stamp_ns"] = source_frame_stamp_ns
+            # Track the latest observation's identity exactly. A malformed or
+            # missing stamp must clear an earlier value rather than silently
+            # falling back to an older camera frame.
+            diagnostics["latest_source_frame_stamp_ns"] = source_frame_stamp_ns
             if (
                 minimum_source_frame_stamp_ns is not None
                 and (source_frame_stamp_ns is None

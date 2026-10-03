@@ -429,6 +429,52 @@ def test_vision_adapter_source_stamp_is_preserved_into_marvin_preview():
     assert preview["target_observation"]["source_frame_stamp_ns"] == 55_000_000_123
 
 
+def test_negative_marvin_identity_preview_preserves_source_stamp_through_runtime_api():
+    vision = marvin_yolo_candidates()
+    for payload in vision.payloads:
+        payload["source_frame_stamp_ns"] = 1001
+    manager = BehaviorManager(
+        robot_client=ReadOnlyRobot(),
+        vision_adapter=vision,
+        semantic_vision=MarvinSemanticVision(marvin_result(found=False)),
+    )
+    manager.TARGET_CONFIRMATION_POLL_SECONDS = 0
+    use_preview_tracker(manager)
+
+    preview = manager.preview_find_object("marvin")
+    assert preview["ok"] is False
+    assert preview["reason"] == "marvin_identity_not_confirmed"
+    assert preview["source_frame_stamp_ns"] == 1001
+    assert preview["motion_authorized_marvin_candidate"] is False
+
+    status, payload = _call_runtime_preview(preview, target="marvin")
+    assert status == 200
+    assert payload["ok"] is False
+    assert payload["reason"] == "marvin_identity_not_confirmed"
+    assert payload["source_frame_stamp_ns"] == 1001
+    assert payload["motion_authorized_marvin_candidate"] is False
+
+
+@pytest.mark.parametrize("bad_stamp", [None, "1003", -1, True, 1.5])
+def test_negative_marvin_identity_preview_does_not_fabricate_source_stamp(bad_stamp):
+    vision = marvin_yolo_candidates()
+    for payload, stamp in zip(vision.payloads, (1001, 1002, bad_stamp)):
+        payload["source_frame_stamp_ns"] = stamp
+    manager = BehaviorManager(
+        robot_client=ReadOnlyRobot(),
+        vision_adapter=vision,
+        semantic_vision=MarvinSemanticVision(marvin_result(found=False)),
+    )
+    manager.TARGET_CONFIRMATION_POLL_SECONDS = 0
+    use_preview_tracker(manager)
+
+    preview = manager.preview_find_object("marvin")
+    assert preview["ok"] is False
+    assert preview["reason"] == "marvin_identity_not_confirmed"
+    assert preview["source_frame_stamp_ns"] is None
+    assert preview["motion_authorized_marvin_candidate"] is False
+
+
 @pytest.mark.parametrize("bad_stamp", [None, "55", -1, True, 1.5])
 def test_marvin_preview_does_not_publish_malformed_source_frame_identity(bad_stamp):
     vision = marvin_yolo_candidates()
