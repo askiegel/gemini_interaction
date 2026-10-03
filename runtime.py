@@ -654,6 +654,21 @@ class CognitiveRuntime:
                         completion_reason=controller.get("reason"),
                     )
                 if (
+                    controller.get("reason") == "find_marvin_clearance_wait_timeout"
+                    and self._marvin_clearance_timeout_is_safe(controller)
+                ):
+                    return dict(
+                        result_base(),
+                        ok=True,
+                        completed=True,
+                        arrived_at_marvin=False,
+                        mission_outcome="safe_incomplete",
+                        state="FIND_MARVIN_SAFE_INCOMPLETE",
+                        reason="find_marvin_clearance_wait_timeout",
+                        completion_reason="find_marvin_clearance_wait_timeout",
+                        clearance_wait=controller.get("clearance_wait"),
+                    )
+                if (
                     controller.get("reason") == "find_marvin_search_complete"
                     and self._marvin_search_exhaustion_is_safe(controller)
                 ):
@@ -837,6 +852,44 @@ class CognitiveRuntime:
                 ):
                     return False
         return True
+
+    @staticmethod
+    def _marvin_clearance_timeout_is_safe(controller):
+        """Accept only a stopped no-motion room-scan clearance timeout."""
+        history = controller.get("history")
+        if (
+            controller.get("completed") is not True
+            or controller.get("arrived_at_marvin") is not False
+            or not isinstance(history, list)
+            or not history
+        ):
+            return False
+        terminal = history[-1]
+        step = terminal.get("search_step_result") if isinstance(terminal, dict) else None
+        wait = controller.get("clearance_wait")
+        bridge = wait.get("bridge_status") if isinstance(wait, dict) else None
+        motion = bridge.get("motion") if isinstance(bridge, dict) else None
+        return bool(
+            isinstance(terminal, dict)
+            and terminal.get("route") == "search"
+            and terminal.get("action_budget_consumed") is False
+            and isinstance(terminal.get("stop_result"), dict)
+            and terminal["stop_result"].get("ok") is True
+            and isinstance(step, dict)
+            and step.get("clearance_wait_timed_out") is True
+            and step.get("motion_executed") is False
+            and step.get("reason") == "find_marvin_clearance_wait_timeout"
+            and isinstance(wait, dict)
+            and terminal.get("pending_scan_turn_index") == wait.get("pending_scan_turn_index")
+            and wait.get("decision") == "clearance_wait_timeout"
+            and isinstance(bridge, dict)
+            and bridge.get("ok") is True
+            and bridge.get("ros_ready") is True
+            and isinstance(motion, dict)
+            and motion.get("linear_x") == 0
+            and motion.get("angular_z") == 0
+            and motion.get("streaming") is False
+        )
 
     def _marvin_mission_context_is_current(self, mission, control_generation):
         with self._state_lock:

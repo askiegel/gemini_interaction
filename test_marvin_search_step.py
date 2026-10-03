@@ -134,10 +134,13 @@ def test_coordinator_has_no_pursuit_loop_or_direct_transport():
     for forbidden in (
         "robot.local_forward", "execute_marvin_pursuit_step",
         "execute_local_obstacle_avoidance_step", "execute_local_obstacle_avoidance_loop",
-        "while true", "arrived_at_marvin",
+        "arrived_at_marvin",
     ):
         assert forbidden not in coordinator.lower()
-    assert coordinator.count("self.execute_guarded_turn(") == 1
+    # The clearance wait is an explicitly time-bounded exception to the
+    # otherwise single-step coordinator; its deadline is mission-scoped.
+    assert "marvin_clearance_wait_timeout_seconds" in coordinator.lower()
+    assert coordinator.count("self.execute_guarded_turn(") == 2
 
 
 def test_marvin_search_limits_are_separate_from_generic_find_object_search():

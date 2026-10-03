@@ -8,6 +8,7 @@ from guarded_turn_policy import (
     ROTATIONAL_SWEPT_FOOTPRINT,
     validate_guarded_turn,
 )
+from lidar_perception import MAXIMUM_EFFECTIVE_AGE_SECONDS
 from local_obstacle_policy import (
     plan_local_obstacle_avoidance,
     recommend_local_avoidance,
@@ -35,7 +36,10 @@ from marvin_search_policy import (
     SCAN_DIRECTION,
     plan_marvin_search_step,
 )
-from local_motion_safety_envelope import evaluate_local_motion_safety
+from local_motion_safety_envelope import (
+    EXPECTED_LIDAR_FRAME,
+    evaluate_local_motion_safety,
+)
 from camera_motion_gate import evaluate_camera_gate
 
 
@@ -529,6 +533,8 @@ class BehaviorManager:
     MARVIN_SCAN_MAX_TURNS = MAX_SCAN_TURNS
     MARVIN_POST_TURN_FRAME_TIMEOUT_SECONDS = 3.0
     MARVIN_POST_TURN_FRAME_POLL_SECONDS = 0.05
+    MARVIN_CLEARANCE_WAIT_TIMEOUT_SECONDS = 60.0
+    MARVIN_CLEARANCE_RECHECK_INTERVAL_SECONDS = 0.25
     SEARCH_MAX_TURN_CHUNKS = 3
     SEARCH_DIRECTION = "LEFT"
     TARGET_CONFIRMATION_MAX_FRAMES = 3
@@ -701,6 +707,13 @@ class BehaviorManager:
                 "scan_exhausted": False,
                 "scan_target_acquired": False,
                 "scan_transition_pending": False,
+                "search_state": "SEARCHING",
+                "clearance_wait_active": False,
+                "clearance_wait_started_monotonic": None,
+                "clearance_recheck_count": 0,
+                "last_rotational_safety_reason": None,
+                "pending_scan_turn_index": None,
+                "pending_scan_direction": None,
             }
             return dict(self._marvin_room_scan)
 
@@ -722,6 +735,62 @@ class BehaviorManager:
                 return None
             self._marvin_room_scan.update(values)
             return dict(self._marvin_room_scan)
+
+    @staticmethod
+    def _is_rotational_clearance_block(result, expected_session):
+        """Accept only a fresh, valid geometric occupancy veto for waiting."""
+        if not isinstance(result, dict) or not (
+            result.get("permitted") is False
+            and result.get("reason") == "rotational_protected_region_violated"
+            and result.get("validation_reason") == "rotational_protected_region_violated"
+            and result.get("producer_session") == expected_session
+        ):
+            return False
+        age = result.get("effective_age_seconds")
+        footprint = result.get("rotational_swept_footprint")
+        point = footprint.get("violating_point") if isinstance(footprint, dict) else None
+        geometry = footprint.get("geometry") if isinstance(footprint, dict) else None
+        if not (
+            isinstance(age, (int, float)) and not isinstance(age, bool)
+            and math.isfinite(age) and 0.0 <= age <= MAXIMUM_EFFECTIVE_AGE_SECONDS
+            and isinstance(footprint, dict)
+            and footprint.get("permitted") is False
+            and footprint.get("reason") == "rotational_protected_region_violated"
+            and footprint.get("protected_radius_m") == 0.45
+            and isinstance(geometry, dict) and geometry.get("valid") is True
+            and geometry.get("frame_id") == EXPECTED_LIDAR_FRAME
+            and isinstance(geometry.get("points"), list)
+            and isinstance(geometry.get("sectors"), dict)
+            and isinstance(point, dict)
+        ):
+            return False
+        x_value, y_value = point.get("x_m"), point.get("y_m")
+        return bool(
+            isinstance(x_value, (int, float)) and not isinstance(x_value, bool)
+            and isinstance(y_value, (int, float)) and not isinstance(y_value, bool)
+            and math.isfinite(x_value) and math.isfinite(y_value)
+            and math.hypot(x_value, y_value) <= 0.45
+        )
+
+    def _stop_and_verify_bridge_zero(self):
+        """Establish and independently verify zero before a scan clearance wait."""
+        try:
+            stopped = self.robot.stop()
+        except Exception as exc:
+            return False, {"ok": False, "reason": "clearance_wait_stop_exception",
+                           "error": str(exc), "error_type": type(exc).__name__}, None
+        if not isinstance(stopped, dict) or stopped.get("ok") is not True:
+            return False, {"ok": False, "reason": "clearance_wait_stop_failed",
+                           "stop_result": stopped}, None
+        try:
+            status = self.robot.status()
+        except Exception as exc:
+            return False, {"ok": False, "reason": "clearance_wait_bridge_status_exception",
+                           "error": str(exc), "error_type": type(exc).__name__}, None
+        if not _bridge_status_zero(status):
+            return False, {"ok": False, "reason": "clearance_wait_bridge_not_zero",
+                           "bridge_status": status}, status
+        return True, {"ok": True, "stop_result": stopped}, status
 
     def _publish_tracking_state(self, result):
         callback = getattr(self, "tracking_state_callback", None)
@@ -1175,6 +1244,7 @@ class BehaviorManager:
         now=None,
         target_directed=None,
         safety_mode="LEGACY_BROAD_SIDE",
+        validate_only=False,
     ):
         """Validate and execute one explicit bounded turn request.
 
@@ -1245,6 +1315,12 @@ class BehaviorManager:
                 validation_reason="turn_already_active",
                 inhibited=True,
             )
+            return result
+
+        if validate_only:
+            # Clearance polling may inspect a fresh JIT result without
+            # authorizing a turn after its mission-scoped deadline.
+            result["validation_only"] = True
             return result
 
         if not validation.get("permitted"):
@@ -1588,52 +1664,307 @@ class BehaviorManager:
             return dict(result, reason="lidar_producer_session_unavailable")
         direction = SCAN_DIRECTION
         primitive = "guarded_turn_left"
-        try:
-            guarded_turn = self.execute_guarded_turn(
-                direction,
-                self.MARVIN_SEARCH_TURN_SPEED,
-                self.MARVIN_SEARCH_TURN_SECONDS,
-                expected_lidar_session=session,
-                now=now,
-                safety_mode=ROTATIONAL_SWEPT_FOOTPRINT,
-            )
-        except Exception as exc:
-            return dict(
-                result,
-                decision="search_turn",
-                executed_primitive=primitive,
-                reason="marvin_search_guarded_turn_exception",
-                error=str(exc),
-                error_type=type(exc).__name__,
-            )
-        turn_ok = bool(
-            isinstance(guarded_turn, dict)
-            and guarded_turn.get("ok") is True
-            and guarded_turn.get("permitted") is True
-            and guarded_turn.get("confirmed_forwarded") is True
+        scan = self._room_scan_snapshot()
+        wait_started = (
+            scan.get("clearance_wait_started_monotonic")
+            if scan and scan.get("clearance_wait_active") is True else None
         )
-        if not turn_ok:
-            return dict(
-                result,
-                decision="search_turn",
-                executed_primitive=primitive,
-                guarded_turn_result=guarded_turn,
-                reason=(
-                    guarded_turn.get("reason", "marvin_search_guarded_turn_failed")
-                    if isinstance(guarded_turn, dict)
-                    else "marvin_search_guarded_turn_failed"
-                ),
+        recheck_count = scan.get("clearance_recheck_count", 0) if scan else 0
+        last_block = None
+        while True:
+            if wait_started is not None:
+                if not self._execution_is_current():
+                    ok_zero, stop_evidence, bridge_status = self._stop_and_verify_bridge_zero()
+                    return dict(
+                        result,
+                        decision="clearance_wait_preempted",
+                        stop_evidence=stop_evidence,
+                        bridge_status=bridge_status,
+                        bridge_zero_reestablished=ok_zero,
+                        reason="find_marvin_clearance_wait_preempted",
+                    )
+                try:
+                    waiting_status = self.robot.status()
+                except Exception:
+                    waiting_status = None
+                if not _bridge_status_zero(waiting_status):
+                    ok_zero, stop_evidence, bridge_status = self._stop_and_verify_bridge_zero()
+                    if not ok_zero:
+                        return dict(
+                            result,
+                            decision="clearance_wait_bridge_not_zero",
+                            stop_evidence=stop_evidence,
+                            bridge_status=bridge_status,
+                            reason=stop_evidence.get(
+                                "reason", "find_marvin_clearance_wait_bridge_not_zero"
+                            ),
+                        )
+            if (
+                wait_started is not None
+                and time.monotonic() - wait_started
+                >= self.MARVIN_CLEARANCE_WAIT_TIMEOUT_SECONDS
+            ):
+                try:
+                    deadline_check = self.execute_guarded_turn(
+                        direction,
+                        self.MARVIN_SEARCH_TURN_SPEED,
+                        self.MARVIN_SEARCH_TURN_SECONDS,
+                        expected_lidar_session=session,
+                        now=None,
+                        safety_mode=ROTATIONAL_SWEPT_FOOTPRINT,
+                        validate_only=True,
+                    )
+                except Exception as exc:
+                    return dict(
+                        result,
+                        decision="clearance_wait_safety_recheck_failed",
+                        error=str(exc), error_type=type(exc).__name__,
+                        reason="marvin_search_guarded_turn_exception",
+                    )
+                if not (
+                    self._is_rotational_clearance_block(deadline_check, session)
+                    or (
+                        isinstance(deadline_check, dict)
+                        and deadline_check.get("permitted") is True
+                        and deadline_check.get("validation_only") is True
+                    )
+                ):
+                    return dict(
+                        result,
+                        decision="clearance_wait_safety_recheck_failed",
+                        guarded_turn_result=deadline_check,
+                        reason=(
+                            deadline_check.get("reason", "marvin_search_guarded_turn_failed")
+                            if isinstance(deadline_check, dict)
+                            else "marvin_search_guarded_turn_failed"
+                        ),
+                    )
+                if not self._is_rotational_clearance_block(deadline_check, session):
+                    # A newly clear result at/after the deadline is too late
+                    # to resume; importantly, validation_only sent no motion.
+                    last_block = deadline_check.get("reason")
+                ok_zero, stop_evidence, bridge_status = self._stop_and_verify_bridge_zero()
+                if not ok_zero:
+                    return dict(
+                        result,
+                        decision="clearance_wait_bridge_not_zero",
+                        guarded_turn_result=deadline_check,
+                        stop_evidence=stop_evidence,
+                        bridge_status=bridge_status,
+                        reason=stop_evidence.get("reason", "clearance_wait_stop_failed"),
+                    )
+                elapsed = max(0.0, time.monotonic() - wait_started)
+                diagnostics = {
+                    "clearance_wait_active": False,
+                    "clearance_wait_elapsed_seconds": elapsed,
+                    "clearance_wait_timeout_seconds": self.MARVIN_CLEARANCE_WAIT_TIMEOUT_SECONDS,
+                    "pending_scan_turn_index": scan_turn_index,
+                    "pending_scan_direction": "LEFT",
+                    "last_rotational_safety_reason": last_block,
+                    "clearance_recheck_count": recheck_count + 1,
+                    "guarded_turn_result": deadline_check,
+                    "stop_evidence": stop_evidence,
+                    "bridge_status": bridge_status,
+                }
+                if scan is not None:
+                    self._room_scan_update(
+                        search_state="CLEARANCE_WAIT_TIMED_OUT",
+                        clearance_wait_active=False,
+                        clearance_recheck_count=recheck_count + 1,
+                        last_rotational_safety_reason=last_block,
+                    )
+                return dict(
+                    result,
+                    ok=True,
+                    decision="clearance_wait_timeout",
+                    motion_executed=False,
+                    clearance_wait_timed_out=True,
+                    **diagnostics,
+                    reason="find_marvin_clearance_wait_timeout",
+                )
+            try:
+                guarded_turn = self.execute_guarded_turn(
+                    direction,
+                    self.MARVIN_SEARCH_TURN_SPEED,
+                    self.MARVIN_SEARCH_TURN_SECONDS,
+                    expected_lidar_session=session,
+                    # Only the initial decision inherits the controller's
+                    # supplied clock. Rechecks must evaluate live monotonic
+                    # freshness from a newly acquired World Model snapshot.
+                    now=now if wait_started is None else None,
+                    safety_mode=ROTATIONAL_SWEPT_FOOTPRINT,
+                )
+            except Exception as exc:
+                if wait_started is not None:
+                    self._room_scan_update(
+                        clearance_wait_active=False,
+                        search_state="SEARCHING",
+                    )
+                return dict(
+                    result,
+                    decision="search_turn",
+                    executed_primitive=primitive,
+                    reason="marvin_search_guarded_turn_exception",
+                    error=str(exc),
+                    error_type=type(exc).__name__,
+                )
+            turn_ok = bool(
+                isinstance(guarded_turn, dict)
+                and guarded_turn.get("ok") is True
+                and guarded_turn.get("permitted") is True
+                and guarded_turn.get("confirmed_forwarded") is True
             )
-        return dict(
-            result,
-            ok=True,
-            decision="search_turn",
-            motion_executed=True,
-            executed_primitive=primitive,
-            replan_required=True,
-            guarded_turn_result=guarded_turn,
-            reason="marvin_search_guarded_turn_complete",
-        )
+            if turn_ok:
+                diagnostics = {
+                    "clearance_wait_active": False,
+                    "clearance_wait_timeout_seconds": self.MARVIN_CLEARANCE_WAIT_TIMEOUT_SECONDS,
+                    "pending_scan_turn_index": scan_turn_index,
+                    "pending_scan_direction": direction,
+                    "last_rotational_safety_reason": last_block,
+                    "clearance_recheck_count": recheck_count,
+                    "clearance_wait_elapsed_seconds": (
+                        max(0.0, time.monotonic() - wait_started)
+                        if wait_started is not None else 0.0
+                    ),
+                }
+                if wait_started is not None:
+                    self._room_scan_update(
+                        clearance_wait_active=False,
+                        clearance_wait_started_monotonic=None,
+                        clearance_recheck_count=recheck_count,
+                        last_rotational_safety_reason=last_block,
+                        pending_scan_turn_index=None,
+                        pending_scan_direction=None,
+                        search_state="SEARCHING",
+                    )
+                return dict(
+                    result,
+                    ok=True,
+                    decision="search_turn",
+                    motion_executed=True,
+                    executed_primitive=primitive,
+                    replan_required=True,
+                    guarded_turn_result=guarded_turn,
+                    reason="marvin_search_guarded_turn_complete",
+                    **diagnostics,
+                )
+
+            if not self._is_rotational_clearance_block(guarded_turn, session):
+                if wait_started is not None:
+                    self._room_scan_update(
+                        clearance_wait_active=False,
+                        search_state="SEARCHING",
+                    )
+                return dict(
+                    result,
+                    decision="search_turn",
+                    executed_primitive=primitive,
+                    guarded_turn_result=guarded_turn,
+                    reason=(
+                        guarded_turn.get("reason", "marvin_search_guarded_turn_failed")
+                        if isinstance(guarded_turn, dict)
+                        else "marvin_search_guarded_turn_failed"
+                    ),
+                )
+
+            if wait_started is None:
+                wait_started = time.monotonic()
+            last_block = guarded_turn.get("reason")
+            ok_zero, stop_evidence, bridge_status = self._stop_and_verify_bridge_zero()
+            elapsed = max(0.0, time.monotonic() - wait_started)
+            if not ok_zero:
+                self._room_scan_update(
+                    clearance_wait_active=False,
+                    last_rotational_safety_reason=last_block,
+                    search_state="SEARCHING",
+                )
+                return dict(
+                    result,
+                    decision="search_turn",
+                    executed_primitive=primitive,
+                    guarded_turn_result=guarded_turn,
+                    stop_evidence=stop_evidence,
+                    bridge_status=bridge_status,
+                    clearance_wait_elapsed_seconds=elapsed,
+                    reason=stop_evidence.get("reason", "clearance_wait_stop_failed"),
+                )
+            if scan is not None:
+                self._room_scan_update(
+                    search_state="FIND_MARVIN_WAITING_FOR_CLEARANCE",
+                    clearance_wait_active=True,
+                    clearance_wait_started_monotonic=wait_started,
+                    clearance_recheck_count=recheck_count,
+                    pending_scan_turn_index=scan_turn_index,
+                    pending_scan_direction="LEFT",
+                    last_rotational_safety_reason=last_block,
+                )
+            if elapsed >= self.MARVIN_CLEARANCE_WAIT_TIMEOUT_SECONDS:
+                diagnostics = {
+                    "clearance_wait_active": False,
+                    "clearance_wait_elapsed_seconds": elapsed,
+                    "clearance_wait_timeout_seconds": self.MARVIN_CLEARANCE_WAIT_TIMEOUT_SECONDS,
+                    "pending_scan_turn_index": scan_turn_index,
+                    "pending_scan_direction": "LEFT",
+                    "last_rotational_safety_reason": last_block,
+                    "clearance_recheck_count": recheck_count,
+                    "stop_evidence": stop_evidence,
+                    "bridge_status": bridge_status,
+                }
+                if scan is not None:
+                    self._room_scan_update(
+                        search_state="CLEARANCE_WAIT_TIMED_OUT",
+                        clearance_wait_active=False,
+                        clearance_recheck_count=recheck_count,
+                    )
+                return dict(
+                    result,
+                    ok=True,
+                    decision="clearance_wait_timeout",
+                    motion_executed=False,
+                    clearance_wait_timed_out=True,
+                    **diagnostics,
+                    reason="find_marvin_clearance_wait_timeout",
+                )
+            if not self._execution_is_current():
+                self._room_scan_update(
+                    clearance_wait_active=False,
+                    search_state="SEARCHING",
+                )
+                return dict(
+                    result, decision="clearance_wait_preempted",
+                    guarded_turn_result=guarded_turn,
+                    stop_evidence=stop_evidence,
+                    bridge_status=bridge_status,
+                    reason="find_marvin_clearance_wait_preempted",
+                )
+            time.sleep(min(
+                self.MARVIN_CLEARANCE_RECHECK_INTERVAL_SECONDS,
+                self.MARVIN_CLEARANCE_WAIT_TIMEOUT_SECONDS - elapsed,
+            ))
+            # Verify zero at every passive wait boundary before another fresh
+            # JIT guard evaluation is allowed.
+            try:
+                bridge_status = self.robot.status()
+            except Exception as exc:
+                bridge_status = None
+                status_error = {"error": str(exc), "error_type": type(exc).__name__}
+            else:
+                status_error = None
+            if status_error is not None or not _bridge_status_zero(bridge_status):
+                stop_ok, stop_evidence, stopped_status = self._stop_and_verify_bridge_zero()
+                return dict(
+                    result,
+                    decision="clearance_wait_bridge_not_zero",
+                    guarded_turn_result=guarded_turn,
+                    bridge_status=(stopped_status if stopped_status is not None else bridge_status),
+                    status_error=status_error,
+                    stop_evidence=stop_evidence,
+                    bridge_zero_reestablished=stop_ok,
+                    reason="find_marvin_clearance_wait_bridge_not_zero",
+                )
+            recheck_count += 1
+            if scan is not None:
+                self._room_scan_update(clearance_recheck_count=recheck_count)
 
     def build_find_marvin_controller_state(self, *, now=None):
         """Read current Marvin evidence for one controller decision.
@@ -2490,6 +2821,9 @@ class BehaviorManager:
                     )
                 history_entry["route"] = "search"
                 history_entry["selected_action"] = "search_step"
+                history_entry["pending_scan_turn_index"] = (
+                    scan.get("scan_turn_index", 0) if scan else local_scan_turn_index
+                )
                 if dry_run:
                     history_entry["selected_action"] = "dry_run_search"
                     base["history"].append(history_entry)
@@ -2556,6 +2890,28 @@ class BehaviorManager:
                     return dict(
                         base, history=list(base["history"]),
                         reason="find_marvin_post_action_stop_failed",
+                    )
+                if (
+                    isinstance(step, dict)
+                    and step.get("clearance_wait_timed_out") is True
+                    and step.get("reason") == "find_marvin_clearance_wait_timeout"
+                ):
+                    # The rejected turn and passive safety rechecks dispatched
+                    # no motion; do not count them against the physical-action
+                    # episode budget.
+                    base["actions_executed"] = max(
+                        0, base["actions_executed"] - 1,
+                    )
+                    history_entry["action_budget_consumed"] = False
+                    history_entry["clearance_wait_timeout"] = True
+                    return dict(
+                        base,
+                        ok=True,
+                        completed=True,
+                        arrived_at_marvin=False,
+                        history=list(base["history"]),
+                        reason="find_marvin_clearance_wait_timeout",
+                        clearance_wait=step,
                     )
                 if not isinstance(step, dict) or step.get("ok") is not True:
                     return dict(

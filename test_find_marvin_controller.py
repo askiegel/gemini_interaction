@@ -170,6 +170,32 @@ def test_search_dispatch_attempt_consumes_budget_and_requires_stop(monkeypatch):
     assert result["reason"] == "find_marvin_post_action_stop_failed"
 
 
+def test_rotational_clearance_timeout_does_not_consume_motion_action_budget(monkeypatch):
+    timeout = {
+        "ok": True,
+        "decision": "clearance_wait_timeout",
+        "search_action": "turn_left",
+        "planner": {"selected_search_action": "turn_left"},
+        "motion_executed": False,
+        "clearance_wait_timed_out": True,
+        "pending_scan_turn_index": 23,
+        "reason": "find_marvin_clearance_wait_timeout",
+    }
+    result, _providers, _evaluations, _arrivals, searches, _pursuits = invoke(
+        monkeypatch,
+        [pursuit("SEARCHING", False)],
+        search_steps=[timeout],
+        max_actions=1,
+        stop_after_action=lambda: {"ok": True},
+    )
+    assert len(searches) == 1
+    assert result["reason"] == "find_marvin_clearance_wait_timeout"
+    assert result["completed"] is True and result["arrived_at_marvin"] is False
+    assert result["actions_executed"] == 0
+    assert result["history"][0]["action_budget_consumed"] is False
+    assert result["history"][0]["pending_scan_turn_index"] == 0
+
+
 def test_ready_authorized_routes_only_to_pursuit(monkeypatch):
     result, _providers, _evaluations, _arrivals, searches, pursuits = invoke(monkeypatch, [pursuit()], max_actions=1)
     assert searches == [] and len(pursuits) == result["actions_executed"] == 1
