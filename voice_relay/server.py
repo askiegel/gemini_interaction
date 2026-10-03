@@ -2282,64 +2282,53 @@ class VoiceRelayHandler(BaseHTTPRequestHandler):
                 ),
             }
 
-        status = self.dashboard_status()
-        runtime = status.get("runtime", {})
-        missions = status.get("missions", {})
-        lidar_value = runtime.get("lidar", {})
-        lidar = lidar_value if isinstance(lidar_value, dict) else {}
-        interlock_value = runtime.get("forward_interlock", {})
-        interlock = interlock_value if isinstance(interlock_value, dict) else {}
-        robot = status.get("robot", {})
-        motion_value = robot.get("motion", {})
-        motion = motion_value if isinstance(motion_value, dict) else {}
-        failures = []
-
-        def stopped_number(value):
-            return bool(
-                isinstance(value, (int, float))
-                and not isinstance(value, bool)
-                and math.isfinite(value)
-                and value == 0
-            )
-
-        requirements = (
-            (runtime.get("connected") is True, "runtime status unavailable"),
-            (runtime.get("running") is True, "runtime is not running"),
-            (runtime.get("state") == "IDLE", "runtime is not IDLE"),
-            (missions.get("active") is None, "another mission is active"),
-            (missions.get("queue_count") == 0, "mission queue is not empty"),
-            (runtime.get("last_error") is None, "runtime reports an error"),
-            (lidar.get("running") is True, "LiDAR worker is not running"),
-            (lidar.get("available") is True, "LiDAR is unavailable"),
-            (lidar.get("valid") is True, "LiDAR is invalid"),
-            (lidar.get("reason") == "fresh", "LiDAR is not fresh"),
-            (lidar.get("front_state") in {"CLEAR", "CAUTION", "BLOCKED"}, "LiDAR front sector is unavailable"),
-            (lidar.get("session_matches") is True, "LiDAR producer session does not match"),
-            (lidar.get("local_motion_geometry_valid") is True, "LiDAR local geometry is invalid"),
-            (lidar.get("required_sectors_valid") is True, "LiDAR required sectors are incomplete"),
-            (interlock.get("configured") is True, "forward interlock is not configured"),
-            (interlock.get("monitor_running") is True, "forward interlock monitor is not running"),
-            (interlock.get("forward_permitted") is True, "forward motion is not permitted"),
-            (interlock.get("reason") == "fresh_clear", "forward interlock is not fresh_clear"),
-            (interlock.get("producer_session") == lidar.get("producer_session"), "forward interlock LiDAR session does not match"),
-            (interlock.get("active_forward") is False, "forward motion is active"),
-            (interlock.get("pending_forward") is False, "forward motion is pending"),
-            (robot.get("connected") is True, "Robot Bridge status unavailable"),
-            (robot.get("status") == "READY", "Robot Bridge is not READY"),
-            (robot.get("ros_ready") is True, "Robot Bridge ROS is not ready"),
-            (isinstance(motion_value, dict), "Robot Bridge motion telemetry is unavailable"),
-            (stopped_number(motion.get("linear_x")), "Robot Bridge linear motion is not zero"),
-            (stopped_number(motion.get("angular_z")), "Robot Bridge angular motion is not zero"),
-            (motion.get("streaming") is False, "Robot Bridge streaming motion is active"),
+        snapshot_response = request_json(
+            "GET",
+            f"{COGNITIVE_RUNTIME_URL}/find-marvin/admission-snapshot",
+            timeout=5.0,
         )
-        failures.extend(reason for safe, reason in requirements if not safe)
+        snapshot = (
+            snapshot_response.get("data")
+            if snapshot_response.get("ok") is True
+            else None
+        )
+        if not isinstance(snapshot, dict):
+            return 503, {
+                "ok": False,
+                "accepted": False,
+                "error": "Find Marvin admission snapshot unavailable.",
+                "reasons": [
+                    snapshot_response.get("error")
+                    or "find_marvin_admission_snapshot_unavailable"
+                ],
+            }
 
-        if failures:
+        snapshot_shape_valid = bool(
+            snapshot.get("ok") is True
+            and isinstance(snapshot.get("evaluation_timestamp"), str)
+            and isinstance(snapshot.get("runtime"), dict)
+            and isinstance(snapshot.get("lidar"), dict)
+            and isinstance(snapshot.get("forward_interlock"), dict)
+            and isinstance(snapshot.get("bridge"), dict)
+            and isinstance(snapshot.get("reasons"), list)
+            and type(snapshot.get("admission_ready")) is bool
+        )
+        if not snapshot_shape_valid:
+            return 503, {
+                "ok": False,
+                "accepted": False,
+                "error": "Find Marvin admission snapshot malformed.",
+                "reasons": ["find_marvin_admission_snapshot_malformed"],
+                "admission_snapshot": snapshot,
+            }
+
+        if snapshot.get("admission_ready") is not True:
             return 409, {
                 "ok": False,
                 "accepted": False,
                 "error": "Find Marvin preflight failed.",
-                "reasons": failures,
+                "reasons": snapshot["reasons"],
+                "admission_snapshot": snapshot,
             }
 
         payload = {

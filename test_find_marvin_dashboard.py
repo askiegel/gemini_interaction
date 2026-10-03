@@ -13,47 +13,48 @@ JS = (ROOT / "voice_relay" / "operator_console.js").read_text(encoding="utf-8")
 SERVER = (ROOT / "voice_relay" / "server.py").read_text(encoding="utf-8")
 
 
-def safe_status():
+def safe_admission_snapshot():
     return {
+        "ok": True,
+        "evaluation_timestamp": "2026-10-02T12:00:00+00:00",
+        "admission_ready": True,
+        "reasons": [],
         "runtime": {
-            "connected": True,
             "running": True,
             "state": "IDLE",
             "last_error": None,
-            "lidar": {
-                "running": True,
-                "available": True,
-                "valid": True,
-                "reason": "fresh",
-                "producer_session": "lidar-session",
-                "session_matches": True,
-                "local_motion_geometry_valid": True,
-                "required_sectors_valid": True,
-                "front_state": "CLEAR",
-            },
-            "forward_interlock": {
-                "configured": True,
-                "monitor_running": True,
-                "forward_permitted": True,
-                "reason": "fresh_clear",
-                "producer_session": "lidar-session",
-                "active_forward": False,
-                "pending_forward": False,
-            },
+            "active_mission": None,
+            "queue": [],
+            "queue_count": 0,
         },
-        "missions": {"active": None, "queue_count": 0},
-        "robot": {
+        "lidar": {
+            "running": True, "available": True, "valid": True,
+            "reason": "fresh", "age_seconds": 0.08,
+            "acquisition_sequence": 17,
+            "producer_session": "lidar-session",
+            "expected_session": "lidar-session", "session_matches": True,
+            "worker_error": None, "front_state": "CLEAR",
+            "local_motion_geometry_valid": True,
+            "required_sectors_valid": True,
+        },
+        "forward_interlock": {
+            "configured": True, "monitor_running": True,
+            "age_seconds": 0.08, "reason": "fresh_clear",
+            "front_state": "CLEAR", "forward_permitted": True,
+            "producer_session": "lidar-session", "session_matches": True,
+            "active_forward": False, "pending_forward": False,
+        },
+        "bridge": {
             "connected": True,
             "status": "READY",
             "ros_ready": True,
-            "motion": {"linear_x": 0, "angular_z": 0, "streaming": False},
+            "linear_x": 0, "angular_z": 0, "streaming": False,
         },
     }
 
 
 def test_dedicated_route_constructs_one_fixed_find_object_mission():
     handler = object.__new__(VoiceRelayHandler)
-    handler.dashboard_status = safe_status
     accepted = {
         "ok": True,
         "accepted": True,
@@ -61,64 +62,111 @@ def test_dedicated_route_constructs_one_fixed_find_object_mission():
     }
     with patch(
         "voice_relay.server.request_json",
-        return_value={
-            "ok": True,
-            "status_code": 202,
-            "data": accepted,
-            "error": None,
-        },
+        side_effect=[
+            {"ok": True, "status_code": 200,
+             "data": safe_admission_snapshot(), "error": None},
+            {"ok": True, "status_code": 202,
+             "data": accepted, "error": None},
+        ],
     ) as request:
-        status_code, payload = handler.submit_find_marvin()
+        status_code, payload = handler.submit_find_marvin(execute=True)
 
     assert status_code == 202
     assert payload == accepted
-    request.assert_called_once_with(
+    assert request.call_count == 2
+    assert request.call_args_list[0].args == (
+        "GET",
+        "http://127.0.0.1:8770/find-marvin/admission-snapshot",
+    )
+    assert request.call_args_list[0].kwargs == {"timeout": 5.0}
+    assert request.call_args_list[1].args == (
         "POST",
         "http://127.0.0.1:8770/missions",
-        payload={
+    )
+    assert request.call_args_list[1].kwargs == {
+        "payload": {
             "source_text": "Find Marvin.",
             "intent": {
                 "intent": "FIND_OBJECT",
                 "speech": "Find Marvin.",
-                "target": "teddy bear",
+                    "target": "marvin",
             },
         },
-        timeout=15.0,
+        "timeout": 15.0,
+    }
+
+
+def test_preflight_uses_one_runtime_snapshot_and_returns_its_exact_diagnostics():
+    handler = object.__new__(VoiceRelayHandler)
+    snapshot = safe_admission_snapshot()
+    snapshot.update(admission_ready=False, reasons=["LiDAR is not fresh"])
+    snapshot["lidar"].update(
+        available=False, valid=False, reason="stale", age_seconds=0.304,
+        acquisition_sequence=21, worker_error="telemetry timeout",
+    )
+    snapshot["forward_interlock"].update(
+        forward_permitted=False, reason="stale", age_seconds=0.304,
+    )
+    with patch(
+        "voice_relay.server.request_json",
+        return_value={"ok": True, "status_code": 200,
+                      "data": snapshot, "error": None},
+    ) as request:
+        status_code, payload = handler.submit_find_marvin(execute=True)
+
+    assert status_code == 409
+    assert payload["reasons"] == ["LiDAR is not fresh"]
+    assert payload["admission_snapshot"] == snapshot
+    request.assert_called_once_with(
+        "GET",
+        "http://127.0.0.1:8770/find-marvin/admission-snapshot",
+        timeout=5.0,
     )
 
 
 def test_unsafe_preflight_never_forwards_mission():
     handler = object.__new__(VoiceRelayHandler)
-    unsafe = safe_status()
-    unsafe["missions"]["active"] = {"mission_type": "FOLLOW_PERSON"}
-    unsafe["runtime"]["lidar"]["reason"] = "stale"
-    unsafe["runtime"]["forward_interlock"]["forward_permitted"] = False
-    handler.dashboard_status = lambda: unsafe
+    unsafe = safe_admission_snapshot()
+    unsafe["runtime"]["active_mission"] = {"mission_type": "FOLLOW_PERSON"}
+    unsafe.update(admission_ready=False, reasons=[
+        "another mission is active", "LiDAR is not fresh",
+    ])
+    unsafe["lidar"]["reason"] = "stale"
+    unsafe["forward_interlock"]["forward_permitted"] = False
 
-    with patch("voice_relay.server.request_json") as request:
-        status_code, payload = handler.submit_find_marvin()
+    with patch("voice_relay.server.request_json", return_value={
+        "ok": True, "status_code": 200, "data": unsafe, "error": None,
+    }) as request:
+        status_code, payload = handler.submit_find_marvin(execute=True)
 
     assert status_code == 409
     assert payload["accepted"] is False
     assert "another mission is active" in payload["reasons"]
     assert "LiDAR is not fresh" in payload["reasons"]
-    request.assert_not_called()
+    request.assert_called_once_with(
+        "GET",
+        "http://127.0.0.1:8770/find-marvin/admission-snapshot",
+        timeout=5.0,
+    )
 
 
-def test_normal_mission_admits_healthy_caution_or_blocked_front():
-    for front_state in ("CAUTION", "BLOCKED"):
+def test_normal_mission_admits_healthy_clear_caution_or_blocked_front():
+    for front_state in ("CLEAR", "CAUTION", "BLOCKED"):
         handler = object.__new__(VoiceRelayHandler)
-        status = safe_status()
-        status["runtime"]["lidar"]["front_state"] = front_state
-        handler.dashboard_status = lambda status=status: status
+        status = safe_admission_snapshot()
+        status["lidar"]["front_state"] = front_state
+        status["forward_interlock"]["front_state"] = front_state
         with patch(
             "voice_relay.server.request_json",
-            return_value={"status_code": 202, "data": {"accepted": True}},
+            side_effect=[
+                {"ok": True, "status_code": 200, "data": status, "error": None},
+                {"ok": True, "status_code": 202, "data": {"accepted": True}, "error": None},
+            ],
         ) as request:
             status_code, payload = handler.submit_find_marvin(execute=True)
         assert status_code == 202
         assert payload["accepted"] is True
-        request.assert_called_once()
+        assert request.call_count == 2
 
 
 def test_normal_mission_rejects_bad_lidar_session_or_incomplete_geometry():
@@ -128,26 +176,32 @@ def test_normal_mission_rejects_bad_lidar_session_or_incomplete_geometry():
         ("required_sectors_valid", False, "LiDAR required sectors are incomplete"),
     ):
         handler = object.__new__(VoiceRelayHandler)
-        status = safe_status()
-        status["runtime"]["lidar"][field] = value
-        handler.dashboard_status = lambda status=status: status
-        with patch("voice_relay.server.request_json") as request:
+        status = safe_admission_snapshot()
+        status["admission_ready"] = False
+        status["reasons"] = [reason]
+        status["lidar"][field] = value
+        with patch("voice_relay.server.request_json", return_value={
+            "ok": True, "status_code": 200, "data": status, "error": None,
+        }) as request:
             status_code, payload = handler.submit_find_marvin(execute=True)
         assert status_code == 409
         assert reason in payload["reasons"]
-        request.assert_not_called()
+        request.assert_called_once()
 
 
 def test_normal_mission_rejects_unknown_front_as_missing_sector_evidence():
     handler = object.__new__(VoiceRelayHandler)
-    status = safe_status()
-    status["runtime"]["lidar"]["front_state"] = "UNKNOWN"
-    handler.dashboard_status = lambda: status
-    with patch("voice_relay.server.request_json") as request:
+    status = safe_admission_snapshot()
+    status["admission_ready"] = False
+    status["reasons"] = ["LiDAR front sector is unavailable"]
+    status["lidar"]["front_state"] = "UNKNOWN"
+    with patch("voice_relay.server.request_json", return_value={
+        "ok": True, "status_code": 200, "data": status, "error": None,
+    }) as request:
         status_code, payload = handler.submit_find_marvin(execute=True)
     assert status_code == 409
     assert "LiDAR front sector is unavailable" in payload["reasons"]
-    request.assert_not_called()
+    request.assert_called_once()
 
 
 def test_normal_mission_still_rejects_unhealthy_lidar():
@@ -158,38 +212,40 @@ def test_normal_mission_still_rejects_unhealthy_lidar():
         ("reason", "stale", "LiDAR is not fresh"),
     ):
         handler = object.__new__(VoiceRelayHandler)
-        status = safe_status()
-        status["runtime"]["lidar"][field] = value
-        handler.dashboard_status = lambda status=status: status
-        with patch("voice_relay.server.request_json") as request:
+        status = safe_admission_snapshot()
+        status["admission_ready"] = False
+        status["reasons"] = [reason]
+        status["lidar"][field] = value
+        with patch("voice_relay.server.request_json", return_value={
+            "ok": True, "status_code": 200, "data": status, "error": None,
+        }) as request:
             status_code, payload = handler.submit_find_marvin(execute=True)
         assert status_code == 409
         assert reason in payload["reasons"]
-        request.assert_not_called()
+        request.assert_called_once()
 
 
 def test_missing_or_malformed_preflight_fields_fail_closed():
     handler = object.__new__(VoiceRelayHandler)
-    handler.dashboard_status = lambda: {
-        "runtime": {}, "missions": {}, "robot": {}
-    }
+    with patch("voice_relay.server.request_json", return_value={
+        "ok": True, "status_code": 200,
+        "data": {"ok": True, "admission_ready": True}, "error": None,
+    }) as request:
+        status_code, payload = handler.submit_find_marvin(execute=True)
 
-    with patch("voice_relay.server.request_json") as request:
-        status_code, payload = handler.submit_find_marvin()
-
-    assert status_code == 409
+    assert status_code == 503
     assert payload["accepted"] is False
-    assert payload["reasons"]
-    request.assert_not_called()
+    assert payload["reasons"] == ["find_marvin_admission_snapshot_malformed"]
+    request.assert_called_once()
 
 
 def test_route_and_browser_cannot_supply_arbitrary_mission_fields():
     assert 'path == "/dashboard/find-marvin"' in SERVER
-    assert "if payload != {}:" in SERVER
-    assert "accepts no browser-supplied mission fields" in SERVER
+    assert 'allowed_fields = {"execute"}' in SERVER
+    assert "Find Marvin accepts only execution authorization." in SERVER
     assert 'body: JSON.stringify({})' in HTML
-    assert '"target": "teddy bear"' in SERVER
-    assert '"target": "teddy bear"' not in HTML
+    assert '"target": "marvin"' in SERVER
+    assert '"target": "marvin"' not in HTML
 
     handler = object.__new__(VoiceRelayHandler)
     handler.path = "/dashboard/find-marvin"

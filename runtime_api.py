@@ -31,6 +31,7 @@ class RuntimeAPIHandler(BaseHTTPRequestHandler):
         GET  /health
         GET  /status
         GET  /missions
+        GET  /find-marvin/admission-snapshot
         GET  /config
         GET  /diagnostics
         GET  /world-model
@@ -172,6 +173,24 @@ class RuntimeAPIHandler(BaseHTTPRequestHandler):
                 200,
                 self.server.runtime.get_status(),
             )
+            return
+
+        if path == "/find-marvin/admission-snapshot":
+            try:
+                snapshot = (
+                    self.server.runtime
+                    .get_find_marvin_admission_snapshot()
+                )
+                self.send_json(200, snapshot)
+            except Exception as exc:
+                self.send_json(
+                    500,
+                    {
+                        "ok": False,
+                        "error": "find_marvin_admission_snapshot_failed",
+                        "detail": f"{type(exc).__name__}: {exc}",
+                    },
+                )
             return
 
         if path == "/find-object/preview":

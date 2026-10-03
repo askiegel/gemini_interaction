@@ -6,12 +6,16 @@ import math
 import signal
 import threading
 import time
+from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
 from behavior_manager import BehaviorManager
 from config import load_config
 from lidar_perception import LidarPerceptionWorker, unavailable_state
-from robot_bridge.forward_interlock import ForwardMotionInterlock
+from robot_bridge.forward_interlock import (
+    ForwardMotionInterlock,
+    evaluate_lidar_state,
+)
 from mission_manager import MissionManager
 from provider_factory import create_provider
 from robot_bridge.client import RobotBridgeClient
@@ -2047,6 +2051,235 @@ class CognitiveRuntime:
             ),
             "last_error": self._lidar_error or (worker.last_error if worker is not None else None),
         }
+
+    def get_find_marvin_admission_snapshot(self):
+        """Return one read-only, coherent safety/status view for Find Marvin.
+
+        The forward-interlock health portion is evaluated against the exact
+        LiDAR state copied for this snapshot. Its cached monitor result is
+        included separately for diagnostics, but is not substituted for the
+        current sample.
+        """
+        bridge_status = None
+        bridge_error = None
+        bridge_status_reader = getattr(self.robot_client, "status", None)
+        if callable(bridge_status_reader):
+            try:
+                bridge_status = bridge_status_reader()
+            except Exception as exc:
+                bridge_error = f"{type(exc).__name__}: {exc}"
+        else:
+            bridge_error = "robot_bridge_status_unavailable"
+
+        with self._state_lock:
+            worker = self.lidar_worker
+            expected_session = worker.session if worker is not None else None
+            try:
+                lidar_state = self.world_model.get_lidar_obstacles(
+                    expected_session=expected_session,
+                )
+            except Exception as exc:
+                lidar_state = unavailable_state(
+                    "world_model_read_error", expected_session,
+                    getattr(worker, "sequence", 0),
+                )
+                lidar_state["worker_error"] = f"{type(exc).__name__}: {exc}"
+
+            worker_running = bool(worker is not None and worker.running)
+            worker_error = (
+                self._lidar_error
+                or getattr(worker, "last_error", None)
+                or lidar_state.get("worker_error")
+            )
+            if worker_error or not worker_running:
+                lidar_state.update(available=False, valid=False)
+                if lidar_state.get("reason") == "fresh":
+                    lidar_state["reason"] = "worker_not_running"
+
+            geometry = lidar_state.get("local_motion_geometry")
+            geometry_sectors = (
+                geometry.get("sectors") if isinstance(geometry, dict) else None
+            )
+            required_sectors_valid = bool(
+                isinstance(geometry, dict)
+                and geometry.get("valid") is True
+                and isinstance(geometry_sectors, dict)
+                and all(
+                    isinstance(geometry_sectors.get(name), dict)
+                    and geometry_sectors[name].get("valid_sample_count", 0)
+                    >= MINIMUM_VALID_SAMPLES_PER_REQUIRED_SECTOR
+                    for name, _, _ in OCTANT_SECTORS
+                )
+            )
+            sectors = lidar_state.get("sectors")
+            front = sectors.get("front") if isinstance(sectors, dict) else None
+            front_state = (
+                front.get("state", "UNKNOWN")
+                if lidar_state.get("valid") is True and isinstance(front, dict)
+                else "UNKNOWN"
+            )
+            lidar = {
+                "running": worker_running,
+                "available": lidar_state.get("available", False),
+                "valid": lidar_state.get("valid", False),
+                "reason": lidar_state.get("reason"),
+                "age_seconds": lidar_state.get("effective_age_seconds"),
+                "acquisition_sequence": lidar_state.get(
+                    "acquisition_sequence", getattr(worker, "sequence", None),
+                ),
+                "producer_session": lidar_state.get("producer_session"),
+                "expected_session": expected_session,
+                "session_matches": bool(
+                    expected_session
+                    and lidar_state.get("producer_session") == expected_session
+                ),
+                "worker_error": worker_error,
+                "front_state": front_state,
+                "local_motion_geometry_valid": bool(
+                    isinstance(geometry, dict) and geometry.get("valid") is True
+                ),
+                "required_sectors_valid": required_sectors_valid,
+            }
+
+            cached_interlock = (
+                self.forward_interlock.status()
+                if self.forward_interlock is not None
+                else {"configured": False, "reason": "not_configured"}
+            )
+            interlock_session = cached_interlock.get("producer_session")
+            interlock_session_matches = bool(
+                expected_session
+                and interlock_session == expected_session
+                and lidar.get("session_matches") is True
+            )
+            lidar_allows_forward = False
+            lidar_interlock_reason = "missing_lidar_state"
+            if expected_session:
+                lidar_allows_forward, lidar_interlock_reason = evaluate_lidar_state(
+                    lidar_state, expected_session,
+                )
+            interlock_operational = bool(
+                cached_interlock.get("configured") is True
+                and cached_interlock.get("monitor_running") is True
+                and interlock_session_matches
+            )
+            forward_permitted = interlock_operational and lidar_allows_forward
+            if cached_interlock.get("configured") is not True:
+                interlock_reason = "not_configured"
+            elif cached_interlock.get("monitor_running") is not True:
+                interlock_reason = "monitor_not_running"
+            elif not interlock_session_matches:
+                interlock_reason = "producer_session_mismatch"
+            else:
+                interlock_reason = lidar_interlock_reason
+            interlock = {
+                "configured": cached_interlock.get("configured") is True,
+                "monitor_running": cached_interlock.get("monitor_running") is True,
+                "age_seconds": lidar.get("age_seconds"),
+                "reason": interlock_reason,
+                "front_state": front_state,
+                "forward_permitted": forward_permitted,
+                "producer_session": interlock_session,
+                "session_matches": interlock_session_matches,
+                "active_forward": cached_interlock.get("active_forward"),
+                "pending_forward": cached_interlock.get("pending_forward"),
+                "monitor_reported_reason": cached_interlock.get("reason"),
+                "monitor_reported_age_seconds": cached_interlock.get(
+                    "effective_age_seconds"
+                ),
+                "monitor_reported_forward_permitted": cached_interlock.get(
+                    "forward_permitted"
+                ),
+                "monitor_inhibited": cached_interlock.get("inhibited"),
+                "last_stop_error": cached_interlock.get("last_stop_error"),
+            }
+
+            manager = self.mission_manager
+            active = manager.get_active_mission()
+            active_mission = active.to_dict() if active is not None else None
+            queue = manager.get_queue()
+            runtime_snapshot = {
+                "running": self.running is True,
+                "state": self.world_model.robot_state.get(
+                    "runtime_state", "UNKNOWN",
+                ),
+                "last_error": self.last_error,
+                "active_mission": active_mission,
+                "queue": queue,
+                "queue_count": len(queue),
+            }
+            bridge = bridge_status if isinstance(bridge_status, dict) else {}
+            motion_value = bridge.get("motion")
+            motion = motion_value if isinstance(motion_value, dict) else {}
+            bridge_snapshot = {
+                "connected": bridge.get("ok") is True,
+                "status": bridge.get("status"),
+                "ros_ready": bridge.get("ros_ready"),
+                "linear_x": motion.get("linear_x"),
+                "angular_z": motion.get("angular_z"),
+                "streaming": motion.get("streaming"),
+                "error": bridge_error or bridge.get("ros_error") or bridge.get("error"),
+            }
+            snapshot = {
+                "ok": True,
+                "evaluation_timestamp": datetime.now(timezone.utc).isoformat(),
+                "runtime": runtime_snapshot,
+                "lidar": lidar,
+                "forward_interlock": interlock,
+                "bridge": bridge_snapshot,
+            }
+            snapshot["reasons"] = self._find_marvin_admission_reasons(snapshot)
+            snapshot["admission_ready"] = not snapshot["reasons"]
+            return snapshot
+
+    @staticmethod
+    def _find_marvin_admission_reasons(snapshot):
+        """Fail-closed Find Marvin admission rules over one snapshot."""
+        runtime = snapshot.get("runtime", {})
+        lidar = snapshot.get("lidar", {})
+        interlock = snapshot.get("forward_interlock", {})
+        bridge = snapshot.get("bridge", {})
+        reasons = []
+
+        def stopped_number(value):
+            return bool(
+                isinstance(value, (int, float))
+                and not isinstance(value, bool)
+                and math.isfinite(value)
+                and value == 0
+            )
+
+        requirements = (
+            (runtime.get("running") is True, "runtime is not running"),
+            (runtime.get("state") == "IDLE", "runtime is not IDLE"),
+            (runtime.get("active_mission") is None, "another mission is active"),
+            (runtime.get("queue_count") == 0, "mission queue is not empty"),
+            (runtime.get("last_error") is None, "runtime reports an error"),
+            (lidar.get("running") is True, "LiDAR worker is not running"),
+            (lidar.get("available") is True, "LiDAR is unavailable"),
+            (lidar.get("valid") is True, "LiDAR is invalid"),
+            (lidar.get("reason") == "fresh", "LiDAR is not fresh"),
+            (lidar.get("front_state") in {"CLEAR", "CAUTION", "BLOCKED"}, "LiDAR front sector is unavailable"),
+            (lidar.get("session_matches") is True, "LiDAR producer session does not match"),
+            (lidar.get("local_motion_geometry_valid") is True, "LiDAR local geometry is invalid"),
+            (lidar.get("required_sectors_valid") is True, "LiDAR required sectors are incomplete"),
+            (interlock.get("configured") is True, "forward interlock is not configured"),
+            (interlock.get("monitor_running") is True, "forward interlock monitor is not running"),
+            (interlock.get("forward_permitted") is True, "forward motion is not permitted"),
+            (interlock.get("reason") == "fresh_clear", "forward interlock is not fresh_clear"),
+            (interlock.get("session_matches") is True, "forward interlock LiDAR session does not match"),
+            (interlock.get("active_forward") is False, "forward motion is active"),
+            (interlock.get("pending_forward") is False, "forward motion is pending"),
+            (interlock.get("last_stop_error") is None, "forward interlock STOP failed"),
+            (bridge.get("connected") is True, "Robot Bridge status unavailable"),
+            (bridge.get("status") == "READY", "Robot Bridge is not READY"),
+            (bridge.get("ros_ready") is True, "Robot Bridge ROS is not ready"),
+            (stopped_number(bridge.get("linear_x")), "Robot Bridge linear motion is not zero"),
+            (stopped_number(bridge.get("angular_z")), "Robot Bridge angular motion is not zero"),
+            (bridge.get("streaming") is False, "Robot Bridge streaming motion is active"),
+        )
+        reasons.extend(reason for passed, reason in requirements if not passed)
+        return reasons
 
     def submit_text(self, user_text: str):
         """

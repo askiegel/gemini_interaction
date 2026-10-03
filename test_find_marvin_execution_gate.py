@@ -86,32 +86,26 @@ def test_find_marvin_live_submission_carries_marvin_semantic_identity():
 
 def test_find_marvin_live_submission_posts_marvin_target_after_preflight():
     handler = _handler()
-    handler.dashboard_status = lambda: {
-        "runtime": {
-            "connected": True, "running": True, "state": "IDLE", "last_error": None,
-            "lidar": {
-                "running": True, "available": True, "valid": True,
-                "reason": "fresh", "front_state": "CLEAR",
-                "producer_session": "lidar-session", "session_matches": True,
-                "local_motion_geometry_valid": True, "required_sectors_valid": True,
-            },
-            "forward_interlock": {
-                "configured": True, "monitor_running": True,
-                "forward_permitted": True, "reason": "fresh_clear",
-                "producer_session": "lidar-session",
-                "active_forward": False, "pending_forward": False,
-            },
-        },
-        "missions": {"active": None, "queue_count": 0},
-        "robot": {
-            "connected": True, "status": "READY", "ros_ready": True,
-            "motion": {"linear_x": 0, "angular_z": 0, "streaming": False},
-        },
+    admission_snapshot = {
+        "ok": True,
+        "evaluation_timestamp": "2026-10-02T12:00:00+00:00",
+        "admission_ready": True,
+        "reasons": [],
+        "runtime": {}, "lidar": {}, "forward_interlock": {}, "bridge": {},
     }
-    with patch("voice_relay.server.request_json", return_value={
-        "status_code": 200, "data": {"ok": True, "accepted": True},
-        "error": None,
-    }) as request:
+    with patch("voice_relay.server.request_json", side_effect=[
+        {"ok": True, "status_code": 200, "data": admission_snapshot,
+         "error": None},
+        {"status_code": 200, "data": {"ok": True, "accepted": True},
+         "error": None},
+    ]) as request:
         status_code, _payload = handler.submit_find_marvin(execute=True)
     assert status_code == 200
+    assert request.call_count == 2
+    assert request.call_args_list[0].args == (
+        "GET", "http://127.0.0.1:8770/find-marvin/admission-snapshot",
+    )
+    assert request.call_args_list[1].args == (
+        "POST", "http://127.0.0.1:8770/missions",
+    )
     assert request.call_args.kwargs["payload"]["intent"]["target"] == "marvin"
