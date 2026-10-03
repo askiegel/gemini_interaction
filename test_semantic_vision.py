@@ -53,6 +53,7 @@ def test_one_jpeg_prompt_schema_and_sdk_request_bounds():
     assert config.automatic_function_calling.disable is True
     assert result['bbox'] == dict(x1=0, y1=10, x2=640, y2=480)
     assert result['frame_received_at'] == FRAME.received_at
+    assert result['source_frame_stamp_ns'] is None
     assert result['source'] == 'gemini_semantic'
     assert result['geometry_quality'] == 'coarse'
     assert not {'confidence', 'track_id', 'entity_id', 'identity_id', 'data'} & result.keys()
@@ -293,15 +294,36 @@ class Response:
 
 def test_configured_camera_url_and_local_timestamp(monkeypatch):
     monkeypatch.setenv('VISION_CAMERA_URL', 'http://camera.invalid/configured.jpg')
-    response = Response()
+    response = Response(headers={
+        'Content-Type': 'image/jpeg',
+        'X-Mayday-Source-Stamp-Sec': '12',
+        'X-Mayday-Source-Stamp-Nanosec': '34',
+    })
     get = Mock(return_value=response)
     monkeypatch.setattr('semantic_vision.requests.get', get)
     instance = SemanticVisionClient(client=None, model='test')
     frame = instance.fetch_frame()
     assert (frame.data, frame.width, frame.height) == (JPEG, 640, 480)
     assert frame.received_at.endswith('+00:00')
+    assert frame.source_frame_stamp_ns == 12_000_000_034
     get.assert_called_once_with('http://camera.invalid/configured.jpg', timeout=5.0, stream=True, allow_redirects=False)
     assert response.closed
+
+
+@pytest.mark.parametrize('headers', [
+    {'Content-Type': 'image/jpeg'},
+    {'Content-Type': 'image/jpeg', 'X-Mayday-Source-Stamp-Sec': 'bad',
+     'X-Mayday-Source-Stamp-Nanosec': '34'},
+    {'Content-Type': 'image/jpeg', 'X-Mayday-Source-Stamp-Sec': '12',
+     'X-Mayday-Source-Stamp-Nanosec': '1000000000'},
+])
+def test_missing_or_invalid_source_stamp_remains_none(monkeypatch, headers):
+    response = Response(headers=headers)
+    monkeypatch.setattr('semantic_vision.requests.get', Mock(return_value=response))
+    instance = SemanticVisionClient(
+        client=None, model='test', camera_url='http://camera.invalid/frame.jpg',
+    )
+    assert instance.fetch_frame().source_frame_stamp_ns is None
 
 
 @pytest.mark.parametrize('response', [Response(b''), Response(status=500),

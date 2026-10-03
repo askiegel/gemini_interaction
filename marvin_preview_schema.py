@@ -51,6 +51,9 @@ def normalize_marvin_preview(value):
         "source": value.get("source") or tracking.get("source"),
         "source_timestamp": value.get("source_timestamp") or tracking.get("vision_timestamp"),
         "vision_timestamp": value.get("vision_timestamp") or tracking.get("vision_timestamp"),
+        "source_frame_stamp_ns": _source_frame_stamp_ns(
+            value.get("source_frame_stamp_ns")
+        ),
         "bbox": dict(bbox) if isinstance(bbox, dict) else None,
         "image_width": width,
         "image_height": height,
@@ -83,3 +86,7 @@ def _first_number(*values):
 
 def _number(value):
     return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
+
+
+def _source_frame_stamp_ns(value):
+    return value if type(value) is int and value >= 0 else None

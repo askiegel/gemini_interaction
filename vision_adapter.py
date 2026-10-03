@@ -383,6 +383,12 @@ class VisionAdapter:
             "identity_diagnostics": detection.get(
                 "identity_diagnostics"
             ),
+            # Source-frame identity is passive metadata. Preserve it when
+            # supplied, but never synthesize it for legacy Vision servers.
+            "source_frame_stamp_ns": detection.get(
+                "source_frame_stamp_ns",
+                self.last_payload.get("source_frame_stamp_ns"),
+            ),
             "attributes": dict(
                 detection.get("attributes") or {}
             ),

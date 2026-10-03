@@ -13,6 +13,7 @@ from mission_types import create_mission
 from runtime_api import RuntimeAPIHandler
 from tracking_state import build_tracking_state, empty_tracking_state
 from vision_adapter import VisionAdapter
+from marvin_preview_schema import normalize_marvin_preview
 
 
 CONTINUITY_GENERATION = "vision-generation-a"
@@ -168,6 +169,7 @@ def marvin_yolo_candidates():
     return CandidateVision([
         {
             **detection("frame-1", cx=450),
+            "source_frame_stamp_ns": 42_000_000_007,
             "detections": [{
                 "label": "chair", "confidence": 0.10,
                 "x1": 400, "y1": 100, "x2": 500, "y2": 300,
@@ -177,6 +179,7 @@ def marvin_yolo_candidates():
         },
         {
             "timestamp": "frame-2", "camera_running": True,
+            "source_frame_stamp_ns": 42_000_000_007,
             "detections": [{
                 "label": "toilet", "confidence": 0.11,
                 "x1": 402, "y1": 102, "x2": 502, "y2": 302,
@@ -186,6 +189,7 @@ def marvin_yolo_candidates():
         },
         {
             "timestamp": "frame-3", "camera_running": True,
+            "source_frame_stamp_ns": 42_000_000_007,
             "detections": [{
                 "label": "teddy bear", "confidence": 0.10,
                 "x1": 403, "y1": 103, "x2": 503, "y2": 303,
@@ -357,6 +361,7 @@ def test_marvin_preview_uses_one_semantic_acquisition_after_yolo_fails():
     assert result["vision_timestamp"] == result["source_timestamp"]
     assert result["target_found"] is True
     assert result["source"] == "marvin_local_tracker"
+    assert result["source_frame_stamp_ns"] == 42_000_000_007
     assert result["authoritative"] is False
     assert result["bbox"] == {"x1": 275, "y1": 112, "x2": 375, "y2": 332}
     assert result["image_width"] == 640
@@ -384,6 +389,63 @@ def test_marvin_preview_uses_one_semantic_acquisition_after_yolo_fails():
     assert vision.queries == []
     assert vision.process_calls == 0
     assert world.writes == 0
+
+
+def test_vision_adapter_source_stamp_is_preserved_into_marvin_preview():
+    vision = VisionAdapter.__new__(VisionAdapter)
+    vision.last_payload = {}
+    payloads = []
+    for index in range(3):
+        payloads.append({
+            "timestamp": f"adapter-frame-{index}",
+            "source_frame_stamp_ns": 55_000_000_123,
+            "camera_running": True,
+            "image_width": 640,
+            "image_height": 480,
+            "detections": [{
+                "label": "teddy bear",
+                "confidence": 0.11,
+                "x1": 402, "y1": 102, "x2": 502, "y2": 302,
+                "center_x": 452, "center_y": 202, "area": 20000,
+            }],
+        })
+
+    def fetch_proposals():
+        vision.last_payload = payloads.pop(0)
+        return dict(vision.last_payload)
+
+    vision.fetch_detection_proposals = fetch_proposals
+    manager = BehaviorManager(
+        robot_client=ReadOnlyRobot(),
+        vision_adapter=vision,
+        semantic_vision=MarvinSemanticVision(marvin_result()),
+    )
+    manager.TARGET_CONFIRMATION_POLL_SECONDS = 0
+    use_preview_tracker(manager)
+
+    preview = manager.preview_find_object("marvin")
+
+    assert preview["source_frame_stamp_ns"] == 55_000_000_123
+    assert preview["target_observation"]["source_frame_stamp_ns"] == 55_000_000_123
+
+
+@pytest.mark.parametrize("bad_stamp", [None, "55", -1, True, 1.5])
+def test_marvin_preview_does_not_publish_malformed_source_frame_identity(bad_stamp):
+    vision = marvin_yolo_candidates()
+    for payload in vision.payloads:
+        payload["source_frame_stamp_ns"] = bad_stamp
+    manager = BehaviorManager(
+        robot_client=ReadOnlyRobot(),
+        vision_adapter=vision,
+        semantic_vision=MarvinSemanticVision(marvin_result()),
+    )
+    manager.TARGET_CONFIRMATION_POLL_SECONDS = 0
+    use_preview_tracker(manager)
+
+    preview = manager.preview_find_object("marvin")
+
+    assert preview["ok"] is True
+    assert preview["source_frame_stamp_ns"] is None
 
 
 def test_marvin_person_only_proposal_fails_before_semantics_or_tracker():
@@ -590,6 +652,42 @@ def test_vision_adapter_normalizes_only_complete_marvin_continuity_metadata():
     assert normalized["identity_id"] is None
     detection["marvin_continuity"] = {"tracker_id": 16}
     assert "marvin_continuity" not in adapter.normalize_detection(detection)
+
+
+def test_vision_adapter_preserves_source_frame_identity_without_fallback():
+    adapter = VisionAdapter.__new__(VisionAdapter)
+    adapter.last_payload = {"source_frame_stamp_ns": 123456789}
+    normalized = adapter.normalize_detection({
+        "label": "teddy bear", "confidence": 0.1,
+        "source_frame_stamp_ns": 123456789,
+    })
+    assert normalized["source_frame_stamp_ns"] == 123456789
+
+    adapter.last_payload = {}
+    legacy = adapter.normalize_detection({
+        "label": "teddy bear", "confidence": 0.1,
+    })
+    assert legacy["source_frame_stamp_ns"] is None
+
+
+@pytest.mark.parametrize("value", [None, "123", -1, True, 1.5])
+def test_marvin_preview_schema_source_frame_identity_fails_closed(value):
+    normalized = normalize_marvin_preview({
+        "target": "marvin", "source_frame_stamp_ns": value,
+    })
+    assert normalized["source_frame_stamp_ns"] is None
+
+
+def test_marvin_preview_schema_preserves_valid_source_frame_identity():
+    normalized = normalize_marvin_preview({
+        "target": "marvin", "source_frame_stamp_ns": 123456789,
+    })
+    assert normalized["source_frame_stamp_ns"] == 123456789
+
+
+def test_marvin_preview_schema_missing_source_frame_identity_is_null():
+    normalized = normalize_marvin_preview({"target": "marvin"})
+    assert normalized["source_frame_stamp_ns"] is None
 
 
 def test_marvin_preview_preserves_provider_continuity_metadata_without_identity_promotion():
@@ -1218,7 +1316,7 @@ def test_runtime_preview_endpoint_does_not_mutate_runtime_or_execute():
     assert handler.server.runtime._control_generation == 0
 
 
-def _call_runtime_preview(result):
+def _call_runtime_preview(result, target="backpack"):
     class FakeBehavior:
         def preview_find_object(self, _target):
             return result
@@ -1227,7 +1325,7 @@ def _call_runtime_preview(result):
         behavior_manager = FakeBehavior()
 
     handler = object.__new__(RuntimeAPIHandler)
-    handler.path = "/find-object/preview?target=backpack"
+    handler.path = f"/find-object/preview?target={target}"
     handler.server = SimpleNamespace(runtime=Runtime())
     responses = []
     handler.send_json = lambda code, payload: responses.append((code, payload))
@@ -1303,6 +1401,7 @@ def test_runtime_marvin_preview_preserves_tracker_provenance():
         "identity_confirmed": True,
         "source_timestamp": "2026-09-25T12:00:00+00:00",
         "vision_timestamp": "2026-09-25T12:00:00+00:00",
+        "source_frame_stamp_ns": 987654321,
         "yolo_seed_bbox": seed_bbox,
         "tracker_seed_bbox": {"x1": 285, "y1": 82, "x2": 489, "y2": 346},
         "tracker_seed_source": "bounded_yolo_proposal_expansion",
@@ -1318,6 +1417,7 @@ def test_runtime_marvin_preview_preserves_tracker_provenance():
     assert payload["identity_confirmed"] is True
     assert payload["source_timestamp"] == "2026-09-25T12:00:00+00:00"
     assert payload["vision_timestamp"] == "2026-09-25T12:00:00+00:00"
+    assert payload["source_frame_stamp_ns"] == 987654321
     assert payload["tracking"]["vision_timestamp"] == "2026-09-25T12:00:00+00:00"
     assert payload["yolo_seed_bbox"] == seed_bbox
     assert payload["tracker_seed_bbox"] == {"x1": 285, "y1": 82, "x2": 489, "y2": 346}
@@ -1325,6 +1425,18 @@ def test_runtime_marvin_preview_preserves_tracker_provenance():
     assert payload["confirmation_diagnostics"] == diagnostics
     assert payload["tracking"]["source"] == "marvin_local_tracker"
     assert payload["tracking"]["bbox"] == tracker_bbox
+
+
+def test_runtime_marvin_preview_missing_source_stamp_is_null():
+    status, payload = _call_runtime_preview({
+        "ok": False,
+        "preview": True,
+        "authoritative": False,
+        "target": "marvin",
+        "target_found": False,
+    }, target="marvin")
+    assert status == 200
+    assert payload["source_frame_stamp_ns"] is None
 
 
 def test_runtime_preview_authoritative_result_keeps_diagnostics_null():

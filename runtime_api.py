@@ -217,9 +217,12 @@ class RuntimeAPIHandler(BaseHTTPRequestHandler):
                     "source_timestamp", "vision_timestamp", "detection_age_ms",
                     "entity_id", "identity_id", "identity_status",
                     "identity_ambiguous", "identity_match_score",
+                    "source_frame_stamp_ns",
                 ):
                     if key in result:
                         payload[key] = result[key]
+                if target.lower() == "marvin":
+                    payload.setdefault("source_frame_stamp_ns", None)
                 self.send_json(200, payload)
             except Exception as exc:
                 self.send_json(
@@ -228,6 +231,10 @@ class RuntimeAPIHandler(BaseHTTPRequestHandler):
                         "ok": False,
                         "preview": True,
                         "target": target.lower(),
+                        **(
+                            {"source_frame_stamp_ns": None}
+                            if target.lower() == "marvin" else {}
+                        ),
                         "reason": str(exc),
                         "tracking": build_tracking_state({
                             "behavior": "FIND_OBJECT",

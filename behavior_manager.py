@@ -4435,6 +4435,8 @@ class BehaviorManager:
             "target": normalized_target,
             "target_found": False,
         }
+        if normalized_target == self.MARVIN_SEMANTIC_TARGET:
+            base["source_frame_stamp_ns"] = None
         if not normalized_target:
             return dict(
                 base,
@@ -5168,6 +5170,9 @@ class BehaviorManager:
             proposal_label=yolo_candidate.get("proposal_label"),
             proposal_confidence=yolo_candidate.get("confidence"),
             proposal_support=yolo_candidate.get("proposal_support"),
+            source_frame_stamp_ns=yolo_candidate.get(
+                "source_frame_stamp_ns"
+            ),
             detector_confidence=yolo_candidate.get("confidence"),
             geometry_source="yolo_proposal",
             identity_source=identity_source,
@@ -5438,6 +5443,9 @@ class BehaviorManager:
             if not isinstance(detections, list):
                 time.sleep(self.TARGET_CONFIRMATION_POLL_SECONDS)
                 continue
+            source_frame_stamp_ns = payload.get("source_frame_stamp_ns")
+            if type(source_frame_stamp_ns) is not int or source_frame_stamp_ns < 0:
+                source_frame_stamp_ns = None
 
             observations = []
             for raw_detection in detections:
@@ -5463,6 +5471,7 @@ class BehaviorManager:
                     "stale": False,
                     "target": self.MARVIN_SEMANTIC_TARGET,
                     "source_timestamp": timestamp,
+                    "source_frame_stamp_ns": source_frame_stamp_ns,
                     "proposal_label": normalized.get("label"),
                     "raw_detection": dict(raw_detection),
                 })
@@ -5620,6 +5629,10 @@ class BehaviorManager:
             "bbox": observation.get("bbox"),
             "target_observation": observation,
         }
+        if target_name == self.MARVIN_SEMANTIC_TARGET:
+            result["source_frame_stamp_ns"] = observation.get(
+                "source_frame_stamp_ns"
+            )
         # Keep the timestamp attached to the exact observation selected for
         # this preview. Marvin's temporary tracker has no persistent identity
         # key today, so do not synthesize one from its seed or track state.

@@ -44,6 +44,7 @@ def test_class_agnostic_proposal_fetch_uses_candidates_endpoint():
     )
     payload = {
         "timestamp": "2026-09-19T00:00:00+00:00",
+        "source_frame_stamp_ns": 1726704000000000000,
         "camera_running": True,
         "detections": [{
             "label": "chair",
@@ -59,6 +60,7 @@ def test_class_agnostic_proposal_fetch_uses_candidates_endpoint():
     with patch("vision_adapter.requests.get", return_value=response) as get:
         result = adapter.fetch_detection_proposals()
     assert result["detections"][0]["label"] == "chair"
+    assert result["source_frame_stamp_ns"] == 1726704000000000000
     assert get.call_args.args[0] == "http://vision.invalid/detections/candidates/latest"
     assert get.call_args.kwargs["timeout"] == 0.25
 

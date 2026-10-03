@@ -26,6 +26,7 @@ class JpegFrame:
     width: int
     height: int
     received_at: str
+    source_frame_stamp_ns: int = None
 
 
 def _jpeg_dimensions(data):
@@ -153,9 +154,28 @@ class SemanticVisionClient:
             if not data:
                 raise ValueError("camera_frame_empty")
             received_at = datetime.now(timezone.utc).isoformat()
+            source_frame_stamp_ns = self._source_frame_stamp_ns(
+                response.headers
+            )
         data = bytes(data)
         width, height = _jpeg_dimensions(data)
-        return JpegFrame(data, width, height, received_at)
+        return JpegFrame(
+            data, width, height, received_at, source_frame_stamp_ns,
+        )
+
+    @staticmethod
+    def _source_frame_stamp_ns(headers):
+        """Read an authoritative source stamp from the JPEG's own response."""
+        if not hasattr(headers, "get"):
+            return None
+        try:
+            sec = int(headers.get("X-Mayday-Source-Stamp-Sec"))
+            nanosec = int(headers.get("X-Mayday-Source-Stamp-Nanosec"))
+        except (TypeError, ValueError):
+            return None
+        if sec < 0 or not 0 <= nanosec < 1_000_000_000:
+            return None
+        return sec * 1_000_000_000 + nanosec
 
     def describe_marvin(self, frame):
         """Locate Marvin by appearance for a read-only preview only."""
@@ -485,7 +505,8 @@ class SemanticVisionClient:
         if require_bbox and value["found"] and value.get("bbox") is None:
             raise ValueError("semantic_bbox_required")
         result = dict(value, frame_received_at=frame.received_at,
-                      source=source, geometry_quality="coarse")
+                      source=source, geometry_quality="coarse",
+                      source_frame_stamp_ns=frame.source_frame_stamp_ns)
         bbox = value.get("bbox")
         if bbox is not None:
             if not isinstance(bbox, dict) or set(bbox) != {"x1", "y1", "x2", "y2"}:
