@@ -45,7 +45,7 @@ def invoke(monkeypatch, planner_output, *, turn_output=None, turn_error=None,
     monkeypatch.setattr(behavior_manager_module, "plan_marvin_search_step", planner)
     monkeypatch.setattr(manager, "execute_guarded_turn", turn)
     result = manager.execute_marvin_search_step(
-        {"state": "SEARCHING"}, prior_search_history=[],
+        {"state": "SEARCHING"}, scan_turn_index=0,
         selected_identity_id=selected_identity_id, preview_result=None, now=10.0,
     )
     return result, manager, planner_calls, turn_calls
@@ -59,24 +59,22 @@ def test_left_plan_dispatches_one_canonical_left_guarded_turn(monkeypatch):
     result, manager, planner_calls, turns = invoke(monkeypatch, planned("turn_left"))
     assert result["ok"] is result["motion_executed"] is result["replan_required"] is True
     assert result["executed_primitive"] == "guarded_turn_left"
-    assert turns == [(("LEFT", 0.25, 0.50), {
+    assert turns == [(("LEFT", 0.25, 1.0), {
         "expected_lidar_session": SESSION, "now": 10.0,
         "safety_mode": behavior_manager_module.ROTATIONAL_SWEPT_FOOTPRINT,
     })]
     assert manager.MARVIN_SEARCH_TURN_SPEED == 0.25
-    assert manager.MARVIN_SEARCH_TURN_SECONDS == 0.50
-    assert abs(turns[0][0][1]) <= 0.25 and turns[0][0][2] <= 0.50
+    assert manager.MARVIN_SEARCH_TURN_SECONDS == 1.0
+    assert abs(turns[0][0][1]) <= 0.25 and turns[0][0][2] <= 1.0
     assert len(planner_calls) == 1
     assert_one_turn(turns)
 
 
-def test_right_plan_dispatches_one_canonical_right_guarded_turn(monkeypatch):
+def test_right_plan_is_rejected_without_fallback(monkeypatch):
     result, manager, _planner, turns = invoke(monkeypatch, planned("turn_right"))
-    assert result["executed_primitive"] == "guarded_turn_right"
-    assert turns[0][0] == ("RIGHT", 0.25, 0.50)
-    assert turns[0][1]["safety_mode"] == behavior_manager_module.ROTATIONAL_SWEPT_FOOTPRINT
-    assert abs(turns[0][0][1]) <= 0.25 and turns[0][0][2] <= 0.50
-    assert result["replan_required"] is True
+    assert result["reason"] == "marvin_search_action_not_permitted"
+    assert result["motion_executed"] is False
+    assert turns == []
     assert_one_turn(turns)
 
 
@@ -93,13 +91,12 @@ def test_malformed_unknown_or_planner_exception_never_turn(monkeypatch):
         assert result["motion_executed"] is False and turns == []
 
 
-def test_left_or_right_failure_never_falls_back(monkeypatch):
-    for action in ("turn_left", "turn_right"):
-        result, _manager, _planner, turns = invoke(
-            monkeypatch, planned(action), turn_output=turn_result(ok=False, reason="denied"),
-        )
-        assert result["motion_executed"] is False and len(turns) == 1
-        assert_one_turn(turns)
+def test_left_failure_never_falls_back_to_other_direction(monkeypatch):
+    result, _manager, _planner, turns = invoke(
+        monkeypatch, planned("turn_left"), turn_output=turn_result(ok=False, reason="denied"),
+    )
+    assert result["motion_executed"] is False and len(turns) == 1
+    assert_one_turn(turns)
 
 
 def test_turn_exception_never_dispatches_a_second_primitive(monkeypatch):
@@ -146,6 +143,6 @@ def test_coordinator_has_no_pursuit_loop_or_direct_transport():
 def test_marvin_search_limits_are_separate_from_generic_find_object_search():
     manager = BehaviorManager(robot_client=object())
     assert manager.MARVIN_SEARCH_TURN_SPEED == 0.25
-    assert manager.MARVIN_SEARCH_TURN_SECONDS == 0.50
+    assert manager.MARVIN_SEARCH_TURN_SECONDS == 1.0
     assert manager.SEARCH_TURN_SPEED == 0.30
     assert manager.SEARCH_TURN_SECONDS == 1.0

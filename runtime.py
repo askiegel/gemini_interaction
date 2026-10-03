@@ -76,6 +76,7 @@ class CognitiveRuntime:
     LOOP_INTERVAL_SECONDS = 0.03
     FIND_MARVIN_AUTONOMOUS_MAX_ACTIONS = 6
     FIND_MARVIN_MAX_EPISODES = 4
+    FIND_MARVIN_SCAN_MAX_EPISODES = 6
     MAX_ACTIVE_LOCALIZATION_TURNS = 6
     ACTIVE_LOCALIZATION_TURN_SPEED = 0.25
     ACTIVE_LOCALIZATION_TURN_DURATION = 0.50
@@ -438,6 +439,12 @@ class CognitiveRuntime:
                 control_generation=control_generation,
             )
         finally:
+            clear_scan = getattr(
+                getattr(self, "behavior_manager", None),
+                "clear_find_marvin_room_scan", None,
+            )
+            if callable(clear_scan):
+                clear_scan(getattr(mission, "mission_id", None))
             controller_lock.release()
 
     def _execute_normal_marvin_find_mission_locked(
@@ -445,12 +452,28 @@ class CognitiveRuntime:
     ):
         """Delegate a normal Find-Marvin mission to the reviewed controller.
 
-        The controller remains the only pursuit implementation.  This method
-        is also the owner of bounded mission continuation. It starts another
-        fresh controller episode only after a verified safe action-limit
-        result; pursuit logic itself remains entirely in the controller.
+        The controller remains the only pursuit implementation. This method
+        owns bounded mission continuation, with a separate finite room-scan
+        episode allowance and the existing pursuit episode allowance. Scan
+        progress itself remains mission-scoped in BehaviorManager.
         """
         mission_id = getattr(mission, "mission_id", None)
+        behavior = getattr(self, "behavior_manager", None)
+        begin_scan = getattr(behavior, "begin_find_marvin_room_scan", None)
+        scan_enabled = callable(begin_scan)
+        if scan_enabled:
+            try:
+                begin_scan(mission_id)
+            except Exception as exc:
+                return {
+                    "ok": False, "completed": True,
+                    "arrived_at_marvin": False,
+                    "mission_outcome": "safe_failure",
+                    "state": "FIND_MARVIN_FAILED",
+                    "mission_id": mission_id,
+                    "reason": "find_marvin_scan_state_initialization_failed",
+                    "error": str(exc),
+                }
         if control_generation is None:
             with self._state_lock:
                 control_generation = self._control_generation
@@ -461,6 +484,13 @@ class CognitiveRuntime:
         any_motion = False
         last_controller = None
 
+        max_episodes = (
+            self.FIND_MARVIN_SCAN_MAX_EPISODES + self.FIND_MARVIN_MAX_EPISODES
+            if scan_enabled else self.FIND_MARVIN_MAX_EPISODES
+        )
+        scan_episodes_used = 0
+        pursuit_episodes_used = 0
+
         def result_base():
             return {
                 "action": "bounded_find_marvin_autonomous_run",
@@ -470,7 +500,7 @@ class CognitiveRuntime:
                 "mission_route": "bounded_marvin_autonomous",
                 "mission_id": mission_id,
                 "episodes_executed": len(episode_results),
-                "max_episodes": self.FIND_MARVIN_MAX_EPISODES,
+                "max_episodes": max_episodes,
                 "max_actions": self.FIND_MARVIN_AUTONOMOUS_MAX_ACTIONS,
                 "total_actions_executed": total_actions,
                 "actions_executed": total_actions,
@@ -480,7 +510,31 @@ class CognitiveRuntime:
                 "motion_executed": any_motion,
             }
 
-        for episode_number in range(1, self.FIND_MARVIN_MAX_EPISODES + 1):
+        episode_number = 0
+        while scan_episodes_used < self.FIND_MARVIN_SCAN_MAX_EPISODES or pursuit_episodes_used < self.FIND_MARVIN_MAX_EPISODES:
+            scan_snapshot = (
+                behavior._room_scan_snapshot()
+                if scan_enabled and callable(getattr(behavior, "_room_scan_snapshot", None))
+                else None
+            )
+            scanning = bool(scan_snapshot and scan_snapshot.get("scan_active") is True)
+            if scanning and scan_episodes_used >= self.FIND_MARVIN_SCAN_MAX_EPISODES:
+                return dict(
+                    result_base(), ok=True, completed=True,
+                    arrived_at_marvin=False, mission_outcome="safe_incomplete",
+                    state="FIND_MARVIN_SAFE_INCOMPLETE",
+                    reason="find_marvin_scan_episode_limit_reached",
+                    completion_reason="find_marvin_scan_episode_limit_reached",
+                )
+            if not scanning and pursuit_episodes_used >= self.FIND_MARVIN_MAX_EPISODES:
+                return dict(
+                    result_base(), ok=True, completed=True,
+                    arrived_at_marvin=False, mission_outcome="safe_incomplete",
+                    state="FIND_MARVIN_SAFE_INCOMPLETE",
+                    reason="find_marvin_mission_episode_limit_reached",
+                    completion_reason="find_marvin_mission_episode_limit_reached",
+                )
+            episode_number += 1
             if not self._marvin_mission_context_is_current(
                 mission, control_generation,
             ):
@@ -503,6 +557,10 @@ class CognitiveRuntime:
                 "result": episode,
             }
             episode_results.append(episode_record)
+            if scanning:
+                scan_episodes_used += 1
+            else:
+                pursuit_episodes_used += 1
             last_controller = controller if isinstance(controller, dict) else None
 
             count = episode.get("actions_executed", 0)
@@ -555,6 +613,42 @@ class CognitiveRuntime:
                 )
 
             if controller.get("reason") != "find_marvin_action_limit_reached":
+                if controller.get("reason") == "find_marvin_search_target_acquired":
+                    bridge_status = self._marvin_bridge_ready_and_stopped()
+                    if not isinstance(bridge_status, dict) or bridge_status.get("ok") is not True:
+                        return dict(
+                            result_base(), ok=False, completed=True,
+                            arrived_at_marvin=False,
+                            mission_outcome="safe_failure",
+                            state="FIND_MARVIN_FAILED",
+                            reason="find_marvin_acquisition_bridge_not_stopped",
+                            bridge_status=bridge_status,
+                        )
+                    continue
+                if controller.get("reason") == "find_marvin_post_turn_frame_preempted":
+                    return dict(
+                        result_base(), ok=False, completed=True,
+                        arrived_at_marvin=False, mission_outcome="preempted",
+                        state="FIND_MARVIN_PREEMPTED",
+                        reason="find_marvin_mission_preempted",
+                    )
+                if (
+                    str(controller.get("reason", "")).startswith(
+                        "find_marvin_post_turn_frame_"
+                    )
+                    or controller.get("reason") in {
+                        "find_marvin_scan_source_frame_baseline_missing",
+                        "find_marvin_post_turn_source_frame_baseline_missing",
+                    }
+                ):
+                    return dict(
+                        result_base(), ok=True, completed=True,
+                        arrived_at_marvin=False,
+                        mission_outcome="safe_incomplete",
+                        state="FIND_MARVIN_SAFE_INCOMPLETE",
+                        reason=controller.get("reason"),
+                        completion_reason=controller.get("reason"),
+                    )
                 if (
                     controller.get("reason") == "find_marvin_search_complete"
                     and self._marvin_search_exhaustion_is_safe(controller)
@@ -652,16 +746,6 @@ class CognitiveRuntime:
                     arrived_at_marvin=False, mission_outcome="safe_failure",
                     state="FIND_MARVIN_FAILED",
                     reason="find_marvin_action_limit_result_not_safely_stopped",
-                )
-
-            if episode_number == self.FIND_MARVIN_MAX_EPISODES:
-                return dict(
-                    result_base(), ok=True, completed=True,
-                    arrived_at_marvin=False,
-                    mission_outcome="safe_incomplete",
-                    state="FIND_MARVIN_SAFE_INCOMPLETE",
-                    reason="find_marvin_mission_episode_limit_reached",
-                    completion_reason="find_marvin_mission_episode_limit_reached",
                 )
 
             # The prior controller has already stopped after every executor

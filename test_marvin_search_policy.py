@@ -67,30 +67,41 @@ def test_search_accepts_dashboard_style_nested_tracking_preview():
 
 def test_searching_empty_preview_plans_first_then_next_deterministic_scan():
     first = plan(state(), preview_result=preview(target_found=False, identity_confirmed=False))
-    second = plan(state(), preview_result=preview(target_found=False, identity_confirmed=False), prior_search_history=[first])
-    assert first["selected_search_action"] == DEFAULT_LOCAL_SCAN_PLAN[0]
-    assert second["selected_search_action"] == DEFAULT_LOCAL_SCAN_PLAN[1]
+    second = plan(state(), preview_result=preview(target_found=False, identity_confirmed=False), scan_turn_index=1)
+    assert first["selected_search_action"] == "turn_left"
+    assert second["selected_search_action"] == "turn_left"
     assert first["search_actions_used"] == 1 and second["search_actions_used"] == 2
 
 
 def test_scan_plan_exhausts_without_another_action():
-    history = [{"selected_search_action": action} for action in DEFAULT_LOCAL_SCAN_PLAN]
-    result = plan(state(), preview_result=None, prior_search_history=history)
+    result = plan(state(), preview_result=None, scan_turn_index=26)
     assert result["completed"] is True
     assert result["selected_search_action"] == "search_complete"
 
 
+def test_room_sweep_is_left_only_and_bounded_at_26_successful_turns():
+    for index in range(26):
+        result = plan(
+            state(), preview_result=None, scan_turn_index=index,
+        )
+        assert result["selected_search_action"] == "turn_left"
+        assert result["search_actions_used"] == index + 1
+    exhausted = plan(state(), preview_result=None, scan_turn_index=26)
+    assert exhausted["selected_search_action"] == "search_complete"
+    assert exhausted["completed"] is True
+
+
 def test_max_one_action_never_plans_a_second():
     first = plan(state(), preview_result=None, max_search_actions=1)
-    second = plan(state(), preview_result=None, max_search_actions=1, prior_search_history=[first])
+    second = plan(state(), preview_result=None, max_search_actions=1, scan_turn_index=1)
     assert first["selected_search_action"] == "turn_left"
     assert second["selected_search_action"] == "search_complete"
 
 
-def test_invalid_limits_and_history_fail_closed():
+def test_invalid_limits_and_scan_index_fail_closed():
     for limit in (0, -1, True, 1.5, "4", None):
         assert plan(state(), max_search_actions=limit)["reason"] == "invalid_marvin_search_action_limit"
-    assert plan(state(), prior_search_history="bad")["selected_search_action"] == "fail_closed"
+    assert plan(state(), scan_turn_index=True)["selected_search_action"] == "fail_closed"
 
 
 def test_reacquire_requires_actual_locked_same_identity():
@@ -187,13 +198,12 @@ def test_fresh_reacquired_nested_preview_returns_to_normal_visual_pursuit():
 
 def test_selected_identity_is_preserved_and_outputs_are_deterministic_without_mutation():
     current = state("REACQUIRE_REQUIRED", "marvin-1")
-    history = [{"selected_search_action": "turn_left"}]
     candidate = preview(target_found=False, identity_confirmed=False)
-    before = deepcopy((current, history, candidate))
-    first = plan(current, selected_identity_id="marvin-1", preview_result=candidate, prior_search_history=history)
-    second = plan(current, selected_identity_id="marvin-1", preview_result=candidate, prior_search_history=history)
+    before = deepcopy((current, candidate))
+    first = plan(current, selected_identity_id="marvin-1", preview_result=candidate, scan_turn_index=1)
+    second = plan(current, selected_identity_id="marvin-1", preview_result=candidate, scan_turn_index=1)
     assert first == second and first["selected_identity_id"] == "marvin-1"
-    assert (current, history, candidate) == before
+    assert (current, candidate) == before
 
 
 def test_policy_is_pure_bounded_and_has_no_motion_dependencies():
@@ -201,4 +211,6 @@ def test_policy_is_pure_bounded_and_has_no_motion_dependencies():
     source = inspect.getsource(marvin_search_policy).lower()
     for forbidden in ("random", "while true", "robot_client", "cmd_vel", "rospy", "rclpy", "stanford", "nav2", "requests."):
         assert forbidden not in source
-    assert DEFAULT_MAX_SEARCH_ACTIONS == 4
+    assert DEFAULT_MAX_SEARCH_ACTIONS == 26
+    assert len(DEFAULT_LOCAL_SCAN_PLAN) == 26
+    assert set(DEFAULT_LOCAL_SCAN_PLAN) == {"turn_left"}

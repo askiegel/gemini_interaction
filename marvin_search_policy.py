@@ -11,16 +11,16 @@ from marvin_preview_reacquisition import DEFAULT_PREVIEW_MAX_AGE_SECONDS
 from marvin_preview_schema import normalize_marvin_preview
 
 
-DEFAULT_MAX_SEARCH_ACTIONS = 4
-# Each turn is separated by a fresh Preview/TargetLock evaluation.  The two
-# right turns inspect past center before the final left turn restores heading.
-DEFAULT_LOCAL_SCAN_PLAN = ("turn_left", "turn_right", "turn_right", "turn_left")
+MAX_SCAN_TURNS = 26
+SCAN_DIRECTION = "LEFT"
+DEFAULT_MAX_SEARCH_ACTIONS = MAX_SCAN_TURNS
+DEFAULT_LOCAL_SCAN_PLAN = ("turn_left",) * MAX_SCAN_TURNS
 
 
 def plan_marvin_search_step(
     pursuit_state,
     *,
-    prior_search_history=None,
+    scan_turn_index=0,
     selected_identity_id=None,
     preview_result=None,
     target_lock_snapshot=None,
@@ -28,13 +28,12 @@ def plan_marvin_search_step(
     max_search_actions=DEFAULT_MAX_SEARCH_ACTIONS,
     now=None,
     max_preview_age_seconds=DEFAULT_PREVIEW_MAX_AGE_SECONDS,
-    scan_plan=DEFAULT_LOCAL_SCAN_PLAN,
+    scan_direction=SCAN_DIRECTION,
 ):
     """Propose at most one deterministic local scan action without motion.
 
-    ``prior_search_history`` is prior planner output, not an execution log.
-    It is used only to count already proposed scan turns; callers must obtain
-    fresh perception and TargetLock evidence before each subsequent call.
+    Scan progress is an explicit mission-scoped completed-turn index. It is
+    never reconstructed from controller or action history.
     """
     base = {
         "ok": False,
@@ -51,10 +50,12 @@ def plan_marvin_search_step(
     }
     if not _valid_limit(max_search_actions):
         return dict(base, reason="invalid_marvin_search_action_limit")
-    if not isinstance(prior_search_history, (list, tuple, type(None))):
-        return dict(base, reason="marvin_search_history_malformed")
-    if not _valid_scan_plan(scan_plan):
-        return dict(base, reason="marvin_search_scan_plan_invalid")
+    if (not isinstance(scan_turn_index, int)
+            or isinstance(scan_turn_index, bool)
+            or not 0 <= scan_turn_index <= max_search_actions):
+        return dict(base, reason="marvin_search_scan_index_invalid")
+    if scan_direction != SCAN_DIRECTION:
+        return dict(base, reason="marvin_search_direction_invalid")
     if not _valid_positive(max_preview_age_seconds):
         return dict(base, reason="marvin_search_preview_age_invalid")
     if not isinstance(pursuit_state, dict):
@@ -67,9 +68,7 @@ def plan_marvin_search_step(
         pursuit_state.get("selected_identity_id")
     )
     result = dict(base, search_state=state, selected_identity_id=selected_identity)
-    used = _count_actions(prior_search_history)
-    if used is None:
-        return dict(result, reason="marvin_search_history_entry_malformed")
+    used = scan_turn_index
     result["search_actions_used"] = used
 
     preview_status = _preview_status(
@@ -106,31 +105,17 @@ def plan_marvin_search_step(
                 selected_search_action="preview_only",
             )
 
-    if used >= max_search_actions or used >= len(scan_plan):
+    if used >= max_search_actions:
         return dict(
             result, ok=True, completed=True, reason="marvin_search_exhausted",
             selected_search_action="search_complete",
         )
-    action = scan_plan[used]
     return dict(
         result, ok=True, reason="search_action_planned",
-        selected_search_action=action, search_actions_used=used + 1,
+        selected_search_action="turn_left", search_actions_used=used + 1,
+        scan_turn_index=used,
+        scan_direction=SCAN_DIRECTION,
     )
-
-
-def _count_actions(history):
-    if history is None:
-        return 0
-    count = 0
-    for entry in history:
-        if not isinstance(entry, dict):
-            return None
-        action = entry.get("selected_search_action")
-        if action in {"turn_left", "turn_right"}:
-            count += 1
-        elif action not in {"preview_only", "reacquired", "search_complete", "fail_closed", None}:
-            return None
-    return count
 
 
 def _identity_restored(snapshot, selected_identity_id):
@@ -207,11 +192,6 @@ def _valid_limit(value):
 
 def _valid_positive(value):
     return _finite(value) and value > 0.0
-
-
-def _valid_scan_plan(value):
-    return (isinstance(value, (tuple, list)) and bool(value)
-            and all(item in {"turn_left", "turn_right"} for item in value))
 
 
 def _finite(value):

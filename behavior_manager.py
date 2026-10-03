@@ -30,9 +30,30 @@ from marvin_identity_continuity import evaluate_marvin_identity_continuity
 from marvin_identity_episode import evaluate_marvin_identity_episode
 from marvin_identity_refresh_policy import build_marvin_identity_refresh_update
 from marvin_preview_reacquisition import evaluate_marvin_preview_reacquisition
-from marvin_search_policy import plan_marvin_search_step
+from marvin_search_policy import (
+    MAX_SCAN_TURNS,
+    SCAN_DIRECTION,
+    plan_marvin_search_step,
+)
 from local_motion_safety_envelope import evaluate_local_motion_safety
 from camera_motion_gate import evaluate_camera_gate
+
+
+def _valid_source_frame_stamp(value):
+    return value if type(value) is int and value >= 0 else None
+
+
+def _bridge_status_zero(status):
+    motion = status.get("motion") if isinstance(status, dict) else None
+    return bool(
+        isinstance(status, dict)
+        and status.get("ok") is True
+        and status.get("ros_ready") is True
+        and isinstance(motion, dict)
+        and motion.get("linear_x") == 0
+        and motion.get("angular_z") == 0
+        and motion.get("streaming") is False
+)
 
 
 LOCAL_AVOIDANCE_LIDAR_WAIT_TIMEOUT_SECONDS = 1.0
@@ -496,7 +517,10 @@ class BehaviorManager:
     SEARCH_TURN_SPEED = 0.30
     SEARCH_TURN_SECONDS = 1.0
     MARVIN_SEARCH_TURN_SPEED = 0.25
-    MARVIN_SEARCH_TURN_SECONDS = 0.50
+    MARVIN_SEARCH_TURN_SECONDS = 1.0
+    MARVIN_SCAN_MAX_TURNS = MAX_SCAN_TURNS
+    MARVIN_POST_TURN_FRAME_TIMEOUT_SECONDS = 3.0
+    MARVIN_POST_TURN_FRAME_POLL_SECONDS = 0.05
     SEARCH_MAX_TURN_CHUNKS = 3
     SEARCH_DIRECTION = "LEFT"
     TARGET_CONFIRMATION_MAX_FRAMES = 3
@@ -646,6 +670,50 @@ class BehaviorManager:
         # Find Marvin uses the same handoff only after its pursuit policy has
         # authorized a local forward-progress request.
         self.marvin_local_progress_with_avoidance_handler = None
+        self._marvin_room_scan_lock = threading.RLock()
+        self._marvin_room_scan = None
+
+    def begin_find_marvin_room_scan(self, mission_id, *, source_frame_stamp_ns=None):
+        """Start mission-scoped state for the bounded nominal room sweep."""
+        if not isinstance(mission_id, str) or not mission_id.strip():
+            raise ValueError("marvin_room_scan_mission_id_invalid")
+        stamp = _valid_source_frame_stamp(source_frame_stamp_ns)
+        with self._marvin_room_scan_lock:
+            self._marvin_room_scan = {
+                "mission_id": mission_id,
+                "scan_active": True,
+                "scan_turn_index": 0,
+                "scan_max_turns": self.MARVIN_SCAN_MAX_TURNS,
+                "scan_direction": SCAN_DIRECTION,
+                "scan_started_at": datetime.now(timezone.utc).isoformat(),
+                "last_completed_scan_turn": None,
+                "last_seen_source_frame_stamp_ns": stamp,
+                "pre_turn_source_frame_stamp_ns": None,
+                "awaiting_new_source_frame": False,
+                "scan_exhausted": False,
+                "scan_target_acquired": False,
+                "scan_transition_pending": False,
+            }
+            return dict(self._marvin_room_scan)
+
+    def clear_find_marvin_room_scan(self, mission_id=None):
+        with self._marvin_room_scan_lock:
+            current = self._marvin_room_scan
+            if current is not None and (
+                mission_id is None or current.get("mission_id") == mission_id
+            ):
+                self._marvin_room_scan = None
+
+    def _room_scan_snapshot(self):
+        with self._marvin_room_scan_lock:
+            return dict(self._marvin_room_scan) if self._marvin_room_scan else None
+
+    def _room_scan_update(self, **values):
+        with self._marvin_room_scan_lock:
+            if self._marvin_room_scan is None:
+                return None
+            self._marvin_room_scan.update(values)
+            return dict(self._marvin_room_scan)
 
     def _publish_tracking_state(self, result):
         callback = getattr(self, "tracking_state_callback", None)
@@ -1440,7 +1508,7 @@ class BehaviorManager:
         self,
         pursuit_state,
         *,
-        prior_search_history=None,
+        scan_turn_index=0,
         selected_identity_id=None,
         preview_result=None,
         target_lock_snapshot=None,
@@ -1466,7 +1534,7 @@ class BehaviorManager:
             "reason": None,
         }
         planner_kwargs = {
-            "prior_search_history": prior_search_history,
+            "scan_turn_index": scan_turn_index,
             "selected_identity_id": selected_identity_id,
             "preview_result": preview_result,
             "target_lock_snapshot": target_lock_snapshot,
@@ -1504,14 +1572,14 @@ class BehaviorManager:
                 result, ok=planner.get("ok") is True,
                 decision=action, reason=planner.get("reason"),
             )
-        if action != "turn_left" and action != "turn_right":
+        if action != "turn_left":
             return dict(result, reason="marvin_search_action_not_permitted")
 
         session = self._current_lidar_session()
         if session is None:
             return dict(result, reason="lidar_producer_session_unavailable")
-        direction = "LEFT" if action == "turn_left" else "RIGHT"
-        primitive = "guarded_turn_left" if direction == "LEFT" else "guarded_turn_right"
+        direction = SCAN_DIRECTION
+        primitive = "guarded_turn_left"
         try:
             guarded_turn = self.execute_guarded_turn(
                 direction,
@@ -1576,9 +1644,74 @@ class BehaviorManager:
         lock_snapshot = self.target_lock.snapshot()
         if not isinstance(lock_snapshot, dict):
             raise RuntimeError("marvin_target_lock_snapshot_malformed")
-        preview = self.preview_find_object(self.MARVIN_SEMANTIC_TARGET)
+        scan = self._room_scan_snapshot()
+        if scan and scan.get("awaiting_new_source_frame") is True:
+            baseline = scan.get("pre_turn_source_frame_stamp_ns")
+            fetch = getattr(self.vision, "fetch_detection_proposals", None)
+            if type(baseline) is not int or baseline < 0 or not callable(fetch):
+                return {"post_turn_frame_status": "unavailable", "preview_result": None}
+            deadline = time.monotonic() + self.MARVIN_POST_TURN_FRAME_TIMEOUT_SECONDS
+            latest_stamp = None
+            while time.monotonic() < deadline:
+                if not self._execution_is_current():
+                    return {"post_turn_frame_status": "preempted", "preview_result": None}
+                try:
+                    payload = fetch()
+                except Exception:
+                    payload = None
+                if isinstance(payload, dict):
+                    stamp = _valid_source_frame_stamp(payload.get("source_frame_stamp_ns"))
+                    if stamp is not None:
+                        latest_stamp = stamp
+                        if stamp > baseline:
+                            break
+                time.sleep(self.MARVIN_POST_TURN_FRAME_POLL_SECONDS)
+            if latest_stamp is None or latest_stamp <= baseline:
+                return {
+                    "post_turn_frame_status": "timeout",
+                    "post_turn_frame_baseline_ns": baseline,
+                    "post_turn_frame_latest_ns": latest_stamp,
+                    "preview_result": None,
+                }
+            self._room_scan_update(
+                awaiting_new_source_frame=False,
+                last_seen_source_frame_stamp_ns=latest_stamp,
+            )
+            scan = self._room_scan_snapshot()
+        required_source_stamp = (
+            scan.get("pre_turn_source_frame_stamp_ns")
+            if scan and scan.get("awaiting_new_source_frame") is False
+            and scan.get("last_completed_scan_turn") is not None
+            else None
+        )
+        if required_source_stamp is None:
+            preview = self.preview_find_object(self.MARVIN_SEMANTIC_TARGET)
+        else:
+            preview = self.preview_find_object(
+                self.MARVIN_SEMANTIC_TARGET,
+                minimum_source_frame_stamp_ns=required_source_stamp,
+            )
         if not isinstance(preview, dict):
             raise RuntimeError("marvin_preview_result_malformed")
+        preview_stamp = _valid_source_frame_stamp(preview.get("source_frame_stamp_ns"))
+        if scan and scan.get("pre_turn_source_frame_stamp_ns") is not None:
+            baseline = scan.get("pre_turn_source_frame_stamp_ns")
+            if (
+                type(baseline) is not int
+                or preview_stamp is None
+                or preview_stamp <= baseline
+            ):
+                return {
+                    "post_turn_frame_status": "preview_not_bound_to_new_frame",
+                    "preview_result": preview,
+                    "target_lock_result": {},
+                    "target_lock_snapshot": lock_snapshot,
+                    "selected_identity_id": None,
+                }
+            self._room_scan_update(
+                last_seen_source_frame_stamp_ns=preview_stamp,
+                pre_turn_source_frame_stamp_ns=None,
+            )
         selected_identity_id = (
             lock_snapshot.get("locked_identity_id")
         )
@@ -1985,6 +2118,7 @@ class BehaviorManager:
         local_progress_completed = False
         last_local_progress_result = None
         search_history = []
+        local_scan_turn_index = 0
         # ``actions_executed`` counts physical or delivery-uncertain actions.
         # A verified pre-transport stale veto can replan once without spending
         # that budget, but this loop remains finite through its separate cap.
@@ -2010,6 +2144,18 @@ class BehaviorManager:
                     base,
                     history=list(base["history"]),
                     reason="find_marvin_state_evidence_malformed",
+                )
+            if evidence.get("post_turn_frame_status") in {
+                "timeout", "unavailable", "preempted",
+                "preview_not_bound_to_new_frame",
+            }:
+                return dict(
+                    base, ok=True, completed=False,
+                    history=list(base["history"]),
+                    reason="find_marvin_post_turn_frame_" + str(
+                        evidence["post_turn_frame_status"]
+                    ),
+                    post_turn_frame=evidence,
                 )
             preview = evidence.get("preview_result")
             lock_result = evidence.get("target_lock_result")
@@ -2068,6 +2214,28 @@ class BehaviorManager:
                     history=list(base["history"]),
                     reason="find_marvin_identity_changed",
                 )
+
+            scan = self._room_scan_snapshot()
+            if scan and scan.get("scan_active") is True:
+                source_stamp = _valid_source_frame_stamp(
+                    preview.get("source_frame_stamp_ns")
+                    if isinstance(preview, dict) else None
+                )
+                if scan.get("scan_turn_index", 0) == 0 and scan.get(
+                    "last_seen_source_frame_stamp_ns"
+                ) is None and source_stamp is not None:
+                    self._room_scan_update(
+                        last_seen_source_frame_stamp_ns=source_stamp,
+                    )
+                if pursuit.get("pursuit_authorized") is True and pursuit.get(
+                    "state"
+                ) in {VISUAL_READY_TO_ALIGN, VISUAL_READY_TO_APPROACH}:
+                    self._room_scan_update(
+                        scan_active=False,
+                        scan_target_acquired=True,
+                        scan_transition_pending=True,
+                        scan_exhausted=False,
+                    )
 
             visual_session = pursuit.get("state") in {
                 VISUAL_READY_TO_ALIGN, VISUAL_READY_TO_APPROACH,
@@ -2261,6 +2429,21 @@ class BehaviorManager:
                 arrival_candidate_timestamp = None
                 base["arrival_observations_confirmed"] = 0
 
+            scan = self._room_scan_snapshot()
+            if scan and scan.get("scan_transition_pending") is True:
+                self._room_scan_update(scan_transition_pending=False)
+                history_entry.update(
+                    route="search",
+                    selected_action="motion_authorized_marvin_acquired",
+                )
+                base["history"].append(history_entry)
+                return dict(
+                    base, ok=True, completed=False,
+                    history=list(base["history"]),
+                    reason="find_marvin_search_target_acquired",
+                    scan_turn_index=scan.get("scan_turn_index"),
+                )
+
             if local_progress_completed:
                 history_entry.update(
                     route="post_progress_reassessment",
@@ -2283,6 +2466,20 @@ class BehaviorManager:
             state = pursuit.get("state")
             authorized = pursuit.get("pursuit_authorized") is True
             if state in {"SEARCHING", "REACQUIRE_REQUIRED"}:
+                scan_state = self._room_scan_snapshot()
+                if (
+                    scan_state and scan_state.get("scan_active") is True
+                    and _valid_source_frame_stamp(
+                        preview.get("source_frame_stamp_ns")
+                        if isinstance(preview, dict) else None
+                    ) is None
+                ):
+                    base["history"].append(history_entry)
+                    return dict(
+                        base, ok=True, completed=False,
+                        history=list(base["history"]),
+                        reason="find_marvin_scan_source_frame_baseline_missing",
+                    )
                 history_entry["route"] = "search"
                 history_entry["selected_action"] = "search_step"
                 if dry_run:
@@ -2303,7 +2500,10 @@ class BehaviorManager:
                 try:
                     step = self.execute_marvin_search_step(
                         pursuit,
-                        prior_search_history=list(search_history),
+                        scan_turn_index=(
+                            scan.get("scan_turn_index", 0)
+                            if scan else local_scan_turn_index
+                        ),
                         selected_identity_id=current_identity_id,
                         preview_result=preview,
                         target_lock_snapshot=lock_snapshot,
@@ -2378,9 +2578,40 @@ class BehaviorManager:
                         base, history=list(base["history"]),
                         reason="find_marvin_search_action_malformed",
                     )
+                if self._room_scan_snapshot() is not None:
+                    bridge_status = self.robot.status()
+                    if not _bridge_status_zero(bridge_status):
+                        return dict(
+                            base, history=list(base["history"]),
+                            reason="find_marvin_search_bridge_not_zero_after_stop",
+                            bridge_status=bridge_status,
+                        )
+                    completed_index = self._room_scan_snapshot()
+                    baseline_stamp = _valid_source_frame_stamp(
+                        preview.get("source_frame_stamp_ns")
+                        if isinstance(preview, dict) else None
+                    )
+                    if baseline_stamp is None:
+                        return dict(
+                            base, history=list(base["history"]),
+                            reason="find_marvin_post_turn_source_frame_baseline_missing",
+                        )
+                    completed_turn = completed_index.get("scan_turn_index", 0) + 1
+                    self._room_scan_update(
+                        scan_turn_index=completed_turn,
+                        last_completed_scan_turn=completed_turn,
+                        pre_turn_source_frame_stamp_ns=baseline_stamp,
+                        last_seen_source_frame_stamp_ns=baseline_stamp,
+                        awaiting_new_source_frame=True,
+                        scan_exhausted=(completed_turn >= completed_index.get(
+                            "scan_max_turns", self.MARVIN_SCAN_MAX_TURNS
+                        )),
+                    )
                 search_history.append({
                     "selected_search_action": history_entry["search_action"],
                 })
+                if self._room_scan_snapshot() is None:
+                    local_scan_turn_index += 1
                 continue
 
             if state not in {
@@ -4421,7 +4652,7 @@ class BehaviorManager:
             self._publish_tracking_state(outcome)
         return outcome
 
-    def preview_find_object(self, target_name):
+    def preview_find_object(self, target_name, *, minimum_source_frame_stamp_ns=None):
         """Preview FIND_OBJECT perception without promotion or motion."""
         normalized_target = str(target_name or "").strip().lower()
         base = {
@@ -4447,7 +4678,9 @@ class BehaviorManager:
         # and the confirmed local tracker for the published preview geometry.
         if normalized_target == self.MARVIN_SEMANTIC_TARGET:
             try:
-                observation = self._preview_marvin_yolo_identity_observation()
+                observation = self._preview_marvin_yolo_identity_observation(
+                    minimum_source_frame_stamp_ns=minimum_source_frame_stamp_ns,
+                )
             except Exception as exc:
                 return dict(
                     base,
@@ -4459,6 +4692,12 @@ class BehaviorManager:
                 )
             if observation is None:
                 return dict(base, reason="Marvin was not found in the current camera frame.")
+            if isinstance(observation, dict) and observation.get("found") is False:
+                return dict(
+                    base,
+                    source_frame_stamp_ns=observation.get("source_frame_stamp_ns"),
+                    reason=observation.get("reason", "Marvin was not found in the current camera frame."),
+                )
             result = self._build_find_object_preview(
                 normalized_target,
                 observation,
@@ -4980,9 +5219,13 @@ class BehaviorManager:
             return None
         return normalized
 
-    def _preview_marvin_yolo_identity_observation(self):
+    def _preview_marvin_yolo_identity_observation(
+        self, *, minimum_source_frame_stamp_ns=None,
+    ):
         """Acquire Marvin perception for read-only Preview."""
-        return self._acquire_marvin_proposal_tracker_observation()
+        return self._acquire_marvin_proposal_tracker_observation(
+            minimum_source_frame_stamp_ns=minimum_source_frame_stamp_ns,
+        )
 
     def _acquire_marvin_proposal_tracker_observation(
         self,
@@ -4990,6 +5233,7 @@ class BehaviorManager:
         execution_guard=None,
         episode=None,
         before_tracker_initialization=None,
+        minimum_source_frame_stamp_ns=None,
     ):
         """Acquire Marvin using proposals, identity selection, and tracking.
 
@@ -5007,9 +5251,21 @@ class BehaviorManager:
         candidates, status, diagnostics = (
             self._confirm_marvin_proposal_candidates_with_status(
                 execution_guard=execution_guard,
+                minimum_source_frame_stamp_ns=minimum_source_frame_stamp_ns,
             )
         )
         if not candidates:
+            source_stamp = diagnostics.get("latest_source_frame_stamp_ns")
+            if (
+                type(source_stamp) is int
+                and (minimum_source_frame_stamp_ns is None
+                     or source_stamp > minimum_source_frame_stamp_ns)
+            ):
+                return {
+                    "found": False,
+                    "source_frame_stamp_ns": source_stamp,
+                    "reason": "Marvin was not found in the current camera frame.",
+                }
             if status == "person_proposals_rejected":
                 raise ValueError("marvin_person_proposal_rejected")
             raise ValueError("marvin_yolo_proposal_" + str(status))
@@ -5351,7 +5607,7 @@ class BehaviorManager:
         return expanded
 
     def _confirm_marvin_proposal_candidates_with_status(
-        self, *, execution_guard=None
+        self, *, execution_guard=None, minimum_source_frame_stamp_ns=None
     ):
         """Cluster class-agnostic proposals by fresh geometry only."""
         fetch = getattr(self.vision, "fetch_detection_proposals", None)
@@ -5373,6 +5629,7 @@ class BehaviorManager:
             "qualified_support_reached": False,
             "detector_target": None,
             "marvin_person_proposals_rejected": 0,
+            "latest_source_frame_stamp_ns": None,
         }
         started = time.monotonic()
         seen_timestamps = set()
@@ -5428,6 +5685,18 @@ class BehaviorManager:
             if not isinstance(payload, dict) or payload.get("camera_running") is not True:
                 time.sleep(self.TARGET_CONFIRMATION_POLL_SECONDS)
                 continue
+            source_frame_stamp_ns = payload.get("source_frame_stamp_ns")
+            if type(source_frame_stamp_ns) is not int or source_frame_stamp_ns < 0:
+                source_frame_stamp_ns = None
+            if source_frame_stamp_ns is not None:
+                diagnostics["latest_source_frame_stamp_ns"] = source_frame_stamp_ns
+            if (
+                minimum_source_frame_stamp_ns is not None
+                and (source_frame_stamp_ns is None
+                     or source_frame_stamp_ns <= minimum_source_frame_stamp_ns)
+            ):
+                time.sleep(self.TARGET_CONFIRMATION_POLL_SECONDS)
+                continue
             timestamp = payload.get("timestamp")
             if (
                 not isinstance(timestamp, str)
@@ -5443,9 +5712,6 @@ class BehaviorManager:
             if not isinstance(detections, list):
                 time.sleep(self.TARGET_CONFIRMATION_POLL_SECONDS)
                 continue
-            source_frame_stamp_ns = payload.get("source_frame_stamp_ns")
-            if type(source_frame_stamp_ns) is not int or source_frame_stamp_ns < 0:
-                source_frame_stamp_ns = None
 
             observations = []
             for raw_detection in detections:

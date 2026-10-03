@@ -787,11 +787,11 @@ def test_invalid_limits_provider_and_evaluator_fail_closed(monkeypatch):
     assert calls == []
 
 
-def test_search_history_advances_only_for_successful_turns(monkeypatch):
+def test_explicit_scan_index_advances_only_for_successful_turns(monkeypatch):
     result, _providers, _evaluations, _arrivals, searches, _pursuits = invoke(
         monkeypatch, [pursuit("SEARCHING", False), pursuit("SEARCHING", False)], max_actions=2)
-    assert searches[0][1]["prior_search_history"] == []
-    assert searches[1][1]["prior_search_history"] == [{"selected_search_action": "turn_left"}]
+    assert searches[0][1]["scan_turn_index"] == 0
+    assert searches[1][1]["scan_turn_index"] == 1
     assert result["history"][0]["search_action"] == "turn_left"
 
 
