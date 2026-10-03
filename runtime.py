@@ -869,10 +869,25 @@ class CognitiveRuntime:
         wait = controller.get("clearance_wait")
         bridge = wait.get("bridge_status") if isinstance(wait, dict) else None
         motion = bridge.get("motion") if isinstance(bridge, dict) else None
+        origin = wait.get("clearance_wait_origin") if isinstance(wait, dict) else None
+        step_origin = step.get("clearance_wait_origin") if isinstance(step, dict) else None
+        interrupted = step.get("interrupted_turn_detected") is True if isinstance(step, dict) else False
+        action_budget_consumed = (
+            terminal.get("action_budget_consumed") if isinstance(terminal, dict) else None
+        )
+        accounting_valid = (
+            origin == step_origin == "pre_turn" and action_budget_consumed is False
+        ) or (
+            origin == step_origin == "active_turn_monitor"
+            and interrupted
+            and step.get("interrupted_turn_monitor_reason")
+            == "rotational_protected_region_violated"
+            and action_budget_consumed is True
+        )
         return bool(
             isinstance(terminal, dict)
             and terminal.get("route") == "search"
-            and terminal.get("action_budget_consumed") is False
+            and accounting_valid
             and isinstance(terminal.get("stop_result"), dict)
             and terminal["stop_result"].get("ok") is True
             and isinstance(step, dict)
@@ -882,6 +897,9 @@ class CognitiveRuntime:
             and isinstance(wait, dict)
             and terminal.get("pending_scan_turn_index") == wait.get("pending_scan_turn_index")
             and wait.get("decision") == "clearance_wait_timeout"
+            and wait.get("clearance_wait_origin") in {
+                "pre_turn", "active_turn_monitor",
+            }
             and isinstance(bridge, dict)
             and bridge.get("ok") is True
             and bridge.get("ros_ready") is True

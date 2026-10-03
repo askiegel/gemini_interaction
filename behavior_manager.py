@@ -710,10 +710,13 @@ class BehaviorManager:
                 "search_state": "SEARCHING",
                 "clearance_wait_active": False,
                 "clearance_wait_started_monotonic": None,
+                "clearance_wait_origin": None,
                 "clearance_recheck_count": 0,
                 "last_rotational_safety_reason": None,
                 "pending_scan_turn_index": None,
                 "pending_scan_direction": None,
+                "interrupted_turn_detected": False,
+                "interrupted_turn_monitor_reason": None,
             }
             return dict(self._marvin_room_scan)
 
@@ -737,17 +740,16 @@ class BehaviorManager:
             return dict(self._marvin_room_scan)
 
     @staticmethod
-    def _is_rotational_clearance_block(result, expected_session):
-        """Accept only a fresh, valid geometric occupancy veto for waiting."""
-        if not isinstance(result, dict) or not (
-            result.get("permitted") is False
-            and result.get("reason") == "rotational_protected_region_violated"
-            and result.get("validation_reason") == "rotational_protected_region_violated"
-            and result.get("producer_session") == expected_session
+    def _is_valid_rotational_occupancy_validation(validation, expected_session):
+        """Validate the structured fresh-JIT proof of a protected-circle hit."""
+        if not isinstance(validation, dict) or not (
+            validation.get("permitted") is False
+            and validation.get("reason") == "rotational_protected_region_violated"
+            and validation.get("producer_session") == expected_session
         ):
             return False
-        age = result.get("effective_age_seconds")
-        footprint = result.get("rotational_swept_footprint")
+        age = validation.get("effective_age_seconds")
+        footprint = validation.get("rotational_swept_footprint")
         point = footprint.get("violating_point") if isinstance(footprint, dict) else None
         geometry = footprint.get("geometry") if isinstance(footprint, dict) else None
         if not (
@@ -756,6 +758,7 @@ class BehaviorManager:
             and isinstance(footprint, dict)
             and footprint.get("permitted") is False
             and footprint.get("reason") == "rotational_protected_region_violated"
+            and footprint.get("model") == "base_link_circular_rotational_envelope"
             and footprint.get("protected_radius_m") == 0.45
             and isinstance(geometry, dict) and geometry.get("valid") is True
             and geometry.get("frame_id") == EXPECTED_LIDAR_FRAME
@@ -770,6 +773,66 @@ class BehaviorManager:
             and isinstance(y_value, (int, float)) and not isinstance(y_value, bool)
             and math.isfinite(x_value) and math.isfinite(y_value)
             and math.hypot(x_value, y_value) <= 0.45
+        )
+
+    @classmethod
+    def _is_rotational_clearance_block(cls, result, expected_session):
+        """Accept a pre-transport fresh geometric occupancy veto only."""
+        return bool(
+            isinstance(result, dict)
+            and result.get("validation_reason") == "rotational_protected_region_violated"
+            and cls._is_valid_rotational_occupancy_validation(result, expected_session)
+        )
+
+    @classmethod
+    def _is_active_turn_rotational_clearance_stop(cls, result, expected_session):
+        """Recognize only a successful transport stopped by valid monitor geometry."""
+        transport_result = result.get("transport_result") if isinstance(result, dict) else None
+        stop_fallback = result.get("stop_fallback_result") if isinstance(result, dict) else None
+        initial_footprint = (
+            result.get("rotational_swept_footprint")
+            if isinstance(result, dict) else None
+        )
+        if not isinstance(result, dict) or not (
+            result.get("reason") == "rotational_protected_region_violated"
+            and result.get("monitor_reason") == "rotational_protected_region_violated"
+            and result.get("permitted") is True
+            and result.get("validation_reason") == "rotational_swept_footprint_clear"
+            and isinstance(initial_footprint, dict)
+            and initial_footprint.get("permitted") is True
+            and initial_footprint.get("model") == "base_link_circular_rotational_envelope"
+            and initial_footprint.get("protected_radius_m") == 0.45
+            and result.get("generation_invalidated") is True
+            and result.get("transport_began") is True
+            and result.get("transport_accepted") is True
+            and result.get("transport_returned") is True
+            and isinstance(transport_result, dict)
+            and transport_result.get("ok") is True
+            and result.get("delivery_uncertain") is False
+            and result.get("transport_error") is None
+            and result.get("stop_fallback_attempted") is True
+            and isinstance(stop_fallback, dict)
+            and stop_fallback.get("ok") is True
+            and result.get("stop_fallback_error") is None
+        ):
+            return False
+        monitor_validation = result.get("monitor_validation")
+        if not cls._is_valid_rotational_occupancy_validation(
+            monitor_validation, expected_session,
+        ):
+            return False
+        events = result.get("stop_events")
+        if not isinstance(events, list):
+            return False
+        return any(
+            isinstance(event, dict)
+            and event.get("source") == "monitor"
+            and isinstance(event.get("result"), dict)
+            and event["result"].get("ok") is True
+            and cls._is_valid_rotational_occupancy_validation(
+                event.get("monitor_validation"), expected_session,
+            )
+            for event in events
         )
 
     def _stop_and_verify_bridge_zero(self):
@@ -1670,7 +1733,12 @@ class BehaviorManager:
             if scan and scan.get("clearance_wait_active") is True else None
         )
         recheck_count = scan.get("clearance_recheck_count", 0) if scan else 0
-        last_block = None
+        wait_origin = scan.get("clearance_wait_origin") if scan else None
+        interrupted_turn = scan.get("interrupted_turn_detected") is True if scan else False
+        interrupted_monitor_reason = (
+            scan.get("interrupted_turn_monitor_reason") if scan else None
+        )
+        last_block = scan.get("last_rotational_safety_reason") if scan else None
         while True:
             if wait_started is not None:
                 if not self._execution_is_current():
@@ -1756,12 +1824,15 @@ class BehaviorManager:
                 elapsed = max(0.0, time.monotonic() - wait_started)
                 diagnostics = {
                     "clearance_wait_active": False,
+                    "clearance_wait_origin": wait_origin,
                     "clearance_wait_elapsed_seconds": elapsed,
                     "clearance_wait_timeout_seconds": self.MARVIN_CLEARANCE_WAIT_TIMEOUT_SECONDS,
                     "pending_scan_turn_index": scan_turn_index,
                     "pending_scan_direction": "LEFT",
                     "last_rotational_safety_reason": last_block,
                     "clearance_recheck_count": recheck_count + 1,
+                    "interrupted_turn_detected": interrupted_turn,
+                    "interrupted_turn_monitor_reason": interrupted_monitor_reason,
                     "guarded_turn_result": deadline_check,
                     "stop_evidence": stop_evidence,
                     "bridge_status": bridge_status,
@@ -1817,11 +1888,14 @@ class BehaviorManager:
             if turn_ok:
                 diagnostics = {
                     "clearance_wait_active": False,
+                    "clearance_wait_origin": wait_origin,
                     "clearance_wait_timeout_seconds": self.MARVIN_CLEARANCE_WAIT_TIMEOUT_SECONDS,
                     "pending_scan_turn_index": scan_turn_index,
                     "pending_scan_direction": direction,
                     "last_rotational_safety_reason": last_block,
                     "clearance_recheck_count": recheck_count,
+                    "interrupted_turn_detected": interrupted_turn,
+                    "interrupted_turn_monitor_reason": interrupted_monitor_reason,
                     "clearance_wait_elapsed_seconds": (
                         max(0.0, time.monotonic() - wait_started)
                         if wait_started is not None else 0.0
@@ -1831,10 +1905,13 @@ class BehaviorManager:
                     self._room_scan_update(
                         clearance_wait_active=False,
                         clearance_wait_started_monotonic=None,
+                        clearance_wait_origin=None,
                         clearance_recheck_count=recheck_count,
                         last_rotational_safety_reason=last_block,
                         pending_scan_turn_index=None,
                         pending_scan_direction=None,
+                        interrupted_turn_detected=False,
+                        interrupted_turn_monitor_reason=None,
                         search_state="SEARCHING",
                     )
                 return dict(
@@ -1849,7 +1926,11 @@ class BehaviorManager:
                     **diagnostics,
                 )
 
-            if not self._is_rotational_clearance_block(guarded_turn, session):
+            pre_turn_block = self._is_rotational_clearance_block(guarded_turn, session)
+            active_turn_block = self._is_active_turn_rotational_clearance_stop(
+                guarded_turn, session,
+            )
+            if not (pre_turn_block or active_turn_block):
                 if wait_started is not None:
                     self._room_scan_update(
                         clearance_wait_active=False,
@@ -1867,11 +1948,10 @@ class BehaviorManager:
                     ),
                 )
 
-            if wait_started is None:
+            if wait_started is None and pre_turn_block:
                 wait_started = time.monotonic()
             last_block = guarded_turn.get("reason")
             ok_zero, stop_evidence, bridge_status = self._stop_and_verify_bridge_zero()
-            elapsed = max(0.0, time.monotonic() - wait_started)
             if not ok_zero:
                 self._room_scan_update(
                     clearance_wait_active=False,
@@ -1885,28 +1965,60 @@ class BehaviorManager:
                     guarded_turn_result=guarded_turn,
                     stop_evidence=stop_evidence,
                     bridge_status=bridge_status,
-                    clearance_wait_elapsed_seconds=elapsed,
+                    clearance_wait_elapsed_seconds=(
+                        max(0.0, time.monotonic() - wait_started)
+                        if wait_started is not None else 0.0
+                    ),
                     reason=stop_evidence.get("reason", "clearance_wait_stop_failed"),
                 )
+            if not self._execution_is_current():
+                self._room_scan_update(
+                    clearance_wait_active=False,
+                    search_state="SEARCHING",
+                )
+                return dict(
+                    result,
+                    decision="clearance_wait_preempted",
+                    guarded_turn_result=guarded_turn,
+                    stop_evidence=stop_evidence,
+                    bridge_status=bridge_status,
+                    reason="find_marvin_clearance_wait_preempted",
+                )
+            if wait_started is None:
+                # An active-turn monitor already issued STOP; the clearance
+                # deadline starts only after this explicit zero verification.
+                wait_started = time.monotonic()
+            if active_turn_block:
+                interrupted_turn = True
+                interrupted_monitor_reason = "rotational_protected_region_violated"
+            if wait_origin is None:
+                wait_origin = "active_turn_monitor" if active_turn_block else "pre_turn"
+            elapsed = max(0.0, time.monotonic() - wait_started)
             if scan is not None:
                 self._room_scan_update(
                     search_state="FIND_MARVIN_WAITING_FOR_CLEARANCE",
                     clearance_wait_active=True,
                     clearance_wait_started_monotonic=wait_started,
+                    clearance_wait_origin=wait_origin,
                     clearance_recheck_count=recheck_count,
                     pending_scan_turn_index=scan_turn_index,
                     pending_scan_direction="LEFT",
                     last_rotational_safety_reason=last_block,
+                    interrupted_turn_detected=interrupted_turn,
+                    interrupted_turn_monitor_reason=interrupted_monitor_reason,
                 )
             if elapsed >= self.MARVIN_CLEARANCE_WAIT_TIMEOUT_SECONDS:
                 diagnostics = {
                     "clearance_wait_active": False,
+                    "clearance_wait_origin": wait_origin,
                     "clearance_wait_elapsed_seconds": elapsed,
                     "clearance_wait_timeout_seconds": self.MARVIN_CLEARANCE_WAIT_TIMEOUT_SECONDS,
                     "pending_scan_turn_index": scan_turn_index,
                     "pending_scan_direction": "LEFT",
                     "last_rotational_safety_reason": last_block,
                     "clearance_recheck_count": recheck_count,
+                    "interrupted_turn_detected": interrupted_turn,
+                    "interrupted_turn_monitor_reason": interrupted_monitor_reason,
                     "stop_evidence": stop_evidence,
                     "bridge_status": bridge_status,
                 }
@@ -2896,13 +3008,19 @@ class BehaviorManager:
                     and step.get("clearance_wait_timed_out") is True
                     and step.get("reason") == "find_marvin_clearance_wait_timeout"
                 ):
-                    # The rejected turn and passive safety rechecks dispatched
-                    # no motion; do not count them against the physical-action
-                    # episode budget.
-                    base["actions_executed"] = max(
-                        0, base["actions_executed"] - 1,
+                    # A pre-turn veto dispatched no motion. An active-monitor
+                    # stop did dispatch a bounded turn, so retain that single
+                    # attempted physical-action opportunity while passive
+                    # clearance rechecks consume none.
+                    attempted_turn = (
+                        step.get("clearance_wait_origin") == "active_turn_monitor"
+                        and step.get("interrupted_turn_detected") is True
                     )
-                    history_entry["action_budget_consumed"] = False
+                    if not attempted_turn:
+                        base["actions_executed"] = max(
+                            0, base["actions_executed"] - 1,
+                        )
+                    history_entry["action_budget_consumed"] = attempted_turn
                     history_entry["clearance_wait_timeout"] = True
                     return dict(
                         base,
