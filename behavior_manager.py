@@ -499,6 +499,14 @@ class _MarvinProposalNotCentered(Exception):
         self.geometry = dict(geometry)
 
 
+class _MarvinProposalGeometryInvalid(ValueError):
+    """Carry camera-frame identity through a fail-closed geometry rejection."""
+
+    def __init__(self, source_frame_stamp_ns):
+        super().__init__("marvin_yolo_proposal_geometry_invalid")
+        self.source_frame_stamp_ns = source_frame_stamp_ns
+
+
 class BehaviorManager:
     MARVIN_SEMANTIC_TARGET = "marvin"
     # A seed spanning almost the whole image is a semantic region, not a
@@ -4682,14 +4690,24 @@ class BehaviorManager:
                     minimum_source_frame_stamp_ns=minimum_source_frame_stamp_ns,
                 )
             except Exception as exc:
-                return dict(
+                negative_preview = dict(
                     base,
                     reason=(
                         "Marvin tracker preview unavailable: "
-                        + type(exc).__name__
+                        + (
+                            "ValueError"
+                            if isinstance(exc, _MarvinProposalGeometryInvalid)
+                            else type(exc).__name__
+                        )
                         + (": " + str(exc) if str(exc) else "")
                     ),
                 )
+                if isinstance(exc, _MarvinProposalGeometryInvalid):
+                    negative_preview["source_frame_stamp_ns"] = (
+                        _valid_source_frame_stamp(exc.source_frame_stamp_ns)
+                    )
+                    negative_preview["motion_authorized_marvin_candidate"] = False
+                return negative_preview
             if observation is None:
                 return dict(base, reason="Marvin was not found in the current camera frame.")
             if isinstance(observation, dict) and observation.get("found") is False:
@@ -5270,11 +5288,21 @@ class BehaviorManager:
             if status == "person_proposals_rejected":
                 raise ValueError("marvin_person_proposal_rejected")
             raise ValueError("marvin_yolo_proposal_" + str(status))
+        proposal_candidates = candidates
         candidates = self._filter_marvin_proposal_geometry(
             candidates, diagnostics,
         )
         if not candidates:
-            raise ValueError("marvin_yolo_proposal_geometry_invalid")
+            source_stamps = [
+                candidate.get("source_frame_stamp_ns")
+                for candidate in proposal_candidates
+                if isinstance(candidate, dict)
+                and type(candidate.get("source_frame_stamp_ns")) is int
+                and candidate.get("source_frame_stamp_ns") >= 0
+            ]
+            raise _MarvinProposalGeometryInvalid(
+                max(source_stamps) if source_stamps else None
+            )
 
         continuity_candidate = self._marvin_preview_continuity_candidate(
             candidates,

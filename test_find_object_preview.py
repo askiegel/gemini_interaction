@@ -475,6 +475,84 @@ def test_negative_marvin_identity_preview_does_not_fabricate_source_stamp(bad_st
     assert preview["motion_authorized_marvin_candidate"] is False
 
 
+def _marvin_invalid_geometry_vision(source_stamp):
+    payloads = []
+    for index in range(3):
+        payloads.append({
+            "timestamp": f"invalid-geometry-{index}",
+            "camera_running": True,
+            "source_frame_stamp_ns": source_stamp,
+            "detections": [{
+                "label": "chair", "confidence": 0.1,
+                "x1": 13, "y1": 140, "x2": 446, "y2": 303,
+                "center_x": 229.5, "center_y": 221.5, "area": 70579,
+                "image_width": 640, "image_height": 480,
+            }],
+        })
+    return CandidateVision(payloads)
+
+
+def test_invalid_marvin_proposal_geometry_preserves_authoritative_source_stamp():
+    manager = BehaviorManager(
+        robot_client=ReadOnlyRobot(),
+        vision_adapter=_marvin_invalid_geometry_vision(2001),
+        semantic_vision=MarvinSemanticVision(marvin_result()),
+    )
+    manager.TARGET_CONFIRMATION_POLL_SECONDS = 0
+    use_preview_tracker(manager)
+
+    preview = manager.preview_find_object("marvin")
+
+    assert preview["ok"] is False
+    assert preview["target_found"] is False
+    assert "marvin_yolo_proposal_geometry_invalid" in preview["reason"]
+    assert preview["source_frame_stamp_ns"] == 2001
+    assert preview["motion_authorized_marvin_candidate"] is False
+    assert preview.get("pursuit_authorized") is not True
+    assert preview.get("bbox") is None
+
+
+@pytest.mark.parametrize("source_stamp", [None, "2001", True, 2001.0, -1])
+def test_invalid_marvin_proposal_geometry_does_not_fabricate_source_stamp(source_stamp):
+    manager = BehaviorManager(
+        robot_client=ReadOnlyRobot(),
+        vision_adapter=_marvin_invalid_geometry_vision(source_stamp),
+        semantic_vision=MarvinSemanticVision(marvin_result()),
+    )
+    manager.TARGET_CONFIRMATION_POLL_SECONDS = 0
+    use_preview_tracker(manager)
+
+    preview = manager.preview_find_object("marvin")
+
+    assert preview["ok"] is False
+    assert preview["target_found"] is False
+    assert preview["source_frame_stamp_ns"] is None
+    assert preview["motion_authorized_marvin_candidate"] is False
+
+
+def test_invalid_geometry_does_not_fallback_to_unrelated_latest_frame_stamp():
+    manager = BehaviorManager(
+        robot_client=ReadOnlyRobot(),
+        vision_adapter=marvin_yolo_candidates(),
+        semantic_vision=MarvinSemanticVision(marvin_result()),
+    )
+    invalid_proposal = {
+        "label": "chair", "bbox": {"x1": 13, "y1": 140, "x2": 446, "y2": 303},
+        "image_width": 640, "image_height": 480,
+        "source_frame_stamp_ns": None,
+    }
+    manager._confirm_marvin_proposal_candidates_with_status = lambda **_kwargs: (
+        [invalid_proposal], "target_confirmed",
+        {"latest_source_frame_stamp_ns": 2001},
+    )
+
+    preview = manager.preview_find_object("marvin")
+
+    assert preview["ok"] is False
+    assert preview["source_frame_stamp_ns"] is None
+    assert preview["motion_authorized_marvin_candidate"] is False
+
+
 @pytest.mark.parametrize("bad_stamp", [None, "55", -1, True, 1.5])
 def test_marvin_preview_does_not_publish_malformed_source_frame_identity(bad_stamp):
     vision = marvin_yolo_candidates()
