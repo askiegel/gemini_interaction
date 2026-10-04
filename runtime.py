@@ -154,6 +154,7 @@ class CognitiveRuntime:
         # Alignment authorization is observation-scoped: a strict V2 tracker
         # frame may admit at most one physical turn, never one per process.
         self._marvin_alignment_observation = None
+        self._marvin_alignment_consensus = []
         self._marvin_alignment_consumed_source_frame_stamps = set()
         self._marvin_approach_step_consumed = False
         self._marvin_autonomous_run_consumed = False
@@ -356,16 +357,20 @@ class CognitiveRuntime:
             self._marvin_alignment_observation = None
         observer = getattr(self.behavior_manager, "observe_find_marvin_v2", None)
         if not callable(observer):
+            self._reset_marvin_alignment_consensus()
             return dict(base, reason="find_marvin_v2_observer_unavailable")
         try:
             evidence = observer()
         except Exception as exc:
+            self._reset_marvin_alignment_consensus()
             return dict(base, reason="find_marvin_v2_observation_failed",
                         error=str(exc), error_type=type(exc).__name__)
         if not isinstance(evidence, dict):
+            self._reset_marvin_alignment_consensus()
             return dict(base, reason="find_marvin_v2_observation_malformed")
         preview = evidence.get("preview_result")
         if not isinstance(preview, dict):
+            self._reset_marvin_alignment_consensus()
             return dict(base, reason="find_marvin_v2_preview_malformed")
         tracker = preview.get("opencv_tracker")
         identity_source = preview.get("identity_source")
@@ -382,6 +387,7 @@ class CognitiveRuntime:
         verifier = getattr(self.behavior_manager, "_marvin_v2_preview_is_verified", None)
         verified = callable(verifier) and verifier(preview) is True
         if not verified:
+            self._reset_marvin_alignment_consensus()
             return dict(base, **common, reason="find_marvin_v2_fresh_identity_required",
                         controller=dict(base["controller"], state="SEARCHING",
                                         decision="REVERIFY_REQUIRED",
@@ -412,33 +418,116 @@ class CognitiveRuntime:
                                   "reason": reason,
                                   "center_tolerance_pixels": FIND_CENTER_TOLERANCE_PIXELS},
                       arrival=arrival)
-        alignment_observation = None
-        tracker_stamp = (
-            tracker.get("source_frame_stamp_ns")
-            if isinstance(tracker, dict) else None
+        self._update_marvin_alignment_consensus(
+            result, tracker, state, decision,
         )
-        if (
-            isinstance(tracker_stamp, int)
-            and not isinstance(tracker_stamp, bool)
-            and tracker_stamp >= 0
-            and state == VISUAL_READY_TO_ALIGN
-            and decision in {"TURN_LEFT", "TURN_RIGHT"}
-        ):
-            alignment_observation = {
-                "source_frame_stamp_ns": tracker_stamp,
-                "identity_confirmed": result["identity_confirmed"],
-                "identity_source": result["identity_source"],
-                "opencv_tracker": dict(tracker),
-                "controller_state": state,
-                "controller_decision": decision,
-            }
-        # This cache is an observation record, not a persistent identity
-        # promotion.  Every current V2 result replaces the previous record;
-        # only a current strict turn observation may install an authorization.
-        # Consumed stamps remain permanently non-retryable for this process.
-        with self._state_lock:
-            self._marvin_alignment_observation = alignment_observation
         return result
+
+    MARVIN_ALIGNMENT_CONSENSUS_WINDOW = 3
+    MARVIN_ALIGNMENT_MAX_CENTER_SPREAD_PIXELS = 30.0
+
+    def _reset_marvin_alignment_consensus(self):
+        """Clear all pending alignment evidence after a failed V2 observation."""
+        with self._state_lock:
+            self._marvin_alignment_observation = None
+            self._marvin_alignment_consensus = []
+
+    @staticmethod
+    def _marvin_alignment_consensus_sample(result, tracker, state, decision):
+        """Extract one strictly valid current observation for turn consensus."""
+        if (
+            not isinstance(result, dict)
+            or result.get("identity_confirmed") is not True
+            or result.get("identity_source")
+            != "gemini_marvin_candidate_selection"
+            or state != VISUAL_READY_TO_ALIGN
+            or decision not in {"TURN_LEFT", "TURN_RIGHT"}
+            or not isinstance(tracker, dict)
+            or tracker.get("active") is not True
+            or tracker.get("matched") is not True
+        ):
+            return None
+        stamp = tracker.get("source_frame_stamp_ns")
+        quality = tracker.get("quality")
+        threshold = tracker.get("threshold")
+        bbox = tracker.get("bbox")
+        if (
+            type(stamp) is not int
+            or stamp < 0
+            or not isinstance(quality, (int, float))
+            or isinstance(quality, bool)
+            or not math.isfinite(float(quality))
+            or not isinstance(threshold, (int, float))
+            or isinstance(threshold, bool)
+            or not math.isfinite(float(threshold))
+            or float(quality) < float(threshold)
+            or not isinstance(bbox, dict)
+        ):
+            return None
+        try:
+            x1, y1, x2, y2 = (
+                bbox[key] for key in ("x1", "y1", "x2", "y2")
+            )
+        except KeyError:
+            return None
+        values = (x1, y1, x2, y2)
+        if (
+            any(not isinstance(value, (int, float)) or isinstance(value, bool)
+                or not math.isfinite(float(value)) for value in values)
+            or float(x2) <= float(x1)
+            or float(y2) <= float(y1)
+        ):
+            return None
+        return {
+            "source_frame_stamp_ns": stamp,
+            "direction": decision,
+            "identity_source": result["identity_source"],
+            "center_x": (float(x1) + float(x2)) / 2.0,
+        }
+
+    def _update_marvin_alignment_consensus(self, result, tracker, state, decision):
+        """Authorize only the newest sample of a stable strict turn window."""
+        sample = self._marvin_alignment_consensus_sample(
+            result, tracker, state, decision,
+        )
+        with self._state_lock:
+            alignment_observation = None
+            previous = list(getattr(self, "_marvin_alignment_consensus", []))
+            if sample is None:
+                consensus = []
+            elif not previous:
+                consensus = [sample]
+            else:
+                last = previous[-1]
+                if (
+                    sample["identity_source"] != last.get("identity_source")
+                    or sample["direction"] != last.get("direction")
+                    or sample["source_frame_stamp_ns"]
+                    <= last.get("source_frame_stamp_ns", -1)
+                ):
+                    # A discontinuity is not evidence for a new window: the
+                    # next authorization requires three entirely new samples.
+                    consensus = []
+                else:
+                    consensus = (previous + [sample])[(-self.MARVIN_ALIGNMENT_CONSENSUS_WINDOW):]
+                    centers = [entry["center_x"] for entry in consensus]
+                    if (
+                        len(consensus) == self.MARVIN_ALIGNMENT_CONSENSUS_WINDOW
+                        and max(centers) - min(centers)
+                        > self.MARVIN_ALIGNMENT_MAX_CENTER_SPREAD_PIXELS
+                    ):
+                        consensus = []
+                    elif len(consensus) == self.MARVIN_ALIGNMENT_CONSENSUS_WINDOW:
+                        alignment_observation = {
+                            "source_frame_stamp_ns": sample["source_frame_stamp_ns"],
+                            "identity_confirmed": result["identity_confirmed"],
+                            "identity_source": result["identity_source"],
+                            "opencv_tracker": dict(tracker),
+                            "controller_state": state,
+                            "controller_decision": decision,
+                        }
+            self._marvin_alignment_consensus = consensus
+            self._marvin_alignment_observation = alignment_observation
 
     def execute_bounded_find_marvin_autonomous(self, *, max_actions):
         """Run one explicitly-authorized, finite Marvin controller episode.

@@ -391,13 +391,12 @@ def test_runtime_path_has_no_direct_primitive_or_navigation_calls():
             assert forbidden not in source
 
 
-def _v2_preview(error=203.0, *, quality=0.97, matched=True,
+def _v2_preview(error=203.0, *, quality=0.97, matched=True, stamp=101,
                 identity_source="gemini_marvin_candidate_selection",
                 identity_confirmed=True):
     width, height = 640.0, 480.0
     cx = width / 2.0 + error
     bbox = {"x1": cx - 40.0, "y1": 100.0, "x2": cx + 40.0, "y2": 300.0}
-    stamp = 101
     return {
         "ok": True, "preview": True, "authoritative": False,
         "target": "marvin", "target_found": True,
@@ -436,14 +435,29 @@ class _ReadOnlyV2Behavior:
         raise AssertionError("controller execution is forbidden")
 
 
-@pytest.mark.parametrize(("error", "decision"), [(-203.0, "TURN_LEFT"), (203.0, "TURN_RIGHT"), (0.0, "FORWARD")])
-def test_v2_observe_uses_fresh_gemini_and_exposes_nonexecuting_decision(error, decision):
+def _v2_runtime(preview):
     runtime = object.__new__(CognitiveRuntime)
     runtime._state_lock = threading.RLock()
     runtime._marvin_alignment_observation = None
+    runtime._marvin_alignment_consensus = []
     runtime._marvin_alignment_consumed_source_frame_stamps = set()
-    behavior = _ReadOnlyV2Behavior(_v2_preview(error))
+    behavior = _ReadOnlyV2Behavior(preview)
     runtime.behavior_manager = behavior
+    return runtime, behavior
+
+
+def _observe_v2_series(runtime, behavior, values):
+    results = []
+    for stamp, error, updates in values:
+        preview = _v2_preview(error, stamp=stamp, **updates)
+        behavior.preview = preview
+        results.append(runtime.observe_find_marvin_v2())
+    return results
+
+
+@pytest.mark.parametrize(("error", "decision"), [(-203.0, "TURN_LEFT"), (203.0, "TURN_RIGHT"), (0.0, "FORWARD")])
+def test_v2_observe_uses_fresh_gemini_and_exposes_nonexecuting_decision(error, decision):
+    runtime, behavior = _v2_runtime(_v2_preview(error))
     result = runtime.observe_find_marvin_v2()
     assert result["ok"] is True
     assert result["read_only"] is True and result["authoritative"] is False
@@ -461,12 +475,7 @@ def test_v2_observe_uses_fresh_gemini_and_exposes_nonexecuting_decision(error, d
     _v2_preview(203.0, matched=False),
 ])
 def test_v2_observe_fails_closed_without_strict_identity_and_tracker(preview):
-    runtime = object.__new__(CognitiveRuntime)
-    runtime._state_lock = threading.RLock()
-    runtime._marvin_alignment_observation = None
-    runtime._marvin_alignment_consumed_source_frame_stamps = set()
-    behavior = _ReadOnlyV2Behavior(preview)
-    runtime.behavior_manager = behavior
+    runtime, behavior = _v2_runtime(preview)
     result = runtime.observe_find_marvin_v2()
     assert result["ok"] is False and result["executed"] is False
     assert result["controller"]["decision"] == "REVERIFY_REQUIRED"
@@ -482,8 +491,9 @@ def test_newer_non_authorizing_v2_observation_clears_alignment_authorization():
     )
     runtime._state_lock = threading.RLock()
     runtime._marvin_alignment_observation = None
+    runtime._marvin_alignment_consensus = []
     runtime._marvin_alignment_consumed_source_frame_stamps = set()
-    behavior = _ReadOnlyV2Behavior(_v2_preview(203.0))
+    behavior = _ReadOnlyV2Behavior(_v2_preview(203.0, stamp=101))
     behavior._execute_target_directed_turn = turn
     behavior.robot = robot
     runtime.behavior_manager = behavior
@@ -497,15 +507,15 @@ def test_newer_non_authorizing_v2_observation_clears_alignment_authorization():
         }),
     )
 
-    first = runtime.observe_find_marvin_v2()
-    stamp = first["opencv_tracker"]["source_frame_stamp_ns"]
+    _observe_v2_series(runtime, behavior, [
+        (101, 203.0, {}), (102, 204.0, {}), (103, 202.0, {}),
+    ])
+    stamp = behavior.preview["opencv_tracker"]["source_frame_stamp_ns"]
     assert runtime._marvin_alignment_observation["source_frame_stamp_ns"] == stamp
 
     # A newer unmatched tracker frame is a non-authorizing V2 observation.
     # It must clear, rather than leave, the prior turn authorization cached.
-    newer = _v2_preview(203.0, matched=False)
-    newer["identity_source_frame_stamp_ns"] += 1
-    newer["opencv_tracker"]["source_frame_stamp_ns"] += 1
+    newer = _v2_preview(203.0, matched=False, stamp=104)
     behavior.preview = newer
     second = runtime.observe_find_marvin_v2()
 
@@ -518,6 +528,108 @@ def test_newer_non_authorizing_v2_observation_clears_alignment_authorization():
     assert stale_attempt["reason"] == "marvin_alignment_observation_not_current"
     turn.assert_not_called()
     robot.motion.assert_not_called()
+
+
+@pytest.mark.parametrize(("error", "decision"), [
+    (60.0, "TURN_RIGHT"), (-60.0, "TURN_LEFT"),
+])
+def test_v2_alignment_authorization_requires_three_stable_current_observations(
+    error, decision,
+):
+    runtime, behavior = _v2_runtime(_v2_preview(error, stamp=100))
+    offset = 2 if error > 0 else -2
+    results = []
+    for stamp, current_error in ((100, error), (101, error + offset)):
+        behavior.preview = _v2_preview(current_error, stamp=stamp)
+        results.append(runtime.observe_find_marvin_v2())
+        assert runtime._marvin_alignment_observation is None
+    behavior.preview = _v2_preview(error + 2 * offset, stamp=102)
+    results.append(runtime.observe_find_marvin_v2())
+    assert all(result["controller"]["decision"] == decision for result in results)
+    assert runtime._marvin_alignment_observation["source_frame_stamp_ns"] == 103
+    assert runtime._marvin_alignment_observation["controller_decision"] == decision
+    # The first two calls deliberately did not leave independently usable
+    # cached authorization; only the current third stamp is retained.
+    assert results[0]["opencv_tracker"]["source_frame_stamp_ns"] != 103
+    assert results[1]["opencv_tracker"]["source_frame_stamp_ns"] != 103
+
+
+def test_v2_centered_observations_never_authorize_alignment():
+    runtime, behavior = _v2_runtime(_v2_preview(0.0, stamp=200))
+    _observe_v2_series(runtime, behavior, [
+        (200, 0.0, {}), (201, 20.0, {}), (202, -20.0, {}),
+    ])
+    assert runtime._marvin_alignment_observation is None
+    assert runtime._marvin_alignment_consensus == []
+
+
+def test_v2_geometry_outlier_resets_consensus_and_requires_three_new_samples():
+    runtime, behavior = _v2_runtime(_v2_preview(60.0, stamp=300))
+    _observe_v2_series(runtime, behavior, [
+        (300, 60.0, {}), (301, 62.0, {}), (302, 175.0, {}),
+    ])
+    assert runtime._marvin_alignment_observation is None
+    assert runtime._marvin_alignment_consensus == []
+    _observe_v2_series(runtime, behavior, [
+        (303, 60.0, {}), (304, 62.0, {}),
+    ])
+    assert runtime._marvin_alignment_observation is None
+    _observe_v2_series(runtime, behavior, [(305, 64.0, {})])
+    assert runtime._marvin_alignment_observation["source_frame_stamp_ns"] == 306
+
+
+def test_v2_alignment_consensus_accepts_exact_spread_and_rolls_to_newest_stamp():
+    runtime, behavior = _v2_runtime(_v2_preview(60.0, stamp=350))
+    _observe_v2_series(runtime, behavior, [
+        # center_x values 380, 395, and 410: exactly 30 px of spread.
+        (350, 60.0, {}), (351, 75.0, {}), (352, 90.0, {}),
+    ])
+    third_stamp = runtime._marvin_alignment_observation["source_frame_stamp_ns"]
+    assert third_stamp == 353
+    _observe_v2_series(runtime, behavior, [(353, 80.0, {})])
+    assert runtime._marvin_alignment_observation["source_frame_stamp_ns"] == 354
+    assert runtime._marvin_alignment_observation["source_frame_stamp_ns"] != third_stamp
+
+
+@pytest.mark.parametrize("updates", [
+    {"matched": False},
+    {"quality": 0.79},
+    {"identity_confirmed": False},
+])
+def test_v2_non_strict_observation_resets_alignment_consensus(updates):
+    runtime, behavior = _v2_runtime(_v2_preview(60.0, stamp=400))
+    _observe_v2_series(runtime, behavior, [
+        (400, 60.0, {}), (401, 62.0, {}), (402, 60.0, updates),
+    ])
+    assert runtime._marvin_alignment_observation is None
+    assert runtime._marvin_alignment_consensus == []
+
+
+def test_v2_direction_change_and_nonmonotonic_stamp_reset_consensus():
+    runtime, behavior = _v2_runtime(_v2_preview(60.0, stamp=500))
+    _observe_v2_series(runtime, behavior, [
+        (500, 60.0, {}), (501, 62.0, {}), (502, -60.0, {}),
+    ])
+    assert runtime._marvin_alignment_observation is None
+    assert runtime._marvin_alignment_consensus == []
+    _observe_v2_series(runtime, behavior, [
+        (503, 60.0, {}), (503, 62.0, {}),
+    ])
+    assert runtime._marvin_alignment_observation is None
+    assert runtime._marvin_alignment_consensus == []
+
+
+def test_v2_malformed_bbox_resets_alignment_consensus():
+    runtime, behavior = _v2_runtime(_v2_preview(60.0, stamp=600))
+    malformed = _v2_preview(60.0, stamp=602)
+    malformed["opencv_tracker"]["bbox"] = {"x1": 1, "x2": 2}
+    _observe_v2_series(runtime, behavior, [
+        (600, 60.0, {}), (601, 62.0, {}),
+    ])
+    behavior.preview = malformed
+    runtime.observe_find_marvin_v2()
+    assert runtime._marvin_alignment_observation is None
+    assert runtime._marvin_alignment_consensus == []
 
 
 def test_v2_observe_get_route_calls_only_observer():
