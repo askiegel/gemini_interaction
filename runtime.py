@@ -155,6 +155,7 @@ class CognitiveRuntime:
         # frame may admit at most one physical turn, never one per process.
         self._marvin_alignment_observation = None
         self._marvin_alignment_consensus = []
+        self._marvin_alignment_geometry_history = []
         self._marvin_alignment_consumed_source_frame_stamps = set()
         self._marvin_approach_step_consumed = False
         self._marvin_autonomous_run_consumed = False
@@ -418,19 +419,34 @@ class CognitiveRuntime:
                                   "reason": reason,
                                   "center_tolerance_pixels": FIND_CENTER_TOLERANCE_PIXELS},
                       arrival=arrival)
-        self._update_marvin_alignment_consensus(
+        geometry_continuity = self._update_marvin_alignment_geometry_continuity(
             result, tracker, state, decision,
         )
+        result["geometry_continuity"] = geometry_continuity
+        if geometry_continuity["accepted"] is True:
+            self._update_marvin_alignment_consensus(
+                result, tracker, state, decision,
+            )
+        else:
+            # A raw observation remains visible to the operator, but a seed
+            # geometry discontinuity is never allowed to contribute to the
+            # physical-alignment consensus window.
+            with self._state_lock:
+                self._marvin_alignment_consensus = []
+                self._marvin_alignment_observation = None
         return result
 
     MARVIN_ALIGNMENT_CONSENSUS_WINDOW = 3
     MARVIN_ALIGNMENT_MAX_CENTER_SPREAD_PIXELS = 30.0
+    MARVIN_ALIGNMENT_GEOMETRY_HISTORY_WINDOW = 3
+    MARVIN_ALIGNMENT_MAX_SEED_CENTER_DELTA_PIXELS = 30.0
 
     def _reset_marvin_alignment_consensus(self):
         """Clear all pending alignment evidence after a failed V2 observation."""
         with self._state_lock:
             self._marvin_alignment_observation = None
             self._marvin_alignment_consensus = []
+            self._marvin_alignment_geometry_history = []
 
     @staticmethod
     def _marvin_alignment_consensus_sample(result, tracker, state, decision):
@@ -484,6 +500,76 @@ class CognitiveRuntime:
             "identity_source": result["identity_source"],
             "center_x": (float(x1) + float(x2)) / 2.0,
         }
+
+    def _update_marvin_alignment_geometry_continuity(
+        self, result, tracker, state, decision,
+    ):
+        """Admit only locally continuous fresh tracker geometry to consensus.
+
+        Strict V2 GET observations intentionally create a new local tracker
+        from a new Gemini-selected seed.  Its match score validates that one
+        short episode, not continuity with the prior GET.  Keep a tiny
+        in-memory history of accepted tracker centers so a grossly different
+        newly seeded box cannot immediately become motion evidence.
+        """
+        sample = self._marvin_alignment_consensus_sample(
+            result, tracker, state, decision,
+        )
+        diagnostic = {
+            "accepted": False,
+            "reason": None,
+            "history_length": 0,
+            "center_delta_px": None,
+        }
+        with self._state_lock:
+            previous = list(getattr(self, "_marvin_alignment_geometry_history", []))
+            if sample is None:
+                self._marvin_alignment_geometry_history = []
+                diagnostic["reason"] = "not_strict_alignment_geometry"
+            elif not previous:
+                self._marvin_alignment_geometry_history = [sample]
+                diagnostic.update(
+                    accepted=True,
+                    reason="geometry_baseline_established",
+                    history_length=1,
+                )
+            else:
+                last = previous[-1]
+                if sample["identity_source"] != last.get("identity_source"):
+                    self._marvin_alignment_geometry_history = []
+                    diagnostic["reason"] = "geometry_identity_source_changed"
+                elif sample["source_frame_stamp_ns"] <= last.get(
+                    "source_frame_stamp_ns", -1,
+                ):
+                    self._marvin_alignment_geometry_history = []
+                    diagnostic["reason"] = "geometry_source_stamp_non_monotonic"
+                else:
+                    centers = sorted(entry["center_x"] for entry in previous)
+                    midpoint = len(centers) // 2
+                    reference_center = (
+                        centers[midpoint]
+                        if len(centers) % 2
+                        else (centers[midpoint - 1] + centers[midpoint]) / 2.0
+                    )
+                    center_delta = abs(sample["center_x"] - reference_center)
+                    diagnostic["center_delta_px"] = center_delta
+                    if center_delta > self.MARVIN_ALIGNMENT_MAX_SEED_CENTER_DELTA_PIXELS:
+                        # Do not turn the rejected seed into a new baseline:
+                        # recovery needs a wholly new stable sequence.
+                        self._marvin_alignment_geometry_history = []
+                        diagnostic["reason"] = "geometry_center_discontinuity"
+                    else:
+                        history = (previous + [sample])[(-self.MARVIN_ALIGNMENT_GEOMETRY_HISTORY_WINDOW):]
+                        self._marvin_alignment_geometry_history = history
+                        diagnostic.update(
+                            accepted=True,
+                            reason="geometry_continuous",
+                            history_length=len(history),
+                        )
+            if diagnostic["accepted"] is not True:
+                self._marvin_alignment_consensus = []
+                self._marvin_alignment_observation = None
+            return diagnostic
 
     def _update_marvin_alignment_consensus(self, result, tracker, state, decision):
         """Authorize only the newest sample of a stable strict turn window."""

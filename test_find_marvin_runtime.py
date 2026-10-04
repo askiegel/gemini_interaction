@@ -440,6 +440,7 @@ def _v2_runtime(preview):
     runtime._state_lock = threading.RLock()
     runtime._marvin_alignment_observation = None
     runtime._marvin_alignment_consensus = []
+    runtime._marvin_alignment_geometry_history = []
     runtime._marvin_alignment_consumed_source_frame_stamps = set()
     behavior = _ReadOnlyV2Behavior(preview)
     runtime.behavior_manager = behavior
@@ -492,6 +493,7 @@ def test_newer_non_authorizing_v2_observation_clears_alignment_authorization():
     runtime._state_lock = threading.RLock()
     runtime._marvin_alignment_observation = None
     runtime._marvin_alignment_consensus = []
+    runtime._marvin_alignment_geometry_history = []
     runtime._marvin_alignment_consumed_source_frame_stamps = set()
     behavior = _ReadOnlyV2Behavior(_v2_preview(203.0, stamp=101))
     behavior._execute_target_directed_turn = turn
@@ -578,6 +580,88 @@ def test_v2_geometry_outlier_resets_consensus_and_requires_three_new_samples():
     assert runtime._marvin_alignment_observation["source_frame_stamp_ns"] == 306
 
 
+def test_v2_seed_geometry_discontinuity_blocks_high_quality_outlier_before_consensus():
+    runtime, behavior = _v2_runtime(_v2_preview(99.0, stamp=700))
+    results = _observe_v2_series(runtime, behavior, [
+        # center_x 419.0, then 423.5: stable newly seeded geometry.
+        (700, 99.0, {}), (701, 103.5, {}),
+        # center_x 509.5: observed gross jump despite a high tracker score.
+        (702, 189.5, {"quality": 0.99}),
+    ])
+
+    assert results[0]["geometry_continuity"] == {
+        "accepted": True,
+        "reason": "geometry_baseline_established",
+        "history_length": 1,
+        "center_delta_px": None,
+    }
+    assert results[1]["geometry_continuity"]["accepted"] is True
+    assert results[2]["geometry_continuity"] == {
+        "accepted": False,
+        "reason": "geometry_center_discontinuity",
+        "history_length": 0,
+        "center_delta_px": 88.25,
+    }
+    assert runtime._marvin_alignment_geometry_history == []
+    assert runtime._marvin_alignment_consensus == []
+    assert runtime._marvin_alignment_observation is None
+
+
+def test_v2_seed_geometry_recovery_requires_three_new_stable_samples():
+    runtime, behavior = _v2_runtime(_v2_preview(99.0, stamp=710))
+    _observe_v2_series(runtime, behavior, [
+        (710, 99.0, {}), (711, 103.5, {}), (712, 189.5, {}),
+    ])
+    assert runtime._marvin_alignment_observation is None
+
+    recovered = _observe_v2_series(runtime, behavior, [
+        (713, 99.0, {}), (714, 103.5, {}),
+    ])
+    assert recovered[0]["geometry_continuity"]["history_length"] == 1
+    assert recovered[1]["geometry_continuity"]["history_length"] == 2
+    assert runtime._marvin_alignment_observation is None
+    recovered.extend(_observe_v2_series(runtime, behavior, [(715, 101.0, {})]))
+    assert recovered[2]["geometry_continuity"]["history_length"] == 3
+    assert runtime._marvin_alignment_observation["source_frame_stamp_ns"] == 716
+
+
+def test_v2_seed_geometry_continuity_accepts_exact_30_pixels_only():
+    runtime, behavior = _v2_runtime(_v2_preview(60.0, stamp=717))
+    exact, over = _observe_v2_series(runtime, behavior, [
+        # center_x 380.0 establishes the baseline; 410.0 is exactly 30 px.
+        (717, 60.0, {}), (718, 90.0, {}),
+    ])
+    assert exact["geometry_continuity"]["accepted"] is True
+    assert over["geometry_continuity"] == {
+        "accepted": True,
+        "reason": "geometry_continuous",
+        "history_length": 2,
+        "center_delta_px": 30.0,
+    }
+
+    over_runtime, over_behavior = _v2_runtime(_v2_preview(60.0, stamp=719))
+    _observe_v2_series(over_runtime, over_behavior, [(719, 60.0, {})])
+    rejected = _observe_v2_series(
+        over_runtime, over_behavior, [(720, 90.0001, {})],
+    )[0]
+    assert rejected["geometry_continuity"]["accepted"] is False
+    assert rejected["geometry_continuity"]["reason"] == "geometry_center_discontinuity"
+    assert rejected["geometry_continuity"]["center_delta_px"] > 30.0
+    assert over_runtime._marvin_alignment_geometry_history == []
+    assert over_runtime._marvin_alignment_consensus == []
+    assert over_runtime._marvin_alignment_observation is None
+
+
+def test_v2_seed_geometry_non_authorizing_observation_resets_history_and_consensus():
+    runtime, behavior = _v2_runtime(_v2_preview(99.0, stamp=720))
+    _observe_v2_series(runtime, behavior, [
+        (720, 99.0, {}), (721, 95.0, {}), (722, 44.0, {}),
+    ])
+    assert runtime._marvin_alignment_geometry_history == []
+    assert runtime._marvin_alignment_consensus == []
+    assert runtime._marvin_alignment_observation is None
+
+
 def test_v2_alignment_consensus_accepts_exact_spread_and_rolls_to_newest_stamp():
     runtime, behavior = _v2_runtime(_v2_preview(60.0, stamp=350))
     _observe_v2_series(runtime, behavior, [
@@ -603,6 +687,7 @@ def test_v2_non_strict_observation_resets_alignment_consensus(updates):
     ])
     assert runtime._marvin_alignment_observation is None
     assert runtime._marvin_alignment_consensus == []
+    assert runtime._marvin_alignment_geometry_history == []
 
 
 def test_v2_direction_change_and_nonmonotonic_stamp_reset_consensus():
@@ -612,6 +697,7 @@ def test_v2_direction_change_and_nonmonotonic_stamp_reset_consensus():
     ])
     assert runtime._marvin_alignment_observation is None
     assert runtime._marvin_alignment_consensus == []
+    assert runtime._marvin_alignment_geometry_history == []
     _observe_v2_series(runtime, behavior, [
         (503, 60.0, {}), (503, 62.0, {}),
     ])
@@ -630,6 +716,7 @@ def test_v2_malformed_bbox_resets_alignment_consensus():
     runtime.observe_find_marvin_v2()
     assert runtime._marvin_alignment_observation is None
     assert runtime._marvin_alignment_consensus == []
+    assert runtime._marvin_alignment_geometry_history == []
 
 
 def test_v2_observe_get_route_calls_only_observer():
