@@ -151,7 +151,10 @@ class CognitiveRuntime:
         self.last_error: Optional[str] = None
         self.tracking_state: Dict[str, Any] = empty_tracking_state()
         self._state_lock = threading.RLock()
-        self._marvin_alignment_step_consumed = False
+        # Alignment authorization is observation-scoped: a strict V2 tracker
+        # frame may admit at most one physical turn, never one per process.
+        self._marvin_alignment_observation = None
+        self._marvin_alignment_consumed_source_frame_stamps = set()
         self._marvin_approach_step_consumed = False
         self._marvin_autonomous_run_consumed = False
         self._marvin_controller_lock = threading.RLock()
@@ -344,6 +347,13 @@ class CognitiveRuntime:
                 "center_tolerance_pixels": FIND_CENTER_TOLERANCE_PIXELS,
             },
         }
+        # A V2 observation supersedes any prior alignment authorization even
+        # when it is non-authorizing or fails closed.  This prevents a later
+        # POST from using an older strict frame after the current scene has
+        # changed.  A qualifying observation is installed below only after
+        # the current V2 result has been evaluated.
+        with self._state_lock:
+            self._marvin_alignment_observation = None
         observer = getattr(self.behavior_manager, "observe_find_marvin_v2", None)
         if not callable(observer):
             return dict(base, reason="find_marvin_v2_observer_unavailable")
@@ -397,11 +407,38 @@ class CognitiveRuntime:
             decision = "SEARCH"
         else:
             decision = "BLOCKED"
-        return dict(base, **common, ok=True, reason=reason,
-                    controller={"state": state, "decision": decision,
-                                "reason": reason,
-                                "center_tolerance_pixels": FIND_CENTER_TOLERANCE_PIXELS},
-                    arrival=arrival)
+        result = dict(base, **common, ok=True, reason=reason,
+                      controller={"state": state, "decision": decision,
+                                  "reason": reason,
+                                  "center_tolerance_pixels": FIND_CENTER_TOLERANCE_PIXELS},
+                      arrival=arrival)
+        alignment_observation = None
+        tracker_stamp = (
+            tracker.get("source_frame_stamp_ns")
+            if isinstance(tracker, dict) else None
+        )
+        if (
+            isinstance(tracker_stamp, int)
+            and not isinstance(tracker_stamp, bool)
+            and tracker_stamp >= 0
+            and state == VISUAL_READY_TO_ALIGN
+            and decision in {"TURN_LEFT", "TURN_RIGHT"}
+        ):
+            alignment_observation = {
+                "source_frame_stamp_ns": tracker_stamp,
+                "identity_confirmed": result["identity_confirmed"],
+                "identity_source": result["identity_source"],
+                "opencv_tracker": dict(tracker),
+                "controller_state": state,
+                "controller_decision": decision,
+            }
+        # This cache is an observation record, not a persistent identity
+        # promotion.  Every current V2 result replaces the previous record;
+        # only a current strict turn observation may install an authorization.
+        # Consumed stamps remain permanently non-retryable for this process.
+        with self._state_lock:
+            self._marvin_alignment_observation = alignment_observation
+        return result
 
     def execute_bounded_find_marvin_autonomous(self, *, max_actions):
         """Run one explicitly-authorized, finite Marvin controller episode.
@@ -1952,7 +1989,7 @@ class CognitiveRuntime:
             self._active_localization_lock.release()
 
     def execute_single_marvin_alignment(
-        self, *, direction, angular_speed, duration,
+        self, *, direction, angular_speed, duration, source_frame_stamp_ns,
     ):
         """Execute one capped, guarded Marvin alignment turn and then stop.
 
@@ -1969,6 +2006,7 @@ class CognitiveRuntime:
             "direction": None,
             "angular_speed": None,
             "duration": None,
+            "source_frame_stamp_ns": None,
             "producer_session": None,
             "turn_result": None,
             "stop_result": None,
@@ -1983,10 +2021,17 @@ class CognitiveRuntime:
             return dict(base, reason="marvin_alignment_angular_speed_invalid")
         if not _bounded_alignment_number(duration, maximum=0.50):
             return dict(base, reason="marvin_alignment_duration_invalid")
+        if (
+            not isinstance(source_frame_stamp_ns, int)
+            or isinstance(source_frame_stamp_ns, bool)
+            or source_frame_stamp_ns < 0
+        ):
+            return dict(base, reason="marvin_alignment_source_frame_stamp_invalid")
         base.update(
             direction=normalized_direction,
             angular_speed=float(angular_speed),
             duration=float(duration),
+            source_frame_stamp_ns=source_frame_stamp_ns,
         )
         if self.running is not True:
             return dict(base, reason="marvin_alignment_runtime_not_running")
@@ -2013,9 +2058,43 @@ class CognitiveRuntime:
             return dict(base, reason="marvin_alignment_lidar_not_current", lidar=lidar)
 
         with self._state_lock:
-            if self._marvin_alignment_step_consumed:
-                return dict(base, reason="marvin_alignment_step_already_consumed")
-            self._marvin_alignment_step_consumed = True
+            consumed = self._marvin_alignment_consumed_source_frame_stamps
+            if source_frame_stamp_ns in consumed:
+                return dict(base, reason="marvin_alignment_observation_already_consumed")
+            observation = self._marvin_alignment_observation
+            if not isinstance(observation, dict) or (
+                observation.get("source_frame_stamp_ns") != source_frame_stamp_ns
+            ):
+                return dict(base, reason="marvin_alignment_observation_not_current")
+            tracker = observation.get("opencv_tracker")
+            expected_direction = (
+                "LEFT" if observation.get("controller_decision") == "TURN_LEFT"
+                else "RIGHT" if observation.get("controller_decision") == "TURN_RIGHT"
+                else None
+            )
+            strict_observation = bool(
+                observation.get("identity_confirmed") is True
+                and observation.get("identity_source")
+                == "gemini_marvin_candidate_selection"
+                and observation.get("controller_state") == VISUAL_READY_TO_ALIGN
+                and expected_direction == normalized_direction
+                and isinstance(tracker, dict)
+                and tracker.get("active") is True
+                and tracker.get("matched") is True
+                and isinstance(tracker.get("quality"), (int, float))
+                and not isinstance(tracker.get("quality"), bool)
+                and isinstance(tracker.get("threshold"), (int, float))
+                and not isinstance(tracker.get("threshold"), bool)
+                and tracker.get("quality") >= tracker.get("threshold")
+                and tracker.get("source_frame_stamp_ns") == source_frame_stamp_ns
+                and isinstance(tracker.get("bbox"), dict)
+            )
+            if not strict_observation:
+                return dict(base, reason="marvin_alignment_observation_not_authorized")
+            # Consume before guarded dispatch: any later transport ambiguity or
+            # JIT veto requires a genuinely new strict observation, preventing
+            # an HTTP retry from duplicating a possible physical action.
+            consumed.add(source_frame_stamp_ns)
 
         base["execution_authorized"] = True
         try:

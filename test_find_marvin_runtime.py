@@ -3,6 +3,7 @@
 from copy import deepcopy
 from datetime import datetime, timezone
 import inspect
+import threading
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -438,6 +439,9 @@ class _ReadOnlyV2Behavior:
 @pytest.mark.parametrize(("error", "decision"), [(-203.0, "TURN_LEFT"), (203.0, "TURN_RIGHT"), (0.0, "FORWARD")])
 def test_v2_observe_uses_fresh_gemini_and_exposes_nonexecuting_decision(error, decision):
     runtime = object.__new__(CognitiveRuntime)
+    runtime._state_lock = threading.RLock()
+    runtime._marvin_alignment_observation = None
+    runtime._marvin_alignment_consumed_source_frame_stamps = set()
     behavior = _ReadOnlyV2Behavior(_v2_preview(error))
     runtime.behavior_manager = behavior
     result = runtime.observe_find_marvin_v2()
@@ -458,12 +462,62 @@ def test_v2_observe_uses_fresh_gemini_and_exposes_nonexecuting_decision(error, d
 ])
 def test_v2_observe_fails_closed_without_strict_identity_and_tracker(preview):
     runtime = object.__new__(CognitiveRuntime)
+    runtime._state_lock = threading.RLock()
+    runtime._marvin_alignment_observation = None
+    runtime._marvin_alignment_consumed_source_frame_stamps = set()
     behavior = _ReadOnlyV2Behavior(preview)
     runtime.behavior_manager = behavior
     result = runtime.observe_find_marvin_v2()
     assert result["ok"] is False and result["executed"] is False
     assert result["controller"]["decision"] == "REVERIFY_REQUIRED"
     assert behavior.motion_calls == 0
+
+
+def test_newer_non_authorizing_v2_observation_clears_alignment_authorization():
+    runtime = object.__new__(CognitiveRuntime)
+    turn = Mock(side_effect=AssertionError("stale observation must not turn"))
+    robot = SimpleNamespace(
+        stop=Mock(side_effect=AssertionError("stale observation must not stop")),
+        motion=Mock(side_effect=AssertionError("stale observation must not move")),
+    )
+    runtime._state_lock = threading.RLock()
+    runtime._marvin_alignment_observation = None
+    runtime._marvin_alignment_consumed_source_frame_stamps = set()
+    behavior = _ReadOnlyV2Behavior(_v2_preview(203.0))
+    behavior._execute_target_directed_turn = turn
+    behavior.robot = robot
+    runtime.behavior_manager = behavior
+    runtime.running = True
+    runtime.lidar_worker = SimpleNamespace(session="test-lidar", running=True)
+    runtime.world_model = SimpleNamespace(
+        get_lidar_obstacles=Mock(return_value={
+            "available": True, "valid": True, "reason": "fresh",
+            "producer_session": "test-lidar",
+            "local_motion_geometry": {"valid": True},
+        }),
+    )
+
+    first = runtime.observe_find_marvin_v2()
+    stamp = first["opencv_tracker"]["source_frame_stamp_ns"]
+    assert runtime._marvin_alignment_observation["source_frame_stamp_ns"] == stamp
+
+    # A newer unmatched tracker frame is a non-authorizing V2 observation.
+    # It must clear, rather than leave, the prior turn authorization cached.
+    newer = _v2_preview(203.0, matched=False)
+    newer["identity_source_frame_stamp_ns"] += 1
+    newer["opencv_tracker"]["source_frame_stamp_ns"] += 1
+    behavior.preview = newer
+    second = runtime.observe_find_marvin_v2()
+
+    assert second["ok"] is False
+    assert runtime._marvin_alignment_observation is None
+    stale_attempt = runtime.execute_single_marvin_alignment(
+        direction="RIGHT", angular_speed=0.25, duration=0.50,
+        source_frame_stamp_ns=stamp,
+    )
+    assert stale_attempt["reason"] == "marvin_alignment_observation_not_current"
+    turn.assert_not_called()
+    robot.motion.assert_not_called()
 
 
 def test_v2_observe_get_route_calls_only_observer():

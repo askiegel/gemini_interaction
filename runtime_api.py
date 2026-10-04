@@ -641,16 +641,17 @@ class RuntimeAPIHandler(BaseHTTPRequestHandler):
                 return
 
             if path == "/find-marvin/alignment-step":
-                required_fields = {"direction", "angular_speed", "duration"}
+                required_fields = {"direction", "angular_speed", "duration", "source_frame_stamp_ns"}
                 if set(request_data) != required_fields:
                     raise ValueError(
                         "find-marvin/alignment-step requires exactly direction, "
-                        "angular_speed, and duration."
+                        "angular_speed, duration, and source_frame_stamp_ns."
                     )
                 result = self.server.runtime.execute_single_marvin_alignment(
                     direction=request_data["direction"],
                     angular_speed=request_data["angular_speed"],
                     duration=request_data["duration"],
+                    source_frame_stamp_ns=request_data["source_frame_stamp_ns"],
                 )
                 self.send_json(200 if result.get("ok") is True else 409, result)
                 return
