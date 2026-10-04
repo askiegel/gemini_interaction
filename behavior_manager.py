@@ -2092,7 +2092,7 @@ class BehaviorManager:
                 self._room_scan_update(clearance_recheck_count=recheck_count)
 
     def build_find_marvin_controller_state(
-        self, *, now=None, require_fresh_gemini=False,
+        self, *, now=None, require_fresh_gemini=False, read_only=False,
     ):
         """Read current Marvin evidence for one controller decision.
 
@@ -2101,6 +2101,8 @@ class BehaviorManager:
         """
         if self.target_lock is None:
             raise RuntimeError("marvin_target_lock_unavailable")
+        if not isinstance(read_only, bool):
+            raise RuntimeError("marvin_read_only_policy_invalid")
         target_label = (
             str(self.target_lock.target_label or "").strip().lower()
             or self.MARVIN_SEMANTIC_TARGET
@@ -2110,6 +2112,25 @@ class BehaviorManager:
         lock_snapshot = self.target_lock.snapshot()
         if not isinstance(lock_snapshot, dict):
             raise RuntimeError("marvin_target_lock_snapshot_malformed")
+        if read_only:
+            # This is the controller builder's strict V2 Preview acquisition,
+            # deliberately before room-scan bookkeeping, entity refresh, and
+            # TargetLock.resolve().
+            preview = self.preview_find_object(
+                self.MARVIN_SEMANTIC_TARGET,
+                require_fresh_gemini=require_fresh_gemini,
+            )
+            if not isinstance(preview, dict):
+                raise RuntimeError("marvin_preview_result_malformed")
+            return {
+                "preview_result": preview,
+                "target_lock_result": {},
+                "target_lock_snapshot": lock_snapshot,
+                "selected_identity_id": None,
+                "identity_evidence": None,
+                "bridge_result": None,
+                "read_only": True,
+            }
         scan = self._room_scan_snapshot()
         if scan and scan.get("awaiting_new_source_frame") is True:
             baseline = scan.get("pre_turn_source_frame_stamp_ns")
@@ -2365,6 +2386,20 @@ class BehaviorManager:
             "identity_episode_continuity": identity_episode_continuity,
             "identity_refresh": identity_refresh,
         }
+
+    def observe_find_marvin_v2(self, *, now=None):
+        """Read strict V2 Marvin evidence without resolving or promoting identity.
+
+        This intentionally shares the controller builder's fresh-Gemini
+        preview path, but stops before the builder's persistent World Model
+        refresh and TargetLock.resolve() boundary.  It is therefore suitable
+        for operator inspection only, never for execution.
+        """
+        return self.build_find_marvin_controller_state(
+            now=now,
+            require_fresh_gemini=True,
+            read_only=True,
+        )
 
     @staticmethod
     def _marvin_target_lock_snapshot_is_locked(snapshot):

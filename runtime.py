@@ -10,6 +10,13 @@ from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
 from behavior_manager import BehaviorManager
+from marvin_arrival_policy import evaluate_marvin_visual_arrival
+from marvin_pursuit_state import (
+    FIND_CENTER_TOLERANCE_PIXELS,
+    VISUAL_READY_TO_ALIGN,
+    VISUAL_READY_TO_APPROACH,
+    evaluate_marvin_pursuit_state,
+)
 from config import load_config
 from lidar_perception import LidarPerceptionWorker, unavailable_state
 from robot_bridge.forward_interlock import (
@@ -314,6 +321,86 @@ class CognitiveRuntime:
             execution_authorized=False,
             motion_executed=False,
         )
+
+    def observe_find_marvin_v2(self):
+        """Return one strict V2 decision without controller or motion side effects."""
+        base = {
+            "ok": False,
+            "read_only": True,
+            "authoritative": False,
+            "executed": False,
+            "fresh_gemini_required": True,
+            "session_continuity_used": False,
+            "identity_confirmed": False,
+            "identity_source": None,
+            "proposal_label": None,
+            "proposal_confidence": None,
+            "opencv_tracker": None,
+            "controller": {
+                "state": "INSUFFICIENT_EVIDENCE",
+                "decision": "REVERIFY_REQUIRED",
+                "reason": None,
+                "center_tolerance_pixels": FIND_CENTER_TOLERANCE_PIXELS,
+            },
+        }
+        observer = getattr(self.behavior_manager, "observe_find_marvin_v2", None)
+        if not callable(observer):
+            return dict(base, reason="find_marvin_v2_observer_unavailable")
+        try:
+            evidence = observer()
+        except Exception as exc:
+            return dict(base, reason="find_marvin_v2_observation_failed",
+                        error=str(exc), error_type=type(exc).__name__)
+        if not isinstance(evidence, dict):
+            return dict(base, reason="find_marvin_v2_observation_malformed")
+        preview = evidence.get("preview_result")
+        if not isinstance(preview, dict):
+            return dict(base, reason="find_marvin_v2_preview_malformed")
+        tracker = preview.get("opencv_tracker")
+        identity_source = preview.get("identity_source")
+        common = dict(
+            identity_confirmed=preview.get("identity_confirmed") is True,
+            identity_source=identity_source,
+            proposal_label=preview.get("proposal_label"),
+            proposal_confidence=preview.get("proposal_confidence"),
+            opencv_tracker=dict(tracker) if isinstance(tracker, dict) else None,
+            session_continuity_used=(identity_source == "marvin_session_continuity"),
+        )
+        # V2 verification is deliberately repeated here as a response gate:
+        # generic Gemini proposal labels are accepted, continuity is not.
+        verifier = getattr(self.behavior_manager, "_marvin_v2_preview_is_verified", None)
+        verified = callable(verifier) and verifier(preview) is True
+        if not verified:
+            return dict(base, **common, reason="find_marvin_v2_fresh_identity_required",
+                        controller=dict(base["controller"], state="SEARCHING",
+                                        decision="REVERIFY_REQUIRED",
+                                        reason="find_marvin_v2_fresh_identity_required"))
+        pursuit = evaluate_marvin_pursuit_state(
+            preview, evidence.get("target_lock_result"),
+            evidence.get("target_lock_snapshot"),
+            selected_identity_id=evidence.get("selected_identity_id"),
+            identity_evidence=evidence.get("identity_evidence"),
+            bridge_result=evidence.get("bridge_result"),
+        )
+        state = pursuit.get("state", "INSUFFICIENT_EVIDENCE") if isinstance(pursuit, dict) else "INSUFFICIENT_EVIDENCE"
+        reason = pursuit.get("reason") if isinstance(pursuit, dict) else "pursuit_result_malformed"
+        arrival = evaluate_marvin_visual_arrival(preview)
+        if isinstance(arrival, dict) and arrival.get("arrived_at_marvin") is True:
+            decision = "ARRIVED"
+        elif state == VISUAL_READY_TO_ALIGN:
+            error = pursuit.get("horizontal_error")
+            decision = "TURN_LEFT" if error < 0 else "TURN_RIGHT" if error > 0 else "BLOCKED"
+        elif state == VISUAL_READY_TO_APPROACH:
+            decision = "FORWARD"
+        elif state == "SEARCHING":
+            decision = "SEARCH"
+        else:
+            decision = "BLOCKED"
+        return dict(base, **common, ok=True, reason=reason,
+                    controller={"state": state, "decision": decision,
+                                "reason": reason,
+                                "center_tolerance_pixels": FIND_CENTER_TOLERANCE_PIXELS},
+                    arrival=arrival)
 
     def execute_bounded_find_marvin_autonomous(self, *, max_actions):
         """Run one explicitly-authorized, finite Marvin controller episode.

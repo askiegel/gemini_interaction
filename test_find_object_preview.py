@@ -20,6 +20,36 @@ CONTINUITY_GENERATION = "vision-generation-a"
 from voice_relay.server import FIND_OBJECT_PREVIEW_TIMEOUT_SECONDS, VoiceRelayHandler
 
 
+def test_v2_observer_uses_strict_builder_without_target_lock_resolution():
+    manager = object.__new__(BehaviorManager)
+    manager.MARVIN_SEMANTIC_TARGET = "marvin"
+
+    class Lock:
+        target_label = "marvin"
+
+        @staticmethod
+        def snapshot():
+            return {"tracking_mode": "UNLOCKED"}
+
+        @staticmethod
+        def resolve(*args, **kwargs):
+            raise AssertionError("read-only observer resolved TargetLock")
+
+    manager.target_lock = Lock()
+    observed = {"ok": False, "identity_source": None}
+    calls = []
+
+    def strict_preview(target, **kwargs):
+        calls.append((target, kwargs))
+        return observed
+
+    manager.preview_find_object = strict_preview
+    result = manager.observe_find_marvin_v2()
+    assert result["read_only"] is True
+    assert result["preview_result"] == observed
+    assert calls == [("marvin", {"require_fresh_gemini": True})]
+
+
 def detection(timestamp="frame-1", cx=145.0):
     return {
         "timestamp": timestamp,

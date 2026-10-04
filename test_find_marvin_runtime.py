@@ -388,3 +388,93 @@ def test_runtime_path_has_no_direct_primitive_or_navigation_calls():
     for source in (runtime_source, builder_source):
         for forbidden in ("robot.local_forward", "execute_guarded_turn", "execute_marvin_search_step", "execute_marvin_pursuit_step", "nav2", "robot_bridge"):
             assert forbidden not in source
+
+
+def _v2_preview(error=203.0, *, quality=0.97, matched=True,
+                identity_source="gemini_marvin_candidate_selection",
+                identity_confirmed=True):
+    width, height = 640.0, 480.0
+    cx = width / 2.0 + error
+    bbox = {"x1": cx - 40.0, "y1": 100.0, "x2": cx + 40.0, "y2": 300.0}
+    stamp = 101
+    return {
+        "ok": True, "preview": True, "authoritative": False,
+        "target": "marvin", "target_found": True,
+        "source": "marvin_local_tracker", "identity_confirmed": identity_confirmed,
+        "identity_source": identity_source, "identity_source_frame_stamp_ns": stamp,
+        "motion_authorized_marvin_candidate": True,
+        "source_timestamp": STAMP, "vision_timestamp": STAMP,
+        "proposal_label": "chair", "proposal_confidence": 0.91,
+        "bbox": dict(bbox), "image_width": width, "image_height": height,
+        "opencv_tracker": {"active": True, "matched": matched,
+                           "quality": quality, "threshold": 0.80,
+                           "bbox": dict(bbox), "image_width": width,
+                           "image_height": height, "center_x": cx,
+                           "center_y": 200.0, "horizontal_error": error,
+                           "source_frame_stamp_ns": stamp + 1,
+                           "reason": "matched"},
+    }
+
+
+class _ReadOnlyV2Behavior:
+    def __init__(self, preview):
+        self.preview = preview
+        self.motion_calls = 0
+
+    @staticmethod
+    def _marvin_v2_preview_is_verified(preview):
+        return BehaviorManager._marvin_v2_preview_is_verified(preview)
+
+    def observe_find_marvin_v2(self):
+        return {"preview_result": self.preview, "target_lock_result": {},
+                "target_lock_snapshot": {}, "selected_identity_id": None,
+                "identity_evidence": None, "bridge_result": None}
+
+    def execute_find_marvin_controller(self, *args, **kwargs):
+        self.motion_calls += 1
+        raise AssertionError("controller execution is forbidden")
+
+
+@pytest.mark.parametrize(("error", "decision"), [(-203.0, "TURN_LEFT"), (203.0, "TURN_RIGHT"), (0.0, "FORWARD")])
+def test_v2_observe_uses_fresh_gemini_and_exposes_nonexecuting_decision(error, decision):
+    runtime = object.__new__(CognitiveRuntime)
+    behavior = _ReadOnlyV2Behavior(_v2_preview(error))
+    runtime.behavior_manager = behavior
+    result = runtime.observe_find_marvin_v2()
+    assert result["ok"] is True
+    assert result["read_only"] is True and result["authoritative"] is False
+    assert result["executed"] is False
+    assert result["identity_source"] == "gemini_marvin_candidate_selection"
+    assert result["proposal_label"] == "chair"
+    assert result["controller"]["decision"] == decision
+    assert behavior.motion_calls == 0
+
+
+@pytest.mark.parametrize("preview", [
+    _v2_preview(203.0, identity_source="marvin_session_continuity"),
+    _v2_preview(203.0, identity_confirmed=False),
+    _v2_preview(203.0, quality=0.79),
+    _v2_preview(203.0, matched=False),
+])
+def test_v2_observe_fails_closed_without_strict_identity_and_tracker(preview):
+    runtime = object.__new__(CognitiveRuntime)
+    behavior = _ReadOnlyV2Behavior(preview)
+    runtime.behavior_manager = behavior
+    result = runtime.observe_find_marvin_v2()
+    assert result["ok"] is False and result["executed"] is False
+    assert result["controller"]["decision"] == "REVERIFY_REQUIRED"
+    assert behavior.motion_calls == 0
+
+
+def test_v2_observe_get_route_calls_only_observer():
+    runtime = SimpleNamespace(observe_find_marvin_v2=Mock(return_value={
+        "ok": True, "read_only": True, "authoritative": False, "executed": False,
+    }))
+    handler = object.__new__(RuntimeAPIHandler)
+    handler.path = "/find-marvin/v2/observe"
+    handler.server = SimpleNamespace(runtime=runtime)
+    responses = []
+    handler.send_json = lambda code, payload: responses.append((code, payload))
+    handler.do_GET()
+    assert responses[0][0] == 200 and responses[0][1]["executed"] is False
+    runtime.observe_find_marvin_v2.assert_called_once_with()

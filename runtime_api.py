@@ -193,6 +193,18 @@ class RuntimeAPIHandler(BaseHTTPRequestHandler):
                 )
             return
 
+        if path == "/find-marvin/v2/observe":
+            try:
+                self.send_json(200, self.server.runtime.observe_find_marvin_v2())
+            except Exception as exc:
+                self.send_json(200, {
+                    "ok": False, "read_only": True, "authoritative": False,
+                    "executed": False, "fresh_gemini_required": True,
+                    "reason": "find_marvin_v2_observation_failed",
+                    "error": str(exc),
+                })
+            return
+
         if path == "/find-object/preview":
             target_values = parse_qs(parsed_url.query).get("target", [])
             target = target_values[0].strip() if target_values else ""
