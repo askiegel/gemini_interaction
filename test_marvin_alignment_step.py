@@ -6,6 +6,7 @@ from unittest.mock import Mock
 
 from runtime import CognitiveRuntime
 from runtime_api import RuntimeAPIHandler
+from guarded_turn_policy import ROTATIONAL_SWEPT_FOOTPRINT
 
 
 SESSION = "active-runtime-lidar-session"
@@ -30,6 +31,7 @@ class Robot:
     def __init__(self):
         self.stop_calls = 0
         self.local_forward = Mock(side_effect=AssertionError("forward forbidden"))
+        self.motion = Mock(side_effect=AssertionError("alignment must use guarded turn"))
 
     def stop(self):
         self.stop_calls += 1
@@ -46,8 +48,9 @@ class Behavior:
         self.execute_local_obstacle_avoidance_step = Mock(side_effect=AssertionError("avoidance forbidden"))
         self.target_lock = SimpleNamespace(resolve=Mock(side_effect=AssertionError("TargetLock mutation forbidden")))
 
-    def _execute_target_directed_turn(self, direction, speed, duration, *, expected_lidar_session):
-        self.calls.append((direction, speed, duration, expected_lidar_session))
+    def _execute_target_directed_turn(self, direction, speed, duration, *, expected_lidar_session,
+                                      safety_mode):
+        self.calls.append((direction, speed, duration, expected_lidar_session, safety_mode))
         return {"ok": True, "permitted": True, "confirmed_forwarded": True}
 
 
@@ -71,7 +74,7 @@ def test_valid_right_uses_active_runtime_lidar_one_turn_and_explicit_stop():
     assert result["ok"] is result["motion_executed"] is True
     assert result["actions_executed"] == 1
     assert value.world_model.calls == [SESSION]
-    assert value.behavior_manager.calls == [("RIGHT", 0.25, 0.50, SESSION)]
+    assert value.behavior_manager.calls == [("RIGHT", 0.25, 0.50, SESSION, ROTATIONAL_SWEPT_FOOTPRINT)]
     assert robot.stop_calls == 1
     assert robot.local_forward.call_count == 0
     for forbidden in (
@@ -91,7 +94,7 @@ def test_valid_left_is_the_only_other_allowed_direction():
         direction="LEFT", angular_speed=0.25, duration=0.50,
     )
     assert result["ok"] is True
-    assert value.behavior_manager.calls == [("LEFT", 0.25, 0.50, SESSION)]
+    assert value.behavior_manager.calls == [("LEFT", 0.25, 0.50, SESSION, ROTATIONAL_SWEPT_FOOTPRINT)]
     assert robot.stop_calls == 1
 
 
@@ -105,7 +108,7 @@ def test_endpoint_runtime_method_cannot_chain_a_second_turn():
     )
     assert first["ok"] is True
     assert second["reason"] == "marvin_alignment_step_already_consumed"
-    assert value.behavior_manager.calls == [("RIGHT", 0.25, 0.50, SESSION)]
+    assert value.behavior_manager.calls == [("RIGHT", 0.25, 0.50, SESSION, ROTATIONAL_SWEPT_FOOTPRINT)]
     assert robot.stop_calls == 1
 
 
@@ -140,6 +143,27 @@ def test_missing_stale_or_invalid_runtime_lidar_vetoes_without_turn():
         )
         assert result["reason"] == "marvin_alignment_lidar_not_current"
         assert value.behavior_manager.calls == [] and robot.stop_calls == 0
+
+
+def test_rotational_safety_veto_never_sends_bridge_motion():
+    value, robot = runtime()
+    value.behavior_manager._execute_target_directed_turn = Mock(return_value={
+        "ok": False, "permitted": False, "confirmed_forwarded": False,
+        "reason": "rotational_protected_region_violated",
+        "rotational_swept_footprint": {
+            "protected_radius_m": 0.45,
+            "reason": "rotational_protected_region_violated",
+        },
+    })
+    result = value.execute_single_marvin_alignment(
+        direction="RIGHT", angular_speed=0.25, duration=0.50,
+    )
+    assert result["motion_executed"] is False
+    value.behavior_manager._execute_target_directed_turn.assert_called_once_with(
+        "RIGHT", 0.25, 0.50, expected_lidar_session=SESSION,
+        safety_mode=ROTATIONAL_SWEPT_FOOTPRINT,
+    )
+    assert robot.motion.call_count == 0
 
 
 def test_endpoint_requires_exact_json_and_delegates_only_to_runtime_method():

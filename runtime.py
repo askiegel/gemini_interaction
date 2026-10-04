@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
 from behavior_manager import BehaviorManager
+from guarded_turn_policy import ROTATIONAL_SWEPT_FOOTPRINT
 from marvin_arrival_policy import evaluate_marvin_visual_arrival
 from marvin_pursuit_state import (
     FIND_CENTER_TOLERANCE_PIXELS,
@@ -2023,6 +2024,7 @@ class CognitiveRuntime:
                 float(angular_speed),
                 float(duration),
                 expected_lidar_session=session,
+                safety_mode=ROTATIONAL_SWEPT_FOOTPRINT,
             )
         except Exception as exc:
             try:
