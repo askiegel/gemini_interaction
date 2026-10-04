@@ -456,6 +456,59 @@ def _observe_v2_series(runtime, behavior, values):
     return results
 
 
+def _v2_semantic_tracker_association_failure(stamp):
+    """Build the runtime preview from a real BehaviorManager rejection."""
+    manager = object.__new__(BehaviorManager)
+    manager._marvin_v2_tracker_episode_lock = threading.RLock()
+    manager._marvin_v2_tracker_episode = None
+    tracker_stamps = iter((900 + stamp, 901 + stamp))
+
+    def acquire(candidate, _diagnostics, *, episode, existing_tracker=None, **_kwargs):
+        if existing_tracker is None:
+            episode["marvin_tracker"] = object()
+        bbox = manager._expand_marvin_tracker_seed_bbox(
+            candidate["bbox"], candidate["image_width"], candidate["image_height"],
+        )
+        return {"opencv_tracker": {
+            "source_frame_stamp_ns": next(tracker_stamps),
+            "bbox": bbox,
+        }}
+
+    manager._acquire_marvin_tracker_observation_from_candidate = acquire
+    frame = SimpleNamespace(received_at=STAMP)
+    candidate = lambda bbox: {"bbox": bbox, "image_width": 640, "image_height": 480}
+    manager._acquire_strict_v2_tracker_observation_from_candidate(
+        candidate({"x1": 212, "y1": 0, "x2": 640, "y2": 384}), {},
+        identity_source="gemini_marvin_candidate_selection",
+        identity_source_frame_stamp_ns=1, execution_guard=None, frame=frame,
+    )
+    manager._acquire_strict_v2_tracker_observation_from_candidate(
+        candidate({"x1": 221, "y1": 0, "x2": 619, "y2": 376}), {},
+        identity_source="gemini_marvin_candidate_selection",
+        identity_source_frame_stamp_ns=2, execution_guard=None, frame=frame,
+    )
+    rejected = manager._acquire_strict_v2_tracker_observation_from_candidate(
+        candidate({"x1": 355, "y1": 16, "x2": 640, "y2": 403}), {},
+        identity_source="gemini_marvin_candidate_selection",
+        identity_source_frame_stamp_ns=3, execution_guard=None, frame=frame,
+    )
+    assert rejected["reason"] == "marvin_v2_semantic_tracker_association_failed"
+    assert manager._marvin_v2_tracker_episode is None
+
+    # preview_find_object deliberately builds a negative strict preview for
+    # this result.  Preserve the actual diagnostic it propagates to runtime.
+    preview = _v2_preview(175.0, stamp=stamp)
+    preview.update(
+        target_found=False,
+        identity_confirmed=False,
+        identity_source=None,
+        motion_authorized_marvin_candidate=False,
+        reason=rejected["reason"],
+        strict_tracker_episode=rejected["strict_tracker_episode"],
+    )
+    return preview
+
+
 @pytest.mark.parametrize(("error", "decision"), [(-203.0, "TURN_LEFT"), (203.0, "TURN_RIGHT"), (0.0, "FORWARD")])
 def test_v2_observe_uses_fresh_gemini_and_exposes_nonexecuting_decision(error, decision):
     runtime, behavior = _v2_runtime(_v2_preview(error))
@@ -532,6 +585,51 @@ def test_newer_non_authorizing_v2_observation_clears_alignment_authorization():
     robot.motion.assert_not_called()
 
 
+@pytest.mark.parametrize(("low_error", "high_error", "direction"), [
+    (105.0, 175.0, "TURN_RIGHT"),
+    (-105.0, -175.0, "TURN_LEFT"),
+])
+def test_v2_association_failure_requires_three_new_samples_before_competing_mode_authorizes(
+    low_error, high_error, direction,
+):
+    """A BehaviorManager association failure is a full downstream boundary."""
+    runtime, behavior = _v2_runtime(_v2_preview(low_error, stamp=100))
+
+    # LOW1--LOW3 establish the original strict episode's downstream window.
+    _observe_v2_series(runtime, behavior, [
+        (100, low_error, {}), (101, low_error + (2 if low_error > 0 else -2), {}),
+        (102, low_error + (1 if low_error > 0 else -1), {}),
+    ])
+    assert runtime._marvin_alignment_observation["source_frame_stamp_ns"] == 103
+    assert runtime._marvin_alignment_observation["controller_decision"] == direction
+
+    # This is the negative preview shape returned by the actual strict-V2
+    # BehaviorManager association boundary.  It must invalidate every older
+    # runtime admission layer before a competing mode can re-acquire.
+    behavior.preview = _v2_semantic_tracker_association_failure(103)
+    failed = runtime.observe_find_marvin_v2()
+    assert failed["strict_tracker_episode"]["semantic_association"] == "failed"
+    assert runtime._marvin_alignment_geometry_history == []
+    assert runtime._marvin_alignment_consensus == []
+    assert runtime._marvin_alignment_observation is None
+
+    # HIGH2 is the new episode's first runtime sample; HIGH3 is its second.
+    # Neither may reuse LOW evidence or authorize a competing turn.
+    _observe_v2_series(runtime, behavior, [
+        (104, high_error, {}), (105, high_error + (2 if high_error > 0 else -2), {}),
+    ])
+    assert len(runtime._marvin_alignment_geometry_history) == 2
+    assert len(runtime._marvin_alignment_consensus) == 2
+    assert runtime._marvin_alignment_observation is None
+
+    # Only HIGH4, the third wholly new strict sample, can be current.
+    _observe_v2_series(runtime, behavior, [
+        (106, high_error + (1 if high_error > 0 else -1), {}),
+    ])
+    assert runtime._marvin_alignment_observation["source_frame_stamp_ns"] == 107
+    assert runtime._marvin_alignment_observation["controller_decision"] == direction
+
+
 @pytest.mark.parametrize(("error", "decision"), [
     (60.0, "TURN_RIGHT"), (-60.0, "TURN_LEFT"),
 ])
@@ -563,6 +661,44 @@ def test_v2_centered_observations_never_authorize_alignment():
     ])
     assert runtime._marvin_alignment_observation is None
     assert runtime._marvin_alignment_consensus == []
+
+
+def test_v2_forward_resets_alignment_admission_without_discarding_episode_evidence():
+    """CENTERED is an admission reset, not a semantic-tracker replacement."""
+    runtime, behavior = _v2_runtime(_v2_preview(60.0, stamp=220))
+    _observe_v2_series(runtime, behavior, [
+        (220, 60.0, {}), (221, 62.0, {}),
+    ])
+    assert len(runtime._marvin_alignment_consensus) == 2
+
+    # An associated strict tracker remains visible in the preview, but once
+    # its controller result is FORWARD the runtime must discard all pending
+    # physical-alignment evidence.
+    centered = _v2_preview(20.0, stamp=222)
+    centered["strict_tracker_episode"] = {
+        "active": True,
+        "continued_existing_tracker": True,
+        "initialized_this_observation": False,
+        "semantic_association": "accepted",
+        "association_metric": "iou",
+        "association_iou": 0.91,
+        "association_threshold": 0.70,
+        "reset_reason": None,
+    }
+    behavior.preview = centered
+    result = runtime.observe_find_marvin_v2()
+    assert result["controller"]["decision"] == "FORWARD"
+    assert result["strict_tracker_episode"]["active"] is True
+    assert runtime._marvin_alignment_geometry_history == []
+    assert runtime._marvin_alignment_consensus == []
+    assert runtime._marvin_alignment_observation is None
+
+    # A later associated turn begins a fresh downstream window only.
+    behavior.preview = _v2_preview(61.0, stamp=223)
+    runtime.observe_find_marvin_v2()
+    assert len(runtime._marvin_alignment_geometry_history) == 1
+    assert len(runtime._marvin_alignment_consensus) == 1
+    assert runtime._marvin_alignment_observation is None
 
 
 def test_v2_geometry_outlier_resets_consensus_and_requires_three_new_samples():

@@ -342,6 +342,7 @@ class CognitiveRuntime:
             "proposal_label": None,
             "proposal_confidence": None,
             "opencv_tracker": None,
+            "strict_tracker_episode": None,
             "controller": {
                 "state": "INSUFFICIENT_EVIDENCE",
                 "decision": "REVERIFY_REQUIRED",
@@ -381,6 +382,11 @@ class CognitiveRuntime:
             proposal_label=preview.get("proposal_label"),
             proposal_confidence=preview.get("proposal_confidence"),
             opencv_tracker=dict(tracker) if isinstance(tracker, dict) else None,
+            strict_tracker_episode=(
+                dict(preview["strict_tracker_episode"])
+                if isinstance(preview.get("strict_tracker_episode"), dict)
+                else None
+            ),
             session_continuity_used=(identity_source == "marvin_session_continuity"),
         )
         # V2 verification is deliberately repeated here as a response gate:

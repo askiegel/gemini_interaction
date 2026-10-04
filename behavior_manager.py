@@ -657,6 +657,11 @@ class BehaviorManager:
         self.semantic_vision = semantic_vision
         self.marvin_local_tracker_factory = MarvinLocalTracker
         self._semantic_episode = None
+        # Strict V2 previews are read-only, but must keep one local tracker
+        # episode across GETs so fresh Gemini selections cannot silently
+        # replace its geometry with a competing proposal.
+        self._marvin_v2_tracker_episode_lock = threading.RLock()
+        self._marvin_v2_tracker_episode = None
 
         self.target_lock = (
             TargetLock(
@@ -5331,6 +5336,10 @@ class BehaviorManager:
                 )
                 if isinstance(observation.get("opencv_tracker"), dict):
                     negative_preview["opencv_tracker"] = observation["opencv_tracker"]
+                if isinstance(observation.get("strict_tracker_episode"), dict):
+                    negative_preview["strict_tracker_episode"] = observation[
+                        "strict_tracker_episode"
+                    ]
                 return negative_preview
             result = self._build_find_object_preview(
                 normalized_target,
@@ -5348,7 +5357,7 @@ class BehaviorManager:
                 "tracker_vertical_padding_fraction", "confirmation_diagnostics",
                 "track_id", "tracker_source", "marvin_continuity",
                 "opencv_tracker", "identity_source_frame_stamp_ns",
-                "marvin_tracking_episode",
+                "marvin_tracking_episode", "strict_tracker_episode",
             ):
                 if key in observation:
                     result[key] = observation[key]
@@ -5894,6 +5903,8 @@ class BehaviorManager:
             )
         )
         if not candidates:
+            if require_fresh_gemini:
+                self._clear_marvin_v2_tracker_episode()
             source_stamp = diagnostics.get("latest_source_frame_stamp_ns")
             if (
                 type(source_stamp) is int
@@ -5913,6 +5924,8 @@ class BehaviorManager:
             candidates, diagnostics,
         )
         if not candidates:
+            if require_fresh_gemini:
+                self._clear_marvin_v2_tracker_episode()
             source_stamps = [
                 candidate.get("source_frame_stamp_ns")
                 for candidate in proposal_candidates
@@ -5963,6 +5976,8 @@ class BehaviorManager:
         if execution_guard is not None:
             execution_guard()
         if not isinstance(identity, dict) or identity.get("confirmed") is not True:
+            if require_fresh_gemini:
+                self._clear_marvin_v2_tracker_episode()
             # The source stamp identifies the camera observation, not the
             # semantic result. Preserve it on a negative preview without
             # promoting the candidate or granting any motion authority.
@@ -5983,6 +5998,7 @@ class BehaviorManager:
             identity_source != "gemini_marvin_candidate_selection"
             or identity_source_stamp is None
         ):
+            self._clear_marvin_v2_tracker_episode()
             return {
                 "found": False,
                 "source_frame_stamp_ns": diagnostics.get(
@@ -5996,6 +6012,14 @@ class BehaviorManager:
         if type(selected_index) is not int or not 0 <= selected_index < len(candidates):
             raise ValueError("marvin_candidate_selection_index_invalid")
         yolo_candidate = candidates[selected_index]
+        if require_fresh_gemini:
+            return self._acquire_strict_v2_tracker_observation_from_candidate(
+                yolo_candidate, diagnostics,
+                identity_source=identity_source,
+                identity_source_frame_stamp_ns=identity_source_stamp,
+                execution_guard=execution_guard,
+                frame=frame,
+            )
         result = self._acquire_marvin_tracker_observation_from_candidate(
             yolo_candidate,
             diagnostics,
@@ -6010,6 +6034,136 @@ class BehaviorManager:
         if not require_fresh_gemini:
             self._set_marvin_preview_continuity(result)
         return result
+
+    MARVIN_V2_TRACKER_ASSOCIATION_MIN_IOU = 0.70
+
+    def _clear_marvin_v2_tracker_episode(self):
+        with self._marvin_v2_tracker_episode_lock:
+            self._marvin_v2_tracker_episode = None
+
+    def _strict_v2_tracker_diagnostic(self, *, active, continued, initialized,
+                                      accepted, iou=None, reason=None):
+        return {
+            "active": bool(active),
+            "continued_existing_tracker": bool(continued),
+            "initialized_this_observation": bool(initialized),
+            "semantic_association": "accepted" if accepted else "failed",
+            "association_metric": "iou",
+            "association_iou": iou,
+            "association_threshold": self.MARVIN_V2_TRACKER_ASSOCIATION_MIN_IOU,
+            "reset_reason": reason,
+        }
+
+    def _acquire_strict_v2_tracker_observation_from_candidate(
+        self, yolo_candidate, diagnostics, *, identity_source,
+        identity_source_frame_stamp_ns, execution_guard, frame,
+    ):
+        """Keep strict V2 geometry bound to one semantically rechecked tracker.
+
+        Fresh Gemini selection remains mandatory on every invocation.  The
+        selected proposal may continue an existing episode only when it has
+        strict IoU agreement with that episode's last confirmed tracker box.
+        A disagreement clears the episode; it never seeds a replacement in
+        the same observation.
+        """
+        candidate_bbox = self._target_bbox(yolo_candidate)
+        if candidate_bbox is None:
+            self._clear_marvin_v2_tracker_episode()
+            return {
+                "found": False, "identity_source": identity_source,
+                "identity_source_frame_stamp_ns": identity_source_frame_stamp_ns,
+                "reason": "marvin_v2_candidate_bbox_invalid",
+                "strict_tracker_episode": self._strict_v2_tracker_diagnostic(
+                    active=False, continued=False, initialized=False,
+                    accepted=False, reason="candidate_bbox_invalid",
+                ),
+            }
+        try:
+            candidate_tracker_seed_bbox = self._expand_marvin_tracker_seed_bbox(
+                candidate_bbox,
+                int(yolo_candidate["image_width"]),
+                int(yolo_candidate["image_height"]),
+            )
+        except (KeyError, TypeError, ValueError):
+            self._clear_marvin_v2_tracker_episode()
+            return {
+                "found": False, "identity_source": identity_source,
+                "identity_source_frame_stamp_ns": identity_source_frame_stamp_ns,
+                "reason": "marvin_v2_candidate_seed_bbox_invalid",
+                "strict_tracker_episode": self._strict_v2_tracker_diagnostic(
+                    active=False, continued=False, initialized=False,
+                    accepted=False, reason="candidate_seed_bbox_invalid",
+                ),
+            }
+        with self._marvin_v2_tracker_episode_lock:
+            episode = self._marvin_v2_tracker_episode
+            episode = dict(episode) if isinstance(episode, dict) else None
+            association_iou = None
+            if episode is None:
+                episode = {"marvin_tracker": None, "tracker_bbox": None,
+                           "last_tracker_source_frame_stamp_ns": None}
+                initialized = True
+                continued = False
+            else:
+                initialized = False
+                continued = True
+                tracker_bbox = episode.get("tracker_bbox")
+                association_iou = self._target_bbox_iou(
+                    {"bbox": candidate_tracker_seed_bbox}, {"bbox": tracker_bbox},
+                )
+                if association_iou < self.MARVIN_V2_TRACKER_ASSOCIATION_MIN_IOU:
+                    self._marvin_v2_tracker_episode = None
+                    return {
+                        "found": False, "identity_source": identity_source,
+                        "identity_source_frame_stamp_ns": identity_source_frame_stamp_ns,
+                        "reason": "marvin_v2_semantic_tracker_association_failed",
+                        "strict_tracker_episode": self._strict_v2_tracker_diagnostic(
+                            active=False, continued=True, initialized=False,
+                            accepted=False, iou=association_iou,
+                            reason="semantic_tracker_iou_below_threshold",
+                        ),
+                    }
+            try:
+                result = self._acquire_marvin_tracker_observation_from_candidate(
+                    yolo_candidate, diagnostics, identity_source=identity_source,
+                    identity_source_frame_stamp_ns=identity_source_frame_stamp_ns,
+                    require_fresh_gemini=True, execution_guard=execution_guard,
+                    episode=episode, frame=frame,
+                    existing_tracker=(episode.get("marvin_tracker") if continued else None),
+                )
+            except Exception:
+                self._marvin_v2_tracker_episode = None
+                raise
+            tracker = result.get("opencv_tracker") if isinstance(result, dict) else None
+            stamp = tracker.get("source_frame_stamp_ns") if isinstance(tracker, dict) else None
+            bbox = tracker.get("bbox") if isinstance(tracker, dict) else None
+            previous_stamp = episode.get("last_tracker_source_frame_stamp_ns")
+            if (
+                type(stamp) is not int or stamp < 0 or not isinstance(bbox, dict)
+                or (continued and (type(previous_stamp) is not int or stamp <= previous_stamp))
+            ):
+                self._marvin_v2_tracker_episode = None
+                return {
+                    "found": False, "identity_source": identity_source,
+                    "identity_source_frame_stamp_ns": identity_source_frame_stamp_ns,
+                    "reason": "marvin_v2_tracker_source_stamp_invalid",
+                    "strict_tracker_episode": self._strict_v2_tracker_diagnostic(
+                        active=False, continued=continued, initialized=initialized,
+                        accepted=False, reason="tracker_source_stamp_invalid",
+                    ),
+                }
+            episode.update(marvin_tracker=episode.get("marvin_tracker"),
+                           tracker_bbox=dict(bbox),
+                           last_tracker_source_frame_stamp_ns=stamp)
+            self._marvin_v2_tracker_episode = episode
+            result["strict_tracker_episode"] = self._strict_v2_tracker_diagnostic(
+                active=True, continued=continued, initialized=initialized,
+                accepted=True,
+                # This records the exact pre-update comparison that admitted
+                # continuation, rather than a post-update tracker box.
+                iou=(1.0 if initialized else association_iou),
+            )
+            return result
 
     @staticmethod
     def _empty_opencv_tracker_diagnostic(*, reason="tracker_not_initialized"):
@@ -6117,6 +6271,7 @@ class BehaviorManager:
         frame=None,
         identity_source_frame_stamp_ns=None,
         require_fresh_gemini=False,
+        existing_tracker=None,
     ):
         """Confirm fresh local-tracker geometry for one selected proposal."""
         semantic_vision = self.semantic_vision
@@ -6161,9 +6316,12 @@ class BehaviorManager:
                 "marvin_tracker": None,
             }
             self._semantic_episode = episode
-        episode["marvin_tracker"] = self.marvin_local_tracker_factory(
-            frame, tracker_seed_bbox,
-        )
+        if existing_tracker is None:
+            episode["marvin_tracker"] = self.marvin_local_tracker_factory(
+                frame, tracker_seed_bbox,
+            )
+        else:
+            episode["marvin_tracker"] = existing_tracker
         try:
             confirmed = self._confirm_marvin_local_tracker_frames(
                 episode["marvin_tracker"],
