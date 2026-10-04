@@ -154,6 +154,73 @@ def test_searching_and_reacquire_route_only_to_search(monkeypatch):
         assert pursuits == [] and result["reason"] == "find_marvin_action_limit_reached"
 
 
+def test_find_marvin_v2_backpack_swap_high_quality_continuity_routes_to_search(
+    monkeypatch,
+):
+    manager = BehaviorManager(robot_client=object())
+    preview_result = {
+        "ok": True,
+        "preview": True,
+        "authoritative": False,
+        "target": "marvin",
+        "target_found": True,
+        "identity_confirmed": True,
+        "identity_source": "marvin_session_continuity",
+        "motion_authorized_marvin_candidate": True,
+        "identity_source_frame_stamp_ns": 50,
+        "source_timestamp": "2026-10-03T12:00:00+00:00",
+        "proposal_label": "backpack",
+        "bbox": {"x1": 100, "y1": 100, "x2": 300, "y2": 400},
+        "image_width": 640,
+        "image_height": 480,
+        "opencv_tracker": {
+            "active": True,
+            "matched": True,
+            "quality": 0.999,
+            "threshold": 0.8,
+            "source_frame_stamp_ns": 60,
+            "bbox": {"x1": 100, "y1": 100, "x2": 300, "y2": 400},
+            "image_width": 640,
+            "image_height": 480,
+        },
+    }
+    value = {
+        "preview_result": preview_result,
+        "target_lock_result": {},
+        "target_lock_snapshot": {},
+        "selected_identity_id": None,
+    }
+    monkeypatch.setattr(
+        behavior_manager_module, "evaluate_marvin_arrival",
+        lambda *_args, **_kwargs: {
+            "ok": True, "arrived_at_marvin": False,
+            "selected_identity_id": None,
+        },
+    )
+    searches = []
+    pursuits = []
+    monkeypatch.setattr(
+        manager, "execute_marvin_search_step",
+        lambda *_args, **_kwargs: searches.append(True) or successful_search(),
+    )
+    monkeypatch.setattr(
+        manager, "execute_marvin_pursuit_step",
+        lambda *_args, **_kwargs: pursuits.append(True) or successful_pursuit(),
+    )
+
+    result = manager.execute_find_marvin_controller(
+        lambda: value,
+        max_actions=1,
+        require_fresh_gemini=True,
+        stop_after_action=lambda: {"ok": True},
+    )
+
+    assert result["reason"] == "find_marvin_action_limit_reached"
+    assert searches == [True]
+    assert pursuits == []
+    assert result["history"][0]["pursuit_state"] == "SEARCHING"
+
+
 def test_search_dispatch_attempt_consumes_budget_and_requires_stop(monkeypatch):
     stops = []
     result, _providers, _evaluations, _arrivals, searches, pursuits = invoke(

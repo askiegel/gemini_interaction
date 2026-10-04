@@ -71,7 +71,7 @@ class FakeBehavior:
         self.provided_states = []
         self.on_controller_call = None
 
-    def build_find_marvin_controller_state(self):
+    def build_find_marvin_controller_state(self, *, require_fresh_gemini=False):
         self.state_provider_calls += 1
         return {"observation_sequence": self.state_provider_calls}
 
@@ -82,12 +82,14 @@ class FakeBehavior:
         max_actions,
         dry_run,
         stop_after_action,
+        require_fresh_gemini=False,
     ):
         self.controller_calls.append({
             "state_provider": state_provider,
             "max_actions": max_actions,
             "dry_run": dry_run,
             "stop_after_action": stop_after_action,
+            "require_fresh_gemini": require_fresh_gemini,
         })
         self.provided_states.append(state_provider())
         if self.on_controller_call is not None:
@@ -162,6 +164,7 @@ def test_find_marvin_text_routes_through_mission_to_existing_bounded_controller(
     call = behavior.controller_calls[0]
     assert call["max_actions"] == 6
     assert call["dry_run"] is False
+    assert call["require_fresh_gemini"] is True
     assert callable(call["stop_after_action"])
     assert behavior.generic_calls == []
     assert result["mission_route"] == "bounded_marvin_autonomous"

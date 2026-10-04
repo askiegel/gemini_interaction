@@ -2091,7 +2091,9 @@ class BehaviorManager:
             if scan is not None:
                 self._room_scan_update(clearance_recheck_count=recheck_count)
 
-    def build_find_marvin_controller_state(self, *, now=None):
+    def build_find_marvin_controller_state(
+        self, *, now=None, require_fresh_gemini=False,
+    ):
         """Read current Marvin evidence for one controller decision.
 
         This is perception/identity acquisition only.  It deliberately does
@@ -2148,13 +2150,14 @@ class BehaviorManager:
             and scan.get("last_completed_scan_turn") is not None
             else None
         )
-        if required_source_stamp is None:
-            preview = self.preview_find_object(self.MARVIN_SEMANTIC_TARGET)
-        else:
-            preview = self.preview_find_object(
-                self.MARVIN_SEMANTIC_TARGET,
-                minimum_source_frame_stamp_ns=required_source_stamp,
-            )
+        preview_options = {}
+        if required_source_stamp is not None:
+            preview_options["minimum_source_frame_stamp_ns"] = required_source_stamp
+        if require_fresh_gemini:
+            preview_options["require_fresh_gemini"] = True
+        preview = self.preview_find_object(
+            self.MARVIN_SEMANTIC_TARGET, **preview_options,
+        )
         if not isinstance(preview, dict):
             raise RuntimeError("marvin_preview_result_malformed")
         preview_stamp = _valid_source_frame_stamp(preview.get("source_frame_stamp_ns"))
@@ -2524,6 +2527,7 @@ class BehaviorManager:
     def execute_find_marvin_controller(
         self, state_provider, *, max_actions=FIND_MARVIN_CONTROLLER_MAX_ACTIONS,
         now=None, dry_run=False, stop_after_action=None,
+        require_fresh_gemini=False,
     ):
         """Run a finite sequence of fresh, one-step Marvin search/pursuit actions.
 
@@ -2558,6 +2562,8 @@ class BehaviorManager:
             return dict(base, reason="find_marvin_state_provider_unavailable")
         if not isinstance(dry_run, bool):
             return dict(base, reason="invalid_find_marvin_dry_run")
+        if not isinstance(require_fresh_gemini, bool):
+            return dict(base, reason="invalid_find_marvin_identity_policy")
         if stop_after_action is not None and not callable(stop_after_action):
             return dict(base, reason="find_marvin_stop_callback_unavailable")
 
@@ -2624,24 +2630,31 @@ class BehaviorManager:
             preview = evidence.get("preview_result")
             lock_result = evidence.get("target_lock_result")
             lock_snapshot = evidence.get("target_lock_snapshot")
-            try:
-                pursuit = evaluate_marvin_pursuit_state(
-                    preview,
-                    lock_result,
-                    lock_snapshot,
-                    selected_identity_id=evidence.get("selected_identity_id"),
-                    identity_evidence=evidence.get("identity_evidence"),
-                    bridge_result=evidence.get("bridge_result"),
-                    now=now,
-                )
-            except Exception as exc:
-                return dict(
-                    base,
-                    history=list(base["history"]),
-                    reason="find_marvin_pursuit_evaluation_exception",
-                    error=str(exc),
-                    error_type=type(exc).__name__,
-                )
+            if require_fresh_gemini and not self._marvin_v2_preview_is_verified(preview):
+                pursuit = {
+                    "state": "SEARCHING",
+                    "pursuit_authorized": False,
+                    "reason": "find_marvin_v2_fresh_identity_required",
+                }
+            else:
+                try:
+                    pursuit = evaluate_marvin_pursuit_state(
+                        preview,
+                        lock_result,
+                        lock_snapshot,
+                        selected_identity_id=evidence.get("selected_identity_id"),
+                        identity_evidence=evidence.get("identity_evidence"),
+                        bridge_result=evidence.get("bridge_result"),
+                        now=now,
+                    )
+                except Exception as exc:
+                    return dict(
+                        base,
+                        history=list(base["history"]),
+                        reason="find_marvin_pursuit_evaluation_exception",
+                        error=str(exc),
+                        error_type=type(exc).__name__,
+                    )
             if not isinstance(pursuit, dict):
                 pursuit = {
                     "state": "INSUFFICIENT_EVIDENCE",
@@ -3342,6 +3355,63 @@ class BehaviorManager:
         } and not authorized:
             return "find_marvin_pursuit_not_authorized"
         return "paused_for_search"
+
+    @staticmethod
+    def _marvin_v2_preview_is_verified(preview):
+        """Fail closed unless fresh Gemini identity and current OpenCV evidence coexist."""
+        if not isinstance(preview, dict):
+            return False
+        identity_stamp = _valid_source_frame_stamp(
+            preview.get("identity_source_frame_stamp_ns")
+        )
+        tracker = preview.get("opencv_tracker")
+        if not isinstance(tracker, dict):
+            return False
+        tracker_stamp = _valid_source_frame_stamp(
+            tracker.get("source_frame_stamp_ns")
+        )
+        quality = tracker.get("quality")
+        threshold = tracker.get("threshold")
+        bbox = tracker.get("bbox")
+        width = tracker.get("image_width")
+        height = tracker.get("image_height")
+        try:
+            validated_bbox = MarvinLocalTracker._validate_bbox(
+                bbox, width, height,
+            )
+        except (TypeError, ValueError):
+            return False
+        preview_bbox = preview.get("bbox")
+        tracker_bbox_matches = bool(
+            isinstance(preview_bbox, dict)
+            and all(
+                isinstance(preview_bbox.get(key), (int, float))
+                and not isinstance(preview_bbox.get(key), bool)
+                and math.isfinite(preview_bbox[key])
+                and float(preview_bbox[key]) == float(bbox[key])
+                for key in ("x1", "y1", "x2", "y2")
+            )
+            and preview.get("image_width") == width
+            and preview.get("image_height") == height
+        )
+        return bool(
+            preview.get("identity_confirmed") is True
+            and preview.get("identity_source") == "gemini_marvin_candidate_selection"
+            and identity_stamp is not None
+            and tracker.get("active") is True
+            and tracker.get("matched") is True
+            and isinstance(quality, (int, float))
+            and not isinstance(quality, bool)
+            and math.isfinite(quality)
+            and isinstance(threshold, (int, float))
+            and not isinstance(threshold, bool)
+            and math.isfinite(threshold)
+            and quality >= threshold
+            and tracker_stamp is not None
+            and tracker_stamp > identity_stamp
+            and validated_bbox is not None
+            and tracker_bbox_matches
+        )
 
     def execute_marvin_pursuit_step(
         self,
@@ -5147,7 +5217,10 @@ class BehaviorManager:
             self._publish_tracking_state(outcome)
         return outcome
 
-    def preview_find_object(self, target_name, *, minimum_source_frame_stamp_ns=None):
+    def preview_find_object(
+        self, target_name, *, minimum_source_frame_stamp_ns=None,
+        require_fresh_gemini=False,
+    ):
         """Preview FIND_OBJECT perception without promotion or motion."""
         normalized_target = str(target_name or "").strip().lower()
         base = {
@@ -5164,6 +5237,8 @@ class BehaviorManager:
         if normalized_target == self.MARVIN_SEMANTIC_TARGET:
             base["source_frame_stamp_ns"] = None
             base["opencv_tracker"] = self._empty_opencv_tracker_diagnostic()
+        if not isinstance(require_fresh_gemini, bool):
+            return dict(base, reason="find_marvin_v2_identity_policy_invalid")
         if not normalized_target:
             return dict(
                 base,
@@ -5174,8 +5249,13 @@ class BehaviorManager:
         # and the confirmed local tracker for the published preview geometry.
         if normalized_target == self.MARVIN_SEMANTIC_TARGET:
             try:
+                observation_options = {
+                    "minimum_source_frame_stamp_ns": minimum_source_frame_stamp_ns,
+                }
+                if require_fresh_gemini:
+                    observation_options["require_fresh_gemini"] = True
                 observation = self._preview_marvin_yolo_identity_observation(
-                    minimum_source_frame_stamp_ns=minimum_source_frame_stamp_ns,
+                    **observation_options,
                 )
             except Exception as exc:
                 negative_preview = dict(
@@ -5232,7 +5312,8 @@ class BehaviorManager:
                 "tracker_horizontal_padding_fraction",
                 "tracker_vertical_padding_fraction", "confirmation_diagnostics",
                 "track_id", "tracker_source", "marvin_continuity",
-                "opencv_tracker",
+                "opencv_tracker", "identity_source_frame_stamp_ns",
+                "marvin_tracking_episode",
             ):
                 if key in observation:
                     result[key] = observation[key]
@@ -5741,10 +5822,12 @@ class BehaviorManager:
 
     def _preview_marvin_yolo_identity_observation(
         self, *, minimum_source_frame_stamp_ns=None,
+        require_fresh_gemini=False,
     ):
         """Acquire Marvin perception for read-only Preview."""
         return self._acquire_marvin_proposal_tracker_observation(
             minimum_source_frame_stamp_ns=minimum_source_frame_stamp_ns,
+            require_fresh_gemini=require_fresh_gemini,
         )
 
     def _acquire_marvin_proposal_tracker_observation(
@@ -5754,6 +5837,7 @@ class BehaviorManager:
         episode=None,
         before_tracker_initialization=None,
         minimum_source_frame_stamp_ns=None,
+        require_fresh_gemini=False,
     ):
         """Acquire Marvin using proposals, identity selection, and tracking.
 
@@ -5805,8 +5889,9 @@ class BehaviorManager:
                 max(source_stamps) if source_stamps else None
             )
 
-        continuity_candidate = self._marvin_preview_continuity_candidate(
-            candidates,
+        continuity_candidate = (
+            None if require_fresh_gemini
+            else self._marvin_preview_continuity_candidate(candidates)
         )
         if continuity_candidate is not None:
             try:
@@ -5853,6 +5938,25 @@ class BehaviorManager:
                 ),
                 "reason": "marvin_identity_not_confirmed",
             }
+        identity_source = identity.get(
+            "source", "gemini_marvin_candidate_selection",
+        )
+        identity_source_stamp = _valid_source_frame_stamp(
+            getattr(frame, "source_frame_stamp_ns", None)
+        )
+        if require_fresh_gemini and (
+            identity_source != "gemini_marvin_candidate_selection"
+            or identity_source_stamp is None
+        ):
+            return {
+                "found": False,
+                "source_frame_stamp_ns": diagnostics.get(
+                    "latest_source_frame_stamp_ns"
+                ),
+                "identity_source": identity_source,
+                "identity_source_frame_stamp_ns": identity_source_stamp,
+                "reason": "find_marvin_v2_fresh_identity_frame_unavailable",
+            }
         selected_index = identity.get("candidate_index")
         if type(selected_index) is not int or not 0 <= selected_index < len(candidates):
             raise ValueError("marvin_candidate_selection_index_invalid")
@@ -5860,15 +5964,16 @@ class BehaviorManager:
         result = self._acquire_marvin_tracker_observation_from_candidate(
             yolo_candidate,
             diagnostics,
-            identity_source=identity.get(
-                "source", "gemini_marvin_candidate_selection"
-            ),
+            identity_source=identity_source,
+            identity_source_frame_stamp_ns=identity_source_stamp,
+            require_fresh_gemini=require_fresh_gemini,
             execution_guard=execution_guard,
             episode=episode,
             before_tracker_initialization=before_tracker_initialization,
             frame=frame,
         )
-        self._set_marvin_preview_continuity(result)
+        if not require_fresh_gemini:
+            self._set_marvin_preview_continuity(result)
         return result
 
     @staticmethod
@@ -5975,6 +6080,8 @@ class BehaviorManager:
         episode=None,
         before_tracker_initialization=None,
         frame=None,
+        identity_source_frame_stamp_ns=None,
+        require_fresh_gemini=False,
     ):
         """Confirm fresh local-tracker geometry for one selected proposal."""
         semantic_vision = self.semantic_vision
@@ -6055,7 +6162,7 @@ class BehaviorManager:
         )
         if marvin_continuity is not None:
             tracker_metadata["marvin_continuity"] = marvin_continuity
-        return dict(
+        result = dict(
             confirmed,
             label="marvin",
             target="marvin",
@@ -6073,8 +6180,14 @@ class BehaviorManager:
             motion_authorized_marvin_candidate=(
                 self._marvin_motion_authorized_candidate(
                     yolo_candidate, confirmed,
+                    require_fresh_gemini=require_fresh_gemini,
+                    identity_source=identity_source,
+                    identity_source_frame_stamp_ns=(
+                        identity_source_frame_stamp_ns
+                    ),
                 )
             ),
+            identity_source_frame_stamp_ns=identity_source_frame_stamp_ns,
             yolo_seed_bbox=yolo_bbox,
             tracker_seed_bbox=tracker_seed_bbox,
             tracker_seed_source="bounded_yolo_proposal_expansion",
@@ -6088,14 +6201,74 @@ class BehaviorManager:
             opencv_tracker=confirmed.get("opencv_tracker"),
             **tracker_metadata,
         )
+        if require_fresh_gemini:
+            tracker = result.get("opencv_tracker")
+            tracker = tracker if isinstance(tracker, dict) else {}
+            result["marvin_tracking_episode"] = {
+                "episode_id": (
+                    "marvin-v2-" + str(identity_source_frame_stamp_ns)
+                ),
+                "identity_confirmed_at": getattr(frame, "received_at", None),
+                "identity_source": identity_source,
+                "identity_source_frame_stamp_ns": (
+                    identity_source_frame_stamp_ns
+                ),
+                "tracker_initialized": True,
+                "tracker_source_frame_stamp_ns": tracker.get(
+                    "source_frame_stamp_ns"
+                ),
+                "tracker_quality": tracker.get("quality"),
+                "tracker_bbox": tracker.get("bbox"),
+                "last_verified_at": result.get("source_timestamp"),
+                "last_verified_source_frame_stamp_ns": tracker.get(
+                    "source_frame_stamp_ns"
+                ),
+                "state": "TRACKING",
+            }
+        return result
 
-    def _marvin_motion_authorized_candidate(self, candidate, confirmed):
+    def _marvin_motion_authorized_candidate(
+        self, candidate, confirmed, *, require_fresh_gemini=False,
+        identity_source=None, identity_source_frame_stamp_ns=None,
+    ):
         """Return Marvin visual-session motion compatibility, fail-closed.
 
         Semantic selection and local tracking remain visible through the
         non-authoritative Preview. Directing Marvin visual-session motion
         additionally requires the documented detector alias.
         """
+        if require_fresh_gemini:
+            tracker = (
+                confirmed.get("opencv_tracker")
+                if isinstance(confirmed, dict) else None
+            )
+            if not isinstance(tracker, dict):
+                return False
+            quality = tracker.get("quality")
+            threshold = tracker.get("threshold")
+            return bool(
+                identity_source == "gemini_marvin_candidate_selection"
+                and _valid_source_frame_stamp(
+                    identity_source_frame_stamp_ns
+                ) is not None
+                and tracker.get("active") is True
+                and tracker.get("matched") is True
+                and isinstance(quality, (int, float))
+                and not isinstance(quality, bool)
+                and math.isfinite(quality)
+                and isinstance(threshold, (int, float))
+                and not isinstance(threshold, bool)
+                and math.isfinite(threshold)
+                and quality >= threshold
+                and _valid_source_frame_stamp(
+                    tracker.get("source_frame_stamp_ns")
+                ) is not None
+                and tracker.get("source_frame_stamp_ns")
+                > identity_source_frame_stamp_ns
+                and isinstance(tracker.get("bbox"), dict)
+                and self._target_bbox(confirmed) is not None
+                and self._target_is_fresh_and_acquired(confirmed)
+            )
         alias = str(self.MARVIN_DETECTOR_ALIAS or "").strip().casefold()
         label = str(
             candidate.get("proposal_label", candidate.get("label", ""))

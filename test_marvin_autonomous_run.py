@@ -26,7 +26,10 @@ class Behavior:
         self.execute_local_obstacle_avoidance_step = Mock(side_effect=AssertionError("avoidance is controller-owned"))
         self.calls = []
 
-    def execute_find_marvin_controller(self, provider, *, max_actions, dry_run, stop_after_action):
+    def execute_find_marvin_controller(
+        self, provider, *, max_actions, dry_run, stop_after_action,
+        require_fresh_gemini=False,
+    ):
         self.calls.append((provider, max_actions, dry_run, stop_after_action))
         history = []
         for _ in range(max_actions):

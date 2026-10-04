@@ -250,8 +250,11 @@ def proposal_frame(timestamp, *detections):
 
 
 class PreviewTracker:
+    MIN_MATCH_QUALITY = 0.80
+
     def __init__(self, _frame, seed_bbox, boxes=None):
         self.seed_bbox = dict(seed_bbox)
+        self.last_quality = 0.95
         self.boxes = list(boxes or [
             {"x1": 270, "y1": 110, "x2": 370, "y2": 330},
             {"x1": 275, "y1": 112, "x2": 375, "y2": 332},
@@ -655,6 +658,164 @@ def test_marvin_filters_person_before_selecting_non_person_candidate():
     assert result["proposal_label"] == "teddy bear"
     assert result["identity_confirmed"] is True
     assert result["motion_authorized_marvin_candidate"] is True
+
+
+def test_find_marvin_v2_requires_fresh_gemini_and_allows_generic_proposal_label():
+    vision = CandidateVision([
+        proposal_frame(
+            f"v2-motorcycle-{index}",
+            ("motorcycle", 0.04, 390 + index, 100, 490 + index, 300),
+        )
+        for index in range(1, 4)
+    ])
+    semantic = MarvinSemanticVision(marvin_result(candidate_index=0))
+    original_fetch = semantic.fetch_frame
+    fetch_count = 0
+
+    def fetch_stamped_frame():
+        nonlocal fetch_count
+        frame = original_fetch()
+        fetch_count += 1
+        frame.source_frame_stamp_ns = 1000 + fetch_count
+        return frame
+
+    semantic.fetch_frame = fetch_stamped_frame
+    manager = BehaviorManager(
+        robot_client=ReadOnlyRobot(), vision_adapter=vision,
+        semantic_vision=semantic,
+    )
+    manager.TARGET_CONFIRMATION_POLL_SECONDS = 0
+    use_preview_tracker(manager)
+
+    result = manager.preview_find_object(
+        "marvin", require_fresh_gemini=True,
+    )
+
+    assert result["identity_source"] == "gemini_marvin_candidate_selection"
+    assert result["identity_source_frame_stamp_ns"] == 1001
+    assert result["proposal_label"] == "motorcycle"
+    assert result["identity_confirmed"] is True
+    assert result["motion_authorized_marvin_candidate"] is True
+    assert result["opencv_tracker"]["matched"] is True
+    assert result["opencv_tracker"]["source_frame_stamp_ns"] > result[
+        "identity_source_frame_stamp_ns"
+    ]
+    assert result["marvin_tracking_episode"]["state"] == "TRACKING"
+    assert result["marvin_tracking_episode"]["identity_source_frame_stamp_ns"] == result[
+        "identity_source_frame_stamp_ns"
+    ]
+    assert manager._marvin_preview_continuity is None
+
+
+def test_find_marvin_v2_does_not_use_session_continuity():
+    vision = marvin_yolo_candidates_with_continuity(16, 16)
+    semantic = MarvinSemanticVision(marvin_result())
+    original_fetch = semantic.fetch_frame
+    fetch_count = 0
+
+    def fetch_stamped_frame():
+        nonlocal fetch_count
+        frame = original_fetch()
+        fetch_count += 1
+        frame.source_frame_stamp_ns = 2000 + fetch_count
+        return frame
+
+    semantic.fetch_frame = fetch_stamped_frame
+    manager = BehaviorManager(
+        robot_client=ReadOnlyRobot(), vision_adapter=vision,
+        semantic_vision=semantic,
+    )
+    manager.TARGET_CONFIRMATION_POLL_SECONDS = 0
+    use_preview_tracker(manager)
+
+    result = manager.preview_find_object(
+        "marvin", require_fresh_gemini=True,
+    )
+
+    assert result["identity_source"] == "gemini_marvin_candidate_selection"
+    assert semantic.calls.count("select_marvin_candidate") == 1
+    assert result["motion_authorized_marvin_candidate"] is True
+
+
+def test_find_marvin_v2_gemini_rejection_cannot_reuse_old_continuity():
+    vision = marvin_yolo_candidates_with_continuity(16, 16)
+    semantic = MarvinSemanticVision(marvin_result(found=False))
+    manager = BehaviorManager(
+        robot_client=ReadOnlyRobot(), vision_adapter=vision,
+        semantic_vision=semantic,
+    )
+    manager.TARGET_CONFIRMATION_POLL_SECONDS = 0
+    manager._set_marvin_preview_continuity({
+        "marvin_continuity": {
+            "tracker_id": 16,
+            "tracker_source": "marvin_continuity_botsort",
+            "tracker_generation": CONTINUITY_GENERATION,
+        },
+    })
+
+    result = manager.preview_find_object(
+        "marvin", require_fresh_gemini=True,
+    )
+
+    assert result["ok"] is False
+    assert result.get("identity_confirmed") is not True
+    assert result["motion_authorized_marvin_candidate"] is False
+    assert result["reason"] == "marvin_identity_not_confirmed"
+    assert semantic.calls.count("select_marvin_candidate") == 1
+
+
+@pytest.mark.parametrize("change", [
+    {"identity_source": "marvin_session_continuity"},
+    {"identity_source_frame_stamp_ns": None},
+    {"opencv_tracker": {"active": True, "matched": False,
+                        "quality": 0.79, "threshold": 0.8,
+                        "bbox": {"x1": 1, "y1": 1, "x2": 5, "y2": 5},
+                        "image_width": 640, "image_height": 480,
+                        "source_frame_stamp_ns": 60}},
+    {"opencv_tracker": {"active": True, "matched": True,
+                        "quality": 0.999, "threshold": 0.8,
+                        "bbox": {"x1": 1, "y1": 1, "x2": 5, "y2": 5},
+                        "image_width": 640, "image_height": 480,
+                            "source_frame_stamp_ns": 40}},
+])
+def test_find_marvin_v2_verified_preview_gate_rejects_incomplete_identity(change):
+    preview = {
+        "identity_confirmed": True,
+        "identity_source": "gemini_marvin_candidate_selection",
+        "identity_source_frame_stamp_ns": 50,
+        "bbox": {"x1": 1, "y1": 1, "x2": 5, "y2": 5},
+        "image_width": 640,
+        "image_height": 480,
+        "opencv_tracker": {
+            "active": True, "matched": True, "quality": 0.999,
+            "threshold": 0.8,
+            "bbox": {"x1": 1, "y1": 1, "x2": 5, "y2": 5},
+            "image_width": 640, "image_height": 480,
+            "source_frame_stamp_ns": 60,
+        },
+    }
+    preview.update(change)
+    assert BehaviorManager._marvin_v2_preview_is_verified(preview) is False
+
+
+def test_find_marvin_v2_verified_preview_gate_accepts_generic_label_with_fresh_frames():
+    preview = {
+        "identity_confirmed": True,
+        "identity_source": "gemini_marvin_candidate_selection",
+        "identity_source_frame_stamp_ns": 50,
+        "proposal_label": "motorcycle",
+        "bbox": {"x1": 1, "y1": 1, "x2": 5, "y2": 5},
+        "image_width": 640,
+        "image_height": 480,
+        "opencv_tracker": {
+            "active": True, "matched": True, "quality": 0.999,
+            "threshold": 0.8,
+            "bbox": {"x1": 1, "y1": 1, "x2": 5, "y2": 5},
+            "image_width": 640, "image_height": 480,
+            "source_frame_stamp_ns": 60,
+        },
+    }
+    assert BehaviorManager._marvin_v2_preview_is_verified(preview) is True
 
 
 @pytest.mark.parametrize("label", ["chair", "suitcase"])

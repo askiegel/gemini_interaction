@@ -240,7 +240,7 @@ class CognitiveRuntime:
                 == self._control_generation
             )
 
-    def build_find_marvin_controller_state(self):
+    def build_find_marvin_controller_state(self, *, require_fresh_gemini=False):
         """Return one fresh Marvin controller evidence bundle without action."""
         builder = getattr(
             self.behavior_manager,
@@ -249,6 +249,8 @@ class CognitiveRuntime:
         )
         if not callable(builder):
             raise RuntimeError("find_marvin_state_provider_unavailable")
+        if require_fresh_gemini:
+            return builder(require_fresh_gemini=True)
         return builder()
 
     def dry_run_find_marvin_controller(self, *, execute=False):
@@ -324,10 +326,12 @@ class CognitiveRuntime:
         return self._execute_bounded_find_marvin_episode(
             max_actions=max_actions,
             consume_one_shot=True,
+            require_fresh_gemini=True,
         )
 
     def _execute_bounded_find_marvin_episode(
         self, *, max_actions, consume_one_shot,
+        require_fresh_gemini=False,
     ):
         """Execute exactly one existing bounded controller episode.
 
@@ -373,12 +377,18 @@ class CognitiveRuntime:
                         return dict(base, reason="marvin_autonomous_run_already_consumed")
                     self._marvin_autonomous_run_consumed = True
             base["execution_authorized"] = True
+            state_provider = self.build_find_marvin_controller_state
+            if require_fresh_gemini:
+                state_provider = lambda: self.build_find_marvin_controller_state(
+                    require_fresh_gemini=True,
+                )
             try:
                 result = controller(
-                    self.build_find_marvin_controller_state,
+                    state_provider,
                     max_actions=max_actions,
                     dry_run=False,
                     stop_after_action=stop,
+                    require_fresh_gemini=require_fresh_gemini,
                 )
             except Exception as exc:
                 return dict(
@@ -552,6 +562,7 @@ class CognitiveRuntime:
             episode = self._execute_bounded_find_marvin_episode(
                 max_actions=self.FIND_MARVIN_AUTONOMOUS_MAX_ACTIONS,
                 consume_one_shot=False,
+                require_fresh_gemini=True,
             )
             if not isinstance(episode, dict):
                 episode = {"ok": False, "reason": "marvin_episode_result_malformed"}
