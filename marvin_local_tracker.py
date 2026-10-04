@@ -28,6 +28,49 @@ class MarvinLocalTracker:
             raise ValueError("marvin_local_tracker_seed_invalid")
         self.last_quality = None
         self.last_search_roi = None
+        self.last_bbox = None
+        self.last_source_frame_stamp_ns = None
+        self.last_image_width = self.width
+        self.last_image_height = self.height
+        self.last_reason = "awaiting_match"
+
+    @staticmethod
+    def horizontal_error(center_x, image_width):
+        """Return the canonical signed pixel offset from image center."""
+        return float(center_x) - float(image_width) / 2.0
+
+    def preview_diagnostics(self):
+        """Return bounded diagnostics for the most recent update only."""
+        bbox = dict(self.last_bbox) if self.last_bbox is not None else None
+        quality = (
+            self.last_quality
+            if self.last_quality is not None and math.isfinite(self.last_quality)
+            else None
+        )
+        center_x = (
+            (bbox["x1"] + bbox["x2"]) / 2.0 if bbox is not None else None
+        )
+        center_y = (
+            (bbox["y1"] + bbox["y2"]) / 2.0 if bbox is not None else None
+        )
+        return {
+            "active": True,
+            "matched": self.last_reason == "matched",
+            "quality": quality,
+            "threshold": self.MIN_MATCH_QUALITY,
+            "bbox": bbox,
+            "center_x": center_x,
+            "center_y": center_y,
+            "horizontal_error": (
+                self.horizontal_error(center_x, self.last_image_width)
+                if center_x is not None and self.last_image_width is not None
+                else None
+            ),
+            "image_width": self.last_image_width,
+            "image_height": self.last_image_height,
+            "source_frame_stamp_ns": self.last_source_frame_stamp_ns,
+            "reason": self.last_reason,
+        }
 
     @staticmethod
     def _valid_dimension(value):
@@ -79,6 +122,12 @@ class MarvinLocalTracker:
 
     def update(self, frame):
         """Return a locally matched bbox, or ``None`` when tracking is lost."""
+        self.last_bbox = None
+        self.last_source_frame_stamp_ns = self._valid_source_stamp(
+            getattr(frame, "source_frame_stamp_ns", None)
+        )
+        self.last_image_width = getattr(frame, "width", None)
+        self.last_image_height = getattr(frame, "height", None)
         try:
             image = self._decode(frame)
             left, top, right, bottom = self._search_roi()
@@ -89,10 +138,12 @@ class MarvinLocalTracker:
             _minimum, quality, _min_location, location = self._cv2.minMaxLoc(result)
         except (ValueError, self._cv2.error):
             self.last_quality = None
+            self.last_reason = "frame_unavailable"
             return None
         self.last_quality = float(quality)
         self.last_search_roi = (left, top, right, bottom)
         if not math.isfinite(self.last_quality) or self.last_quality < self.MIN_MATCH_QUALITY:
+            self.last_reason = "below_threshold"
             return None
         template_height, template_width = self.template.shape
         x1 = left + int(location[0])
@@ -104,5 +155,16 @@ class MarvinLocalTracker:
                 self.width, self.height,
             )
         except ValueError:
+            self.last_reason = "invalid_bbox"
             return None
+        self.last_bbox = dict(
+            x1=x1, y1=y1, x2=x1 + template_width, y2=y1 + template_height
+        )
+        self.last_reason = "matched"
         return dict(x1=x1, y1=y1, x2=x1 + template_width, y2=y1 + template_height)
+
+    @staticmethod
+    def _valid_source_stamp(value):
+        if type(value) is int and value >= 0:
+            return value
+        return None

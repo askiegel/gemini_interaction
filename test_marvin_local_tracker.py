@@ -13,7 +13,10 @@ HEIGHT = 480
 SEED_BBOX = {"x1": 184, "y1": 84, "x2": 420, "y2": 403}
 
 
-def _frame(*, left=184, top=84, width=WIDTH, height=HEIGHT, include_target=True):
+def _frame(
+    *, left=184, top=84, width=WIDTH, height=HEIGHT,
+    include_target=True, source_frame_stamp_ns=None,
+):
     image = np.full((height, width), 18, dtype=np.uint8)
     target_width = SEED_BBOX["x2"] - SEED_BBOX["x1"]
     target_height = SEED_BBOX["y2"] - SEED_BBOX["y1"]
@@ -25,11 +28,14 @@ def _frame(*, left=184, top=84, width=WIDTH, height=HEIGHT, include_target=True)
         cv2.line(image, (left + 9, top + 12), (left + 211, top + 289), 5, 180)
     ok, encoded = cv2.imencode(".jpg", image, [cv2.IMWRITE_JPEG_QUALITY, 95])
     assert ok
-    return SimpleNamespace(data=encoded.tobytes(), width=width, height=height)
+    return SimpleNamespace(
+        data=encoded.tobytes(), width=width, height=height,
+        source_frame_stamp_ns=source_frame_stamp_ns,
+    )
 
 
 def test_valid_seed_and_identical_frame_are_tracked_deterministically():
-    frame = _frame()
+    frame = _frame(source_frame_stamp_ns=123456789)
     first = MarvinLocalTracker(frame, SEED_BBOX)
     second = MarvinLocalTracker(frame, SEED_BBOX)
 
@@ -37,6 +43,38 @@ def test_valid_seed_and_identical_frame_are_tracked_deterministically():
     assert second.update(frame) == SEED_BBOX
     assert first.last_quality == pytest.approx(1.0)
     assert first.last_search_roi == second.last_search_roi
+    assert first.preview_diagnostics() == {
+        "active": True,
+        "matched": True,
+        "quality": pytest.approx(1.0),
+        "threshold": 0.80,
+        "bbox": SEED_BBOX,
+        "center_x": 302.0,
+        "center_y": 243.5,
+        "horizontal_error": -18.0,
+        "image_width": WIDTH,
+        "image_height": HEIGHT,
+        "source_frame_stamp_ns": 123456789,
+        "reason": "matched",
+    }
+
+
+def test_tracker_diagnostics_keep_low_quality_and_exact_frame_stamp():
+    tracker = MarvinLocalTracker(_frame(), SEED_BBOX)
+
+    assert tracker.update(
+        _frame(include_target=False, source_frame_stamp_ns=987654321)
+    ) is None
+    diagnostic = tracker.preview_diagnostics()
+
+    assert diagnostic["active"] is True
+    assert diagnostic["matched"] is False
+    assert diagnostic["quality"] == tracker.last_quality
+    assert diagnostic["quality"] < diagnostic["threshold"] == 0.80
+    assert diagnostic["bbox"] is None
+    assert diagnostic["source_frame_stamp_ns"] == 987654321
+    assert diagnostic["reason"] == "below_threshold"
+    assert MarvinLocalTracker.horizontal_error(19, 640) == -301
 
 
 @pytest.mark.parametrize("offset", [(15, 0), (0, 18)])

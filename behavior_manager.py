@@ -511,6 +511,14 @@ class _MarvinProposalGeometryInvalid(ValueError):
         self.source_frame_stamp_ns = source_frame_stamp_ns
 
 
+class _MarvinLocalTrackerConfirmationRequired(ValueError):
+    """Carry the failed preview tracker's bounded diagnostics to its API."""
+
+    def __init__(self, opencv_tracker):
+        super().__init__("marvin_local_tracker_confirmation_required")
+        self.opencv_tracker = dict(opencv_tracker)
+
+
 class BehaviorManager:
     MARVIN_SEMANTIC_TARGET = "marvin"
     # A seed spanning almost the whole image is a semantic region, not a
@@ -1129,11 +1137,16 @@ class BehaviorManager:
                 if bbox is None:
                     return None
                 bbox = MarvinLocalTracker._validate_bbox(bbox, frame.width, frame.height)
+                tracker_bbox = dict(zip(("x1", "y1", "x2", "y2"), bbox))
+                opencv_tracker = self._opencv_tracker_diagnostic(
+                    tracker, frame, tracker_bbox,
+                )
                 observation = {
                     "found": True, "stale": False, "target": "marvin", "label": "marvin",
                     "source": "marvin_local_tracker", "source_timestamp": timestamp,
-                    "bbox": dict(zip(("x1", "y1", "x2", "y2"), bbox)),
+                    "bbox": tracker_bbox,
                     "image_width": width, "image_height": height,
+                    "opencv_tracker": opencv_tracker,
                 }
                 observation["cx"] = (bbox[0] + bbox[2]) / 2.0
                 observation["cy"] = (bbox[1] + bbox[3]) / 2.0
@@ -5150,6 +5163,7 @@ class BehaviorManager:
         }
         if normalized_target == self.MARVIN_SEMANTIC_TARGET:
             base["source_frame_stamp_ns"] = None
+            base["opencv_tracker"] = self._empty_opencv_tracker_diagnostic()
         if not normalized_target:
             return dict(
                 base,
@@ -5170,12 +5184,21 @@ class BehaviorManager:
                         "Marvin tracker preview unavailable: "
                         + (
                             "ValueError"
-                            if isinstance(exc, _MarvinProposalGeometryInvalid)
+                            if isinstance(exc, ValueError)
                             else type(exc).__name__
                         )
                         + (": " + str(exc) if str(exc) else "")
                     ),
                 )
+                tracker_diagnostics = getattr(exc, "opencv_tracker", None)
+                if isinstance(tracker_diagnostics, dict):
+                    negative_preview["opencv_tracker"] = tracker_diagnostics
+                else:
+                    negative_preview["opencv_tracker"] = (
+                        self._empty_opencv_tracker_diagnostic(
+                            reason=self._opencv_tracker_failure_reason(exc)
+                        )
+                    )
                 if isinstance(exc, _MarvinProposalGeometryInvalid):
                     negative_preview["source_frame_stamp_ns"] = (
                         _valid_source_frame_stamp(exc.source_frame_stamp_ns)
@@ -5185,12 +5208,15 @@ class BehaviorManager:
             if observation is None:
                 return dict(base, reason="Marvin was not found in the current camera frame.")
             if isinstance(observation, dict) and observation.get("found") is False:
-                return dict(
+                negative_preview = dict(
                     base,
                     source_frame_stamp_ns=observation.get("source_frame_stamp_ns"),
                     motion_authorized_marvin_candidate=False,
                     reason=observation.get("reason", "Marvin was not found in the current camera frame."),
                 )
+                if isinstance(observation.get("opencv_tracker"), dict):
+                    negative_preview["opencv_tracker"] = observation["opencv_tracker"]
+                return negative_preview
             result = self._build_find_object_preview(
                 normalized_target,
                 observation,
@@ -5206,6 +5232,7 @@ class BehaviorManager:
                 "tracker_horizontal_padding_fraction",
                 "tracker_vertical_padding_fraction", "confirmation_diagnostics",
                 "track_id", "tracker_source", "marvin_continuity",
+                "opencv_tracker",
             ):
                 if key in observation:
                     result[key] = observation[key]
@@ -5844,6 +5871,100 @@ class BehaviorManager:
         self._set_marvin_preview_continuity(result)
         return result
 
+    @staticmethod
+    def _empty_opencv_tracker_diagnostic(*, reason="tracker_not_initialized"):
+        return {
+            "active": False,
+            "matched": False,
+            "quality": None,
+            "threshold": MarvinLocalTracker.MIN_MATCH_QUALITY,
+            "bbox": None,
+            "center_x": None,
+            "center_y": None,
+            "horizontal_error": None,
+            "image_width": None,
+            "image_height": None,
+            "source_frame_stamp_ns": None,
+            "reason": reason,
+        }
+
+    @staticmethod
+    def _opencv_tracker_failure_reason(exc):
+        message = str(exc).casefold()
+        if "bbox" in message:
+            return "invalid_bbox"
+        if "seed_invalid" in message or "dependencies_unavailable" in message:
+            return "template_unavailable"
+        if "frame" in message or "decode" in message:
+            return "frame_unavailable"
+        return "tracker_not_initialized"
+
+    @staticmethod
+    def _opencv_tracker_diagnostic(tracker, frame, bbox=None):
+        diagnostic_method = getattr(tracker, "preview_diagnostics", None)
+        if callable(diagnostic_method):
+            diagnostic = diagnostic_method()
+        else:
+            diagnostic = {
+                "active": True,
+                "matched": bbox is not None,
+                "quality": getattr(tracker, "last_quality", None),
+                "threshold": getattr(
+                    tracker, "MIN_MATCH_QUALITY",
+                    MarvinLocalTracker.MIN_MATCH_QUALITY,
+                ),
+                "bbox": dict(bbox) if isinstance(bbox, dict) else None,
+                "center_x": None,
+                "center_y": None,
+                "horizontal_error": None,
+                "image_width": getattr(
+                    frame, "width", getattr(tracker, "last_image_width", None)
+                ),
+                "image_height": getattr(
+                    frame, "height", getattr(tracker, "last_image_height", None)
+                ),
+                "source_frame_stamp_ns": _valid_source_frame_stamp(
+                    getattr(
+                        frame, "source_frame_stamp_ns",
+                        getattr(tracker, "last_source_frame_stamp_ns", None),
+                    )
+                ),
+                "reason": "matched" if bbox is not None else "frame_unavailable",
+            }
+        diagnostic = dict(diagnostic) if isinstance(diagnostic, dict) else {}
+        diagnostic["active"] = True
+        diagnostic["matched"] = bbox is not None
+        diagnostic["bbox"] = dict(bbox) if isinstance(bbox, dict) else None
+        diagnostic["image_width"] = getattr(
+            frame, "width", getattr(tracker, "last_image_width", None)
+        )
+        diagnostic["image_height"] = getattr(
+            frame, "height", getattr(tracker, "last_image_height", None)
+        )
+        diagnostic["source_frame_stamp_ns"] = _valid_source_frame_stamp(
+            getattr(
+                frame, "source_frame_stamp_ns",
+                getattr(tracker, "last_source_frame_stamp_ns", None),
+            )
+        )
+        if bbox is not None:
+            center_x = (bbox["x1"] + bbox["x2"]) / 2.0
+            center_y = (bbox["y1"] + bbox["y2"]) / 2.0
+            diagnostic["center_x"] = center_x
+            diagnostic["center_y"] = center_y
+            diagnostic["horizontal_error"] = MarvinLocalTracker.horizontal_error(
+                center_x, diagnostic["image_width"],
+            )
+            diagnostic["reason"] = "matched"
+        else:
+            diagnostic["center_x"] = None
+            diagnostic["center_y"] = None
+            diagnostic["horizontal_error"] = None
+            diagnostic["reason"] = getattr(
+                tracker, "last_reason", diagnostic.get("reason", "frame_unavailable")
+            )
+        return diagnostic
+
     def _acquire_marvin_tracker_observation_from_candidate(
         self,
         yolo_candidate,
@@ -5914,7 +6035,11 @@ class BehaviorManager:
         if execution_guard is not None:
             execution_guard()
         if confirmed is None:
-            raise ValueError("marvin_local_tracker_confirmation_required")
+            raise _MarvinLocalTrackerConfirmationRequired(
+                self._opencv_tracker_diagnostic(
+                    episode["marvin_tracker"], None,
+                )
+            )
         # Preserve only provider-supplied tracker diagnostics. They remain
         # non-authoritative metadata and never alter local tracker behavior.
         tracker_metadata = {}
@@ -5960,6 +6085,7 @@ class BehaviorManager:
                 self.MARVIN_TRACKER_VERTICAL_PADDING_FRACTION
             ),
             confirmation_diagnostics=diagnostics,
+            opencv_tracker=confirmed.get("opencv_tracker"),
             **tracker_metadata,
         )
 
@@ -6367,7 +6493,7 @@ class BehaviorManager:
             else None
         )
         horizontal_error = (
-            float(cx) - image_center_x
+            MarvinLocalTracker.horizontal_error(cx, image_width)
             if image_center_x is not None
             and isinstance(cx, (int, float))
             and not isinstance(cx, bool)

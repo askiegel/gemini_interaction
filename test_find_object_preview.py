@@ -1162,6 +1162,151 @@ def test_marvin_preview_requires_two_fresh_tracker_frames_and_uses_tracker_geome
     assert result["horizontal_error_pixels"] == 0.0
 
 
+def test_marvin_preview_exposes_exact_opencv_tracker_evidence_without_authority():
+    semantic = MarvinSemanticVision(marvin_result())
+    original_fetch = semantic.fetch_frame
+    fetch_count = 0
+
+    def fetch_stamped_frame():
+        nonlocal fetch_count
+        frame = original_fetch()
+        fetch_count += 1
+        frame.source_frame_stamp_ns = 123456780 + fetch_count
+        return frame
+
+    semantic.fetch_frame = fetch_stamped_frame
+    manager = BehaviorManager(
+        robot_client=ReadOnlyRobot(), vision_adapter=marvin_yolo_candidates(),
+        semantic_vision=semantic,
+    )
+
+    class HighQualityTracker:
+        MIN_MATCH_QUALITY = 0.80
+
+        def __init__(self, _frame, _bbox):
+            self.last_quality = 0.91
+
+        def update(self, _frame):
+            return {"x1": 9, "y1": 100, "x2": 29, "y2": 140}
+
+    manager.marvin_local_tracker_factory = HighQualityTracker
+    result = manager.preview_find_object("marvin")
+    evidence = result["opencv_tracker"]
+
+    assert result["preview"] is True
+    assert result["authoritative"] is False
+    assert result["executed"] is False
+    assert result["motion_authorized_marvin_candidate"] is False
+    assert evidence["active"] is True
+    assert evidence["matched"] is True
+    assert evidence["quality"] == 0.91
+    assert evidence["threshold"] == HighQualityTracker.MIN_MATCH_QUALITY
+    assert evidence["bbox"] == {"x1": 9, "y1": 100, "x2": 29, "y2": 140}
+    assert evidence["center_x"] == 19.0
+    assert evidence["center_y"] == 120.0
+    assert evidence["horizontal_error"] == -301.0
+    assert evidence["image_width"] == 640
+    assert evidence["image_height"] == 480
+    # The tracker frame stamp is intentionally distinct from the proposal stamp.
+    assert evidence["source_frame_stamp_ns"] == 123456783
+    assert result["source_frame_stamp_ns"] == 42_000_000_007
+    assert evidence["reason"] == "matched"
+
+
+def test_marvin_preview_exposes_below_threshold_tracker_failure_read_only():
+    semantic = MarvinSemanticVision(marvin_result())
+    original_fetch = semantic.fetch_frame
+    fetch_count = 0
+
+    def fetch_stamped_frame():
+        nonlocal fetch_count
+        frame = original_fetch()
+        fetch_count += 1
+        frame.source_frame_stamp_ns = 765432100 + fetch_count
+        return frame
+
+    semantic.fetch_frame = fetch_stamped_frame
+    manager = BehaviorManager(
+        robot_client=ReadOnlyRobot(), vision_adapter=marvin_yolo_candidates(),
+        semantic_vision=semantic,
+    )
+
+    class BelowThresholdTracker:
+        MIN_MATCH_QUALITY = 0.80
+
+        def __init__(self, _frame, _bbox):
+            self.last_quality = None
+            self.last_reason = "awaiting_match"
+            self.last_source_frame_stamp_ns = None
+            self.last_image_width = 640
+            self.last_image_height = 480
+
+        def update(self, frame):
+            self.last_quality = 0.79
+            self.last_reason = "below_threshold"
+            self.last_source_frame_stamp_ns = frame.source_frame_stamp_ns
+            return None
+
+        def preview_diagnostics(self):
+            return {
+                "active": True,
+                "matched": False,
+                "quality": self.last_quality,
+                "threshold": self.MIN_MATCH_QUALITY,
+                "bbox": None,
+                "center_x": None,
+                "center_y": None,
+                "horizontal_error": None,
+                "image_width": self.last_image_width,
+                "image_height": self.last_image_height,
+                "source_frame_stamp_ns": self.last_source_frame_stamp_ns,
+                "reason": self.last_reason,
+            }
+
+    manager.marvin_local_tracker_factory = BelowThresholdTracker
+    result = manager.preview_find_object("marvin")
+    evidence = result["opencv_tracker"]
+
+    assert result["ok"] is False
+    assert evidence["active"] is True
+    assert evidence["matched"] is False
+    assert evidence["quality"] == 0.79
+    assert evidence["threshold"] == 0.80
+    assert evidence["bbox"] is None
+    assert evidence["source_frame_stamp_ns"] == 765432102
+    assert evidence["reason"] == "below_threshold"
+    assert result.get("motion_authorized_marvin_candidate") is not True
+
+
+def test_marvin_preview_without_tracker_returns_bounded_inactive_diagnostics():
+    manager = BehaviorManager(
+        robot_client=ReadOnlyRobot(),
+        vision_adapter=no_marvin_candidates(),
+        semantic_vision=MarvinSemanticVision(marvin_result()),
+    )
+    manager.TARGET_CONFIRMATION_POLL_SECONDS = 0
+
+    result = manager.preview_find_object("marvin")
+
+    assert result["preview"] is True
+    assert result["authoritative"] is False
+    assert result["executed"] is False
+    assert result["opencv_tracker"] == {
+        "active": False,
+        "matched": False,
+        "quality": None,
+        "threshold": 0.80,
+        "bbox": None,
+        "center_x": None,
+        "center_y": None,
+        "horizontal_error": None,
+        "image_width": None,
+        "image_height": None,
+        "source_frame_stamp_ns": None,
+        "reason": "tracker_not_initialized",
+    }
+
+
 def test_marvin_tracker_seed_expansion_is_rounded_and_clamped():
     manager = BehaviorManager(
         robot_client=ReadOnlyRobot(), vision_adapter=marvin_yolo_candidates(),
@@ -1530,6 +1675,20 @@ def test_runtime_marvin_preview_preserves_tracker_provenance():
         "tracker_seed_bbox": {"x1": 285, "y1": 82, "x2": 489, "y2": 346},
         "tracker_seed_source": "bounded_yolo_proposal_expansion",
         "confirmation_diagnostics": diagnostics,
+        "opencv_tracker": {
+            "active": True,
+            "matched": True,
+            "quality": 0.91,
+            "threshold": 0.80,
+            "bbox": tracker_bbox,
+            "center_x": 387.5,
+            "center_y": 214.5,
+            "horizontal_error": 67.5,
+            "image_width": 640,
+            "image_height": 480,
+            "source_frame_stamp_ns": 123456789,
+            "reason": "matched",
+        },
     }
     status, payload = _call_runtime_preview(result)
     assert status == 200
@@ -1547,6 +1706,7 @@ def test_runtime_marvin_preview_preserves_tracker_provenance():
     assert payload["tracker_seed_bbox"] == {"x1": 285, "y1": 82, "x2": 489, "y2": 346}
     assert payload["tracker_seed_source"] == "bounded_yolo_proposal_expansion"
     assert payload["confirmation_diagnostics"] == diagnostics
+    assert payload["opencv_tracker"] == result["opencv_tracker"]
     assert payload["tracking"]["source"] == "marvin_local_tracker"
     assert payload["tracking"]["bbox"] == tracker_bbox
 

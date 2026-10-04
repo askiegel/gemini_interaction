@@ -237,6 +237,7 @@ class RuntimeAPIHandler(BaseHTTPRequestHandler):
                     "entity_id", "identity_id", "identity_status",
                     "identity_ambiguous", "identity_match_score",
                     "source_frame_stamp_ns",
+                    "opencv_tracker",
                 ):
                     if key in result:
                         payload[key] = result[key]
