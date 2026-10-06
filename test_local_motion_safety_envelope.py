@@ -81,6 +81,16 @@ def test_base_link_transform_accounts_for_lidar_offset_and_yaw():
     assert point["y_m"] == pytest.approx(LIDAR_TO_BASE_Y_M)
 
 
+def test_new_forward_speed_evaluates_five_centimeter_sweep_without_changing_envelope():
+    geometry = geometry_with_point(0.495, 0.0)
+    old_step = evaluate_geometry(geometry, linear_x=0.08)
+    new_step = evaluate_geometry(geometry, linear_x=0.10)
+    assert old_step["permitted"] is True  # Endpoint clearance 0.455 m.
+    assert new_step["permitted"] is False  # Endpoint clearance 0.445 m.
+    assert new_step["reason"] == "translation_protected_region_violated"
+    assert old_step["protected_radius_m"] == new_step["protected_radius_m"] == 0.45
+
+
 def test_scanner_range_can_still_violate_total_base_link_protected_radius():
     payload = scan()
     set_robot_bearing(payload, 0, 0.50)  # Base point is inside the 0.45 m tube.

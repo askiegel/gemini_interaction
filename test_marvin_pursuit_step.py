@@ -118,7 +118,7 @@ def test_ready_and_clear_dispatches_one_forward_then_requires_replan(monkeypatch
     assert result["ok"] is result["motion_executed"] is result["replan_required"] is True
     assert result["decision"] == "approach_forward"
     assert robot.forward_calls == 1 and avoids == []
-    assert robot.forward_requests == [(0.08, 0.50)]
+    assert robot.forward_requests == [(0.10, 0.50)]
     assert world.calls == [(SESSION, 10.0), (SESSION, 10.0)]
     assert len(pursuit_calls) == 1 and len(safety_calls) == 2
     assert robot.forward_interlock.calls == 1
@@ -156,7 +156,7 @@ def test_visual_centered_uses_existing_lidar_gated_forward_path(monkeypatch):
     )
     assert result["decision"] == "approach_forward"
     assert robot.forward_calls == 1 and len(safety_calls) == 2 and avoids == []
-    assert robot.forward_requests == [(0.08, 0.50)]
+    assert robot.forward_requests == [(0.10, 0.50)]
 
 
 def test_incompatible_visual_preview_cannot_turn_or_enter_local_progress_handoff(monkeypatch):
@@ -190,7 +190,7 @@ def test_incompatible_visual_preview_cannot_turn_or_enter_local_progress_handoff
 def test_canonical_bounded_bridge_result_is_normalized_and_replans(monkeypatch):
     bridge_result = {
         "ok": True, "action": "motion", "mode": "bounded",
-        "linear_x": 0.08, "angular_z": 0.0, "duration": 0.50,
+        "linear_x": 0.10, "angular_z": 0.0, "duration": 0.50,
         "automatic_stop": True, "returned_immediately": False,
     }
     result, robot, _world, _calls, _safety, avoids = invoke(
@@ -198,13 +198,13 @@ def test_canonical_bounded_bridge_result_is_normalized_and_replans(monkeypatch):
     )
     assert result["ok"] is result["motion_executed"] is result["replan_required"] is True
     assert result["forward_result"]["executed"] is True
-    assert robot.forward_requests == [(0.08, 0.50)] and avoids == []
+    assert robot.forward_requests == [(0.10, 0.50)] and avoids == []
 
 
 def test_partial_bridge_success_never_normalizes(monkeypatch):
     malformed = {
         "ok": True, "action": "motion", "mode": "bounded",
-        "linear_x": 0.08, "angular_z": 0.0, "duration": 0.50,
+        "linear_x": 0.10, "angular_z": 0.0, "duration": 0.50,
         "automatic_stop": True,
     }
     for bridge_result in (malformed, {"ok": False}):
@@ -213,7 +213,7 @@ def test_partial_bridge_success_never_normalizes(monkeypatch):
         )
         assert result["ok"] is result["motion_executed"] is False
         assert result["replan_required"] is False
-        assert robot.forward_requests == [(0.08, 0.50)] and avoids == []
+        assert robot.forward_requests == [(0.10, 0.50)] and avoids == []
 
 
 def test_pre_dispatch_stale_veto_never_calls_robot_and_requests_replan(monkeypatch):
@@ -236,7 +236,7 @@ def test_post_transport_stale_invalidation_is_physical_or_uncertain_replan(monke
         "bounded_forward_invalidated": True, "reason": "stale",
         "transport_result": {
             "ok": True, "action": "motion", "mode": "bounded",
-            "linear_x": 0.08, "angular_z": 0.0, "duration": 0.50,
+            "linear_x": 0.10, "angular_z": 0.0, "duration": 0.50,
             "automatic_stop": True, "returned_immediately": False,
         },
     }
@@ -247,7 +247,7 @@ def test_post_transport_stale_invalidation_is_physical_or_uncertain_replan(monke
     assert result["stale_replan_classification"] == "PHYSICAL_OR_UNCERTAIN_STALE_REPLAN"
     assert result["action_budget_consumed"] is result["motion_executed"] is True
     assert result["motion_possible"] is True
-    assert robot.forward_requests == [(0.08, 0.50)] and avoids == []
+    assert robot.forward_requests == [(0.10, 0.50)] and avoids == []
 
 
 def test_verified_no_transport_stale_result_is_nonphysical_replan(monkeypatch):
@@ -336,7 +336,7 @@ def test_fresh_evaluation_no_cached_authorization_determinism_and_no_mutation(mo
 def test_coordinator_has_no_mission_or_runtime_integration():
     source = open("behavior_manager.py", encoding="utf-8").read()
     start = source.index("    def execute_marvin_pursuit_step(")
-    end = source.index("    def execute_local_obstacle_avoidance_step(", start)
+    end = source.index("    def execute_single_marvin_approach_step(", start)
     coordinator = source[start:end]
     for forbidden in ("self.execute_local_obstacle_avoidance_loop", "self._execute_find", "self.execute_behavior", "arrived_at_marvin"):
         assert forbidden not in coordinator

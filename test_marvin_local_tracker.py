@@ -120,3 +120,23 @@ def test_unrelated_image_and_poor_match_quality_report_loss():
     assert tracker.update(_frame(include_target=False)) is None
     assert tracker.last_quality is not None
     assert tracker.last_quality < tracker.MIN_MATCH_QUALITY
+
+
+def test_four_cm_scale_change_can_legitimately_lose_fixed_scale_tracker():
+    # Approximate apparent scale from a 0.04 m approach at 0.904484 m.
+    # Synthetic texture demonstrates the failure mode; it is not a replay
+    # or diagnosis of the live frame, which was not retained.
+    frame = _frame(source_frame_stamp_ns=1)
+    tracker = MarvinLocalTracker(frame, SEED_BBOX)
+    image = cv2.imdecode(np.frombuffer(frame.data, dtype=np.uint8), cv2.IMREAD_GRAYSCALE)
+    scale = .904484 / (.904484 - .04)
+    scaled = cv2.warpAffine(image, cv2.getRotationMatrix2D((302, 243.5), 0, scale), (WIDTH, HEIGHT))
+    ok, encoded = cv2.imencode('.jpg', scaled)
+    assert ok
+    moved = SimpleNamespace(data=encoded.tobytes(), width=WIDTH, height=HEIGHT, source_frame_stamp_ns=2)
+    assert tracker.update(moved) is None
+    assert tracker.last_quality < tracker.MIN_MATCH_QUALITY == .8
+    assert tracker.last_reason == "below_threshold"
+    assert tracker.last_bbox is None
+    assert tracker.last_candidate_bbox is not None
+    assert tracker.bbox == tuple(SEED_BBOX[key] for key in ("x1", "y1", "x2", "y2"))

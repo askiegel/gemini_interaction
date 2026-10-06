@@ -173,6 +173,9 @@ class RobotBridgeClient:
                             "confirmed_forwarded": False,
                             "transport_attempted": True,
                             "bounded_forward_invalidated": True,
+                            "interlock_stop_succeeded": (
+                                isinstance(outcome, dict) and outcome.get("stop_succeeded") is True),
+                            "interlock_dispatch_outcome": outcome,
                             "transport_result": transport_result,
                             "error": "bounded_forward_invalidated",
                             "reason": (

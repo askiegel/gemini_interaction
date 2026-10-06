@@ -81,7 +81,7 @@ def test_three_centered_cycles_issue_three_forward_steps_only():
     forwards = [call for call in robot.calls if call[0] == "forward"]
     assert result["state"] == "MARVIN_GUARDED_APPROACH_COMPLETE"
     assert len(forwards) == 3
-    assert forwards == [("forward", 0.08, 0.50)] * 3
+    assert forwards == [("forward", 0.10, 0.50)] * 3
     assert turns == []
     assert result["motion_actions_attempted"] == 3
     assert result["approach_chunks_completed"] == 3

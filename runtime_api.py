@@ -22,6 +22,41 @@ DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8770
 
 
+def _precision_safe_source_frame_stamps(value):
+    """Return an API payload whose nanosecond frame stamps are JSON strings."""
+    if isinstance(value, dict):
+        return {
+            key: (
+                str(item)
+                if (
+                    key.endswith("source_frame_stamp_ns")
+                    and type(item) is int
+                    and item >= 0
+                )
+                else _precision_safe_source_frame_stamps(item)
+            )
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [_precision_safe_source_frame_stamps(item) for item in value]
+    if isinstance(value, tuple):
+        return [_precision_safe_source_frame_stamps(item) for item in value]
+    return value
+
+
+def _parse_source_frame_stamp_ns(value):
+    """Parse an exact, nonnegative decimal stamp without numeric coercion."""
+    if type(value) is int:
+        if value >= 0:
+            return value
+    elif isinstance(value, str):
+        if value and all("0" <= character <= "9" for character in value):
+            return int(value)
+    raise ValueError(
+        "source_frame_stamp_ns must be a nonnegative decimal string or JSON integer."
+    )
+
+
 class RuntimeAPIHandler(BaseHTTPRequestHandler):
     """
     HTTP interface for the persistent cognitive runtime.
@@ -72,7 +107,7 @@ class RuntimeAPIHandler(BaseHTTPRequestHandler):
 
     def send_json(self, status_code: int, payload: Dict[str, Any]):
         body = json.dumps(
-            payload,
+            _precision_safe_source_frame_stamps(payload),
             indent=2,
             default=str,
         ).encode("utf-8")
@@ -651,17 +686,27 @@ class RuntimeAPIHandler(BaseHTTPRequestHandler):
                     direction=request_data["direction"],
                     angular_speed=request_data["angular_speed"],
                     duration=request_data["duration"],
-                    source_frame_stamp_ns=request_data["source_frame_stamp_ns"],
+                    source_frame_stamp_ns=_parse_source_frame_stamp_ns(
+                        request_data["source_frame_stamp_ns"]
+                    ),
                 )
                 self.send_json(200 if result.get("ok") is True else 409, result)
                 return
 
             if path == "/find-marvin/approach-step":
-                required_fields = {"linear_speed", "duration"}
+                required_fields = {"linear_speed", "duration", "source_frame_stamp_ns"}
                 if set(request_data) != required_fields:
-                    raise ValueError("find-marvin/approach-step requires exactly linear_speed and duration.")
+                    raise ValueError(
+                        "find-marvin/approach-step requires exactly linear_speed, "
+                        "duration, and source_frame_stamp_ns."
+                    )
                 result = self.server.runtime.execute_single_marvin_approach(
-                    linear_speed=request_data["linear_speed"], duration=request_data["duration"])
+                    linear_speed=request_data["linear_speed"],
+                    duration=request_data["duration"],
+                    source_frame_stamp_ns=_parse_source_frame_stamp_ns(
+                        request_data["source_frame_stamp_ns"]
+                    ),
+                )
                 self.send_json(200 if result.get("ok") is True else 409, result)
                 return
 

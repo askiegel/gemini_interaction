@@ -359,7 +359,7 @@ def test_guarded_search_visible_before_turn_uses_zero_chunks():
     assert result["completed"] is True
     assert result["turn_chunks_attempted"] == 0
     assert calls == []
-    assert robot.calls == [("move_forward", 0.08, 0.50)]
+    assert robot.calls == [("move_forward", 0.10, 0.50)]
     assert result["state"] == "APPROACH_STEP_COMPLETE"
     assert result["executed"] is True
     assert result["approach_chunks_attempted"] == 1
@@ -1777,7 +1777,7 @@ def test_four_step_approach_sequence_is_bounded_and_uses_fixed_forward_pulses():
     assert result["avoidance_maneuvers_completed"] == 0
     assert result["avoidance_steps"] == []
     assert len(_move_calls(robot)) == 4
-    assert all(call == ("move_forward", 0.08, 0.50) for call in _move_calls(robot))
+    assert all(call == ("move_forward", 0.10, 0.50) for call in _move_calls(robot))
     assert len(result["approach_steps"]) == 4
     assert all(
         step["post_motion_confirmation_diagnostics"][
@@ -2152,7 +2152,7 @@ def test_approach_refreshes_existing_interlock_once_before_dispatch():
     result = manager.execute(_mission())
     assert result["state"] == "APPROACH_STEP_COMPLETE"
     assert interlock.refresh_calls == 1
-    assert robot.calls == [("move_forward", 0.08, 0.50)]
+    assert robot.calls == [("move_forward", 0.10, 0.50)]
 
 
 def test_approach_interlock_denial_is_terminal_without_transport():
@@ -2372,7 +2372,7 @@ def _stale_forward_result(**updates):
         "confirmed_forwarded": False,
         "transport_attempted": True,
         "bounded_forward_invalidated": True,
-        "transport_result": {"ok": True, "linear_x": 0.08, "duration": 0.5},
+        "transport_result": {"ok": True, "linear_x": 0.10, "duration": 0.5},
         "error": "bounded_forward_invalidated",
         "reason": "stale",
     }
@@ -2556,7 +2556,7 @@ def test_approach_allows_post_motion_track_id_change():
     assert result["approach_chunks_attempted"] == 1
     assert result["approach_chunks_completed"] == 1
     assert result["target_observation"]["track_id"] != 101
-    assert robot.calls == [("move_forward", 0.08, 0.50)]
+    assert robot.calls == [("move_forward", 0.10, 0.50)]
     assert turn_calls == []
 
 
@@ -2585,7 +2585,7 @@ def test_approach_allows_post_motion_entity_id_change():
     assert result["approach_chunks_attempted"] == 1
     assert result["approach_chunks_completed"] == 1
     assert result["target_observation"]["entity_id"] == "backpack-002"
-    assert robot.calls == [("move_forward", 0.08, 0.50)]
+    assert robot.calls == [("move_forward", 0.10, 0.50)]
     assert turn_calls == []
 
 
@@ -3642,7 +3642,7 @@ def test_post_bypass_blocked_right_centering_uses_one_clearance_forward():
     assert result["clearance_forward_completed"] is True
     assert result["clearance_forward_trigger_reason"] == "turn_side_not_clear"
     assert len(_move_calls(robot)) == 3
-    assert all(call == ("move_forward", 0.08, 0.50) for call in _move_calls(robot))
+    assert all(call == ("move_forward", 0.10, 0.50) for call in _move_calls(robot))
     assert turns == [("LEFT", 0.20, 0.50), ("RIGHT", 0.20, 0.50)]
     clearance_steps = [
         step for step in result["approach_steps"]

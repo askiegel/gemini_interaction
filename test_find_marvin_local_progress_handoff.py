@@ -326,56 +326,13 @@ def test_find_marvin_handoff_rejects_wrong_generation_or_execution_thread(
     runtime.run_local_progress_with_avoidance.assert_not_called()
 
 
-@pytest.mark.parametrize(
-    ("terminal", "expected_state", "expected_ok"),
-    [
-        ("LOCAL_PROGRESS_BLOCKED", "FIND_MARVIN_SAFE_INCOMPLETE", True),
-        ("LOCAL_PROGRESS_SAFETY_VETO", "FIND_MARVIN_SAFE_INCOMPLETE", True),
-        ("LOCAL_PROGRESS_MAX_STEPS_REACHED", "FIND_MARVIN_SAFE_INCOMPLETE", True),
-        ("LOCAL_PROGRESS_OWNERSHIP_REJECTED", "FIND_MARVIN_SAFE_INCOMPLETE", True),
-        ("LOCAL_PROGRESS_EXECUTION_FAILED", "FIND_MARVIN_FAILED", False),
-    ],
-)
-def test_normal_mission_surfaces_handoff_terminal_without_retry(
-    terminal, expected_state, expected_ok,
-):
-    runtime = object.__new__(CognitiveRuntime)
-    mission = SimpleNamespace(
-        mission_type="FIND_OBJECT", target="marvin", mission_id="mission-11",
-    )
-    runtime._state_lock = threading.RLock()
-    runtime._marvin_controller_lock = threading.RLock()
-    runtime.mission_manager = SimpleNamespace(get_active_mission=lambda: mission)
-    runtime._control_generation = 3
-    runtime.running = True
-    episode_calls = []
-    controller = {
-        "ok": True,
-        "completed": False,
-        "arrived_at_marvin": False,
-        "reason": "marvin_local_progress_terminal",
-        "local_progress_terminal": terminal,
-        "local_progress_result": _progress(terminal, actions=2),
-        "actions_executed": 2,
-    }
-    runtime._execute_bounded_find_marvin_episode = lambda **_kwargs: (
-        episode_calls.append(True)
-        or {
-            "ok": True,
-            "execution_authorized": True,
-            "actions_executed": 2,
-            "motion_executed": True,
-            "controller_result": controller,
-        }
-    )
 
-    result = runtime._execute_normal_marvin_find_mission_locked(
-        mission, control_generation=3,
-    )
+def test_normal_mission_does_not_enter_legacy_local_progress_controller(tmp_path, monkeypatch):
+    from test_find_marvin_closed_loop import make_runtime, run
 
-    assert result["ok"] is expected_ok
-    assert result["completed"] is True
-    assert result["arrived_at_marvin"] is False
-    assert result["state"] == expected_state
-    assert result["local_progress_terminal"] == terminal
-    assert len(episode_calls) == 1
+    runtime, _, _, _, _ = make_runtime(tmp_path, monkeypatch, [(0, .5)])
+    runtime._execute_bounded_find_marvin_episode = Mock(
+        side_effect=AssertionError("legacy controller must not own normal V2 mission"))
+    result = run(runtime)
+    assert result["state"] == "ARRIVED"
+    runtime._execute_bounded_find_marvin_episode.assert_not_called()

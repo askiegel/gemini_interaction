@@ -88,6 +88,7 @@ class LidarPerceptionWorker:
         self._receipt = None
         self._age = None
         self.last_error = None
+        self.diagnostic_sample_callback = None
         self.world_model.publish_lidar_obstacles(unavailable_state("starting", self.session))
 
     def _get_telemetry(self):
@@ -174,6 +175,12 @@ class LidarPerceptionWorker:
                 if self._stop.is_set():
                     return unavailable_state("stopped", self.session, self.sequence)
                 self.world_model.publish_lidar_obstacles(state)
+            # Retention is separate from publication and never affects validity.
+            if callable(self.diagnostic_sample_callback):
+                try:
+                    self.diagnostic_sample_callback(state)
+                except Exception:
+                    pass
             return state
 
     def _run(self):

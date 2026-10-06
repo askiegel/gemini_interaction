@@ -4,12 +4,14 @@ from copy import deepcopy
 from datetime import datetime, timezone
 import inspect
 import threading
+import time
 from types import SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
 
 import behavior_manager as behavior_manager_module
+import runtime as runtime_module
 from behavior_manager import BehaviorManager
 from marvin_arrival_policy import evaluate_marvin_arrival
 from marvin_pursuit_state import READY_TO_APPROACH, evaluate_marvin_pursuit_state
@@ -394,6 +396,9 @@ def test_runtime_path_has_no_direct_primitive_or_navigation_calls():
 def _v2_preview(error=203.0, *, quality=0.97, matched=True, stamp=101,
                 identity_source="gemini_marvin_candidate_selection",
                 identity_confirmed=True):
+    # Each fake observation gets its own receipt timestamp; a large suite
+    # must not expire it while earlier test modules are running.
+    frame_timestamp = datetime.now(timezone.utc).isoformat()
     width, height = 640.0, 480.0
     cx = width / 2.0 + error
     bbox = {"x1": cx - 40.0, "y1": 100.0, "x2": cx + 40.0, "y2": 300.0}
@@ -403,7 +408,7 @@ def _v2_preview(error=203.0, *, quality=0.97, matched=True, stamp=101,
         "source": "marvin_local_tracker", "identity_confirmed": identity_confirmed,
         "identity_source": identity_source, "identity_source_frame_stamp_ns": stamp,
         "motion_authorized_marvin_candidate": True,
-        "source_timestamp": STAMP, "vision_timestamp": STAMP,
+        "source_timestamp": frame_timestamp, "vision_timestamp": frame_timestamp,
         "proposal_label": "chair", "proposal_confidence": 0.91,
         "bbox": dict(bbox), "image_width": width, "image_height": height,
         "opencv_tracker": {"active": True, "matched": matched,
@@ -412,6 +417,7 @@ def _v2_preview(error=203.0, *, quality=0.97, matched=True, stamp=101,
                            "image_height": height, "center_x": cx,
                            "center_y": 200.0, "horizontal_error": error,
                            "source_frame_stamp_ns": stamp + 1,
+                           "received_monotonic_seconds": time.monotonic(),
                            "reason": "matched"},
     }
 
@@ -444,6 +450,19 @@ def _v2_runtime(preview):
     runtime._marvin_alignment_consumed_source_frame_stamps = set()
     behavior = _ReadOnlyV2Behavior(preview)
     runtime.behavior_manager = behavior
+    runtime.marvin_camera_model = {
+        "fx_pixels": 320.0, "cx_pixels": 320.0, "image_width": 640,
+        "x_m": 0.0, "y_m": 0.0, "yaw_degrees": 0.0, "range_uncertainty_m": 0.0,
+    }
+    runtime.lidar_worker = SimpleNamespace(session="v2-lidar", running=True)
+    runtime.world_model = SimpleNamespace(get_lidar_obstacles=Mock(return_value={
+        "available": True, "valid": True, "reason": "fresh",
+        "producer_session": "v2-lidar", "effective_age_seconds": 0.0,
+        "acquisition_sequence": 1,
+        "local_motion_geometry": {"valid": True, "frame_id": "lidar_link",
+                                  "points": [{"x_m": 1.0, "y_m": y / 1000.0}
+                                             for y in range(-200, 201)]},
+    }))
     return runtime, behavior
 
 
@@ -589,13 +608,13 @@ def test_newer_non_authorizing_v2_observation_clears_alignment_authorization():
     (105.0, 175.0, "TURN_RIGHT"),
     (-105.0, -175.0, "TURN_LEFT"),
 ])
-def test_v2_association_failure_requires_three_new_samples_before_competing_mode_authorizes(
+def test_v2_association_failure_clears_current_authorization_before_reacquisition(
     low_error, high_error, direction,
 ):
     """A BehaviorManager association failure is a full downstream boundary."""
     runtime, behavior = _v2_runtime(_v2_preview(low_error, stamp=100))
 
-    # LOW1--LOW3 establish the original strict episode's downstream window.
+    # Each current strict observation can authorize one bounded action.
     _observe_v2_series(runtime, behavior, [
         (100, low_error, {}), (101, low_error + (2 if low_error > 0 else -2), {}),
         (102, low_error + (1 if low_error > 0 else -1), {}),
@@ -613,27 +632,21 @@ def test_v2_association_failure_requires_three_new_samples_before_competing_mode
     assert runtime._marvin_alignment_consensus == []
     assert runtime._marvin_alignment_observation is None
 
-    # HIGH2 is the new episode's first runtime sample; HIGH3 is its second.
-    # Neither may reuse LOW evidence or authorize a competing turn.
+    # The first new strict observation is a new episode's current action
+    # evidence; it cannot reuse any LOW stamp or observation.
     _observe_v2_series(runtime, behavior, [
         (104, high_error, {}), (105, high_error + (2 if high_error > 0 else -2), {}),
     ])
     assert len(runtime._marvin_alignment_geometry_history) == 2
-    assert len(runtime._marvin_alignment_consensus) == 2
-    assert runtime._marvin_alignment_observation is None
-
-    # Only HIGH4, the third wholly new strict sample, can be current.
-    _observe_v2_series(runtime, behavior, [
-        (106, high_error + (1 if high_error > 0 else -1), {}),
-    ])
-    assert runtime._marvin_alignment_observation["source_frame_stamp_ns"] == 107
+    assert runtime._marvin_alignment_consensus == []
+    assert runtime._marvin_alignment_observation["source_frame_stamp_ns"] == 106
     assert runtime._marvin_alignment_observation["controller_decision"] == direction
 
 
 @pytest.mark.parametrize(("error", "decision"), [
     (60.0, "TURN_RIGHT"), (-60.0, "TURN_LEFT"),
 ])
-def test_v2_alignment_authorization_requires_three_stable_current_observations(
+def test_v2_current_strict_observation_authorizes_one_bounded_turn(
     error, decision,
 ):
     runtime, behavior = _v2_runtime(_v2_preview(error, stamp=100))
@@ -642,23 +655,224 @@ def test_v2_alignment_authorization_requires_three_stable_current_observations(
     for stamp, current_error in ((100, error), (101, error + offset)):
         behavior.preview = _v2_preview(current_error, stamp=stamp)
         results.append(runtime.observe_find_marvin_v2())
-        assert runtime._marvin_alignment_observation is None
+        assert runtime._marvin_alignment_observation["source_frame_stamp_ns"] == stamp + 1
     behavior.preview = _v2_preview(error + 2 * offset, stamp=102)
     results.append(runtime.observe_find_marvin_v2())
     assert all(result["controller"]["decision"] == decision for result in results)
     assert runtime._marvin_alignment_observation["source_frame_stamp_ns"] == 103
     assert runtime._marvin_alignment_observation["controller_decision"] == decision
-    # The first two calls deliberately did not leave independently usable
-    # cached authorization; only the current third stamp is retained.
-    assert results[0]["opencv_tracker"]["source_frame_stamp_ns"] != 103
-    assert results[1]["opencv_tracker"]["source_frame_stamp_ns"] != 103
+    assert results[0]["opencv_tracker"]["source_frame_stamp_ns"] == 101
+    assert results[1]["opencv_tracker"]["source_frame_stamp_ns"] == 102
 
 
-def test_v2_centered_observations_never_authorize_alignment():
+def test_v2_post_action_locked_tracker_evidence_can_authorize_new_frame_without_gemini():
+    continuity = _v2_preview(80.0, stamp=501,
+                             identity_source="marvin_locked_tracker_continuity")
+    continuity["post_action_tracker_continuity"] = True
+    continuity["post_action_source_frame_stamp_ns"] = 500
+    continuity["marvin_tracking_episode"] = {
+        "episode_id": "marvin-v2-450",
+        "post_action_source_frame_stamp_ns": 500,
+        "state": "POST_ACTION_TRACKED",
+    }
+    runtime, behavior = _v2_runtime(continuity)
+
+    result = runtime.observe_find_marvin_v2()
+
+    assert result["ok"] is True
+    assert result["identity_confirmed"] is True
+    assert result["fresh_gemini_required"] is False
+    assert result["post_action_tracker_continuity"] is True
+    assert result["controller"]["decision"] == "TURN_RIGHT"
+    assert runtime._marvin_alignment_observation["source_frame_stamp_ns"] == 502
+    assert runtime._marvin_alignment_observation["identity_source"] == "marvin_locked_tracker_continuity"
+    assert runtime._marvin_alignment_observation["post_action_tracker_continuity"] is True
+    assert behavior.motion_calls == 0
+
+
+def test_post_action_identity_source_without_continuity_proof_cannot_authorize():
+    continuity = _v2_preview(80.0, stamp=601,
+                             identity_source="marvin_locked_tracker_continuity")
+    continuity["post_action_tracker_continuity"] = True
+    continuity["post_action_source_frame_stamp_ns"] = 600
+    continuity["marvin_tracking_episode"] = {"state": "TRACKING"}
+    runtime, _behavior = _v2_runtime(continuity)
+
+    result = runtime.observe_find_marvin_v2()
+
+    assert result["controller"]["decision"] == "REVERIFY_REQUIRED"
+    assert runtime._marvin_alignment_observation is None
+
+
+def test_behavior_manager_locked_post_action_tracker_flows_to_runtime_authorization():
+    bbox = {"x1": 380, "y1": 150, "x2": 500, "y2": 250}
+    stamp = 9001
+    manager = object.__new__(BehaviorManager)
+    manager._continue_strict_v2_tracker_after_action = lambda: {
+        "found": True, "stale": False, "target": "marvin", "label": "marvin",
+        "source": "marvin_local_tracker",
+        "source_timestamp": datetime.now(timezone.utc).isoformat(),
+        "bbox": bbox, "cx": 440.0, "cy": 200.0, "area": 12000,
+        "image_width": 640, "image_height": 480,
+        "identity_confirmed": True,
+        "identity_source": "marvin_locked_tracker_continuity",
+        "identity_source_frame_stamp_ns": 8000,
+        "motion_authorized_marvin_candidate": True,
+        "post_action_tracker_continuity": True,
+        "post_action_source_frame_stamp_ns": 9000,
+        "strict_tracker_episode": {"active": True, "continued_existing_tracker": True},
+        "marvin_tracking_episode": {
+            "episode_id": "marvin-v2-8000",
+            "post_action_source_frame_stamp_ns": 9000,
+            "state": "POST_ACTION_TRACKED",
+        },
+        "opencv_tracker": {
+            "active": True, "matched": True, "quality": 0.96, "threshold": 0.80,
+            "bbox": bbox, "image_width": 640, "image_height": 480,
+            "center_x": 440.0, "center_y": 200.0,
+            "horizontal_error": 120.0, "source_frame_stamp_ns": stamp,
+        },
+    }
+    runtime = object.__new__(CognitiveRuntime)
+    runtime._state_lock = threading.RLock()
+    runtime._marvin_alignment_observation = None
+    runtime._marvin_alignment_consensus = []
+    runtime._marvin_alignment_geometry_history = []
+    runtime._marvin_alignment_consumed_source_frame_stamps = set()
+    runtime.behavior_manager = manager
+
+    result = runtime.observe_find_marvin_v2()
+
+    assert result["ok"] is True
+    assert result["identity_source"] == "marvin_locked_tracker_continuity"
+    assert result["fresh_gemini_required"] is False
+    assert result["opencv_tracker"]["source_frame_stamp_ns"] == stamp
+    assert runtime._marvin_alignment_observation["source_frame_stamp_ns"] == stamp
+    assert runtime._marvin_alignment_observation["post_action_tracker_continuity"] is True
+
+
+def test_two_turns_use_new_post_action_tracker_frames_without_runtime_restart(monkeypatch):
+    monkeypatch.setattr(runtime_module.time, "time_ns", lambda: 1010)
+    manager = object.__new__(BehaviorManager)
+    manager._marvin_v2_tracker_episode_lock = threading.RLock()
+    tracker_object = object()
+    manager._marvin_v2_tracker_episode = {
+        "marvin_tracker": tracker_object,
+        "tracker_bbox": {"x1": 300, "y1": 100, "x2": 500, "y2": 300},
+        "last_tracker_source_frame_stamp_ns": 1000,
+        "last_tracker_received_at": STAMP,
+        "identity_source": "gemini_marvin_candidate_selection",
+        "identity_source_frame_stamp_ns": 900,
+        "episode_id": "marvin-v2-900",
+    }
+    manager.semantic_vision = SimpleNamespace(fetch_frame=Mock())
+    continuation_calls = []
+
+    def confirm(current_tracker, **kwargs):
+        continuation_calls.append((current_tracker, kwargs))
+        stamp = 1001 + len(continuation_calls) - 1
+        bbox = {"x1": 390, "y1": 140, "x2": 510, "y2": 240}
+        opencv = {
+            "active": True, "matched": True, "quality": 0.95, "threshold": 0.80,
+            "bbox": bbox, "image_width": 640, "image_height": 480,
+            "center_x": 450.0, "center_y": 190.0,
+            "horizontal_error": 130.0, "source_frame_stamp_ns": stamp,
+            "received_monotonic_seconds": runtime_module.time.monotonic(),
+        }
+        return {
+            "found": True, "stale": False, "target": "marvin", "label": "marvin",
+            "source": "marvin_local_tracker",
+            "source_timestamp": datetime.now(timezone.utc).isoformat(),
+            "bbox": bbox, "cx": 450.0, "cy": 190.0, "area": 12000,
+            "image_width": 640, "image_height": 480,
+            "opencv_tracker": opencv,
+        }
+
+    monkeypatch.setattr(manager, "_confirm_marvin_local_tracker_frames", confirm)
+    robot = SimpleNamespace(stop=Mock(return_value={"ok": True}))
+    turns = []
+    manager.robot = robot
+    manager._execute_target_directed_turn = lambda direction, speed, duration, **kwargs: (
+        turns.append((direction, speed, duration, kwargs)) or
+        {"ok": True, "permitted": True, "confirmed_forwarded": True}
+    )
+    runtime = object.__new__(CognitiveRuntime)
+    runtime.running = True
+    runtime._state_lock = threading.RLock()
+    receipt = time.monotonic()
+    runtime._marvin_alignment_observation = {
+        "source_frame_stamp_ns": 1000,
+        "received_monotonic_seconds": receipt,
+        "identity_confirmed": True,
+        "identity_source": "gemini_marvin_candidate_selection",
+        "opencv_tracker": {
+            "active": True, "matched": True, "quality": 0.95,
+            "threshold": 0.80, "bbox": {"x1": 300, "y1": 100, "x2": 500, "y2": 300},
+            "source_frame_stamp_ns": 1000,
+            "received_monotonic_seconds": receipt,
+        },
+        "controller_state": "VISUAL_READY_TO_ALIGN",
+        "controller_decision": "TURN_RIGHT",
+    }
+    runtime._marvin_alignment_consensus = []
+    runtime._marvin_alignment_geometry_history = []
+    runtime._marvin_alignment_consumed_source_frame_stamps = set()
+    runtime.behavior_manager = manager
+    runtime.world_model = SimpleNamespace(get_lidar_obstacles=lambda **_kwargs: {
+        "available": True, "valid": True, "reason": "fresh",
+        "producer_session": "test-session", "local_motion_geometry": {"valid": True},
+    })
+    runtime.lidar_worker = SimpleNamespace(session="test-session", running=True)
+
+    first = runtime.execute_single_marvin_alignment(
+        direction="RIGHT", angular_speed=0.25, duration=0.50,
+        source_frame_stamp_ns=1000,
+    )
+    assert first["motion_executed"] is True
+    assert runtime.execute_single_marvin_alignment(
+        direction="RIGHT", angular_speed=0.25, duration=0.50,
+        source_frame_stamp_ns=1000,
+    )["reason"] == "marvin_alignment_observation_already_consumed"
+
+    next_observation = runtime.observe_find_marvin_v2()
+    assert next_observation["identity_source"] == "marvin_locked_tracker_continuity"
+    next_stamp = next_observation["opencv_tracker"]["source_frame_stamp_ns"]
+    second = runtime.execute_single_marvin_alignment(
+        direction="RIGHT", angular_speed=0.25, duration=0.50,
+        source_frame_stamp_ns=next_stamp,
+    )
+
+    assert second["motion_executed"] is True
+    assert [call[0] for call in turns] == ["RIGHT", "RIGHT"]
+    assert len(continuation_calls) == 1
+    assert continuation_calls[0][0] is tracker_object
+    assert continuation_calls[0][1]["minimum_source_frame_stamp_ns"] == 1000
+    assert manager._marvin_v2_tracker_episode["last_tracker_source_frame_stamp_ns"] == next_stamp
+    assert robot.stop.call_count == 2
+
+
+def test_v2_centered_observations_authorize_only_current_guarded_forward():
     runtime, behavior = _v2_runtime(_v2_preview(0.0, stamp=200))
     _observe_v2_series(runtime, behavior, [
         (200, 0.0, {}), (201, 20.0, {}), (202, -20.0, {}),
     ])
+    assert runtime._marvin_alignment_observation["controller_state"] == "VISUAL_READY_TO_APPROACH"
+    assert runtime._marvin_alignment_observation["controller_decision"] == "FORWARD"
+    assert runtime._marvin_alignment_observation["source_frame_stamp_ns"] == 203
+    assert runtime._marvin_alignment_consensus == []
+
+
+def test_v2_arrival_never_authorizes_another_pursuit_action(monkeypatch):
+    runtime, behavior = _v2_runtime(_v2_preview(0.0, stamp=210))
+    runtime.world_model.get_lidar_obstacles.return_value["local_motion_geometry"]["points"] = [
+        {"x_m": 0.5, "y_m": y / 1000.0} for y in range(-3, 4)
+    ]
+    monkeypatch.setattr(
+        runtime_module, "evaluate_marvin_visual_arrival",
+        lambda *_args, **_kwargs: {"ok": True, "arrived_at_marvin": True},
+    )
+    result = runtime.observe_find_marvin_v2()
+    assert result["controller"]["decision"] == "ARRIVED"
     assert runtime._marvin_alignment_observation is None
     assert runtime._marvin_alignment_consensus == []
 
@@ -669,7 +883,7 @@ def test_v2_forward_resets_alignment_admission_without_discarding_episode_eviden
     _observe_v2_series(runtime, behavior, [
         (220, 60.0, {}), (221, 62.0, {}),
     ])
-    assert len(runtime._marvin_alignment_consensus) == 2
+    assert runtime._marvin_alignment_consensus == []
 
     # An associated strict tracker remains visible in the preview, but once
     # its controller result is FORWARD the runtime must discard all pending
@@ -691,29 +905,25 @@ def test_v2_forward_resets_alignment_admission_without_discarding_episode_eviden
     assert result["strict_tracker_episode"]["active"] is True
     assert runtime._marvin_alignment_geometry_history == []
     assert runtime._marvin_alignment_consensus == []
-    assert runtime._marvin_alignment_observation is None
+    assert runtime._marvin_alignment_observation["controller_decision"] == "FORWARD"
 
-    # A later associated turn begins a fresh downstream window only.
+    # A later associated turn uses only its own current source stamp.
     behavior.preview = _v2_preview(61.0, stamp=223)
     runtime.observe_find_marvin_v2()
     assert len(runtime._marvin_alignment_geometry_history) == 1
-    assert len(runtime._marvin_alignment_consensus) == 1
-    assert runtime._marvin_alignment_observation is None
+    assert runtime._marvin_alignment_consensus == []
+    assert runtime._marvin_alignment_observation["source_frame_stamp_ns"] == 224
 
 
-def test_v2_geometry_outlier_resets_consensus_and_requires_three_new_samples():
+def test_v2_geometry_outlier_resets_current_authorization_until_new_valid_observation():
     runtime, behavior = _v2_runtime(_v2_preview(60.0, stamp=300))
     _observe_v2_series(runtime, behavior, [
         (300, 60.0, {}), (301, 62.0, {}), (302, 175.0, {}),
     ])
     assert runtime._marvin_alignment_observation is None
     assert runtime._marvin_alignment_consensus == []
-    _observe_v2_series(runtime, behavior, [
-        (303, 60.0, {}), (304, 62.0, {}),
-    ])
-    assert runtime._marvin_alignment_observation is None
-    _observe_v2_series(runtime, behavior, [(305, 64.0, {})])
-    assert runtime._marvin_alignment_observation["source_frame_stamp_ns"] == 306
+    _observe_v2_series(runtime, behavior, [(303, 60.0, {})])
+    assert runtime._marvin_alignment_observation["source_frame_stamp_ns"] == 304
 
 
 def test_v2_seed_geometry_discontinuity_blocks_high_quality_outlier_before_consensus():
@@ -743,22 +953,16 @@ def test_v2_seed_geometry_discontinuity_blocks_high_quality_outlier_before_conse
     assert runtime._marvin_alignment_observation is None
 
 
-def test_v2_seed_geometry_recovery_requires_three_new_stable_samples():
+def test_v2_seed_geometry_recovery_uses_only_new_current_observation():
     runtime, behavior = _v2_runtime(_v2_preview(99.0, stamp=710))
     _observe_v2_series(runtime, behavior, [
         (710, 99.0, {}), (711, 103.5, {}), (712, 189.5, {}),
     ])
     assert runtime._marvin_alignment_observation is None
 
-    recovered = _observe_v2_series(runtime, behavior, [
-        (713, 99.0, {}), (714, 103.5, {}),
-    ])
+    recovered = _observe_v2_series(runtime, behavior, [(713, 99.0, {})])
     assert recovered[0]["geometry_continuity"]["history_length"] == 1
-    assert recovered[1]["geometry_continuity"]["history_length"] == 2
-    assert runtime._marvin_alignment_observation is None
-    recovered.extend(_observe_v2_series(runtime, behavior, [(715, 101.0, {})]))
-    assert recovered[2]["geometry_continuity"]["history_length"] == 3
-    assert runtime._marvin_alignment_observation["source_frame_stamp_ns"] == 716
+    assert runtime._marvin_alignment_observation["source_frame_stamp_ns"] == 714
 
 
 def test_v2_seed_geometry_continuity_accepts_exact_30_pixels_only():
@@ -788,17 +992,17 @@ def test_v2_seed_geometry_continuity_accepts_exact_30_pixels_only():
     assert over_runtime._marvin_alignment_observation is None
 
 
-def test_v2_seed_geometry_non_authorizing_observation_resets_history_and_consensus():
+def test_v2_centered_observation_resets_turn_history_and_becomes_forward_current_observation():
     runtime, behavior = _v2_runtime(_v2_preview(99.0, stamp=720))
     _observe_v2_series(runtime, behavior, [
         (720, 99.0, {}), (721, 95.0, {}), (722, 44.0, {}),
     ])
     assert runtime._marvin_alignment_geometry_history == []
     assert runtime._marvin_alignment_consensus == []
-    assert runtime._marvin_alignment_observation is None
+    assert runtime._marvin_alignment_observation["controller_decision"] == "FORWARD"
 
 
-def test_v2_alignment_consensus_accepts_exact_spread_and_rolls_to_newest_stamp():
+def test_v2_current_authorization_rolls_to_newest_stamp():
     runtime, behavior = _v2_runtime(_v2_preview(60.0, stamp=350))
     _observe_v2_series(runtime, behavior, [
         # center_x values 380, 395, and 410: exactly 30 px of spread.

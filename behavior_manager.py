@@ -43,6 +43,9 @@ from local_motion_safety_envelope import (
 from camera_motion_gate import evaluate_camera_gate
 
 
+FIND_MARVIN_FORWARD_SPEED_MPS = 0.10
+
+
 def _valid_source_frame_stamp(value):
     return value if type(value) is int and value >= 0 else None
 
@@ -351,6 +354,7 @@ class _GuardedTurnMonitor:
         except Exception as exc:
             error = str(exc)
             error_type = type(exc).__name__
+        completed_monotonic_seconds = time.monotonic()
         with self._lock:
             self._stop_count += 1
             self._last_stop_result = result
@@ -361,6 +365,7 @@ class _GuardedTurnMonitor:
                 "error": error,
                 "error_type": error_type,
                 "source": source,
+                "completed_monotonic_seconds": completed_monotonic_seconds,
             }
             if self._first_invalidating_validation is not None:
                 event["monitor_validation"] = dict(self._first_invalidating_validation)
@@ -568,9 +573,9 @@ class BehaviorManager:
     CENTER_TURN_SPEED = 0.60
     CENTER_TURN_SECONDS = 0.40
 
-    FIND_FORWARD_SPEED = 0.08
+    FIND_FORWARD_SPEED = FIND_MARVIN_FORWARD_SPEED_MPS
     FIND_FORWARD_SECONDS = 0.80
-    FIND_APPROACH_FORWARD_SPEED = 0.08
+    FIND_APPROACH_FORWARD_SPEED = FIND_MARVIN_FORWARD_SPEED_MPS
     FIND_APPROACH_FORWARD_SECONDS = 0.50
     FIND_APPROACH_MAX_CHUNKS = 4
     # A stale LiDAR veto proven to have occurred before transport begins is
@@ -1118,7 +1123,9 @@ class BehaviorManager:
         )
 
     def _confirm_marvin_local_tracker_frames(
-        self, tracker, *, minimum_timestamp=None, fetch_frame, check_current=None
+        self, tracker, *, minimum_timestamp=None,
+        minimum_source_frame_stamp_ns=None, fetch_frame, check_current=None,
+        diagnostics=None, post_action=False,
     ):
         """Confirm a seeded tracker from fresh frames.
 
@@ -1126,29 +1133,125 @@ class BehaviorManager:
         execution/preemption checks; preview callers intentionally do not.
         """
         observations = []
+        if diagnostics is None:
+            diagnostics = {}
+        diagnostics.update(frames_attempted=0, fresh_frames_attempted=0,
+                           cached_frame_count=0, frames=[], failure_reason=None)
+        deadline = (time.monotonic() + self.MARVIN_POST_TURN_FRAME_TIMEOUT_SECONDS
+                    if post_action else None)
+        if post_action:
+            diagnostics.update(maximum_fresh_frames=self.MARVIN_LOCAL_TRACKER_MAX_FRAMES,
+                               refresh_timeout_seconds=self.MARVIN_POST_TURN_FRAME_TIMEOUT_SECONDS)
         last_timestamp = minimum_timestamp
+        previous_source_stamp = minimum_source_frame_stamp_ns
         previous = None
         for _ in range(self.MARVIN_LOCAL_TRACKER_MAX_FRAMES):
             if check_current is not None:
                 check_current()
+            sample = None
+            def record_frame(frame):
+                sample = {"update_returned_no_bbox": False, "bbox_invalid": False,
+                          "tracker_evaluated": False}
+                diagnostics["frames_attempted"] += 1
+                diagnostics["frames"].append(sample)
+                stamp = getattr(frame, "source_frame_stamp_ns", None)
+                cached = (type(stamp) is int and previous_source_stamp is not None
+                          and stamp <= previous_source_stamp)
+                sample.update(source_frame_stamp_ns=stamp,
+                              camera_returned_cached_frame=cached,
+                              received_at=getattr(frame, "received_at", None),
+                              received_monotonic_seconds=getattr(frame, "received_monotonic_seconds", None),
+                              image_width=getattr(frame, "width", None),
+                              image_height=getattr(frame, "height", None))
+                diagnostics["cached_frame_count"] += int(cached)
+                if post_action:
+                    sample["identity_source"] = "marvin_locked_tracker_continuity"
+                    self._emit_marvin_perception_diagnostic("post_action_frame", sample)
+
             try:
-                frame = fetch_frame()
+                if post_action:
+                    frame = self._fetch_strict_v2_frame_after(
+                        previous_source_stamp, execution_guard=check_current,
+                        deadline=deadline, fetch_frame=fetch_frame, on_frame=record_frame,
+                    )
+                else:
+                    frame = fetch_frame()
+                    record_frame(frame)
+                if check_current is not None:
+                    check_current()
+                sample = diagnostics["frames"][-1]
+                diagnostics["fresh_frames_attempted"] += 1
+                source_stamp = _valid_source_frame_stamp(getattr(frame, "source_frame_stamp_ns", None))
+                if post_action:
+                    # Even a rejected fresh frame is consumed; its cached
+                    # copies never spend another tracker evaluation.
+                    previous_source_stamp = source_stamp
                 timestamp = getattr(frame, "received_at", None)
                 if not self._vision_timestamp_is_newer(timestamp, last_timestamp):
+                    diagnostics["failure_reason"] = "local_receipt_timestamp_not_newer"
+                    if post_action:
+                        continue
+                    return None
+                source_stamp = _valid_source_frame_stamp(
+                    getattr(frame, "source_frame_stamp_ns", None)
+                )
+                if (not post_action and previous_source_stamp is not None
+                        and (source_stamp is None or source_stamp <= previous_source_stamp)):
+                    sample["camera_returned_cached_frame"] = source_stamp == previous_source_stamp
+                    diagnostics["failure_reason"] = "source_frame_stamp_not_newer"
                     return None
                 width = MarvinLocalTracker._valid_dimension(frame.width)
                 height = MarvinLocalTracker._valid_dimension(frame.height)
+                sample["tracker_evaluated"] = True
                 bbox = tracker.update(frame)
-                if bbox is None:
+                if check_current is not None:
+                    check_current()
+                if post_action and time.monotonic() >= deadline:
+                    diagnostics["failure_reason"] = "post_action_tracker_refresh_timeout"
                     return None
-                bbox = MarvinLocalTracker._validate_bbox(bbox, frame.width, frame.height)
+                sample["tracker_bbox"] = dict(bbox) if isinstance(bbox, dict) else None
+                sample["tracker_candidate_bbox"] = getattr(tracker, "last_candidate_bbox", None)
+                sample["tracker_search_roi"] = getattr(tracker, "last_search_roi", None)
+                if bbox is None:
+                    sample["opencv_tracker"] = self._opencv_tracker_diagnostic(tracker, frame)
+                    sample["update_returned_no_bbox"] = True
+                    diagnostics["failure_reason"] = sample["opencv_tracker"].get("reason") or "tracker_update_no_bbox"
+                    if post_action:
+                        continue
+                    return None
+                try:
+                    bbox = MarvinLocalTracker._validate_bbox(bbox, frame.width, frame.height)
+                except ValueError:
+                    sample["bbox_invalid"] = True
+                    sample["opencv_tracker"] = self._opencv_tracker_diagnostic(tracker, frame)
+                    sample["opencv_tracker"]["reason"] = "invalid_bbox"
+                    diagnostics["failure_reason"] = "invalid_bbox"
+                    if post_action:
+                        continue
+                    return None
                 tracker_bbox = dict(zip(("x1", "y1", "x2", "y2"), bbox))
                 opencv_tracker = self._opencv_tracker_diagnostic(
                     tracker, frame, tracker_bbox,
                 )
+                sample["opencv_tracker"] = opencv_tracker
+                if post_action:
+                    receipt = getattr(frame, "received_monotonic_seconds", None)
+                    quality = opencv_tracker.get("quality")
+                    threshold = opencv_tracker.get("threshold")
+                    if (opencv_tracker.get("matched") is not True
+                            or type(quality) not in (int, float) or not math.isfinite(quality)
+                            or type(threshold) not in (int, float) or not math.isfinite(threshold)
+                            or quality < max(threshold, MarvinLocalTracker.MIN_MATCH_QUALITY)):
+                        diagnostics["failure_reason"] = "below_threshold"
+                        continue
+                    if (type(receipt) not in (int, float) or not math.isfinite(receipt)
+                            or not 0 <= time.monotonic() - receipt <= 1.0):
+                        diagnostics["failure_reason"] = "tracker_local_receipt_not_current"
+                        continue
                 observation = {
                     "found": True, "stale": False, "target": "marvin", "label": "marvin",
                     "source": "marvin_local_tracker", "source_timestamp": timestamp,
+                    "received_monotonic_seconds": getattr(frame, "received_monotonic_seconds", None),
                     "bbox": tracker_bbox,
                     "image_width": width, "image_height": height,
                     "opencv_tracker": opencv_tracker,
@@ -1156,17 +1259,41 @@ class BehaviorManager:
                 observation["cx"] = (bbox[0] + bbox[2]) / 2.0
                 observation["cy"] = (bbox[1] + bbox[3]) / 2.0
                 observation["area"] = (bbox[2] - bbox[0]) * (bbox[3] - bbox[1])
-                if previous is not None and not self._target_observations_match(previous, observation):
-                    return None
+                if previous is not None:
+                    sample["continuity"] = self._target_observation_match_details(previous, observation)
+                    if not sample["continuity"]["matched"]:
+                        diagnostics["failure_reason"] = "tracker_frame_geometry_discontinuity"
+                        return None
             except _SemanticPreempted:
                 raise
-            except Exception:
+            except TimeoutError as exc:
+                if not post_action:
+                    diagnostics["failure_reason"] = str(exc) or type(exc).__name__
+                    if diagnostics["frames"]:
+                        diagnostics["frames"][-1]["error_type"] = type(exc).__name__
+                    return None
+                diagnostics["camera_new_frame_timeout"] = True
+                if not diagnostics["fresh_frames_attempted"]:
+                    diagnostics["failure_reason"] = "find_marvin_post_action_camera_new_frame_timeout"
                 return None
+            except Exception as exc:
+                diagnostics["failure_reason"] = str(exc) or type(exc).__name__
+                if diagnostics["frames"]:
+                    diagnostics["frames"][-1]["error_type"] = type(exc).__name__
+                if post_action and diagnostics["fresh_frames_attempted"]:
+                    continue
+                return None
+            finally:
+                if post_action and sample is not None and sample.get("tracker_evaluated") is True:
+                    self._emit_marvin_perception_diagnostic("post_action_frame", sample)
             observations.append(observation)
             previous = observation
             last_timestamp = timestamp
-            if len(observations) >= self.MARVIN_LOCAL_TRACKER_MIN_SUPPORT:
+            previous_source_stamp = source_stamp
+            if post_action or len(observations) >= self.MARVIN_LOCAL_TRACKER_MIN_SUPPORT:
+                diagnostics["failure_reason"] = None
                 return observation
+        diagnostics["failure_reason"] = diagnostics.get("failure_reason") or "insufficient_tracker_support"
         return None
 
     def simulate(self, mission):
@@ -1300,20 +1427,54 @@ class BehaviorManager:
 
     def _execute_target_directed_turn(
         self, direction, angular_speed, duration, *, expected_lidar_session,
-        safety_mode="LEGACY_BROAD_SIDE",
+        safety_mode="LEGACY_BROAD_SIDE", dispatch_guard=None,
     ):
         previous = getattr(self, "_target_directed_turn_context", False)
         self._target_directed_turn_context = True
         try:
+            extra = {"dispatch_guard": dispatch_guard} if dispatch_guard is not None else {}
             return self.execute_guarded_turn(
                 direction,
                 angular_speed,
                 duration,
                 expected_lidar_session=expected_lidar_session,
                 safety_mode=safety_mode,
+                **extra,
             )
         finally:
             self._target_directed_turn_context = previous
+
+    def _emit_marvin_perception_diagnostic(self, phase, metadata):
+        callback = getattr(self, "marvin_perception_diagnostic_callback", None)
+        if callable(callback):
+            try:
+                callback(phase, metadata)
+            except Exception:
+                pass
+
+    def _emit_marvin_command_diagnostic(self, phase, **metadata):
+        """Best-effort cached retention; its return value has no authority."""
+        callback = getattr(self, "marvin_command_diagnostic_callback", None)
+        if callable(callback):
+            try:
+                callback(phase, metadata)
+            except Exception:
+                pass
+
+    def _emit_marvin_semantic_frame_diagnostic(self, frame, candidate=None):
+        try:
+            box = self._target_bbox(candidate) if candidate is not None else None
+            center = ({"x": (box["x1"] + box["x2"]) / 2,
+                       "y": (box["y1"] + box["y2"]) / 2} if box is not None else None)
+            self._emit_marvin_perception_diagnostic("semantic", {
+                "source_frame_stamp_ns": getattr(frame, "source_frame_stamp_ns", None),
+                "received_monotonic_seconds": getattr(frame, "received_monotonic_seconds", None),
+                "image_width": getattr(frame, "width", None), "image_height": getattr(frame, "height", None),
+                "identity_source": "gemini_marvin_candidate_selection", "bbox": box,
+                "center": center, "tracker_quality": None, "confirmed": candidate is not None,
+            })
+        except Exception:
+            pass
 
     def execute_guarded_turn(
         self,
@@ -1326,6 +1487,7 @@ class BehaviorManager:
         target_directed=None,
         safety_mode="LEGACY_BROAD_SIDE",
         validate_only=False,
+        dispatch_guard=None,
     ):
         """Validate and execute one explicit bounded turn request.
 
@@ -1359,6 +1521,13 @@ class BehaviorManager:
             safety_mode=safety_mode,
         )
         result = dict(validation)
+        # Preserve the snapshot that authorized this turn, rather than a later
+        # monitor or post-STOP acquisition. Marvin's next cycle must exceed it.
+        if isinstance(state, dict):
+            result["action_lidar_evidence"] = {
+                "producer_session": state.get("producer_session"),
+                "acquisition_sequence": state.get("acquisition_sequence"),
+            }
         result.update(
             ok=False,
             forwarded=False,
@@ -1466,6 +1635,12 @@ class BehaviorManager:
         transport_result = None
         transport_error = None
         try:
+            if dispatch_guard is not None and dispatch_guard() is not True:
+                raise RuntimeError("marvin_motion_observation_stale_or_preempted")
+            self._emit_marvin_command_diagnostic(
+                "start", start_monotonic_seconds=time.monotonic(), linear_x=0.0,
+                angular_z=validation["angular_z"], duration=validation["duration"],
+            )
             transport_result = self.robot.motion(
                 linear_x=0.0,
                 angular_z=validation["angular_z"],
@@ -1474,6 +1649,12 @@ class BehaviorManager:
             )
         except Exception as exc:
             transport_error = exc
+
+        self._emit_marvin_command_diagnostic(
+            "complete", completion_monotonic_seconds=time.monotonic(),
+            bridge_acknowledgement=transport_result,
+            transport_error=str(transport_error) if transport_error is not None else None,
+        )
 
         transport_ok = (
             transport_error is None
@@ -2400,11 +2581,348 @@ class BehaviorManager:
         refresh and TargetLock.resolve() boundary.  It is therefore suitable
         for operator inspection only, never for execution.
         """
-        return self.build_find_marvin_controller_state(
+        continuity = self._continue_strict_v2_tracker_after_action()
+        if continuity is not None:
+            if continuity.get("found") is not True:
+                preview = {
+                    "ok": False, "preview": True, "authoritative": False,
+                    "executed": False, "completed": True,
+                    "behavior": "FIND_OBJECT", "state": "PREVIEW",
+                    "target": "marvin", "target_found": False,
+                    "identity_confirmed": False,
+                    "motion_authorized_marvin_candidate": False,
+                    "reason": continuity.get("reason"),
+                    "source_frame_stamp_ns": continuity.get("source_frame_stamp_ns"),
+                    "opencv_tracker": continuity.get("opencv_tracker"),
+                    "strict_tracker_episode": continuity.get("strict_tracker_episode"),
+                    "post_action_tracker_diagnostics": continuity.get("post_action_tracker_diagnostics"),
+                }
+            else:
+                preview = self._build_find_object_preview(
+                    self.MARVIN_SEMANTIC_TARGET, continuity,
+                    source="marvin_local_tracker", authoritative=False,
+                )
+                for key in (
+                    "identity_confirmed", "identity_source",
+                    "identity_source_frame_stamp_ns",
+                    "motion_authorized_marvin_candidate", "opencv_tracker",
+                    "strict_tracker_episode", "marvin_tracking_episode",
+                    "post_action_tracker_continuity",
+                    "post_action_source_frame_stamp_ns", "post_action_tracker_diagnostics",
+                ):
+                    if key in continuity:
+                        preview[key] = continuity[key]
+            return {
+                "preview_result": preview,
+                "target_lock_result": {},
+                "target_lock_snapshot": {},
+                "selected_identity_id": None,
+                "identity_evidence": None,
+                "bridge_result": None,
+                "read_only": True,
+            }
+        evidence = self.build_find_marvin_controller_state(
             now=now,
             require_fresh_gemini=True,
             read_only=True,
         )
+        preview = evidence.get("preview_result") or {}
+        if preview.get("reason") in {
+            "Marvin was not found in the current camera frame.",
+            "marvin_identity_not_confirmed",
+        }:
+            # Semantic absence is not an action frame: inference/proposal
+            # latency can make its source stamp too old for a search turn.
+            baseline = _valid_source_frame_stamp(
+                preview.get("identity_source_frame_stamp_ns")
+            )
+            if baseline is None:
+                baseline = _valid_source_frame_stamp(preview.get("source_frame_stamp_ns"))
+            boundary = time.monotonic()
+            guard = self._strict_v2_current_execution_guard()
+            try:
+                if guard is not None:
+                    guard()
+                frame = self._fetch_strict_v2_frame_after(
+                    baseline,
+                    execution_guard=guard,
+                    minimum_received_monotonic_seconds=boundary,
+                )
+                if guard is not None:
+                    guard()
+                stamp = _valid_source_frame_stamp(frame.source_frame_stamp_ns)
+                if (baseline is None or stamp is None
+                        or stamp <= baseline
+                        or type(frame.width) is not int or frame.width <= 0
+                        or type(frame.height) is not int or frame.height <= 0):
+                    raise ValueError("fresh_search_frame_unavailable")
+                preview["identity_source_frame_stamp_ns"] = baseline
+                preview["source_frame_stamp_ns"] = stamp
+                preview["source_timestamp"] = frame.received_at
+                preview["received_monotonic_seconds"] = frame.received_monotonic_seconds
+            except Exception:
+                preview["source_frame_stamp_ns"] = None
+                preview["reason"] = "find_marvin_search_fresh_frame_unavailable"
+        return evidence
+
+    def reacquire_find_marvin_v2(self, *, minimum_source_frame_stamp_ns):
+        """Start a new Gemini episode while the runtime holds the stopped robot."""
+        self._clear_marvin_v2_tracker_episode()
+        guard = self._strict_v2_current_execution_guard()
+        # Discard the first relay sample after STOP; require camera advancement
+        # as well as a local receipt after this recovery boundary.
+        frame = self._fetch_strict_v2_frame_after(
+            minimum_source_frame_stamp_ns, execution_guard=guard,
+            minimum_received_monotonic_seconds=time.monotonic(),
+        )
+        preview = self.preview_find_object(
+            self.MARVIN_SEMANTIC_TARGET, require_fresh_gemini=True,
+            minimum_source_frame_stamp_ns=frame.source_frame_stamp_ns,
+        )
+        return {"preview_result": preview, "target_lock_result": {},
+                "target_lock_snapshot": {}, "selected_identity_id": None}
+
+    def mark_strict_v2_action_stopped(self, source_frame_stamp_ns, stopped_at):
+        with self._marvin_v2_tracker_episode_lock:
+            episode = self._marvin_v2_tracker_episode
+            if (isinstance(episode, dict) and episode.get("post_action_pending") is True
+                    and episode.get("post_action_source_frame_stamp_ns") == source_frame_stamp_ns):
+                episode["post_action_stopped_monotonic_seconds"] = stopped_at
+
+    def _fetch_strict_v2_frame_after(self, minimum_stamp, *, execution_guard=None,
+                                     minimum_received_monotonic_seconds=None,
+                                     deadline=None, fetch_frame=None, on_frame=None):
+        """Wait boundedly for actual camera advancement, never restamp a JPEG.
+
+        The relay may briefly return its cached latest frame. Polling is
+        perception only, uses the existing new-frame timeout, and checks STOP
+        around every fetch. Transport/invalid-stamp failures are not retried.
+        """
+        if deadline is None:
+            deadline = time.monotonic() + self.MARVIN_POST_TURN_FRAME_TIMEOUT_SECONDS
+        if fetch_frame is None:
+            fetch_frame = self.semantic_vision.fetch_frame
+        if type(minimum_stamp) is not int or minimum_stamp < 0:
+            raise ValueError("camera_source_stamp_invalid")
+        # Establish the relay's current source-clock baseline *after* slow
+        # semantics, then wait for advancement. This excludes a cached frame
+        # produced during Gemini without comparing clocks across hosts.
+        establish_source_floor = minimum_received_monotonic_seconds is not None
+        while time.monotonic() < deadline:
+            if execution_guard is not None:
+                execution_guard()
+            frame = fetch_frame()
+            if execution_guard is not None:
+                execution_guard()
+            if on_frame is not None:
+                on_frame(frame)
+            stamp = _valid_source_frame_stamp(getattr(frame, "source_frame_stamp_ns", None))
+            if stamp is None:
+                raise ValueError("camera_source_stamp_invalid")
+            if time.monotonic() >= deadline:
+                break
+            receipt = getattr(frame, "received_monotonic_seconds", None)
+            if minimum_received_monotonic_seconds is not None and (
+                type(receipt) not in (int, float) or not math.isfinite(receipt)
+                or receipt < minimum_received_monotonic_seconds
+                or receipt > time.monotonic()
+            ):
+                raise ValueError("camera_local_receipt_invalid")
+            if establish_source_floor:
+                minimum_stamp = max(minimum_stamp, stamp)
+                establish_source_floor = False
+                continue
+            if stamp > minimum_stamp:
+                return frame
+            if execution_guard is not None:
+                execution_guard()
+            time.sleep(min(self.MARVIN_POST_TURN_FRAME_POLL_SECONDS,
+                           max(0.0, deadline - time.monotonic())))
+        raise TimeoutError("new_camera_source_frame_unavailable")
+
+    def _strict_v2_current_execution_guard(self):
+        """Bind mission perception to its current execution, not diagnostics."""
+        provider = getattr(self, "execution_authorization_provider", None)
+        if not callable(provider) or not self._execution_is_current():
+            return None
+
+        def check():
+            if not self._execution_is_current():
+                raise _SemanticPreempted()
+
+        return check
+
+    def mark_strict_v2_action_dispatched(self, source_frame_stamp_ns, action):
+        """Require tracked evidence from a newer frame after V2 self-motion."""
+        if type(source_frame_stamp_ns) is not int or source_frame_stamp_ns < 0:
+            return False
+        with self._marvin_v2_tracker_episode_lock:
+            episode = self._marvin_v2_tracker_episode
+            if (not isinstance(episode, dict)
+                    or episode.get("last_tracker_source_frame_stamp_ns")
+                    != source_frame_stamp_ns
+                    or episode.get("identity_source")
+                    != "gemini_marvin_candidate_selection"):
+                return False
+            episode["post_action_pending"] = True
+            episode["post_action_source_frame_stamp_ns"] = source_frame_stamp_ns
+            episode["post_action_kind"] = str(action)
+            return True
+
+    def _continue_strict_v2_tracker_after_action(self):
+        """Continue only the locked tracker across known V2 self-motion.
+
+        Up to three genuinely newer frames may supply one independent valid
+        match during one bounded refresh window. Cached frames only wait.
+        Static candidate-vs-pre-action-box IoU is intentionally not
+        used across a commanded camera rotation/translation.  Failure clears
+        the episode so the next ordinary observation must reacquire via Gemini.
+        """
+        with self._marvin_v2_tracker_episode_lock:
+            episode = self._marvin_v2_tracker_episode
+            if not isinstance(episode, dict) or episode.get("post_action_pending") is not True:
+                return None
+            if episode.get("post_action_in_progress") is True:
+                return {
+                    "found": False,
+                    "reason": "post_action_tracker_continuity_in_progress",
+                }
+            episode = dict(episode)
+            self._marvin_v2_tracker_episode["post_action_in_progress"] = True
+        tracker = episode.get("marvin_tracker")
+        action_stamp = episode.get("post_action_source_frame_stamp_ns")
+        previous_stamp = episode.get("last_tracker_source_frame_stamp_ns")
+        previous_time = episode.get("last_tracker_received_at")
+        if (tracker is None or type(action_stamp) is not int
+                or type(previous_stamp) is not int or action_stamp != previous_stamp
+                or self.semantic_vision is None):
+            self._clear_marvin_v2_tracker_episode()
+            return {"found": False, "reason": "post_action_tracker_episode_invalid"}
+        started_at = time.monotonic()
+        stopped_at = episode.get("post_action_stopped_monotonic_seconds")
+        diagnostics = {
+            "pre_action_tracker_bbox": episode.get("tracker_bbox"),
+            "pre_action_tracker": episode.get("last_tracker_diagnostics"),
+            "pre_action_source_frame_stamp_ns": action_stamp,
+            "pre_action_received_at": previous_time,
+            "pre_action_received_monotonic_seconds": episode.get("last_tracker_received_monotonic_seconds"),
+            "action_kind": episode.get("post_action_kind"),
+            "action_stopped_monotonic_seconds": stopped_at,
+            "refresh_started_monotonic_seconds": started_at,
+            "stop_to_refresh_seconds": started_at - stopped_at if stopped_at is not None else None,
+        }
+        guard = self._strict_v2_current_execution_guard()
+        confirmed = self._confirm_marvin_local_tracker_frames(
+            tracker,
+            minimum_timestamp=previous_time,
+            minimum_source_frame_stamp_ns=action_stamp,
+            fetch_frame=self.semantic_vision.fetch_frame,
+            check_current=guard, diagnostics=diagnostics, post_action=True,
+        )
+        diagnostics["refresh_elapsed_seconds"] = time.monotonic() - started_at
+        frames = diagnostics.get("frames", [])
+        last_frame = frames[-1] if frames else {}
+        last_opencv = last_frame.get("opencv_tracker")
+        post_bbox = last_frame.get("tracker_bbox") or last_frame.get("tracker_candidate_bbox")
+        pre_bbox = episode.get("tracker_bbox")
+        diagnostics["post_action_candidate_bbox"] = post_bbox
+        diagnostics["pre_to_post_iou"] = self._target_bbox_iou(
+            {"bbox": pre_bbox}, {"bbox": post_bbox},
+        ) if post_bbox else None
+        if (self._target_bbox({"bbox": pre_bbox}) is not None
+                and self._target_bbox({"bbox": post_bbox}) is not None):
+            diagnostics["translation_pixels"] = {
+                axis: (post_bbox[axis + "1"] + post_bbox[axis + "2"]
+                       - pre_bbox[axis + "1"] - pre_bbox[axis + "2"]) / 2.0
+                for axis in ("x", "y")
+            }
+            diagnostics["bbox_scale_ratios"] = {
+                axis: (post_bbox[axis + "2"] - post_bbox[axis + "1"])
+                / (pre_bbox[axis + "2"] - pre_bbox[axis + "1"])
+                for axis in ("x", "y")
+                if pre_bbox[axis + "2"] > pre_bbox[axis + "1"]
+            }
+        diagnostics["pre_to_post_iou_used_for_admission"] = False
+        opencv = confirmed.get("opencv_tracker") if isinstance(confirmed, dict) else None
+        stamp = opencv.get("source_frame_stamp_ns") if isinstance(opencv, dict) else None
+        bbox = opencv.get("bbox") if isinstance(opencv, dict) else None
+        quality, threshold = (
+            (opencv.get("quality"), opencv.get("threshold"))
+            if isinstance(opencv, dict) else (None, None)
+        )
+        valid = bool(
+            isinstance(confirmed, dict) and type(stamp) is int
+            and stamp > action_stamp and isinstance(bbox, dict)
+            and opencv.get("active") is True and opencv.get("matched") is True
+            and isinstance(quality, (int, float)) and not isinstance(quality, bool)
+            and isinstance(threshold, (int, float)) and not isinstance(threshold, bool)
+            and math.isfinite(float(quality)) and math.isfinite(float(threshold))
+            and quality >= threshold
+        )
+        if not valid:
+            diagnostics["failure_reason"] = diagnostics.get("failure_reason") or "post_action_tracker_evidence_invalid"
+            self._clear_marvin_v2_tracker_episode()
+            reason = ("find_marvin_post_action_camera_new_frame_timeout"
+                      if diagnostics["failure_reason"] == "find_marvin_post_action_camera_new_frame_timeout"
+                      else "post_action_tracker_continuity_lost")
+            return {
+                "found": False,
+                "source_frame_stamp_ns": stamp if stamp is not None else last_frame.get("source_frame_stamp_ns"),
+                "post_action_tracker_diagnostics": diagnostics,
+                "opencv_tracker": opencv or last_opencv or self._empty_opencv_tracker_diagnostic(
+                    reason=reason,
+                ),
+                "reason": reason,
+                "strict_tracker_episode": self._strict_v2_tracker_diagnostic(
+                    active=False, continued=True, initialized=False,
+                    accepted=False, reason=reason,
+                ),
+            }
+        episode.update(
+            tracker_bbox=dict(bbox), last_tracker_source_frame_stamp_ns=stamp,
+            last_tracker_diagnostics=dict(opencv),
+            last_tracker_received_monotonic_seconds=confirmed.get("received_monotonic_seconds"),
+            last_tracker_received_at=confirmed.get("source_timestamp"),
+            post_action_pending=False, post_action_in_progress=False,
+        )
+        with self._marvin_v2_tracker_episode_lock:
+            # Do not resurrect an episode that was invalidated concurrently.
+            current = self._marvin_v2_tracker_episode
+            if (not isinstance(current, dict)
+                    or current.get("post_action_source_frame_stamp_ns") != action_stamp
+                    or current.get("post_action_pending") is not True
+                    or current.get("post_action_in_progress") is not True
+                    or current.get("marvin_tracker") is not tracker):
+                self._marvin_v2_tracker_episode = None
+                return {"found": False, "reason": "post_action_tracker_episode_superseded"}
+            self._marvin_v2_tracker_episode = episode
+        identity_stamp = episode.get("identity_source_frame_stamp_ns")
+        confirmed.update(
+            post_action_tracker_diagnostics=diagnostics,
+            identity_confirmed=True,
+            identity_source="marvin_locked_tracker_continuity",
+            identity_source_frame_stamp_ns=identity_stamp,
+            motion_authorized_marvin_candidate=True,
+            strict_tracker_episode=self._strict_v2_tracker_diagnostic(
+                active=True, continued=True, initialized=False,
+                accepted=True, reason="post_action_tracker_continuity_matched",
+            ),
+            marvin_tracking_episode={
+                "episode_id": episode.get("episode_id"),
+                "identity_source": episode.get("identity_source"),
+                "identity_source_frame_stamp_ns": identity_stamp,
+                "post_action_source_frame_stamp_ns": action_stamp,
+                "post_action_kind": episode.get("post_action_kind"),
+                "tracker_initialized": True,
+                "tracker_source_frame_stamp_ns": stamp,
+                "tracker_quality": quality,
+                "tracker_bbox": dict(bbox),
+                "state": "POST_ACTION_TRACKED",
+            },
+            post_action_tracker_continuity=True,
+            post_action_source_frame_stamp_ns=action_stamp,
+        )
+        return confirmed
 
     @staticmethod
     def _marvin_target_lock_snapshot_is_locked(snapshot):
@@ -3398,7 +3916,7 @@ class BehaviorManager:
 
     @staticmethod
     def _marvin_v2_preview_is_verified(preview):
-        """Fail closed unless fresh Gemini identity and current OpenCV evidence coexist."""
+        """Validate fresh semantic acquisition or locked post-action tracking."""
         if not isinstance(preview, dict):
             return False
         identity_stamp = _valid_source_frame_stamp(
@@ -3434,11 +3952,8 @@ class BehaviorManager:
             and preview.get("image_width") == width
             and preview.get("image_height") == height
         )
-        return bool(
-            preview.get("identity_confirmed") is True
-            and preview.get("identity_source") == "gemini_marvin_candidate_selection"
-            and identity_stamp is not None
-            and tracker.get("active") is True
+        common_current_tracker = bool(
+            tracker.get("active") is True
             and tracker.get("matched") is True
             and isinstance(quality, (int, float))
             and not isinstance(quality, bool)
@@ -3448,9 +3963,29 @@ class BehaviorManager:
             and math.isfinite(threshold)
             and quality >= threshold
             and tracker_stamp is not None
-            and tracker_stamp > identity_stamp
             and validated_bbox is not None
             and tracker_bbox_matches
+        )
+        if (preview.get("identity_source") == "marvin_locked_tracker_continuity"
+                and preview.get("post_action_tracker_continuity") is True):
+            episode = preview.get("marvin_tracking_episode")
+            return bool(
+                preview.get("identity_confirmed") is True
+                and isinstance(episode, dict)
+                and episode.get("state") == "POST_ACTION_TRACKED"
+                and type(identity_stamp) is int
+                and tracker_stamp is not None and tracker_stamp > identity_stamp
+                and type(episode.get("post_action_source_frame_stamp_ns")) is int
+                and tracker_stamp > episode["post_action_source_frame_stamp_ns"]
+                and common_current_tracker
+            )
+        return bool(
+            preview.get("identity_confirmed") is True
+            and preview.get("identity_source") == "gemini_marvin_candidate_selection"
+            and identity_stamp is not None
+            and tracker_stamp is not None
+            and tracker_stamp > identity_stamp
+            and common_current_tracker
         )
 
     def execute_marvin_pursuit_step(
@@ -3848,17 +4383,36 @@ class BehaviorManager:
 
     def execute_single_marvin_approach_step(
         self, *, expected_lidar_session, linear_speed, duration,
+        target_tracker=None, camera_model=None, dispatch_guard=None,
     ):
-        """Run one fixed Marvin forward primitive, with no avoidance branch."""
+        """Run one bounded Marvin forward primitive, with no avoidance branch."""
         base = {"ok": False, "decision": "no_motion", "executed_primitive": None,
                 "motion_executed": False, "forward_safety": None, "reason": None}
         if (linear_speed != self.FIND_APPROACH_FORWARD_SPEED
-                or duration != self.FIND_APPROACH_FORWARD_SECONDS):
+                or type(duration) not in (int, float) or not math.isfinite(duration)
+                or not 0 < duration <= self.FIND_APPROACH_FORWARD_SECONDS):
             return dict(base, reason="marvin_single_approach_parameters_invalid")
         if expected_lidar_session is None or self.world_model is None:
             return dict(base, reason="lidar_producer_session_unavailable")
         try:
             lidar = self.world_model.get_lidar_obstacles(expected_session=expected_lidar_session)
+            if target_tracker is not None:
+                from marvin_lidar_standoff import TARGET_STANDOFF_M, evaluate_marvin_lidar_standoff
+                standoff = evaluate_marvin_lidar_standoff(
+                    target_tracker, lidar, camera_model, expected_session=expected_lidar_session,
+                )
+                base["target_standoff"] = standoff
+                base["action_lidar_evidence"] = {
+                    "producer_session": lidar.get("producer_session"),
+                    "acquisition_sequence": lidar.get("acquisition_sequence"),
+                    "source": lidar.get("source"),
+                    "received_monotonic_seconds": lidar.get("received_monotonic_seconds"),
+                    "effective_age_seconds": lidar.get("effective_age_seconds"),
+                }
+                if standoff.get("ok") is not True or standoff.get("arrived_at_marvin") is True:
+                    return dict(base, reason="marvin_single_approach_target_standoff_vetoed")
+                duration = min(duration, (standoff["target_distance_m"] - TARGET_STANDOFF_M) / linear_speed)
+            base["duration"] = duration
             safety = evaluate_local_motion_safety(
                 lidar, expected_session=expected_lidar_session,
                 linear_x=linear_speed, duration=duration,
@@ -3872,9 +4426,19 @@ class BehaviorManager:
         if safety.get("permitted") is not True:
             return dict(base, reason="marvin_single_approach_translation_vetoed")
         try:
+            if dispatch_guard is not None and dispatch_guard() is not True:
+                return dict(base, reason="marvin_motion_observation_stale_or_preempted")
+            self._emit_marvin_command_diagnostic(
+                "start", start_monotonic_seconds=time.monotonic(), linear_x=linear_speed,
+                angular_z=0.0, duration=duration,
+            )
             forward = self.robot.move_forward(
-                speed=self.FIND_APPROACH_FORWARD_SPEED,
-                seconds=self.FIND_APPROACH_FORWARD_SECONDS,
+                speed=linear_speed,
+                seconds=duration,
+            )
+            self._emit_marvin_command_diagnostic(
+                "complete", completion_monotonic_seconds=time.monotonic(),
+                bridge_acknowledgement=forward,
             )
         except Exception as exc:
             return dict(base, decision="approach_forward", executed_primitive="forward",
@@ -3900,8 +4464,8 @@ class BehaviorManager:
         """Run the established single bounded forward primitive for local use.
 
         This is deliberately a semantic-free delegate, not another motion
-        implementation.  It retains the existing 0.08 m/s, 0.50 s forward
-        values, local-motion envelope check, and forward-interlock dispatch
+        implementation.  It uses the canonical Find Marvin speed and 0.50 s
+        bound, local-motion envelope check, and forward-interlock dispatch
         gate owned by ``execute_single_marvin_approach_step``.
         """
         del now  # The delegated primitive obtains its own current snapshot.
@@ -5310,6 +5874,8 @@ class BehaviorManager:
                         + (": " + str(exc) if str(exc) else "")
                     ),
                 )
+                if require_fresh_gemini and isinstance(exc, _MarvinLocalTrackerConfirmationRequired):
+                    negative_preview["reason"] = "find_marvin_post_semantic_tracker_refresh_failed"
                 tracker_diagnostics = getattr(exc, "opencv_tracker", None)
                 if isinstance(tracker_diagnostics, dict):
                     negative_preview["opencv_tracker"] = tracker_diagnostics
@@ -5331,6 +5897,7 @@ class BehaviorManager:
                 negative_preview = dict(
                     base,
                     source_frame_stamp_ns=observation.get("source_frame_stamp_ns"),
+                    identity_source_frame_stamp_ns=observation.get("identity_source_frame_stamp_ns"),
                     motion_authorized_marvin_candidate=False,
                     reason=observation.get("reason", "Marvin was not found in the current camera frame."),
                 )
@@ -5872,6 +6439,8 @@ class BehaviorManager:
         return self._acquire_marvin_proposal_tracker_observation(
             minimum_source_frame_stamp_ns=minimum_source_frame_stamp_ns,
             require_fresh_gemini=require_fresh_gemini,
+            execution_guard=(self._strict_v2_current_execution_guard()
+                             if require_fresh_gemini else None),
         )
 
     def _acquire_marvin_proposal_tracker_observation(
@@ -5960,7 +6529,10 @@ class BehaviorManager:
 
         if execution_guard is not None:
             execution_guard()
-        frame = semantic_vision.fetch_frame()
+        frame = (self._fetch_strict_v2_frame_after(
+            minimum_source_frame_stamp_ns, execution_guard=execution_guard,
+        ) if require_fresh_gemini and minimum_source_frame_stamp_ns is not None
+            else semantic_vision.fetch_frame())
         if execution_guard is not None:
             execution_guard()
         if any(
@@ -5972,6 +6544,8 @@ class BehaviorManager:
         candidates = candidates[: self.MARVIN_PREVIEW_MAX_SEMANTIC_CANDIDATES]
         if execution_guard is not None:
             execution_guard()
+        if require_fresh_gemini:
+            self._emit_marvin_semantic_frame_diagnostic(frame)
         identity = semantic_vision.select_marvin_candidate(frame, candidates)
         if execution_guard is not None:
             execution_guard()
@@ -5985,6 +6559,9 @@ class BehaviorManager:
                 "found": False,
                 "source_frame_stamp_ns": diagnostics.get(
                     "latest_source_frame_stamp_ns"
+                ),
+                "identity_source_frame_stamp_ns": _valid_source_frame_stamp(
+                    getattr(frame, "source_frame_stamp_ns", None)
                 ),
                 "reason": "marvin_identity_not_confirmed",
             }
@@ -6013,12 +6590,15 @@ class BehaviorManager:
             raise ValueError("marvin_candidate_selection_index_invalid")
         yolo_candidate = candidates[selected_index]
         if require_fresh_gemini:
+            self._emit_marvin_semantic_frame_diagnostic(frame, yolo_candidate)
             return self._acquire_strict_v2_tracker_observation_from_candidate(
                 yolo_candidate, diagnostics,
                 identity_source=identity_source,
                 identity_source_frame_stamp_ns=identity_source_stamp,
                 execution_guard=execution_guard,
                 frame=frame,
+                action_frame_minimum_stamp_ns=identity_source_stamp,
+                action_frame_minimum_received_monotonic_seconds=time.monotonic(),
             )
         result = self._acquire_marvin_tracker_observation_from_candidate(
             yolo_candidate,
@@ -6057,6 +6637,8 @@ class BehaviorManager:
     def _acquire_strict_v2_tracker_observation_from_candidate(
         self, yolo_candidate, diagnostics, *, identity_source,
         identity_source_frame_stamp_ns, execution_guard, frame,
+        action_frame_minimum_stamp_ns=None,
+        action_frame_minimum_received_monotonic_seconds=None,
     ):
         """Keep strict V2 geometry bound to one semantically rechecked tracker.
 
@@ -6066,6 +6648,18 @@ class BehaviorManager:
         A disagreement clears the episode; it never seeds a replacement in
         the same observation.
         """
+        if (identity_source != "gemini_marvin_candidate_selection"
+                or _valid_source_frame_stamp(identity_source_frame_stamp_ns) is None):
+            self._clear_marvin_v2_tracker_episode()
+            return {
+                "found": False, "identity_source": identity_source,
+                "identity_source_frame_stamp_ns": identity_source_frame_stamp_ns,
+                "reason": "marvin_v2_fresh_identity_invalid",
+                "strict_tracker_episode": self._strict_v2_tracker_diagnostic(
+                    active=False, continued=False, initialized=False,
+                    accepted=False, reason="fresh_identity_invalid",
+                ),
+            }
         candidate_bbox = self._target_bbox(yolo_candidate)
         if candidate_bbox is None:
             self._clear_marvin_v2_tracker_episode()
@@ -6130,6 +6724,12 @@ class BehaviorManager:
                     require_fresh_gemini=True, execution_guard=execution_guard,
                     episode=episode, frame=frame,
                     existing_tracker=(episode.get("marvin_tracker") if continued else None),
+                    minimum_source_frame_stamp_ns=(
+                        action_frame_minimum_stamp_ns
+                        if action_frame_minimum_stamp_ns is not None
+                        else identity_source_frame_stamp_ns
+                    ),
+                    minimum_received_monotonic_seconds=action_frame_minimum_received_monotonic_seconds,
                 )
             except Exception:
                 self._marvin_v2_tracker_episode = None
@@ -6141,6 +6741,8 @@ class BehaviorManager:
             if (
                 type(stamp) is not int or stamp < 0 or not isinstance(bbox, dict)
                 or (continued and (type(previous_stamp) is not int or stamp <= previous_stamp))
+                or (action_frame_minimum_stamp_ns is not None
+                    and stamp <= action_frame_minimum_stamp_ns)
             ):
                 self._marvin_v2_tracker_episode = None
                 return {
@@ -6152,9 +6754,18 @@ class BehaviorManager:
                         accepted=False, reason="tracker_source_stamp_invalid",
                     ),
                 }
-            episode.update(marvin_tracker=episode.get("marvin_tracker"),
-                           tracker_bbox=dict(bbox),
-                           last_tracker_source_frame_stamp_ns=stamp)
+            episode.update(
+                marvin_tracker=episode.get("marvin_tracker"),
+                tracker_bbox=dict(bbox),
+                last_tracker_diagnostics=dict(tracker),
+                last_tracker_source_frame_stamp_ns=stamp,
+                last_tracker_received_at=result.get("source_timestamp"),
+                last_tracker_received_monotonic_seconds=result.get("received_monotonic_seconds"),
+                identity_source=identity_source,
+                identity_source_frame_stamp_ns=identity_source_frame_stamp_ns,
+                episode_id=(episode.get("episode_id") or
+                            "marvin-v2-" + str(identity_source_frame_stamp_ns)),
+            )
             self._marvin_v2_tracker_episode = episode
             result["strict_tracker_episode"] = self._strict_v2_tracker_diagnostic(
                 active=True, continued=continued, initialized=initialized,
@@ -6241,6 +6852,10 @@ class BehaviorManager:
                 getattr(tracker, "last_source_frame_stamp_ns", None),
             )
         )
+        # Bind receipt to this exact update frame, never to the older seed or
+        # to tracker metadata retained from an earlier frame.
+        diagnostic["received_monotonic_seconds"] = getattr(frame, "received_monotonic_seconds", None)
+        diagnostic["received_monotonic_clock"] = "local_process_relative"
         if bbox is not None:
             center_x = (bbox["x1"] + bbox["x2"]) / 2.0
             center_y = (bbox["y1"] + bbox["y2"]) / 2.0
@@ -6272,6 +6887,8 @@ class BehaviorManager:
         identity_source_frame_stamp_ns=None,
         require_fresh_gemini=False,
         existing_tracker=None,
+        minimum_source_frame_stamp_ns=None,
+        minimum_received_monotonic_seconds=None,
     ):
         """Confirm fresh local-tracker geometry for one selected proposal."""
         semantic_vision = self.semantic_vision
@@ -6322,11 +6939,25 @@ class BehaviorManager:
             )
         else:
             episode["marvin_tracker"] = existing_tracker
+        current_frame_floor = minimum_source_frame_stamp_ns
+
+        def fetch_tracker_frame():
+            nonlocal current_frame_floor
+            if require_fresh_gemini and current_frame_floor is not None:
+                current = self._fetch_strict_v2_frame_after(
+                    current_frame_floor, execution_guard=execution_guard,
+                    minimum_received_monotonic_seconds=minimum_received_monotonic_seconds,
+                )
+                current_frame_floor = current.source_frame_stamp_ns
+                return current
+            return semantic_vision.fetch_frame()
+
         try:
             confirmed = self._confirm_marvin_local_tracker_frames(
                 episode["marvin_tracker"],
                 minimum_timestamp=frame.received_at,
-                fetch_frame=semantic_vision.fetch_frame,
+                minimum_source_frame_stamp_ns=minimum_source_frame_stamp_ns,
+                fetch_frame=fetch_tracker_frame,
                 check_current=execution_guard,
             )
         finally:
@@ -6363,8 +6994,11 @@ class BehaviorManager:
             proposal_label=yolo_candidate.get("proposal_label"),
             proposal_confidence=yolo_candidate.get("confidence"),
             proposal_support=yolo_candidate.get("proposal_support"),
-            source_frame_stamp_ns=yolo_candidate.get(
-                "source_frame_stamp_ns"
+            # Identity came from the semantic seed; motion belongs only to
+            # the latest confirmed local tracker frame, never that seed.
+            source_frame_stamp_ns=(
+                (confirmed.get("opencv_tracker") or {}).get("source_frame_stamp_ns")
+                if require_fresh_gemini else yolo_candidate.get("source_frame_stamp_ns")
             ),
             detector_confidence=yolo_candidate.get("confidence"),
             geometry_source="yolo_proposal",
@@ -6902,6 +7536,7 @@ class BehaviorManager:
             "target_observation": observation,
         }
         if target_name == self.MARVIN_SEMANTIC_TARGET:
+            result["received_monotonic_seconds"] = observation.get("received_monotonic_seconds")
             result["source_frame_stamp_ns"] = observation.get(
                 "source_frame_stamp_ns"
             )

@@ -53,14 +53,16 @@ def _runtime():
 def test_clear_path_uses_exactly_one_direct_single_step(monkeypatch):
     runtime = _runtime()
     runtime.run_local_reactive_step.return_value = _single_step()
-    monkeypatch.setattr(runtime_module, "decide_forward_reaction",
-                        lambda *_args, **_kwargs: _decision("FORWARD_CLEAR"))
+    decision = Mock(return_value=_decision("FORWARD_CLEAR"))
+    monkeypatch.setattr(runtime_module, "decide_forward_reaction", decision)
 
     result = runtime.run_local_progress_with_avoidance()
 
     assert result["terminal_state"] == "LOCAL_PROGRESS_COMPLETE"
     assert result["mode"] == "DIRECT_FORWARD"
     assert result["physical_actions"] == 1
+    decision.assert_called_once_with(
+        {"fresh": True}, expected_session=SESSION, forward_linear_speed=0.10)
     runtime.run_local_reactive_step.assert_called_once_with()
     runtime.run_bounded_local_reactive_avoidance.assert_not_called()
 

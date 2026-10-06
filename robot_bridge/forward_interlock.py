@@ -71,6 +71,7 @@ class ForwardMotionInterlock:
         self._dispatch_sequence = 0
         self._dispatch_epochs = {}
         self._dispatch_modes = {}
+        self._dispatch_details = {}
         self._bounded_authorization_consumed = False
         self._last_stop_error = None
         self._stopped = False
@@ -90,6 +91,7 @@ class ForwardMotionInterlock:
         state = self._read()
         permitted, reason = evaluate_lidar_state(state, self.expected_session)
         should_stop = False
+        pending = []
         with self._lock:
             was_active = self._active_forward or bool(self._pending_dispatches.get(self._generation))
             self._state = copy.deepcopy(state) if isinstance(state, dict) else None
@@ -107,13 +109,33 @@ class ForwardMotionInterlock:
                     generation != self._generation for generation in self._pending_dispatches
                 )
                 self._reason = reason
+            if should_stop:
+                pending = list(self._dispatch_epochs)
+                for dispatch in pending:
+                    details = self._dispatch_details[dispatch]
+                    details.setdefault("interruption_monotonic_seconds", self.monotonic())
+                    details.setdefault("invalidating_lidar_evidence", copy.deepcopy({
+                        key: (self._state or {}).get(key) for key in (
+                            "producer_session", "acquisition_sequence", "received_monotonic_seconds",
+                            "effective_age_seconds", "available", "valid", "reason", "source",
+                            "age_at_receipt_seconds", "request_latency_seconds",
+                            "acquisition_started_at", "completed_at")}))
+                    details["stop_pending"] += 1
         if should_stop:
-            self._dispatch_stop()
+            event = self._dispatch_stop()
+            with self._lock:
+                for dispatch in pending:
+                    if dispatch in self._dispatch_details:
+                        details = self._dispatch_details[dispatch]
+                        details["stop_events"].append(event)
+                        details["stop_pending"] -= 1
         return permitted, reason
 
     def _dispatch_stop(self):
         """STOP is ungated and always called outside the interlock lock."""
         error = None
+        started = self.monotonic()
+        result = None
         try:
             result = self.stop_callback()
             if not isinstance(result, dict) or result.get("ok") is not True:
@@ -123,6 +145,9 @@ class ForwardMotionInterlock:
         if error is not None:
             with self._lock:
                 self._last_stop_error = error
+        return {"started_monotonic_seconds": started,
+                "completed_monotonic_seconds": self.monotonic(),
+                "result": copy.deepcopy(result), "error": error}
 
     def begin_positive_dispatch(self, *, streaming):
         with self._lock:
@@ -142,6 +167,9 @@ class ForwardMotionInterlock:
             self._dispatch_sequence += 1
             self._dispatch_epochs[dispatch_id] = epoch
             self._dispatch_modes[dispatch_id] = bool(streaming)
+            self._dispatch_details[dispatch_id] = {
+                "dispatch_started_monotonic_seconds": self.monotonic(),
+                "stop_events": [], "stop_pending": 0}
             self._pending_dispatches[epoch] = (
                 self._pending_dispatches.get(epoch, 0) + 1
             )
@@ -178,14 +206,18 @@ class ForwardMotionInterlock:
                 self._active_forward = True
             if not streaming:
                 self._bounded_authorization_consumed = True
-                if invalidated:
-                    self._dispatch_outcomes[generation] = {
-                        "valid": False,
-                        "reason": invalidation_reason,
-                    }
         if invalidated:
-            self._dispatch_stop()
+            event = self._dispatch_stop()
         with self._lock:
+            details = self._dispatch_details.pop(generation)
+            if invalidated:
+                details["stop_events"].append(event)
+                if not streaming:
+                    self._dispatch_outcomes[generation] = {
+                        "valid": False, "reason": invalidation_reason, **details,
+                        "stop_succeeded": (details["stop_pending"] == 0
+                                           and all(e["error"] is None for e in details["stop_events"])),
+                    }
             remaining = self._pending_dispatches[epoch] - 1
             if remaining:
                 self._pending_dispatches[epoch] = remaining

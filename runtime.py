@@ -3,15 +3,22 @@
 import argparse
 import json
 import math
+import os
 import signal
 import threading
 import time
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
-from behavior_manager import BehaviorManager
+from behavior_manager import (
+    BehaviorManager, FIND_MARVIN_FORWARD_SPEED_MPS,
+    LOCAL_AVOIDANCE_LIDAR_POLL_INTERVAL_SECONDS,
+)
 from guarded_turn_policy import ROTATIONAL_SWEPT_FOOTPRINT
 from marvin_arrival_policy import evaluate_marvin_visual_arrival
+from marvin_lidar_standoff import TARGET_STANDOFF_M, evaluate_marvin_lidar_standoff
+from marvin_progress_diagnostics import MarvinProgressDiagnostics
+from marvin_search_policy import MAX_SCAN_TURNS, SCAN_DIRECTION
 from marvin_pursuit_state import (
     FIND_CENTER_TOLERANCE_PIXELS,
     VISUAL_READY_TO_ALIGN,
@@ -19,7 +26,9 @@ from marvin_pursuit_state import (
     evaluate_marvin_pursuit_state,
 )
 from config import load_config
-from lidar_perception import LidarPerceptionWorker, unavailable_state
+from lidar_perception import (
+    LidarPerceptionWorker, MAXIMUM_EFFECTIVE_AGE_SECONDS, unavailable_state,
+)
 from robot_bridge.forward_interlock import (
     ForwardMotionInterlock,
     evaluate_lidar_state,
@@ -89,6 +98,16 @@ class CognitiveRuntime:
     FIND_MARVIN_AUTONOMOUS_MAX_ACTIONS = 6
     FIND_MARVIN_MAX_EPISODES = 4
     FIND_MARVIN_SCAN_MAX_EPISODES = 6
+    MAX_CONSECUTIVE_MARVIN_REACQUISITION_FAILURES = 3
+    # One recovery per existing full-search turn allowance is a secondary
+    # mission bound; successes reset failures, but cannot recover forever.
+    MAX_MARVIN_REACQUISITION_EPISODES = MAX_SCAN_TURNS
+    MAX_CONSECUTIVE_MARVIN_LIDAR_INTERRUPTION_FAILURES = 3
+    MARVIN_MOTION_OBSERVATION_MAX_AGE_SECONDS = 1.0
+    # LD06 acquisition polls every 0.08 s with a 0.25 s request deadline.
+    # Allow two freshness windows for a new publication, without relaxing age.
+    MARVIN_NEW_LIDAR_TIMEOUT_SECONDS = 2 * MAXIMUM_EFFECTIVE_AGE_SECONDS
+    MARVIN_NEW_LIDAR_POLL_SECONDS = LOCAL_AVOIDANCE_LIDAR_POLL_INTERVAL_SECONDS
     MAX_ACTIVE_LOCALIZATION_TURNS = 6
     ACTIVE_LOCALIZATION_TURN_SPEED = 0.25
     ACTIVE_LOCALIZATION_TURN_DURATION = 0.50
@@ -107,6 +126,7 @@ class CognitiveRuntime:
         lidar_worker_factory=None,
         semantic_vision=None,
         localization_facade=None,
+        marvin_camera_model=None,
     ):
         self.config = None
 
@@ -137,6 +157,22 @@ class CognitiveRuntime:
             vision_adapter=self.vision_adapter,
             world_model=self.world_model,
             semantic_vision=semantic_vision,
+        )
+        # Measured camera intrinsics/extrinsics only; absence blocks V2 approach.
+        # See marvin_lidar_standoff.py for the calibration JSON fields.
+        if marvin_camera_model is None:
+            try:
+                marvin_camera_model = json.loads(os.getenv("MARVIN_CAMERA_LIDAR_CALIBRATION", "null"))
+            except (ValueError, TypeError):
+                marvin_camera_model = {}
+        self.marvin_camera_model = marvin_camera_model
+        self._marvin_last_action_lidar_evidence = None
+        self.marvin_progress_diagnostics = MarvinProgressDiagnostics()
+        self.behavior_manager.marvin_command_diagnostic_callback = (
+            lambda *args: self._retain_marvin_diagnostic("command_event", *args)
+        )
+        self.behavior_manager.marvin_perception_diagnostic_callback = (
+            lambda *args: self._retain_marvin_diagnostic("perception_event", *args)
         )
 
         self.loop_interval = (
@@ -197,6 +233,10 @@ class CognitiveRuntime:
                 self.world_model,
                 base_url=getattr(self.robot_client, "base_url", None),
             )
+            try:
+                self.lidar_worker.diagnostic_sample_callback = lambda sample: self._retain_marvin_diagnostic("record_lidar", sample)
+            except Exception:
+                pass  # Optional retention cannot disable the safety producer.
             self.forward_interlock = ForwardMotionInterlock(
                 self.world_model.get_lidar_obstacles,
                 expected_session=self.lidar_worker.session,
@@ -214,6 +254,13 @@ class CognitiveRuntime:
                 self.world_model.publish_lidar_obstacles(unavailable_state("worker_creation_failed"))
             except Exception:
                 pass
+
+    def _retain_marvin_diagnostic(self, method, *args, **kwargs):
+        """Diagnostics have no return path into control or safety admission."""
+        try:
+            return getattr(self.marvin_progress_diagnostics, method)(*args, **kwargs)
+        except Exception:
+            return None
 
     def _start_lidar(self):
         with self._lidar_lifecycle_lock:
@@ -329,6 +376,18 @@ class CognitiveRuntime:
         )
 
     def observe_find_marvin_v2(self):
+        # Diagnostics must not supersede a mission-owned observation.
+        lock = getattr(self, "_marvin_controller_lock", None)
+        if lock is not None and not lock.acquire(blocking=False):
+            return {"ok": False, "read_only": True, "executed": False,
+                    "reason": "find_marvin_controller_owned"}
+        try:
+            return self._observe_find_marvin_v2()
+        finally:
+            if lock is not None:
+                lock.release()
+
+    def _observe_find_marvin_v2(self, *, reacquisition_source_floor=None):
         """Return one strict V2 decision without controller or motion side effects."""
         base = {
             "ok": False,
@@ -362,7 +421,12 @@ class CognitiveRuntime:
             self._reset_marvin_alignment_consensus()
             return dict(base, reason="find_marvin_v2_observer_unavailable")
         try:
-            evidence = observer()
+            if reacquisition_source_floor is None:
+                evidence = observer()
+            else:
+                evidence = self.behavior_manager.reacquire_find_marvin_v2(
+                    minimum_source_frame_stamp_ns=reacquisition_source_floor,
+                )
         except Exception as exc:
             self._reset_marvin_alignment_consensus()
             return dict(base, reason="find_marvin_v2_observation_failed",
@@ -377,8 +441,19 @@ class CognitiveRuntime:
         tracker = preview.get("opencv_tracker")
         identity_source = preview.get("identity_source")
         common = dict(
+            # Tony2 process-relative diagnostic, not a portable timestamp.
+            received_monotonic_seconds=(tracker.get("received_monotonic_seconds")
+                if isinstance(tracker, dict) and tracker.get("active") is True
+                else preview.get("received_monotonic_seconds")),
+            received_monotonic_clock="local_process_relative",
+            source_frame_stamp_ns=(tracker.get("source_frame_stamp_ns")
+                                   if isinstance(tracker, dict) and tracker.get("active") is True
+                                   else preview.get("source_frame_stamp_ns")),
+            target_found=preview.get("target_found") is True,
+            perception_reason=preview.get("reason"),
             identity_confirmed=preview.get("identity_confirmed") is True,
             identity_source=identity_source,
+            identity_source_frame_stamp_ns=preview.get("identity_source_frame_stamp_ns"),
             proposal_label=preview.get("proposal_label"),
             proposal_confidence=preview.get("proposal_confidence"),
             opencv_tracker=dict(tracker) if isinstance(tracker, dict) else None,
@@ -388,7 +463,19 @@ class CognitiveRuntime:
                 else None
             ),
             session_continuity_used=(identity_source == "marvin_session_continuity"),
+            marvin_tracking_episode=preview.get("marvin_tracking_episode"),
+            post_action_tracker_diagnostics=preview.get("post_action_tracker_diagnostics"),
         )
+        post_action_continuity = (
+            preview.get("post_action_tracker_continuity") is True
+            and identity_source == "marvin_locked_tracker_continuity"
+        )
+        if post_action_continuity:
+            common["fresh_gemini_required"] = False
+            common["post_action_tracker_continuity"] = True
+            common["post_action_source_frame_stamp_ns"] = preview.get(
+                "post_action_source_frame_stamp_ns"
+            )
         # V2 verification is deliberately repeated here as a response gate:
         # generic Gemini proposal labels are accepted, continuity is not.
         verifier = getattr(self.behavior_manager, "_marvin_v2_preview_is_verified", None)
@@ -408,14 +495,21 @@ class CognitiveRuntime:
         )
         state = pursuit.get("state", "INSUFFICIENT_EVIDENCE") if isinstance(pursuit, dict) else "INSUFFICIENT_EVIDENCE"
         reason = pursuit.get("reason") if isinstance(pursuit, dict) else "pursuit_result_malformed"
-        arrival = evaluate_marvin_visual_arrival(preview)
-        if isinstance(arrival, dict) and arrival.get("arrived_at_marvin") is True:
-            decision = "ARRIVED"
-        elif state == VISUAL_READY_TO_ALIGN:
+        visual_arrival = evaluate_marvin_visual_arrival(preview)
+        arrival = {"ok": False, "arrived_at_marvin": False,
+                   "authority": "target_bearing_lidar", "reason": "marvin_not_centered"}
+        if state == VISUAL_READY_TO_ALIGN:
             error = pursuit.get("horizontal_error")
             decision = "TURN_LEFT" if error < 0 else "TURN_RIGHT" if error > 0 else "BLOCKED"
         elif state == VISUAL_READY_TO_APPROACH:
-            decision = "FORWARD"
+            arrival = self._marvin_v2_lidar_arrival(tracker)
+            reason = arrival["reason"]
+            if arrival.get("ok") is not True:
+                state, decision = "BLOCKED", "BLOCKED"
+            elif arrival.get("arrived_at_marvin") is True:
+                state, decision = "ARRIVED", "ARRIVED"
+            else:
+                decision = "FORWARD"
         elif state == "SEARCHING":
             decision = "SEARCH"
         else:
@@ -423,27 +517,55 @@ class CognitiveRuntime:
         result = dict(base, **common, ok=True, reason=reason,
                       controller={"state": state, "decision": decision,
                                   "reason": reason,
+                                  "distance_state": ("ARRIVED" if decision == "ARRIVED" else
+                                                     "APPROACH" if decision == "FORWARD" else "UNKNOWN"),
                                   "center_tolerance_pixels": FIND_CENTER_TOLERANCE_PIXELS},
-                      arrival=arrival)
+                      arrival=arrival, visual_arrival=visual_arrival)
         geometry_continuity = self._update_marvin_alignment_geometry_continuity(
             result, tracker, state, decision,
         )
         result["geometry_continuity"] = geometry_continuity
+        # A current strict tracker observation authorizes at most one bounded
+        # action.  The former three-observation turn consensus made normal
+        # closed-loop pursuit brittle: one transient tracker-quality miss
+        # discarded otherwise current Marvin evidence.  Geometry continuity
+        # still gates turns, while a centered strict observation independently
+        # authorizes one guarded forward step.  In both cases the exact source
+        # stamp is consumed before physical dispatch below.
+        action_observation = None
         if geometry_continuity["accepted"] is True:
-            self._update_marvin_alignment_consensus(
+            action_observation = self._marvin_v2_action_observation(
                 result, tracker, state, decision,
             )
-        else:
-            # A raw observation remains visible to the operator, but a seed
-            # geometry discontinuity is never allowed to contribute to the
-            # physical-alignment consensus window.
-            with self._state_lock:
-                self._marvin_alignment_consensus = []
-                self._marvin_alignment_observation = None
+        elif state == VISUAL_READY_TO_APPROACH and decision == "FORWARD":
+            action_observation = self._marvin_v2_action_observation(
+                result, tracker, state, decision,
+            )
+        with self._state_lock:
+            self._marvin_alignment_consensus = []
+            self._marvin_alignment_observation = action_observation
         return result
 
-    MARVIN_ALIGNMENT_CONSENSUS_WINDOW = 3
-    MARVIN_ALIGNMENT_MAX_CENTER_SPREAD_PIXELS = 30.0
+    def _marvin_v2_lidar_arrival(self, tracker, lidar=None):
+        worker = getattr(self, "lidar_worker", None)
+        session = getattr(worker, "session", None)
+        if lidar is None and getattr(worker, "running", False) is True:
+            reader = getattr(getattr(self, "world_model", None), "get_lidar_obstacles", None)
+            if callable(reader):
+                try:
+                    lidar = reader(expected_session=session)
+                except Exception:
+                    lidar = None
+        result = evaluate_marvin_lidar_standoff(
+            tracker, lidar, getattr(self, "marvin_camera_model", None), expected_session=session,
+        )
+        prior = getattr(self, "_marvin_last_action_lidar_evidence", None)
+        if (result.get("ok") is True and prior is not None and session == prior[0]
+                and result["acquisition_sequence"] <= prior[1]):
+            return dict(result, ok=False, arrived_at_marvin=False,
+                        reason="target_lidar_newer_observation_required")
+        return result
+
     MARVIN_ALIGNMENT_GEOMETRY_HISTORY_WINDOW = 3
     MARVIN_ALIGNMENT_MAX_SEED_CENTER_DELTA_PIXELS = 30.0
 
@@ -454,14 +576,33 @@ class CognitiveRuntime:
             self._marvin_alignment_consensus = []
             self._marvin_alignment_geometry_history = []
 
+    def _marvin_motion_stamp_is_fresh(self, stamp, received_monotonic_seconds=None):
+        """Remote stamp identifies a frame; only local receipt measures age."""
+        receipt = received_monotonic_seconds
+        now = time.monotonic()
+        return (type(stamp) is int and stamp >= 0
+                and type(receipt) in (int, float)
+                and 0 <= receipt <= now and math.isfinite(receipt)
+                and 0 <= now - receipt
+                <= self.MARVIN_MOTION_OBSERVATION_MAX_AGE_SECONDS)
+
     @staticmethod
     def _marvin_alignment_consensus_sample(result, tracker, state, decision):
         """Extract one strictly valid current observation for turn consensus."""
         if (
             not isinstance(result, dict)
             or result.get("identity_confirmed") is not True
-            or result.get("identity_source")
-            != "gemini_marvin_candidate_selection"
+            or result.get("identity_source") not in {
+                "gemini_marvin_candidate_selection",
+                "marvin_locked_tracker_continuity",
+            }
+            or (result.get("identity_source") == "marvin_locked_tracker_continuity"
+                and (result.get("post_action_tracker_continuity") is not True
+                     or type(result.get("post_action_source_frame_stamp_ns")) is not int
+                     or not isinstance(tracker, dict)
+                     or type(tracker.get("source_frame_stamp_ns")) is not int
+                     or tracker["source_frame_stamp_ns"]
+                     <= result["post_action_source_frame_stamp_ns"]))
             or state != VISUAL_READY_TO_ALIGN
             or decision not in {"TURN_LEFT", "TURN_RIGHT"}
             or not isinstance(tracker, dict)
@@ -505,6 +646,91 @@ class CognitiveRuntime:
             "direction": decision,
             "identity_source": result["identity_source"],
             "center_x": (float(x1) + float(x2)) / 2.0,
+        }
+
+    @staticmethod
+    def _marvin_v2_action_observation(result, tracker, state, decision):
+        """Return the one current strict V2 observation eligible for action.
+
+        This is deliberately current-frame scoped, not a temporal-motion
+        consensus.  It accepts only the existing two controller states that
+        map to bounded local actions and preserves every identity/tracker
+        validation used by the older alignment gate.
+        """
+        if (
+            not isinstance(result, dict)
+            or result.get("identity_confirmed") is not True
+            or result.get("identity_source") not in {
+                "gemini_marvin_candidate_selection",
+                "marvin_locked_tracker_continuity",
+            }
+            or (result.get("identity_source") == "marvin_locked_tracker_continuity"
+                and (result.get("post_action_tracker_continuity") is not True
+                     or type(result.get("post_action_source_frame_stamp_ns")) is not int
+                     or not isinstance(tracker, dict)
+                     or type(tracker.get("source_frame_stamp_ns")) is not int
+                     or tracker["source_frame_stamp_ns"]
+                     <= result["post_action_source_frame_stamp_ns"]))
+            or not isinstance(tracker, dict)
+            or tracker.get("active") is not True
+            or tracker.get("matched") is not True
+            or state not in {VISUAL_READY_TO_ALIGN, VISUAL_READY_TO_APPROACH}
+            or (state == VISUAL_READY_TO_ALIGN and decision not in {"TURN_LEFT", "TURN_RIGHT"})
+            or (state == VISUAL_READY_TO_APPROACH and decision != "FORWARD")
+        ):
+            return None
+        arrival = result.get("arrival")
+        if isinstance(arrival, dict) and arrival.get("arrived_at_marvin") is True:
+            return None
+        if state == VISUAL_READY_TO_APPROACH and (
+            not isinstance(arrival, dict) or arrival.get("ok") is not True
+            or arrival.get("authority") != "target_bearing_lidar"
+            or not isinstance(arrival.get("target_distance_m"), (int, float))
+            or isinstance(arrival.get("target_distance_m"), bool)
+            or not math.isfinite(arrival["target_distance_m"])
+            or arrival["target_distance_m"] <= TARGET_STANDOFF_M
+        ):
+            return None
+        stamp = tracker.get("source_frame_stamp_ns")
+        quality = tracker.get("quality")
+        threshold = tracker.get("threshold")
+        bbox = tracker.get("bbox")
+        if (
+            type(stamp) is not int or stamp < 0
+            or not isinstance(quality, (int, float)) or isinstance(quality, bool)
+            or not math.isfinite(float(quality))
+            or not isinstance(threshold, (int, float)) or isinstance(threshold, bool)
+            or not math.isfinite(float(threshold))
+            or float(quality) < float(threshold)
+            or not isinstance(bbox, dict)
+        ):
+            return None
+        try:
+            x1, y1, x2, y2 = (bbox[key] for key in ("x1", "y1", "x2", "y2"))
+        except KeyError:
+            return None
+        values = (x1, y1, x2, y2)
+        if (
+            any(not isinstance(value, (int, float)) or isinstance(value, bool)
+                or not math.isfinite(float(value)) for value in values)
+            or float(x2) <= float(x1) or float(y2) <= float(y1)
+        ):
+            return None
+        return {
+            "source_frame_stamp_ns": stamp,
+            "received_monotonic_seconds": tracker.get("received_monotonic_seconds"),
+            "identity_confirmed": True,
+            "identity_source": result["identity_source"],
+            "post_action_tracker_continuity": (
+                result.get("post_action_tracker_continuity") is True
+            ),
+            "post_action_source_frame_stamp_ns": result.get(
+                "post_action_source_frame_stamp_ns"
+            ),
+            "opencv_tracker": dict(tracker),
+            "controller_state": state,
+            "controller_decision": decision,
+            "target_standoff": result.get("arrival"),
         }
 
     def _update_marvin_alignment_geometry_continuity(
@@ -576,50 +802,6 @@ class CognitiveRuntime:
                 self._marvin_alignment_consensus = []
                 self._marvin_alignment_observation = None
             return diagnostic
-
-    def _update_marvin_alignment_consensus(self, result, tracker, state, decision):
-        """Authorize only the newest sample of a stable strict turn window."""
-        sample = self._marvin_alignment_consensus_sample(
-            result, tracker, state, decision,
-        )
-        with self._state_lock:
-            alignment_observation = None
-            previous = list(getattr(self, "_marvin_alignment_consensus", []))
-            if sample is None:
-                consensus = []
-            elif not previous:
-                consensus = [sample]
-            else:
-                last = previous[-1]
-                if (
-                    sample["identity_source"] != last.get("identity_source")
-                    or sample["direction"] != last.get("direction")
-                    or sample["source_frame_stamp_ns"]
-                    <= last.get("source_frame_stamp_ns", -1)
-                ):
-                    # A discontinuity is not evidence for a new window: the
-                    # next authorization requires three entirely new samples.
-                    consensus = []
-                else:
-                    consensus = (previous + [sample])[(-self.MARVIN_ALIGNMENT_CONSENSUS_WINDOW):]
-                    centers = [entry["center_x"] for entry in consensus]
-                    if (
-                        len(consensus) == self.MARVIN_ALIGNMENT_CONSENSUS_WINDOW
-                        and max(centers) - min(centers)
-                        > self.MARVIN_ALIGNMENT_MAX_CENTER_SPREAD_PIXELS
-                    ):
-                        consensus = []
-                    elif len(consensus) == self.MARVIN_ALIGNMENT_CONSENSUS_WINDOW:
-                        alignment_observation = {
-                            "source_frame_stamp_ns": sample["source_frame_stamp_ns"],
-                            "identity_confirmed": result["identity_confirmed"],
-                            "identity_source": result["identity_source"],
-                            "opencv_tracker": dict(tracker),
-                            "controller_state": state,
-                            "controller_decision": decision,
-                        }
-            self._marvin_alignment_consensus = consensus
-            self._marvin_alignment_observation = alignment_observation
 
     def execute_bounded_find_marvin_autonomous(self, *, max_actions):
         """Run one explicitly-authorized, finite Marvin controller episode.
@@ -746,7 +928,7 @@ class CognitiveRuntime:
                 "completed": True,
                 "behavior": "FIND_OBJECT",
                 "target": "marvin",
-                "mission_route": "bounded_marvin_autonomous",
+                "mission_route": "marvin_v2_closed_loop",
                 "mission_id": getattr(mission, "mission_id", None),
                 "arrived_at_marvin": False,
                 "mission_outcome": "safe_failure",
@@ -767,362 +949,403 @@ class CognitiveRuntime:
                 clear_scan(getattr(mission, "mission_id", None))
             controller_lock.release()
 
+    def _wait_for_new_marvin_lidar_evidence(
+        self, *, expected_session, previous_sequence, execution_guard,
+        timeout_seconds=None, allow_transient_stale=False,
+    ):
+        """Poll World Model telemetry while stopped; never acquire or mint scans."""
+        timeout = (self.MARVIN_NEW_LIDAR_TIMEOUT_SECONDS if timeout_seconds is None
+                   else timeout_seconds)
+        started = time.monotonic()
+        polls = 0
+        last = None
+
+        def finish(reason, *, ok=False):
+            return {"ok": ok, "reason": reason, "snapshot": last,
+                    "producer_session": expected_session,
+                    "previous_acquisition_sequence": previous_sequence,
+                    "poll_count": polls,
+                    "wait_elapsed_seconds": max(0.0, time.monotonic() - started)}
+
+        if (not isinstance(expected_session, str) or not expected_session
+                or type(previous_sequence) is not int or previous_sequence < 0
+                or not _bounded_alignment_number(timeout, maximum=1.0)
+                or not callable(execution_guard)):
+            return finish("find_marvin_lidar_wait_request_invalid")
+        deadline = started + timeout
+        while True:
+            if not execution_guard():
+                return finish("find_marvin_mission_preempted")
+            worker = self.lidar_worker
+            if worker.session != expected_session:
+                return finish("find_marvin_lidar_producer_session_changed")
+            if worker.running is not True:
+                return finish("find_marvin_lidar_not_current")
+            if time.monotonic() >= deadline:
+                return finish("find_marvin_new_lidar_evidence_timeout")
+            polls += 1
+            try:
+                last = self.world_model.get_lidar_obstacles(expected_session=expected_session)
+            except Exception:
+                if not execution_guard():
+                    return finish("find_marvin_mission_preempted")
+                return finish("find_marvin_lidar_read_failed")
+            if not execution_guard():
+                return finish("find_marvin_mission_preempted")
+            if (worker.session != expected_session or isinstance(last, dict)
+                    and last.get("producer_session") != expected_session):
+                return finish("find_marvin_lidar_producer_session_changed")
+            if worker.running is not True or not isinstance(last, dict):
+                return finish("find_marvin_lidar_not_current")
+            sequence = last.get("acquisition_sequence")
+            if type(sequence) is not int or sequence < previous_sequence:
+                return finish("find_marvin_lidar_acquisition_sequence_invalid")
+            if time.monotonic() >= deadline:
+                return finish("find_marvin_new_lidar_evidence_timeout")
+            if sequence > previous_sequence:
+                age = last.get("effective_age_seconds")
+                fresh = (_marvin_alignment_lidar_is_current(last, expected_session)
+                         and type(age) in (int, float) and math.isfinite(age)
+                         and 0 <= age <= MAXIMUM_EFFECTIVE_AGE_SECONDS)
+                if fresh:
+                    return finish("find_marvin_new_lidar_evidence_received", ok=True)
+                if not (allow_transient_stale and last.get("reason") in {"stale", "stale_lidar"}):
+                    return finish("find_marvin_lidar_not_current")
+            # The old acquisition may age out while stopped. It cannot release
+            # this wait; only a new scan's freshness/validity can admit progress.
+            # STOP/preemption is checked on both sides of every poll and sleep.
+            if not execution_guard():
+                return finish("find_marvin_mission_preempted")
+            time.sleep(min(self.MARVIN_NEW_LIDAR_POLL_SECONDS,
+                           max(0.0, deadline - time.monotonic())))
+
     def _execute_normal_marvin_find_mission_locked(
         self, mission, *, control_generation=None,
     ):
-        """Delegate a normal Find-Marvin mission to the reviewed controller.
-
-        The controller remains the only pursuit implementation. This method
-        owns bounded mission continuation, with a separate finite room-scan
-        episode allowance and the existing pursuit episode allowance. Scan
-        progress itself remains mission-scoped in BehaviorManager.
-        """
-        mission_id = getattr(mission, "mission_id", None)
-        behavior = getattr(self, "behavior_manager", None)
-        begin_scan = getattr(behavior, "begin_find_marvin_room_scan", None)
-        scan_enabled = callable(begin_scan)
-        if scan_enabled:
-            try:
-                begin_scan(mission_id)
-            except Exception as exc:
-                return {
-                    "ok": False, "completed": True,
-                    "arrived_at_marvin": False,
-                    "mission_outcome": "safe_failure",
-                    "state": "FIND_MARVIN_FAILED",
-                    "mission_id": mission_id,
-                    "reason": "find_marvin_scan_state_initialization_failed",
-                    "error": str(exc),
-                }
+        """Own the complete V2 observe/action/STOP loop for one mission."""
+        behavior = self.behavior_manager
         if control_generation is None:
-            with self._state_lock:
-                control_generation = self._control_generation
+            control_generation = self._control_generation
+        history = []
+        reacquisition_history = []
+        tracker_loss_history = []
+        lidar_wait_history = []
+        lidar_recovery_history = []
+        consecutive_lidar_interruptions = 0
+        reacquisition_attempts = 0
+        consecutive_reacquisition_failures = 0
+        search_turns = 0
+        acquired = False
+        observation = None
+        previous_stamp = None
+        action_finished_monotonic_seconds = None
+        retain = self._retain_marvin_diagnostic
+        retain("begin", mission.mission_id,
+               expected_session=getattr(self.lidar_worker, "session", None),
+               camera_model=self.marvin_camera_model)
+        self._reset_marvin_alignment_consensus()
+        clear_episode = getattr(behavior, "_clear_marvin_v2_tracker_episode", None)
+        if callable(clear_episode):
+            clear_episode()  # A new mission requires fresh semantic acquisition.
 
-        episode_results = []
-        total_actions = 0
-        total_stale_replans = 0
-        any_motion = False
-        last_controller = None
+        def current():
+            return self._marvin_mission_context_is_current(mission, control_generation)
 
-        max_episodes = (
-            self.FIND_MARVIN_SCAN_MAX_EPISODES + self.FIND_MARVIN_MAX_EPISODES
-            if scan_enabled else self.FIND_MARVIN_MAX_EPISODES
-        )
-        scan_episodes_used = 0
-        pursuit_episodes_used = 0
-
-        def result_base():
+        def finish(state, reason):
+            self._reset_marvin_alignment_consensus()
+            try:
+                stop = self.robot_client.stop()
+            except Exception as exc:
+                stop = {"ok": False, "error": str(exc)}
+            stop_completed_monotonic_seconds = time.monotonic()
+            zero = self._marvin_bridge_ready_and_stopped()
+            safe = (isinstance(stop, dict) and stop.get("ok") is True
+                    and zero.get("ok") is True and zero.get("status") == "READY")
+            if not safe:
+                state, reason = "BLOCKED", "find_marvin_stop_or_bridge_failed"
+            if callable(clear_episode):
+                clear_episode()
+            retain("mission_stop", stop, zero, stop_completed_monotonic_seconds)
+            retain("terminal", state, reason)
             return {
-                "action": "bounded_find_marvin_autonomous_run",
-                "execution_authorized": bool(episode_results),
-                "behavior": "FIND_OBJECT",
-                "target": "marvin",
-                "mission_route": "bounded_marvin_autonomous",
-                "mission_id": mission_id,
-                "episodes_executed": len(episode_results),
-                "max_episodes": max_episodes,
-                "max_actions": self.FIND_MARVIN_AUTONOMOUS_MAX_ACTIONS,
-                "total_actions_executed": total_actions,
-                "actions_executed": total_actions,
-                "stale_replans": total_stale_replans,
-                "episode_results": list(episode_results),
-                "controller_result": last_controller,
-                "motion_executed": any_motion,
+                "ok": safe, "completed": True, "behavior": "FIND_OBJECT",
+                "target": "marvin", "mission_id": mission.mission_id,
+                "mission_route": "marvin_v2_closed_loop", "state": state,
+                "reason": reason, "arrived_at_marvin": state == "ARRIVED",
+                "mission_outcome": ("arrived_at_marvin" if state == "ARRIVED"
+                                    else "safe_incomplete" if safe else "safe_failure"),
+                "search_turns": search_turns, "max_search_turns": MAX_SCAN_TURNS,
+                "actions_executed": sum(row.get("motion_executed") is True for row in history),
+                "completed_forward_actions": sum(row["state"] == "ADVANCING"
+                    and row["result"].get("full_step_completed") is True for row in history),
+                "interrupted_forward_attempts": sum(row["state"] == "ADVANCING"
+                    and row["result"].get("interrupted") is True for row in history),
+                "consecutive_lidar_interruptions": consecutive_lidar_interruptions,
+                "max_consecutive_lidar_interruptions": self.MAX_CONSECUTIVE_MARVIN_LIDAR_INTERRUPTION_FAILURES,
+                "max_lidar_recovery_episodes": self.MAX_MARVIN_REACQUISITION_EPISODES,
+                "lidar_recovery_history": lidar_recovery_history,
+                "history": history, "stop_result": stop, "bridge_after_stop": zero,
+                "reacquisition_attempts": reacquisition_attempts,
+                "consecutive_reacquisition_failures": consecutive_reacquisition_failures,
+                "max_consecutive_reacquisition_failures": self.MAX_CONSECUTIVE_MARVIN_REACQUISITION_FAILURES,
+                "max_reacquisition_episodes": self.MAX_MARVIN_REACQUISITION_EPISODES,
+                "max_reacquisition_attempts": (self.MAX_MARVIN_REACQUISITION_EPISODES
+                                              * self.MAX_CONSECUTIVE_MARVIN_REACQUISITION_FAILURES),
+                "reacquisition_history": reacquisition_history,
+                "tracker_loss_history": tracker_loss_history,
+                "lidar_wait_history": lidar_wait_history,
+                "final_observation": observation,
+                "progress_diagnostics": retain("snapshot"),
             }
 
-        episode_number = 0
-        while scan_episodes_used < self.FIND_MARVIN_SCAN_MAX_EPISODES or pursuit_episodes_used < self.FIND_MARVIN_MAX_EPISODES:
-            scan_snapshot = (
-                behavior._room_scan_snapshot()
-                if scan_enabled and callable(getattr(behavior, "_room_scan_snapshot", None))
-                else None
-            )
-            scanning = bool(scan_snapshot and scan_snapshot.get("scan_active") is True)
-            if scanning and scan_episodes_used >= self.FIND_MARVIN_SCAN_MAX_EPISODES:
-                return dict(
-                    result_base(), ok=True, completed=True,
-                    arrived_at_marvin=False, mission_outcome="safe_incomplete",
-                    state="FIND_MARVIN_SAFE_INCOMPLETE",
-                    reason="find_marvin_scan_episode_limit_reached",
-                    completion_reason="find_marvin_scan_episode_limit_reached",
+        while current():
+            bridge = self._marvin_bridge_ready_and_stopped()
+            if bridge.get("ok") is not True or bridge.get("status") != "READY":
+                return finish("BLOCKED", "find_marvin_bridge_not_ready_or_stopped")
+            prior = self._marvin_last_action_lidar_evidence
+            if prior is not None:
+                wait = self._wait_for_new_marvin_lidar_evidence(
+                    expected_session=prior[0], previous_sequence=prior[1], execution_guard=current,
                 )
-            if not scanning and pursuit_episodes_used >= self.FIND_MARVIN_MAX_EPISODES:
-                return dict(
-                    result_base(), ok=True, completed=True,
-                    arrived_at_marvin=False, mission_outcome="safe_incomplete",
-                    state="FIND_MARVIN_SAFE_INCOMPLETE",
-                    reason="find_marvin_mission_episode_limit_reached",
-                    completion_reason="find_marvin_mission_episode_limit_reached",
-                )
-            episode_number += 1
-            if not self._marvin_mission_context_is_current(
-                mission, control_generation,
-            ):
-                return dict(
-                    result_base(), ok=False, completed=True,
-                    arrived_at_marvin=False, mission_outcome="preempted",
-                    state="FIND_MARVIN_PREEMPTED",
-                    reason="find_marvin_mission_preempted",
-                )
-
-            episode = self._execute_bounded_find_marvin_episode(
-                max_actions=self.FIND_MARVIN_AUTONOMOUS_MAX_ACTIONS,
-                consume_one_shot=False,
-                require_fresh_gemini=True,
-            )
-            if not isinstance(episode, dict):
-                episode = {"ok": False, "reason": "marvin_episode_result_malformed"}
-            controller = episode.get("controller_result")
-            episode_record = {
-                "episode": episode_number,
-                "result": episode,
-            }
-            episode_results.append(episode_record)
-            if scanning:
-                scan_episodes_used += 1
+                lidar_wait_history.append(wait)
+                if isinstance(wait.get("snapshot"), dict):
+                    retain("record_lidar", wait["snapshot"])
+                if wait["ok"] is not True:
+                    return finish("STOPPED" if not current() else "BLOCKED", wait["reason"])
+            # No camera/semantic decision is made before the stopped LiDAR wait.
+            observation = self.observe_find_marvin_v2()
+            retain("observe", observation)
+            if not current():
+                return finish("STOPPED", "find_marvin_mission_preempted")
+            tracker = observation.get("opencv_tracker") or {}
+            stamp = observation.get("source_frame_stamp_ns")
+            if (acquired and observation.get("identity_confirmed") is not True
+                    and observation.get("perception_reason") == "post_action_tracker_continuity_lost"):
+                # The mission owns recovery. No search or action can occur
+                # until new Gemini identity AND a post-Gemini action frame pass
+                # the normal freshness, LiDAR and motion admission gates below.
+                loss = observation
+                tracker_loss_history.append(loss)
+                if len(tracker_loss_history) > self.MAX_MARVIN_REACQUISITION_EPISODES:
+                    return finish("REVERIFY_REQUIRED", "find_marvin_recovery_backstop_exhausted")
+                self._reset_marvin_alignment_consensus()
+                if callable(clear_episode):
+                    clear_episode()
+                floor = max(value for value in (previous_stamp, stamp)
+                            if type(value) is int)
+                recovered = False
+                while consecutive_reacquisition_failures < self.MAX_CONSECUTIVE_MARVIN_REACQUISITION_FAILURES:
+                    if not current():
+                        return finish("STOPPED", "find_marvin_mission_preempted")
+                    try:
+                        stop = self.robot_client.stop()
+                    except Exception:
+                        return finish("BLOCKED", "find_marvin_reacquisition_stop_failed")
+                    bridge = self._marvin_bridge_ready_and_stopped()
+                    if (not isinstance(stop, dict) or stop.get("ok") is not True
+                            or bridge.get("ok") is not True or bridge.get("status") != "READY"):
+                        return finish("BLOCKED", "find_marvin_reacquisition_stop_failed")
+                    reacquisition_attempts += 1  # Cumulative telemetry, not the failure budget.
+                    self._publish_behavior_tracking({
+                        "behavior": "FIND_OBJECT", "target": "marvin", "state": "REACQUIRE",
+                        "reacquisition_attempt": reacquisition_attempts,
+                        "post_action_tracker_diagnostics": loss.get("post_action_tracker_diagnostics"),
+                    })
+                    if not current():
+                        return finish("STOPPED", "find_marvin_mission_preempted")
+                    observation = self._observe_find_marvin_v2(reacquisition_source_floor=floor)
+                    retain("observe", observation, reacquisition=True)
+                    reacquisition_history.append({
+                        "state": "REACQUIRE", "attempt": reacquisition_attempts,
+                        "loss_observation": loss, "source_floor": floor,
+                        "observation": observation, "motion_executed": False,
+                    })
+                    if not current():
+                        return finish("STOPPED", "find_marvin_mission_preempted")
+                    identity_stamp = observation.get("identity_source_frame_stamp_ns")
+                    action_stamp = observation.get("source_frame_stamp_ns")
+                    if (observation.get("ok") is True
+                            and observation.get("identity_confirmed") is True
+                            and observation.get("identity_source") == "gemini_marvin_candidate_selection"
+                            and type(identity_stamp) is int and identity_stamp > floor
+                            and type(action_stamp) is int and action_stamp > identity_stamp):
+                        recovered = True
+                        consecutive_reacquisition_failures = 0
+                        reacquisition_history[-1].update(succeeded=True, consecutive_failures_after=0)
+                        break
+                    consecutive_reacquisition_failures += 1
+                    reacquisition_history[-1].update(
+                        succeeded=False, consecutive_failures_after=consecutive_reacquisition_failures)
+                    # Neither an old identity nor a failed action observation
+                    # may survive into the next attempt.
+                    self._reset_marvin_alignment_consensus()
+                    if callable(clear_episode):
+                        clear_episode()
+                    floor = max([floor] + [value for value in (identity_stamp, action_stamp)
+                                           if type(value) is int])
+                if not recovered:
+                    return finish("REVERIFY_REQUIRED", "find_marvin_semantic_reacquisition_exhausted")
+                tracker = observation.get("opencv_tracker") or {}
+                stamp = observation.get("source_frame_stamp_ns")
+            if acquired and observation.get("identity_confirmed") is not True:
+                return finish("REVERIFY_REQUIRED", observation.get("perception_reason")
+                              or observation.get("reason") or "marvin_identity_lost")
+            if observation.get("perception_reason") in {
+                "find_marvin_post_semantic_tracker_refresh_failed",
+                "find_marvin_search_fresh_frame_unavailable",
+            }:
+                return finish("REVERIFY_REQUIRED", observation["perception_reason"])
+            receipt = observation.get("received_monotonic_seconds")
+            if not self._marvin_motion_stamp_is_fresh(stamp, receipt):
+                return finish("BLOCKED", "marvin_motion_observation_stale")
+            if (previous_stamp is not None and stamp <= previous_stamp
+                    or action_finished_monotonic_seconds is not None
+                    and receipt <= action_finished_monotonic_seconds):
+                return finish("REVERIFY_REQUIRED", "find_marvin_new_camera_frame_required")
+            session, lidar = self._active_localization_lidar_is_current()
+            if lidar is None:
+                return finish("BLOCKED", "find_marvin_lidar_not_current")
+            prior = getattr(self, "_marvin_last_action_lidar_evidence", None)
+            sequence = lidar.get("acquisition_sequence")
+            if prior is not None and session != prior[0]:
+                return finish("BLOCKED", "find_marvin_lidar_producer_session_changed")
+            if type(sequence) is not int or sequence < 0 or (prior is not None and sequence <= prior[1]):
+                return finish("BLOCKED", "find_marvin_lidar_acquisition_sequence_invalid")
+            decision = (observation.get("controller") or {}).get("decision")
+            if observation.get("identity_confirmed") is not True:
+                # Only a fresh, explicit negative perception result permits
+                # initial search. Camera/semantic errors are not "no target".
+                absent = observation.get("perception_reason") in {
+                    "Marvin was not found in the current camera frame.",
+                    "marvin_identity_not_confirmed",
+                }
+                if acquired or not absent:
+                    return finish("REVERIFY_REQUIRED", observation.get("perception_reason")
+                                  or observation.get("reason") or "marvin_identity_lost")
+                if search_turns >= MAX_SCAN_TURNS:
+                    return finish("SEARCH_EXHAUSTED", "find_marvin_search_exhausted")
+                state = "SEARCHING"
+                action = lambda: self._execute_marvin_v2_search_turn(stamp, receipt)
             else:
-                pursuit_episodes_used += 1
-            last_controller = controller if isinstance(controller, dict) else None
-
-            count = episode.get("actions_executed", 0)
-            if not isinstance(count, int) or isinstance(count, bool) or not 0 <= count <= self.FIND_MARVIN_AUTONOMOUS_MAX_ACTIONS:
-                return dict(
-                    result_base(), ok=False, completed=True,
-                    arrived_at_marvin=False, mission_outcome="safe_failure",
-                    state="FIND_MARVIN_FAILED",
-                    reason="find_marvin_episode_action_count_invalid",
-                )
-            total_actions += count
-            episode_stale_replans = episode.get("controller_result", {}).get(
-                "stale_replans", 0,
-            ) if isinstance(episode.get("controller_result"), dict) else 0
-            if (
-                not isinstance(episode_stale_replans, int)
-                or isinstance(episode_stale_replans, bool)
-                or episode_stale_replans < 0
-            ):
-                return dict(
-                    result_base(), ok=False, completed=True,
-                    arrived_at_marvin=False, mission_outcome="safe_failure",
-                    state="FIND_MARVIN_FAILED",
-                    reason="find_marvin_episode_stale_replan_count_invalid",
-                )
-            total_stale_replans += episode_stale_replans
-            any_motion = any_motion or episode.get("motion_executed") is True
-
-            if not isinstance(controller, dict) or episode.get("ok") is not True:
-                return dict(
-                    result_base(), ok=False, completed=True,
-                    arrived_at_marvin=False, mission_outcome="safe_failure",
-                    state="FIND_MARVIN_FAILED",
-                    reason=episode.get("reason", "find_marvin_controller_failed"),
-                    controller_reason=(controller.get("reason") if isinstance(controller, dict) else None),
-                )
-
-            if (
-                controller.get("reason") == "arrived_at_marvin"
-                and controller.get("arrived_at_marvin") is True
-                and controller.get("completed") is True
-            ):
-                return dict(
-                    result_base(), ok=True, completed=True,
-                    arrived_at_marvin=True,
-                    mission_outcome="arrived_at_marvin",
-                    state="ARRIVED_AT_MARVIN",
-                    reason="arrived_at_marvin",
-                    completion_reason="arrived_at_marvin",
-                )
-
-            if controller.get("reason") != "find_marvin_action_limit_reached":
-                if controller.get("reason") == "find_marvin_search_target_acquired":
-                    bridge_status = self._marvin_bridge_ready_and_stopped()
-                    if not isinstance(bridge_status, dict) or bridge_status.get("ok") is not True:
-                        return dict(
-                            result_base(), ok=False, completed=True,
-                            arrived_at_marvin=False,
-                            mission_outcome="safe_failure",
-                            state="FIND_MARVIN_FAILED",
-                            reason="find_marvin_acquisition_bridge_not_stopped",
-                            bridge_status=bridge_status,
-                        )
-                    continue
-                if controller.get("reason") == "find_marvin_post_turn_frame_preempted":
-                    return dict(
-                        result_base(), ok=False, completed=True,
-                        arrived_at_marvin=False, mission_outcome="preempted",
-                        state="FIND_MARVIN_PREEMPTED",
-                        reason="find_marvin_mission_preempted",
-                    )
-                if (
-                    str(controller.get("reason", "")).startswith(
-                        "find_marvin_post_turn_frame_"
-                    )
-                    or controller.get("reason") in {
-                        "find_marvin_scan_source_frame_baseline_missing",
-                        "find_marvin_post_turn_source_frame_baseline_missing",
-                    }
-                ):
-                    return dict(
-                        result_base(), ok=True, completed=True,
-                        arrived_at_marvin=False,
-                        mission_outcome="safe_incomplete",
-                        state="FIND_MARVIN_SAFE_INCOMPLETE",
-                        reason=controller.get("reason"),
-                        completion_reason=controller.get("reason"),
-                    )
-                if (
-                    controller.get("reason") == "find_marvin_clearance_wait_timeout"
-                    and self._marvin_clearance_timeout_is_safe(controller)
-                ):
-                    return dict(
-                        result_base(),
-                        ok=True,
-                        completed=True,
-                        arrived_at_marvin=False,
-                        mission_outcome="safe_incomplete",
-                        state="FIND_MARVIN_SAFE_INCOMPLETE",
-                        reason="find_marvin_clearance_wait_timeout",
-                        completion_reason="find_marvin_clearance_wait_timeout",
-                        clearance_wait=controller.get("clearance_wait"),
-                    )
-                if (
-                    controller.get("reason") == "find_marvin_search_complete"
-                    and self._marvin_search_exhaustion_is_safe(controller)
-                ):
-                    return dict(
-                        result_base(),
-                        ok=True,
-                        completed=True,
-                        arrived_at_marvin=False,
-                        mission_outcome="safe_incomplete",
-                        state="FIND_MARVIN_SAFE_INCOMPLETE",
-                        reason="find_marvin_search_exhausted",
-                        completion_reason="find_marvin_search_exhausted",
-                    )
-                if controller.get("reason") == "find_marvin_arrival_confirmation_not_independent":
-                    return dict(
-                        result_base(), ok=True, completed=True,
-                        arrived_at_marvin=False,
-                        mission_outcome="safe_incomplete",
-                        state="FIND_MARVIN_SAFE_INCOMPLETE",
-                        reason=controller["reason"],
-                        completion_reason=controller["reason"],
-                    )
-                if controller.get("reason") == "marvin_local_progress_terminal":
-                    terminal = controller.get("local_progress_terminal")
-                    progress = controller.get("local_progress_result")
-                    common = dict(
-                        result_base(),
-                        completed=True,
-                        arrived_at_marvin=False,
-                        mission_outcome="safe_incomplete",
-                        local_progress_terminal=terminal,
-                        local_progress_result=progress,
-                    )
-                    if terminal == "LOCAL_PROGRESS_EXECUTION_FAILED":
-                        return dict(
-                            common,
-                            ok=False,
-                            mission_outcome="safe_failure",
-                            state="FIND_MARVIN_FAILED",
-                            reason=(
-                                progress.get("reason", terminal.lower())
-                                if isinstance(progress, dict) else terminal.lower()
-                            ),
-                        )
-                    return dict(
-                        common,
-                        ok=True,
-                        state="FIND_MARVIN_SAFE_INCOMPLETE",
-                        reason=(
-                            progress.get("reason", terminal.lower())
-                            if isinstance(progress, dict) else terminal.lower()
-                        ),
-                        completion_reason=terminal,
-                    )
-                if controller.get("reason") == "marvin_local_progress_action_budget_insufficient":
-                    return dict(
-                        result_base(),
-                        ok=True,
-                        completed=True,
-                        arrived_at_marvin=False,
-                        mission_outcome="safe_incomplete",
-                        state="FIND_MARVIN_SAFE_INCOMPLETE",
-                        reason=controller["reason"],
-                        completion_reason=controller["reason"],
-                    )
-                if controller.get("reason") == "marvin_local_progress_complete":
-                    return dict(
-                        result_base(),
-                        ok=True,
-                        completed=True,
-                        arrived_at_marvin=False,
-                        mission_outcome="safe_incomplete",
-                        state="FIND_MARVIN_SAFE_INCOMPLETE",
-                        reason=controller["reason"],
-                        completion_reason="local_progress_reassessment_required",
-                        post_progress_pursuit_state=controller.get(
-                            "post_progress_pursuit_state",
-                        ),
-                        local_progress_result=controller.get(
-                            "local_progress_result",
-                        ),
-                    )
-                return dict(
-                    result_base(), ok=False, completed=True,
-                    arrived_at_marvin=False, mission_outcome="safe_failure",
-                    state="FIND_MARVIN_FAILED",
-                    reason="find_marvin_controller_terminal_result_unrecognized",
-                    controller_reason=controller.get("reason"),
-                )
-
-            if not self._marvin_episode_is_safe_action_limit(episode, controller):
-                return dict(
-                    result_base(), ok=False, completed=True,
-                    arrived_at_marvin=False, mission_outcome="safe_failure",
-                    state="FIND_MARVIN_FAILED",
-                    reason="find_marvin_action_limit_result_not_safely_stopped",
-                )
-
-            # The prior controller has already stopped after every executor
-            # attempt. Verify that stop and the Bridge state before permitting
-            # a new controller episode; the next call obtains a fresh Preview
-            # and has an episode-local arrival/stale-replan state.
-            if not self._marvin_mission_context_is_current(
-                mission, control_generation,
-            ):
-                return dict(
-                    result_base(), ok=False, completed=True,
-                    arrived_at_marvin=False, mission_outcome="preempted",
-                    state="FIND_MARVIN_PREEMPTED",
-                    reason="find_marvin_mission_preempted",
-            )
-            bridge_status = self._marvin_bridge_ready_and_stopped()
-            if not isinstance(bridge_status, dict) or bridge_status.get("ok") is not True:
-                return dict(
-                    result_base(), ok=False, completed=True,
-                    arrived_at_marvin=False, mission_outcome="safe_failure",
-                    state="FIND_MARVIN_FAILED",
-                    reason="find_marvin_episode_bridge_not_ready_or_stopped",
-                    bridge_status=bridge_status,
-                )
-            if not self._marvin_mission_context_is_current(
-                mission, control_generation,
-            ):
-                return dict(
-                    result_base(), ok=False, completed=True,
-                    arrived_at_marvin=False, mission_outcome="preempted",
-                    state="FIND_MARVIN_PREEMPTED",
-                    reason="find_marvin_mission_preempted",
-                )
-
-        # The bounded loop always returns from an explicit terminal branch.
-        return dict(
-            result_base(), ok=False, completed=True,
-            arrived_at_marvin=False, mission_outcome="safe_failure",
-            state="FIND_MARVIN_FAILED",
-            reason="find_marvin_mission_episode_loop_exited_unexpectedly",
-        )
+                acquired = True
+                if observation.get("ok") is not True:
+                    return finish("REVERIFY_REQUIRED", observation.get("reason"))
+                if decision == "ARRIVED":
+                    arrival = observation.get("arrival") or {}
+                    if (arrival.get("ok") is True
+                            and arrival.get("authority") == "target_bearing_lidar"
+                            and arrival.get("arrived_at_marvin") is True
+                            and arrival.get("target_distance_m", float("inf")) <= TARGET_STANDOFF_M):
+                        return finish("ARRIVED", "arrived_at_marvin")
+                    return finish("BLOCKED", "find_marvin_arrival_evidence_invalid")
+                if decision in {"TURN_LEFT", "TURN_RIGHT"}:
+                    state = "ALIGNING"
+                    action = lambda: self.execute_single_marvin_alignment(
+                        direction="LEFT" if decision == "TURN_LEFT" else "RIGHT",
+                        angular_speed=0.25, duration=0.50, source_frame_stamp_ns=stamp)
+                elif decision == "FORWARD":
+                    state = "ADVANCING"
+                    action = lambda: self.execute_single_marvin_approach(
+                        linear_speed=FIND_MARVIN_FORWARD_SPEED_MPS,
+                        duration=0.50, source_frame_stamp_ns=stamp)
+                else:
+                    return finish("BLOCKED", observation.get("reason") or "find_marvin_unexpected_controller_state")
+            self._publish_behavior_tracking({
+                "behavior": "FIND_OBJECT", "target": "marvin", "state": state,
+                "opencv_tracker": tracker, "source_frame_stamp_ns": stamp,
+            })
+            if not current():
+                return finish("STOPPED", "find_marvin_mission_preempted")
+            try:
+                retain("prepare_action", state, observation)
+                result = action()
+            except Exception as exc:
+                return finish("BLOCKED", "find_marvin_action_exception: " + str(exc))
+            if not isinstance(result, dict):
+                return finish("BLOCKED", "find_marvin_action_result_malformed")
+            history.append({"state": state, "source_frame_stamp_ns": stamp,
+                            "observation": observation, "result": result,
+                            "action_lidar_evidence": self._marvin_last_action_lidar_evidence,
+                            "motion_executed": result.get("motion_executed") is True})
+            retain("action_result", result)
+            if not current():
+                return finish("STOPPED", "find_marvin_mission_preempted")
+            if result.get("ok") is not True or result.get("motion_executed") is not True:
+                forward = (result.get("approach_result") or {}).get("forward_result") or {}
+                recoverable = (state == "ADVANCING" and result.get("interrupted") is True
+                    and result.get("source_stamp_consumed") is True
+                    and forward.get("bounded_forward_invalidated") is True
+                    and forward.get("reason") in {"stale", "stale_lidar"}
+                    and (forward.get("transport_result") or {}).get("ok") is True)
+                if not recoverable:
+                    return finish("BLOCKED", result.get("reason") or "find_marvin_guarded_action_failed")
+                bridge = self._marvin_bridge_ready_and_stopped()
+                if (forward.get("interlock_stop_succeeded") is not True
+                        or (result.get("stop_result") or {}).get("ok") is not True
+                        or bridge.get("ok") is not True or bridge.get("status") != "READY"):
+                    return finish("BLOCKED", "find_marvin_lidar_recovery_stop_unconfirmed")
+                if not current():
+                    return finish("STOPPED", "find_marvin_mission_preempted")
+                consecutive_lidar_interruptions += 1
+                recovery = {"source_frame_stamp_ns": stamp, "motion_executed": False,
+                            "consecutive_interruptions": consecutive_lidar_interruptions}
+                lidar_recovery_history.append(recovery)
+                if (consecutive_lidar_interruptions >= self.MAX_CONSECUTIVE_MARVIN_LIDAR_INTERRUPTION_FAILURES
+                        or len(lidar_recovery_history) > self.MAX_MARVIN_REACQUISITION_EPISODES):
+                    return finish("BLOCKED", "find_marvin_lidar_recovery_exhausted")
+                action_finished_monotonic_seconds = time.monotonic()
+                previous_stamp = stamp
+                self._reset_marvin_alignment_consensus()
+                retain("action_result", result, action_finished_monotonic_seconds)
+                mark_stopped = getattr(behavior, "mark_strict_v2_action_stopped", None)
+                if callable(mark_stopped):
+                    mark_stopped(stamp, action_finished_monotonic_seconds)
+                baseline = self._marvin_last_action_lidar_evidence
+                invalidating = (forward.get("interlock_dispatch_outcome") or {}).get("invalidating_lidar_evidence") or {}
+                expired_age = invalidating.get("effective_age_seconds")
+                if (baseline is None or baseline[0] != session or type(baseline[1]) is not int
+                        or invalidating.get("producer_session") != session
+                        or type(invalidating.get("acquisition_sequence")) is not int
+                        or invalidating["acquisition_sequence"] < baseline[1]
+                        or type(expired_age) not in (int, float) or not math.isfinite(expired_age)
+                        or expired_age <= MAXIMUM_EFFECTIVE_AGE_SECONDS):
+                    return finish("BLOCKED", "find_marvin_lidar_recovery_evidence_invalid")
+                # Neither the action's safety scan nor the scan that expired
+                # can release recovery. Only a genuinely newer fresh scan can.
+                self._marvin_last_action_lidar_evidence = (
+                    session, max(baseline[1], invalidating["acquisition_sequence"]))
+                self._publish_behavior_tracking({"behavior": "FIND_OBJECT", "target": "marvin",
+                    "state": "WAITING_FOR_FRESH_LIDAR", "source_frame_stamp_ns": stamp})
+                wait = self._wait_for_new_marvin_lidar_evidence(
+                    expected_session=session, previous_sequence=self._marvin_last_action_lidar_evidence[1],
+                    execution_guard=current, allow_transient_stale=True)
+                recovery["wait"] = wait
+                if isinstance(wait.get("snapshot"), dict):
+                    retain("record_lidar", wait["snapshot"])
+                if wait["ok"] is not True:
+                    return finish("STOPPED" if not current() else "BLOCKED", wait["reason"])
+                # Do not replay/resume the command. The next cycle observes a
+                # new camera frame, checks tracker/identity and replans with JIT.
+                continue
+            consecutive_lidar_interruptions = 0
+            bridge = self._marvin_bridge_ready_and_stopped()
+            if bridge.get("ok") is not True or bridge.get("status") != "READY":
+                return finish("BLOCKED", "find_marvin_bridge_not_stopped_after_action")
+            action_finished_monotonic_seconds = time.monotonic()
+            retain("action_result", result, action_finished_monotonic_seconds)
+            previous_stamp = stamp
+            mark_stopped = getattr(behavior, "mark_strict_v2_action_stopped", None)
+            if callable(mark_stopped):
+                mark_stopped(stamp, action_finished_monotonic_seconds)
+            # Retain the actual JIT authorization acquisition. Reading again
+            # here would discard a usable N+1 and unnecessarily require N+2.
+            baseline = self._marvin_last_action_lidar_evidence
+            if (baseline is None or baseline[0] != session
+                    or type(baseline[1]) is not int):
+                return finish("BLOCKED", "find_marvin_action_lidar_evidence_invalid")
+            if state == "SEARCHING":
+                search_turns += 1
+        return finish("STOPPED", "find_marvin_mission_preempted")
 
     @staticmethod
     def _marvin_search_exhaustion_is_safe(controller):
@@ -1629,6 +1852,7 @@ class CognitiveRuntime:
                 return dict(base, reason="lidar_producer_session_or_state_unavailable")
             decision = decide_forward_reaction(
                 lidar, expected_session=session,
+                forward_linear_speed=FIND_MARVIN_FORWARD_SPEED_MPS,
             )
             if not isinstance(decision, dict):
                 return dict(base, reason="local_reactive_decision_malformed")
@@ -1888,6 +2112,7 @@ class CognitiveRuntime:
             decision_result = decide_forward_reaction(
                 lidar_state,
                 expected_session=producer_session,
+                forward_linear_speed=FIND_MARVIN_FORWARD_SPEED_MPS,
             )
             if not isinstance(decision_result, dict):
                 return dict(base, terminal_state="LOCAL_PROGRESS_EXECUTION_FAILED",
@@ -2172,6 +2397,112 @@ class CognitiveRuntime:
     def execute_single_marvin_alignment(
         self, *, direction, angular_speed, duration, source_frame_stamp_ns,
     ):
+        return self._dispatch_marvin_observation_action(
+            self._execute_single_marvin_alignment,
+            direction=direction, angular_speed=angular_speed, duration=duration,
+            source_frame_stamp_ns=source_frame_stamp_ns,
+        )
+
+    def _marvin_motion_owner_is_current(self):
+        manager = getattr(self, "mission_manager", None)
+        active = manager.get_active_mission() if manager is not None else None
+        generation = getattr(self, "_behavior_execution_generation", None)
+        if active is not None or generation is not None:
+            return (active is not None and self._is_normal_marvin_find_mission(active)
+                    and generation == getattr(self, "_control_generation", None)
+                    and getattr(self, "_behavior_execution_thread_id", None) == threading.get_ident())
+        return getattr(self, "_last_runtime_state", None) != "STOPPED"
+
+    def _dispatch_marvin_observation_action(self, callback, *,
+                                            search_received_monotonic_seconds=None, **kwargs):
+        rejected = {"ok": False, "execution_authorized": False,
+                    "actions_executed": 0, "motion_executed": False,
+                    "source_frame_stamp_ns": kwargs.get("source_frame_stamp_ns"),
+                    "reason": "marvin_motion_ownership_conflict"}
+        controller = getattr(self, "_marvin_controller_lock", None)
+        physical = getattr(self, "_physical_action_lock", None)
+        if controller is not None and not controller.acquire(blocking=False):
+            return rejected
+        physical_acquired = False
+        try:
+            if physical is not None:
+                physical_acquired = physical.acquire(blocking=False)
+                if not physical_acquired:
+                    return rejected
+            with self._state_lock:
+                if not self._marvin_motion_owner_is_current():
+                    return rejected
+                generation = getattr(self, "_control_generation", None)
+                # Capture the receipt bound to the exact authorization before
+                # one-shot consumption clears it. Callers cannot supply a
+                # replacement receipt through the public motion API.
+                observation = getattr(self, "_marvin_alignment_observation", None)
+                receipt = None
+                if (isinstance(observation, dict)
+                        and observation.get("source_frame_stamp_ns") == kwargs["source_frame_stamp_ns"]):
+                    tracker = observation.get("opencv_tracker")
+                    if (isinstance(tracker, dict)
+                            and tracker.get("source_frame_stamp_ns") == kwargs["source_frame_stamp_ns"]
+                            and tracker.get("received_monotonic_seconds") == observation.get("received_monotonic_seconds")):
+                        receipt = observation.get("received_monotonic_seconds")
+                if callback == self._guarded_marvin_v2_search_turn:
+                    receipt = search_received_monotonic_seconds
+
+            def dispatch_guard():
+                with self._state_lock:
+                    return (generation == getattr(self, "_control_generation", None)
+                            and self._marvin_motion_owner_is_current()
+                            and self._marvin_motion_stamp_is_fresh(kwargs["source_frame_stamp_ns"], receipt))
+
+            return callback(**kwargs, dispatch_guard=dispatch_guard)
+        finally:
+            if physical_acquired:
+                physical.release()
+            if controller is not None:
+                controller.release()
+
+    def _execute_marvin_v2_search_turn(self, stamp, receipt):
+        return self._dispatch_marvin_observation_action(
+            self._guarded_marvin_v2_search_turn, source_frame_stamp_ns=stamp,
+            search_received_monotonic_seconds=receipt,
+        )
+
+    def _guarded_marvin_v2_search_turn(self, *, source_frame_stamp_ns, dispatch_guard):
+        base = {"ok": False, "actions_executed": 0, "motion_executed": False}
+        session, lidar = self._active_localization_lidar_is_current()
+        if lidar is None:
+            return dict(base, reason="find_marvin_search_lidar_not_current")
+        with self._state_lock:
+            if source_frame_stamp_ns in self._marvin_alignment_consumed_source_frame_stamps:
+                return dict(base, reason="marvin_search_observation_already_consumed")
+            if not dispatch_guard():
+                return dict(base, reason="marvin_motion_observation_stale_or_preempted")
+            self._marvin_alignment_consumed_source_frame_stamps.add(source_frame_stamp_ns)
+            self._reset_marvin_alignment_consensus()
+        try:
+            turn = self.behavior_manager._execute_target_directed_turn(
+                SCAN_DIRECTION, self.behavior_manager.MARVIN_SEARCH_TURN_SPEED,
+                self.behavior_manager.MARVIN_SEARCH_TURN_SECONDS,
+                expected_lidar_session=session, safety_mode=ROTATIONAL_SWEPT_FOOTPRINT,
+                dispatch_guard=dispatch_guard,
+            )
+        finally:
+            self.robot_client.stop()
+        moved = (isinstance(turn, dict) and turn.get("ok") is True
+                 and turn.get("permitted") is True and turn.get("confirmed_forwarded") is True)
+        if moved:
+            evidence = turn.get("action_lidar_evidence", lidar)
+            if not isinstance(evidence, dict):
+                evidence = {}
+            self._marvin_last_action_lidar_evidence = (
+                evidence.get("producer_session"), evidence.get("acquisition_sequence"))
+        return dict(base, ok=moved, actions_executed=1, motion_executed=moved,
+                    turn_result=turn, reason="find_marvin_search_turn_complete" if moved
+                    else "find_marvin_search_guarded_turn_vetoed")
+
+    def _execute_single_marvin_alignment(
+        self, *, direction, angular_speed, duration, source_frame_stamp_ns, dispatch_guard,
+    ):
         """Execute one capped, guarded Marvin alignment turn and then stop.
 
         This is intentionally not a controller, mission, or general motion
@@ -2255,8 +2586,19 @@ class CognitiveRuntime:
             )
             strict_observation = bool(
                 observation.get("identity_confirmed") is True
-                and observation.get("identity_source")
-                == "gemini_marvin_candidate_selection"
+                and (
+                    observation.get("identity_source")
+                    == "gemini_marvin_candidate_selection"
+                    or (
+                        observation.get("identity_source")
+                        == "marvin_locked_tracker_continuity"
+                        and observation.get("post_action_tracker_continuity") is True
+                        and type(observation.get("post_action_source_frame_stamp_ns")) is int
+                        and type(source_frame_stamp_ns) is int
+                        and source_frame_stamp_ns
+                        > observation["post_action_source_frame_stamp_ns"]
+                    )
+                )
                 and observation.get("controller_state") == VISUAL_READY_TO_ALIGN
                 and expected_direction == normalized_direction
                 and isinstance(tracker, dict)
@@ -2272,10 +2614,22 @@ class CognitiveRuntime:
             )
             if not strict_observation:
                 return dict(base, reason="marvin_alignment_observation_not_authorized")
+            if not dispatch_guard():
+                self._reset_marvin_alignment_consensus()
+                return dict(base, reason="marvin_motion_observation_stale_or_preempted")
             # Consume before guarded dispatch: any later transport ambiguity or
             # JIT veto requires a genuinely new strict observation, preventing
             # an HTTP retry from duplicating a possible physical action.
             consumed.add(source_frame_stamp_ns)
+            self._marvin_alignment_geometry_history = []
+            self._marvin_alignment_consensus = []
+
+            if type(lidar.get("acquisition_sequence")) is int:
+                self._marvin_last_action_lidar_evidence = (session, lidar["acquisition_sequence"])
+
+        mark_action = getattr(behavior, "mark_strict_v2_action_dispatched", None)
+        if callable(mark_action) and mark_action(source_frame_stamp_ns, "turn") is not True:
+            return dict(base, reason="marvin_alignment_tracker_episode_not_current")
 
         base["execution_authorized"] = True
         try:
@@ -2285,6 +2639,7 @@ class CognitiveRuntime:
                 float(duration),
                 expected_lidar_session=session,
                 safety_mode=ROTATIONAL_SWEPT_FOOTPRINT,
+                dispatch_guard=dispatch_guard,
             )
         except Exception as exc:
             try:
@@ -2307,6 +2662,10 @@ class CognitiveRuntime:
             and turn.get("confirmed_forwarded") is True
         )
         stop_ok = isinstance(stop_result, dict) and stop_result.get("ok") is True
+        if motion_executed and isinstance(turn.get("action_lidar_evidence"), dict):
+            evidence = turn["action_lidar_evidence"]
+            self._marvin_last_action_lidar_evidence = (
+                evidence.get("producer_session"), evidence.get("acquisition_sequence"))
         return dict(
             base,
             ok=motion_executed and stop_ok,
@@ -2320,20 +2679,38 @@ class CognitiveRuntime:
             ),
         )
 
-    def execute_single_marvin_approach(self, *, linear_speed, duration):
-        """Execute one capped active-runtime Marvin forward step, then stop."""
+    def execute_single_marvin_approach(
+        self, *, linear_speed, duration, source_frame_stamp_ns,
+    ):
+        return self._dispatch_marvin_observation_action(
+            self._execute_single_marvin_approach, linear_speed=linear_speed,
+            duration=duration, source_frame_stamp_ns=source_frame_stamp_ns,
+        )
+
+    def _execute_single_marvin_approach(self, *, linear_speed, duration, source_frame_stamp_ns,
+                                       dispatch_guard):
+        """Execute one current-observation-bound guarded Marvin forward step."""
         base = {"ok": False, "action": "single_marvin_approach_step",
                 "execution_authorized": False, "motion_executed": False,
                 "actions_executed": 0, "linear_speed": None, "duration": None,
-                "producer_session": None, "approach_result": None,
+                "source_frame_stamp_ns": None, "producer_session": None, "approach_result": None,
                 "stop_result": None, "reason": None}
-        if not _bounded_alignment_number(linear_speed, maximum=0.08):
+        if not _bounded_alignment_number(linear_speed, maximum=FIND_MARVIN_FORWARD_SPEED_MPS):
             return dict(base, reason="marvin_approach_linear_speed_invalid")
         if not _bounded_alignment_number(duration, maximum=0.50):
             return dict(base, reason="marvin_approach_duration_invalid")
-        if float(linear_speed) != 0.08 or float(duration) != 0.50:
+        if float(linear_speed) != FIND_MARVIN_FORWARD_SPEED_MPS or float(duration) != 0.50:
             return dict(base, reason="marvin_approach_parameters_not_calibrated")
-        base.update(linear_speed=float(linear_speed), duration=float(duration))
+        if (
+            not isinstance(source_frame_stamp_ns, int)
+            or isinstance(source_frame_stamp_ns, bool)
+            or source_frame_stamp_ns < 0
+        ):
+            return dict(base, reason="marvin_approach_source_frame_stamp_invalid")
+        base.update(
+            linear_speed=float(linear_speed), duration=float(duration),
+            source_frame_stamp_ns=source_frame_stamp_ns,
+        )
         if self.running is not True:
             return dict(base, reason="marvin_approach_runtime_not_running")
         behavior = getattr(self, "behavior_manager", None)
@@ -2357,13 +2734,81 @@ class CognitiveRuntime:
         if not _marvin_alignment_lidar_is_current(lidar, session):
             return dict(base, reason="marvin_approach_lidar_not_current", lidar=lidar)
         with self._state_lock:
-            if getattr(self, "_marvin_approach_step_consumed", False):
-                return dict(base, reason="marvin_approach_step_already_consumed")
-            self._marvin_approach_step_consumed = True
+            consumed = self._marvin_alignment_consumed_source_frame_stamps
+            if source_frame_stamp_ns in consumed:
+                return dict(base, reason="marvin_approach_observation_already_consumed")
+            observation = self._marvin_alignment_observation
+            tracker = (
+                observation.get("opencv_tracker")
+                if isinstance(observation, dict) else None
+            )
+            strict_observation = bool(
+                isinstance(observation, dict)
+                and observation.get("source_frame_stamp_ns") == source_frame_stamp_ns
+                and observation.get("identity_confirmed") is True
+                and (
+                    observation.get("identity_source")
+                    == "gemini_marvin_candidate_selection"
+                    or (
+                        observation.get("identity_source")
+                        == "marvin_locked_tracker_continuity"
+                        and observation.get("post_action_tracker_continuity") is True
+                        and type(observation.get("post_action_source_frame_stamp_ns")) is int
+                        and type(source_frame_stamp_ns) is int
+                        and source_frame_stamp_ns
+                        > observation["post_action_source_frame_stamp_ns"]
+                    )
+                )
+                and observation.get("controller_state") == VISUAL_READY_TO_APPROACH
+                and observation.get("controller_decision") == "FORWARD"
+                and isinstance(tracker, dict)
+                and tracker.get("active") is True
+                and tracker.get("matched") is True
+                and isinstance(tracker.get("quality"), (int, float))
+                and not isinstance(tracker.get("quality"), bool)
+                and isinstance(tracker.get("threshold"), (int, float))
+                and not isinstance(tracker.get("threshold"), bool)
+                and tracker.get("quality") >= tracker.get("threshold")
+                and tracker.get("source_frame_stamp_ns") == source_frame_stamp_ns
+                and isinstance(tracker.get("bbox"), dict)
+            )
+            if not strict_observation:
+                return dict(base, reason="marvin_approach_observation_not_authorized")
+            if not dispatch_guard():
+                self._reset_marvin_alignment_consensus()
+                return dict(base, reason="marvin_motion_observation_stale_or_preempted")
+            observed_standoff = observation.get("target_standoff")
+            if (not isinstance(observed_standoff, dict)
+                    or observed_standoff.get("ok") is not True
+                    or observed_standoff.get("authority") != "target_bearing_lidar"
+                    or observed_standoff.get("arrived_at_marvin") is not False):
+                return dict(base, reason="marvin_approach_target_distance_not_authorized")
+            # Recompute target range from current producer-bound points, not
+            # from the cached arrival diagnostic. Local safety independently
+            # evaluates the entire actual forward bound immediately afterward.
+            standoff = self._marvin_v2_lidar_arrival(tracker, lidar)
+            if standoff.get("ok") is not True or standoff.get("arrived_at_marvin") is True:
+                return dict(base, reason="marvin_approach_target_standoff_veto", target_standoff=standoff)
+            effective_duration = min(float(duration),
+                                     (standoff["target_distance_m"] - TARGET_STANDOFF_M) / float(linear_speed))
+            base.update(requested_duration=float(duration), duration=effective_duration,
+                        target_standoff=standoff)
+            # As with a turn, consume immediately before the guarded dispatch.
+            # An HTTP retry must never duplicate a possible forward movement.
+            consumed.add(source_frame_stamp_ns)
+            self._marvin_alignment_geometry_history = []
+            self._marvin_alignment_consensus = []
+            self._marvin_last_action_lidar_evidence = (session, standoff["acquisition_sequence"])
+        mark_action = getattr(behavior, "mark_strict_v2_action_dispatched", None)
+        if callable(mark_action) and mark_action(source_frame_stamp_ns, "forward") is not True:
+            return dict(base, reason="marvin_approach_tracker_episode_not_current")
         base["execution_authorized"] = True
         try:
             approach_result = approach(expected_lidar_session=session,
-                                       linear_speed=float(linear_speed), duration=float(duration))
+                                       linear_speed=float(linear_speed), duration=effective_duration,
+                                       target_tracker=dict(tracker),
+                                       camera_model=getattr(self, "marvin_camera_model", None),
+                                       dispatch_guard=dispatch_guard)
         except Exception as exc:
             approach_result = {"ok": False, "motion_executed": False, "error": str(exc)}
         try:
@@ -2371,8 +2816,19 @@ class CognitiveRuntime:
         except Exception as exc:
             stop_result = {"ok": False, "error": str(exc), "error_type": type(exc).__name__}
         moved = bool(isinstance(approach_result, dict) and approach_result.get("motion_executed") is True)
+        if isinstance(approach_result, dict):
+            latest_standoff = approach_result.get("target_standoff")
+            if isinstance(latest_standoff, dict) and latest_standoff.get("ok") is True:
+                with self._state_lock:
+                    self._marvin_last_action_lidar_evidence = (session, latest_standoff["acquisition_sequence"])
         stop_ok = isinstance(stop_result, dict) and stop_result.get("ok") is True
-        return dict(base, ok=moved and stop_ok, motion_executed=moved, actions_executed=1,
+        forward = (approach_result or {}).get("forward_result") or {}
+        interrupted = forward.get("bounded_forward_invalidated") is True
+        return dict(base, ok=moved and stop_ok, motion_executed=moved, actions_executed=int(moved),
+                    interrupted=interrupted, interruption_reason=forward.get("reason") if interrupted else None,
+                    source_stamp_consumed=source_frame_stamp_ns in consumed,
+                    full_step_completed=moved and stop_ok,
+                    actual_confirmed_run_duration_seconds=None,
                     approach_result=approach_result, stop_result=stop_result,
                     reason=("marvin_approach_step_complete" if moved and stop_ok else
                             (approach_result.get("reason", "marvin_approach_step_failed")
@@ -2751,6 +3207,7 @@ class CognitiveRuntime:
         with self._state_lock:
             if intent_name == "STOP":
                 self._control_generation += 1
+                self._reset_marvin_alignment_consensus()
 
                 mission = self.mission_manager.handle_intent(
                     intent
@@ -2892,6 +3349,10 @@ class CognitiveRuntime:
                 previous=self.tracking_state,
             )
 
+            if self._is_normal_marvin_find_mission(mission) and result.get("completed") is True:
+                # Preserve terminal diagnostics, but the V2 episode is over.
+                self.tracking_state["active"] = False
+
             active = self.mission_manager.get_active_mission()
 
             if active and active.mission_id == mission_id:
@@ -2992,6 +3453,7 @@ class CognitiveRuntime:
             print()
 
             self._start_lidar()
+            self._retain_marvin_diagnostic("start")
             if self.forward_interlock is not None:
                 self.forward_interlock.start()
             while self.running:
@@ -3007,6 +3469,7 @@ class CognitiveRuntime:
                 pass
 
             self._stop_lidar()
+            self._retain_marvin_diagnostic("stop")
             if self.forward_interlock is not None:
                 self.forward_interlock.stop()
 
@@ -3025,6 +3488,7 @@ class CognitiveRuntime:
         Request a clean runtime shutdown.
         """
         self.running = False
+        self._retain_marvin_diagnostic("stop")
         self._stop_lidar()
         if self.forward_interlock is not None:
             self.forward_interlock.stop()
@@ -3063,6 +3527,8 @@ class CognitiveRuntime:
                     self.mission_manager.mission_history
                 ),
                 "last_result": self.last_result,
+                "marvin_progress_diagnostics": self._retain_marvin_diagnostic("snapshot"),
+                "marvin_odometry_diagnostics": self._retain_marvin_diagnostic("odometry_snapshot"),
                 "tracking": dict(self.tracking_state),
                 "last_error": self.last_error,
                 "lidar_perception": self._lidar_status(),

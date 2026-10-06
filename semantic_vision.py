@@ -27,6 +27,8 @@ class JpegFrame:
     height: int
     received_at: str
     source_frame_stamp_ns: int = None
+    # Local process clock only; never compare this to a remote ROS stamp.
+    received_monotonic_seconds: float = None
 
 
 def _jpeg_dimensions(data):
@@ -154,6 +156,7 @@ class SemanticVisionClient:
             if not data:
                 raise ValueError("camera_frame_empty")
             received_at = datetime.now(timezone.utc).isoformat()
+            received_monotonic_seconds = time.monotonic()
             source_frame_stamp_ns = self._source_frame_stamp_ns(
                 response.headers
             )
@@ -161,6 +164,7 @@ class SemanticVisionClient:
         width, height = _jpeg_dimensions(data)
         return JpegFrame(
             data, width, height, received_at, source_frame_stamp_ns,
+            received_monotonic_seconds,
         )
 
     @staticmethod

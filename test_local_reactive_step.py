@@ -123,8 +123,9 @@ def _runtime(*, robot=None, behavior=None, facade=None, active_mission=None):
 
 
 def _install_decision(monkeypatch, value, events):
-    def decide(state, *, expected_session):
+    def decide(state, *, expected_session, forward_linear_speed):
         assert state["producer_session"] == expected_session == SESSION
+        assert forward_linear_speed == 0.10
         events.append("decision")
         return _decision(value)
 

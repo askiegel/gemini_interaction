@@ -21,7 +21,7 @@ from voice_relay.server import FIND_OBJECT_PREVIEW_TIMEOUT_SECONDS, VoiceRelayHa
 
 
 def test_v2_observer_uses_strict_builder_without_target_lock_resolution():
-    manager = object.__new__(BehaviorManager)
+    manager = BehaviorManager(robot_client=ReadOnlyRobot())
     manager.MARVIN_SEMANTIC_TARGET = "marvin"
 
     class Lock:
@@ -706,6 +706,8 @@ def test_find_marvin_v2_requires_fresh_gemini_and_allows_generic_proposal_label(
         nonlocal fetch_count
         frame = original_fetch()
         fetch_count += 1
+        import time
+        frame.received_monotonic_seconds = time.monotonic()
         frame.source_frame_stamp_ns = 1000 + fetch_count
         return frame
 
@@ -747,6 +749,8 @@ def test_find_marvin_v2_does_not_use_session_continuity():
         nonlocal fetch_count
         frame = original_fetch()
         fetch_count += 1
+        import time
+        frame.received_monotonic_seconds = time.monotonic()
         frame.source_frame_stamp_ns = 2000 + fetch_count
         return frame
 

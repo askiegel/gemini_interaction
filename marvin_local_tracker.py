@@ -29,6 +29,7 @@ class MarvinLocalTracker:
         self.last_quality = None
         self.last_search_roi = None
         self.last_bbox = None
+        self.last_candidate_bbox = None
         self.last_source_frame_stamp_ns = None
         self.last_image_width = self.width
         self.last_image_height = self.height
@@ -123,6 +124,8 @@ class MarvinLocalTracker:
     def update(self, frame):
         """Return a locally matched bbox, or ``None`` when tracking is lost."""
         self.last_bbox = None
+        self.last_candidate_bbox = None
+        self.last_search_roi = None
         self.last_source_frame_stamp_ns = self._valid_source_stamp(
             getattr(frame, "source_frame_stamp_ns", None)
         )
@@ -142,13 +145,16 @@ class MarvinLocalTracker:
             return None
         self.last_quality = float(quality)
         self.last_search_roi = (left, top, right, bottom)
-        if not math.isfinite(self.last_quality) or self.last_quality < self.MIN_MATCH_QUALITY:
-            self.last_reason = "below_threshold"
-            return None
         template_height, template_width = self.template.shape
         x1 = left + int(location[0])
         y1 = top + int(location[1])
         bbox = (x1, y1, x1 + template_width, y1 + template_height)
+        # Retain the best candidate for diagnosis even when it cannot supply
+        # motion evidence. Matching remains fixed-scale and quality-gated.
+        self.last_candidate_bbox = dict(zip(("x1", "y1", "x2", "y2"), bbox))
+        if not math.isfinite(self.last_quality) or self.last_quality < self.MIN_MATCH_QUALITY:
+            self.last_reason = "below_threshold"
+            return None
         try:
             self.bbox = self._validate_bbox(
                 dict(zip(("x1", "y1", "x2", "y2"), bbox)),

@@ -214,7 +214,7 @@ def test_centered_confirmed_tracker_allows_one_forward_then_stop():
     assert result["authority_source"] == "marvin_local_tracker"
     assert result["approach_chunks_attempted"] == result["approach_chunks_completed"] == 1
     assert result["turn_chunks_attempted"] == result["centering_turn_chunks_attempted"] == 0
-    assert robot.calls == [("forward", 0.08, 0.50), ("stop",)]
+    assert robot.calls == [("forward", 0.10, 0.50), ("stop",)]
     assert result["post_step_stop_result"]["ok"] is True
 
 
@@ -230,7 +230,7 @@ def test_fresh_first_guard_has_no_lidar_refresh_retry():
     assert result["lidar_refresh_initial_reason"] == "fresh"
     assert result["lidar_refresh_final_acquisition_sequence"] == 1
     assert [call for call in robot.calls if call[0] == "forward"] == [
-        ("forward", 0.08, 0.50),
+        ("forward", 0.10, 0.50),
     ]
 
 

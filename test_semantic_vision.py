@@ -293,6 +293,7 @@ class Response:
 
 
 def test_configured_camera_url_and_local_timestamp(monkeypatch):
+    monkeypatch.setattr('semantic_vision.time.monotonic', lambda: 123.125)
     monkeypatch.setenv('VISION_CAMERA_URL', 'http://camera.invalid/configured.jpg')
     response = Response(headers={
         'Content-Type': 'image/jpeg',
@@ -306,6 +307,7 @@ def test_configured_camera_url_and_local_timestamp(monkeypatch):
     assert (frame.data, frame.width, frame.height) == (JPEG, 640, 480)
     assert frame.received_at.endswith('+00:00')
     assert frame.source_frame_stamp_ns == 12_000_000_034
+    assert frame.received_monotonic_seconds == 123.125
     get.assert_called_once_with('http://camera.invalid/configured.jpg', timeout=5.0, stream=True, allow_redirects=False)
     assert response.closed
 
@@ -375,7 +377,7 @@ def test_slow_frame_stream_expires_and_closes(monkeypatch, elapsed, expired):
     response = Response()
     get = Mock(return_value=response)
     monkeypatch.setattr('semantic_vision.requests.get', get)
-    ticks = iter([0.0, elapsed, elapsed])
+    ticks = iter([0.0, elapsed, elapsed, elapsed])
     monkeypatch.setattr('semantic_vision.time.monotonic', lambda: next(ticks))
     instance, _ = helper()
     assert instance.timeout_seconds == 5.0
