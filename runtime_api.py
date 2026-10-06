@@ -16,6 +16,7 @@ from config.config_manager import (
 )
 from runtime import CognitiveRuntime
 from tracking_state import build_tracking_state
+from runtime_reporting import status_summary
 
 
 DEFAULT_HOST = "127.0.0.1"
@@ -105,6 +106,10 @@ class RuntimeAPIHandler(BaseHTTPRequestHandler):
             "Content-Type",
         )
 
+    def _runtime_status_summary(self):
+        getter = getattr(self.server.runtime, "get_status_summary", None)
+        return getter() if callable(getter) else status_summary(self.server.runtime.get_status())
+
     def send_json(self, status_code: int, payload: Dict[str, Any]):
         body = json.dumps(
             _precision_safe_source_frame_stamps(payload),
@@ -119,6 +124,7 @@ class RuntimeAPIHandler(BaseHTTPRequestHandler):
             "application/json; charset=utf-8",
         )
         self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
         self.end_headers()
         self.wfile.write(body)
 
@@ -204,9 +210,10 @@ class RuntimeAPIHandler(BaseHTTPRequestHandler):
             return
 
         if path == "/status":
+            details = parse_qs(parsed_url.query).get("details") == ["1"]
             self.send_json(
                 200,
-                self.server.runtime.get_status(),
+                self.server.runtime.get_status() if details else self._runtime_status_summary(),
             )
             return
 
@@ -457,7 +464,7 @@ class RuntimeAPIHandler(BaseHTTPRequestHandler):
             return
 
         if path == "/missions":
-            runtime_status = self.server.runtime.get_status()
+            runtime_status = self._runtime_status_summary()
 
             self.send_json(
                 200,
@@ -467,6 +474,7 @@ class RuntimeAPIHandler(BaseHTTPRequestHandler):
                         "active_mission"
                     ),
                     "queue": runtime_status.get("queue", []),
+                    "queue_count": runtime_status.get("queue_count", 0),
                     "history_count": runtime_status.get(
                         "history_count",
                         0,
@@ -947,7 +955,7 @@ class RuntimeAPIHandler(BaseHTTPRequestHandler):
                     "intent": submission["intent"],
                     "mission": submission["mission"],
                     "addressing": submission.get("addressing"),
-                    "runtime": self.server.runtime.get_status(),
+                    "runtime": self._runtime_status_summary(),
                 },
             )
 

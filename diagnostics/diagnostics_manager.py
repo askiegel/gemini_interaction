@@ -120,7 +120,10 @@ class DiagnosticsManager:
 
     def collect(self) -> Dict[str, Any]:
         config = self.config_manager.get_config()
-        runtime_status = self.runtime.get_status()
+        summary_getter = getattr(self.runtime, "get_status_summary", None)
+        runtime_status = (
+            summary_getter() if callable(summary_getter) else self.runtime.get_status()
+        )
         vision_url = config.get("vision", {}).get("server_url", "")
         bridge_url = (
             f"{self.config_manager.robot_bridge_url}/status"
@@ -154,7 +157,7 @@ class DiagnosticsManager:
                 "uptime_seconds": runtime_status.get("uptime_seconds"),
                 "loop_hz": round(1.0 / self.runtime.loop_interval, 1) if self.runtime.loop_interval > 0 else None,
                 "active_mission": active,
-                "queue_length": len(runtime_status.get("queue", [])),
+                "queue_length": runtime_status.get("queue_count", len(runtime_status.get("queue", []))),
                 "history_count": runtime_status.get("history_count", 0),
                 "entity_count": entity_count,
                 "last_error": runtime_status.get("last_error"),

@@ -362,6 +362,7 @@ class VoiceRelayHandler(BaseHTTPRequestHandler):
             "Content-Length",
             str(len(body)),
         )
+        self.send_header("Cache-Control", "no-store")
 
         self.end_headers()
         self.wfile.write(body)
@@ -2060,12 +2061,6 @@ class VoiceRelayHandler(BaseHTTPRequestHandler):
             timeout=3.0,
         )
 
-        mission_response = request_json(
-            "GET",
-            f"{COGNITIVE_RUNTIME_URL}/missions",
-            timeout=3.0,
-        )
-
         vision_response = request_json(
             "GET",
             VISION_SERVER_URL,
@@ -2081,12 +2076,6 @@ class VoiceRelayHandler(BaseHTTPRequestHandler):
         runtime = (
             runtime_response["data"]
             if runtime_response["ok"]
-            else None
-        )
-
-        missions = (
-            mission_response["data"]
-            if mission_response["ok"]
             else None
         )
 
@@ -2107,26 +2096,7 @@ class VoiceRelayHandler(BaseHTTPRequestHandler):
         last_result = None
         history_count = 0
 
-        if missions:
-            active_mission = missions.get(
-                "active_mission"
-            )
-
-            queue = missions.get(
-                "queue",
-                [],
-            )
-
-            last_result = missions.get(
-                "last_result"
-            )
-
-            history_count = missions.get(
-                "history_count",
-                0,
-            )
-
-        elif runtime:
+        if runtime:
             active_mission = runtime.get(
                 "active_mission"
             )
@@ -2203,7 +2173,7 @@ class VoiceRelayHandler(BaseHTTPRequestHandler):
             "missions": {
                 "active": active_mission,
                 "queue": queue,
-                "queue_count": len(queue),
+                "queue_count": runtime.get("queue_count", len(queue)) if runtime else 0,
                 "history_count": history_count,
                 "last_result": last_result,
             },
@@ -2901,6 +2871,7 @@ class VoiceRelayHandler(BaseHTTPRequestHandler):
                 "Content-Type",
                 "text/html; charset=utf-8",
             )
+            self.send_header("Cache-Control", "no-store")
 
             self.send_header(
                 "Content-Length",
@@ -3291,6 +3262,16 @@ class VoiceRelayHandler(BaseHTTPRequestHandler):
                 200,
                 self.dashboard_status(),
             )
+            return
+
+        if path == "/dashboard/runtime-details":
+            # Large retained evidence is explicitly requested, never polled.
+            response = request_json(
+                "GET", f"{COGNITIVE_RUNTIME_URL}/status?details=1", timeout=8.0,
+            )
+            self.send_json(response["status_code"] or 503, response["data"] or {
+                "ok": False, "error": response["error"] or "Runtime details unavailable.",
+            })
             return
 
         if path == "/dashboard/config":

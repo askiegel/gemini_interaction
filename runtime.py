@@ -3493,6 +3493,35 @@ class CognitiveRuntime:
         if self.forward_interlock is not None:
             self.forward_interlock.stop()
 
+    def get_status_summary(self):
+        """Dashboard view without copying retained history or diagnostics.
+
+        Reporting is read-only. Admission and motion continue to use their
+        existing independent evidence paths.
+        """
+        from runtime_reporting import status_summary
+
+        with self._state_lock:
+            active = self.mission_manager.get_active_mission()
+            queue = self.mission_manager.mission_queue
+            return status_summary({
+                "ok": True,
+                "service": "mini_pupper_cognitive_runtime",
+                "running": self.running,
+                "runtime_state": self.world_model.robot_state.get("runtime_state", "UNKNOWN"),
+                "uptime_seconds": max(0.0, time.time() - self.started_at) if self.started_at is not None else None,
+                "active_mission": active.to_dict() if active is not None else None,
+                "queue": [mission.to_dict() for mission in queue[:20]],
+                "queue_count": len(queue),
+                "history_count": len(self.mission_manager.mission_history),
+                "last_result": self.last_result,
+                "tracking": self.tracking_state,
+                "last_error": self.last_error,
+                "lidar_perception": self._lidar_status(),
+                "forward_interlock": self.forward_interlock.status() if self.forward_interlock is not None else {
+                    "configured": False, "reason": "not_configured"},
+            })
+
     def get_status(self):
         """
         Return a serializable runtime status snapshot.

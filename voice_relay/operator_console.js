@@ -1,5 +1,112 @@
 "use strict";
 
+/* Shared read-only transport. Command requests pass directly to native fetch. */
+(() => {
+    const nativeFetch = window.fetch.bind(window);
+    const requests = new Map();
+    const cadences = new Map([
+        ["/dashboard/status", 500],
+        ["/dashboard/lidar", 125],
+    ]);
+
+    function cancelled() {
+        return new DOMException("Telemetry request superseded or hidden", "AbortError");
+    }
+
+    function invalidate() {
+        for (const state of requests.values()) {
+            state.generation += 1;
+            if (state.controller) state.controller.abort();
+            state.pending = null;
+            state.response = null;
+        }
+    }
+
+    function currentResponse(response, state, generation) {
+        const clone = response.clone();
+        for (const method of ["json", "text", "arrayBuffer", "blob", "formData"]) {
+            const read = clone[method].bind(clone);
+            clone[method] = async () => {
+                const payload = await read();
+                if (document.hidden || generation !== state.generation) throw cancelled();
+                return payload;
+            };
+        }
+        return clone;
+    }
+
+    async function telemetryFetch(url, options = {}) {
+        const method = String(options.method || (url && url.method) || "GET").toUpperCase();
+        if (method !== "GET") {
+            // Never cache, coalesce, abort, or retry a command, including STOP.
+            try { return await nativeFetch(url, options); }
+            finally { invalidate(); }
+        }
+        if (document.hidden || (options.signal && options.signal.aborted)) throw cancelled();
+        const key = typeof url === "string" ? url : url.url;
+        const interval = cadences.get(key) || 0;
+        let state = requests.get(key);
+        if (!state) {
+            state = {generation: 0, pending: null, response: null, started: -Infinity};
+            requests.set(key, state);
+        }
+        if (!state.pending && state.response && performance.now() - state.started < interval) {
+            return currentResponse(state.response, state, state.generation);
+        }
+        if (!state.pending) {
+            const generation = ++state.generation;
+            const controller = new AbortController();
+            state.controller = controller;
+            state.response = null;
+            state.started = performance.now();
+            const timeout = window.setTimeout(() => controller.abort(), interval ? 3000 : 30000);
+            state.pending = (async () => {
+                try {
+                    const response = await nativeFetch(url, {
+                        ...options, cache: "no-store", signal: controller.signal,
+                    });
+                    // Finish reading before another generation can begin.
+                    const body = await response.arrayBuffer();
+                    if (document.hidden || generation !== state.generation || controller.signal.aborted) {
+                        throw cancelled();
+                    }
+                    const complete = new Response([204, 205, 304].includes(response.status) ? null : body, {
+                        status: response.status, statusText: response.statusText,
+                        headers: response.headers,
+                    });
+                    state.response = interval && response.ok ? complete : null;
+                    return complete;
+                } finally {
+                    window.clearTimeout(timeout);
+                    if (generation === state.generation) {
+                        state.pending = null;
+                        state.controller = null;
+                    }
+                }
+            })();
+        }
+        // A consumer's cancellation must not abort a coalesced peer request.
+        const generation = state.generation;
+        const response = await state.pending;
+        if (document.hidden || (options.signal && options.signal.aborted)) throw cancelled();
+        return currentResponse(response, state, generation);
+    }
+
+    function bridgeScanVisible(payload) {
+        const telemetry = payload && payload.telemetry;
+        return Boolean(payload && payload.ok && telemetry && telemetry.available
+            && telemetry.scan && typeof telemetry.age_seconds === "number"
+            && Number.isFinite(telemetry.age_seconds)
+            && telemetry.age_seconds >= 0 && telemetry.age_seconds <= 0.30);
+    }
+
+    window.MaydayTelemetry = {fetch: telemetryFetch, invalidate, bridgeScanVisible};
+    document.addEventListener("visibilitychange", () => { if (document.hidden) invalidate(); });
+})();
+
+/* Operator console modules */
+"use strict";
+
 /*
  * Mini Pupper 2 Operator Console v2
  *
@@ -569,7 +676,7 @@
         if (!missionControlIsVisible()) return;
 
         try {
-            const response = await fetch(
+            const response = await window.MaydayTelemetry.fetch(
                 STATUS_URL,
                 {
                     cache: "no-store"
@@ -586,6 +693,7 @@
             updateConsole(status);
         }
         catch (error) {
+            if (error.name === "AbortError") return;
             setText(
                 "operatorRuntime",
                 "OFFLINE"
@@ -633,7 +741,9 @@
     const SCAN_TO_ROBOT_ROTATION_RADIANS = Math.PI / 2;
     // Visualization-only mirror of production front sector [-20, +20).
     const FRONT_SECTOR_HALF_RADIANS = 20 * Math.PI / 180;
-    let requestInFlight = false;
+    let scanRequestInFlight = false;
+    let safetyRequestInFlight = false;
+    let frontState = "UNKNOWN";
 
     function byId(id) { return document.getElementById(id); }
     function setText(id, value) {
@@ -729,16 +839,12 @@
         context.closePath();
         context.fill();
     }
-    async function refresh() {
-        if (!visible() || requestInFlight) return;
-        requestInFlight = true;
+    async function refreshSafety() {
+        if (!visible() || safetyRequestInFlight) return;
+        safetyRequestInFlight = true;
         try {
-            const responses = await Promise.all([
-                fetch(STATUS_URL, {cache: "no-store"}),
-                fetch(LIDAR_URL, {cache: "no-store"}),
-            ]);
-            const status = await responses[0].json();
-            const scanPayload = await responses[1].json();
+            const response = await window.MaydayTelemetry.fetch(STATUS_URL, {cache: "no-store"});
+            const status = await response.json();
             const lidar = (status.runtime || {}).lidar || {};
             setText("missionLidarSession", lidar.producer_session || "—");
             setText("missionLidarSequence", String(lidar.acquisition_sequence ?? "—"));
@@ -746,31 +852,45 @@
             setText("missionLidarFront", lidar.front_state || "UNKNOWN");
             const age = Number(lidar.effective_age_seconds);
             setText("missionLidarAge", Number.isFinite(age) ? age.toFixed(3) + " s" : "—");
-            const fresh = responses[0].ok && responses[1].ok
+            const fresh = response.ok
                 && lidar.running === true && lidar.available === true
-                && lidar.valid === true && lidar.reason === "fresh"
-                && scanPayload.ok === true && scanPayload.telemetry
-                && scanPayload.telemetry.available === true
-                && scanPayload.telemetry.scan;
-            if (!fresh) {
-                clear("LiDAR is stale, invalid, or unavailable. Scan points hidden.", lidar.reason || "Unavailable");
+                && lidar.valid === true && lidar.reason === "fresh";
+            frontState = fresh ? lidar.front_state : "UNKNOWN";
+            setText("missionCognitiveLidarState", fresh ? "Fresh" : (lidar.reason || "Unavailable"));
+        } catch (error) {
+            if (error.name !== "AbortError") setText("missionCognitiveLidarState", "Unavailable");
+        } finally {
+            safetyRequestInFlight = false;
+        }
+    }
+    async function refreshScan() {
+        if (!visible() || scanRequestInFlight) return;
+        scanRequestInFlight = true;
+        try {
+            const response = await window.MaydayTelemetry.fetch(LIDAR_URL, {cache: "no-store"});
+            const scanPayload = await response.json();
+            if (!response.ok || !window.MaydayTelemetry.bridgeScanVisible(scanPayload)) {
+                clear("Bridge scan is stale or unavailable.", "Bridge stale / unavailable");
                 return;
             }
-            draw(scanPayload.telemetry.scan, lidar.front_state);
-            setText("missionLidarState", lidar.front_state || "Fresh");
+            draw(scanPayload.telemetry.scan, frontState);
+            setText("missionBridgeLidarAge", Number(scanPayload.telemetry.age_seconds).toFixed(3) + " s");
+            setText("missionLidarState", "Bridge scan fresh");
             const overlay = byId("missionLidarMessage");
             if (overlay) overlay.hidden = true;
         } catch (error) {
-            clear("LiDAR unavailable: " + error.message, "Unavailable");
+            if (error.name !== "AbortError") clear("Bridge LiDAR unavailable: " + error.message, "Unavailable");
         } finally {
-            requestInFlight = false;
+            scanRequestInFlight = false;
         }
     }
     function initialize() {
         if (!byId("missionLidarCanvas")) return;
         clear("Waiting for fresh LiDAR telemetry.", "Unavailable");
-        refresh();
-        window.setInterval(refresh, 500);
+        refreshSafety();
+        refreshScan();
+        window.setInterval(refreshSafety, 500);
+        window.setInterval(refreshScan, 125);
     }
     if (document.readyState === "loading") {
         document.addEventListener("DOMContentLoaded", initialize);
@@ -991,7 +1111,7 @@
         setBusy(true);
 
         try {
-            const response = await fetch(CONFIGURATION_URL, {
+            const response = await window.MaydayTelemetry.fetch(CONFIGURATION_URL, {
                 method: "GET",
                 cache: "no-store",
             });
@@ -1143,11 +1263,12 @@
         if (!diagnosticsIsVisible()) return;
 
         try {
-            const response = await fetch(DIAGNOSTICS_URL, {cache:"no-store"});
+            const response = await window.MaydayTelemetry.fetch(DIAGNOSTICS_URL, {cache:"no-store"});
             const payload = await response.json();
             if (!response.ok || payload.ok === false) throw new Error(payload.error || `Diagnostics returned ${response.status}.`);
             render(payload);
         } catch (error) {
+            if (error.name === "AbortError") return;
             const pill = el("diagnosticsStatusPill");
             if (pill) { pill.textContent = "Diagnostics offline"; pill.className = "console-status-pill error"; }
             const message = el("diagnosticsMessage");
@@ -1202,7 +1323,7 @@
             field("Created", formatTimestamp(mission.created_at)) + field("Started", formatTimestamp(mission.started_at)) +
             field("Completed", formatTimestamp(mission.completed_at)) + field("Duration", duration(mission)) +
             field("Priority", mission.priority) + field("Target", mission.target || "None") +
-            '</div>';
+            '</div><a href="/dashboard/runtime-details" target="_blank" rel="noopener">Open retained runtime diagnostics</a>';
     }
 
     function field(label, value) { return '<div class="mission-history-detail-field"><span>' + escapeHtml(label) + '</span><strong>' + escapeHtml(value) + '</strong></div>'; }
@@ -1241,7 +1362,7 @@
         var pill = byId("missionHistoryStatusPill");
         var message = byId("missionHistoryMessage");
         try {
-            var response = await fetch(HISTORY_URL, {cache: "no-store"});
+            var response = await window.MaydayTelemetry.fetch(HISTORY_URL, {cache: "no-store"});
             var payload = await response.json();
             if (!response.ok || payload.ok === false) throw new Error(payload.error || "Mission history request failed.");
             missions = Array.isArray(payload.missions) ? payload.missions : [];
@@ -1250,6 +1371,7 @@
             message.hidden = true;
             render();
         } catch (error) {
+            if (error.name === "AbortError") return;
             pill.textContent = "History offline";
             pill.className = "console-status-pill error";
             message.textContent = error.message;
@@ -1263,8 +1385,9 @@
         byId("missionHistorySearch").addEventListener("input", render);
         byId("missionHistoryFilter").addEventListener("change", render);
         refresh();
-        timer = window.setInterval(refresh, 5000);
-        window.addEventListener("beforeunload", function () { window.clearInterval(timer); }, {once: true});
+        // History is loaded on opening this page or explicit refresh only.
+        new MutationObserver(function () { if (missionHistoryIsVisible()) refresh(); })
+            .observe(byId("historyPage"), {attributes: true, attributeFilter: ["class", "hidden"]});
     }
     if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", initialize, {once: true}); else initialize();
 })();
@@ -1371,7 +1494,7 @@
         var pill = byId("worldModelStatusPill");
         var message = byId("worldModelMessage");
         try {
-            var response = await fetch(WORLD_MODEL_URL, {cache: "no-store"});
+            var response = await window.MaydayTelemetry.fetch(WORLD_MODEL_URL, {cache: "no-store"});
             var payload = await response.json();
             if (!response.ok || payload.ok === false) throw new Error(payload.error || "World Model request failed.");
             entities = Array.isArray(payload.entities) ? payload.entities : [];
@@ -1383,6 +1506,7 @@
             message.hidden = true;
             render();
         } catch (error) {
+            if (error.name === "AbortError") return;
             pill.textContent = "World Model offline";
             pill.className = "console-status-pill error";
             message.textContent = error.message;
@@ -1397,7 +1521,7 @@
         byId("worldModelTypeFilter").addEventListener("change", render);
         byId("worldModelAgeFilter").addEventListener("change", render);
         refresh();
-        timer = window.setInterval(refresh, 3000);
+        timer = window.setInterval(refresh, 60000);
         window.addEventListener("beforeunload", function () { window.clearInterval(timer); }, {once: true});
     }
     if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", initialize, {once: true}); else initialize();
@@ -1996,7 +2120,7 @@
             scanButton.textContent = "Scanning...";
         }
 
-        return fetch(
+        return window.MaydayTelemetry.fetch(
             NETWORK_URL +
                 (rescan ? "?rescan=true" : ""),
             {
@@ -2020,6 +2144,7 @@
                 return result.payload;
             })
             .catch(function (error) {
+            if (error.name === "AbortError") return;
                 setMessage(
                     error.message || String(error),
                     "error"
@@ -2348,7 +2473,7 @@
     "use strict";
 
     const ENDPOINT = "/dashboard/lidar";
-    const REFRESH_MS = 250;
+    const REFRESH_MS = 125;
     const DISPLAY_RANGE_METERS = 4.0;
 
     /*
@@ -2612,7 +2737,7 @@
         requestInFlight = true;
 
         try {
-            const response = await fetch(ENDPOINT, {
+            const response = await window.MaydayTelemetry.fetch(ENDPOINT, {
                 cache: "no-store",
             });
             const payload = await response.json();
@@ -2632,6 +2757,7 @@
 
             render(payload);
         } catch (error) {
+            if (error.name === "AbortError") return;
             setOffline(error.message);
         } finally {
             requestInFlight = false;
@@ -2807,12 +2933,13 @@
         statusRequestInFlight = true;
 
         try {
-            const response = await fetch(
+            const response = await window.MaydayTelemetry.fetch(
                 STATUS,
                 {cache: "no-store"}
             );
             render(await read(response));
         } catch (error) {
+            if (error.name === "AbortError") return;
             setDisplay(
                 "Unavailable",
                 "error",
@@ -3299,7 +3426,7 @@
         requestInFlight = true;
 
         try {
-            const response = await fetch(
+            const response = await window.MaydayTelemetry.fetch(
                 STATUS_ENDPOINT,
                 {cache: "no-store"}
             );
@@ -3314,6 +3441,7 @@
 
             renderStatus(payload);
         } catch (error) {
+            if (error.name === "AbortError") return;
             latestReadinessReady = false;
             setState("Unavailable", "error");
             setMessage(error.message, true);
@@ -3868,7 +3996,7 @@
         requestInFlight = true;
 
         try {
-            const response = await fetch(ENDPOINT, {
+            const response = await window.MaydayTelemetry.fetch(ENDPOINT, {
                 cache: "no-store",
             });
             const payload = await response.json();
@@ -3907,6 +4035,7 @@
 
             render(payload);
         } catch (error) {
+            if (error.name === "AbortError") return;
             setUnavailable(error.message);
         } finally {
             requestInFlight = false;
@@ -4411,7 +4540,7 @@
         requestInFlight = true;
 
         try {
-            const response = await fetch(ENDPOINT, {
+            const response = await window.MaydayTelemetry.fetch(ENDPOINT, {
                 cache: "no-store",
             });
             const payload = await response.json();
@@ -4425,6 +4554,7 @@
 
             render(payload);
         } catch (error) {
+            if (error.name === "AbortError") return;
             setUnavailable(error.message);
         } finally {
             requestInFlight = false;
@@ -4760,7 +4890,7 @@
     async function loadMap() {
         if (occupancyMap) return true;
 
-        const response = await fetch(
+        const response = await window.MaydayTelemetry.fetch(
             MAP_ENDPOINT,
             {cache: "no-store"}
         );
@@ -4799,11 +4929,11 @@
             }
 
             const responses = await Promise.all([
-                fetch(
+                window.MaydayTelemetry.fetch(
                     LOCALIZATION_ENDPOINT,
                     {cache: "no-store"}
                 ),
-                fetch(
+                window.MaydayTelemetry.fetch(
                     LIDAR_ENDPOINT,
                     {cache: "no-store"}
                 ),
@@ -4881,6 +5011,7 @@
                 drawn > 0 ? "ready" : "waiting"
             );
         } catch (error) {
+            if (error.name === "AbortError") return;
             clearScan();
             setStatus(
                 "Localized scan unavailable",
@@ -5191,7 +5322,7 @@
         requestInFlight = true;
 
         try {
-            const response = await fetch(MAP_ENDPOINT, {
+            const response = await window.MaydayTelemetry.fetch(MAP_ENDPOINT, {
                 cache: "no-store",
             });
             const payload = await response.json();
@@ -5216,6 +5347,7 @@
                 timer = null;
             }
         } catch (error) {
+            if (error.name === "AbortError") return;
             setOffline(error.message);
         } finally {
             requestInFlight = false;
@@ -5574,7 +5706,7 @@
     async function loadMap() {
         if (occupancyMap) return true;
 
-        const response = await fetch(MAP_ENDPOINT, {
+        const response = await window.MaydayTelemetry.fetch(MAP_ENDPOINT, {
             cache: "no-store",
         });
         const payload = await response.json();
@@ -5618,7 +5750,7 @@
                 return;
             }
 
-            const response = await fetch(
+            const response = await window.MaydayTelemetry.fetch(
                 LOCALIZATION_ENDPOINT,
                 {cache: "no-store"}
             );
@@ -5646,6 +5778,7 @@
 
             renderPose(payload);
         } catch (error) {
+            if (error.name === "AbortError") return;
             clearPose();
             setOverlayStatus(
                 "Localization unavailable",
@@ -5881,7 +6014,7 @@
     }
 
     async function fetchJson(url, options) {
-        const response = await fetch(
+        const response = await window.MaydayTelemetry.fetch(
             url,
             Object.assign(
                 {cache: "no-store"},
@@ -6659,6 +6792,7 @@
             setGoalUi();
             drawOverlay();
         } catch (error) {
+            if (error.name === "AbortError") return;
             clearSelectedGoal(
                 "Target cleared: " + error.message
             );
@@ -6707,6 +6841,7 @@
                 false,
             );
         } catch (error) {
+            if (error.name === "AbortError") return;
             latestLiveMap = null;
             latestLivePose = null;
 
@@ -7106,7 +7241,7 @@
         poseRequestInFlight = true;
 
         try {
-            const response = await fetch(
+            const response = await window.MaydayTelemetry.fetch(
                 LOCALIZATION_ENDPOINT,
                 {
                     cache: "no-store",
@@ -7153,6 +7288,7 @@
                 "ready"
             );
         } catch (_error) {
+            if (_error.name === "AbortError") return;
             setBothPoseReadouts(
                 "Mayday: waiting for map localization",
                 "Mayday: local LiDAR origin · forward up",
@@ -7519,7 +7655,7 @@
 
 
     async function getJson(url) {
-        const response = await fetch(
+        const response = await window.MaydayTelemetry.fetch(
             url,
             {
                 cache: "no-store",
@@ -9649,6 +9785,7 @@
                     );
 
             } catch (_error) {
+            if (_error.name === "AbortError") return;
                 persistentPayload =
                     null;
             }
@@ -10073,7 +10210,7 @@
 
         try {
             const response =
-                await fetch(
+                await window.MaydayTelemetry.fetch(
                     LOCALIZATION_ENDPOINT,
                     {
                         cache:
@@ -10150,6 +10287,7 @@
             }
 
         } catch (_error) {
+            if (_error.name === "AbortError") return;
             /*
              * Localization telemetry is optional for presentation.
              * Remain at the safe +X baseline orientation.

@@ -81,7 +81,7 @@ def test_lidar_display_corrects_physical_orientation():
 
 def test_lidar_javascript_is_read_only():
     assert 'const ENDPOINT = "/dashboard/lidar"' in JS
-    assert 'const REFRESH_MS = 250' in JS
+    assert 'const REFRESH_MS = 125' in JS
     assert 'function drawScan(scan)' in JS
     assert 'requestAnimationFrame' not in JS
 
@@ -95,7 +95,7 @@ def test_lidar_javascript_is_read_only():
     lidar_source = JS.split(
         '/* Live read-only LD06 visualization */',
         1,
-    )[1]
+    )[1].split('/* Minimal guarded localization buttons */', 1)[0]
 
     for value in forbidden:
         assert value not in lidar_source

@@ -292,7 +292,10 @@ def test_camera_and_read_only_lidar_are_responsive_companions():
     assert "grid-template-columns: repeat(2, minmax(0, 1fr));" in CSS
     assert "@media (max-width: 980px)" in CSS
     assert 'const LIDAR_URL = "/dashboard/lidar";' in JS
-    assert "LiDAR is stale, invalid, or unavailable. Scan points hidden." in JS
+    assert "Bridge scan is stale or unavailable." in JS
+    assert "missionCognitiveLidarState" in JS
+    assert "Cognitive safety age" in HTML
+    assert "Bridge scan age" in HTML
     assert 'context.fillText("FORWARD ↑"' in JS
     assert ".mission-lidar-message[hidden] {\n    display: none;\n}" in CSS
 

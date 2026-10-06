@@ -9,6 +9,7 @@
     >
 
     <title>Mini Pupper 2 Operator Console</title>
+    <script src="/operator_console.js"></script>
 
     <style>
         :root {
@@ -765,7 +766,9 @@
                     <span>Sequence <strong id="missionLidarSequence">—</strong></span>
                     <span>Reason <strong id="missionLidarReason">unavailable</strong></span>
                     <span>Front <strong id="missionLidarFront">UNKNOWN</strong></span>
-                    <span>Age <strong id="missionLidarAge">—</strong></span>
+                    <span>Cognitive safety age <strong id="missionLidarAge">—</strong></span>
+                    <span>Cognitive safety <strong id="missionCognitiveLidarState">Unavailable</strong></span>
+                    <span>Bridge scan age <strong id="missionBridgeLidarAge">—</strong></span>
                 </div>
                 <p class="small-text">Read-only robot-relative scan. Forward is up.</p>
             </aside>
@@ -2716,7 +2719,7 @@
         if (!missionStatusPageIsVisible()) return;
 
         try {
-            const response = await fetch(
+            const response = await window.MaydayTelemetry.fetch(
                 "/dashboard/status",
                 {
                     cache: "no-store"
@@ -3057,6 +3060,7 @@
                     );
         }
         catch (error) {
+            if (error.name === "AbortError") return;
             setHealth(
                 elements.runtimeDot,
                 elements.runtimeHealth,
@@ -3104,7 +3108,7 @@
         elements.findObjectPreviewStatus.textContent =
             "Requesting read-only preview...";
         try {
-            const response = await fetch(
+            const response = await window.MaydayTelemetry.fetch(
                 "/dashboard/find-object-preview?target=" +
                     encodeURIComponent(target)
             );
@@ -3390,7 +3394,6 @@
         1000
     );
 </script>
-    <script src="/operator_console.js"></script>
 
 <script>
 /* Guarded candidate map promotion */
@@ -3596,13 +3599,13 @@
             readPublishedSelection();
 
             const responses = await Promise.all([
-                fetch(INVENTORY_ENDPOINT, {
+                window.MaydayTelemetry.fetch(INVENTORY_ENDPOINT, {
                     cache: "no-store",
                 }),
-                fetch(MAPPING_STATUS_ENDPOINT, {
+                window.MaydayTelemetry.fetch(MAPPING_STATUS_ENDPOINT, {
                     cache: "no-store",
                 }),
-                fetch(LOCALIZATION_STATUS_ENDPOINT, {
+                window.MaydayTelemetry.fetch(LOCALIZATION_STATUS_ENDPOINT, {
                     cache: "no-store",
                 }),
             ]);
@@ -3653,6 +3656,7 @@
 
             updateControls();
         } catch (error) {
+            if (error.name === "AbortError") return;
             runtimeSafe = false;
             setState(
                 "Unavailable",
@@ -4660,7 +4664,7 @@
     }
 
     async function fetchJson(endpoint, options) {
-        const response = await fetch(
+        const response = await window.MaydayTelemetry.fetch(
             endpoint,
             options
         );
@@ -4766,6 +4770,7 @@
             updateButtons();
 
         } catch (error) {
+            if (error.name === "AbortError") return;
             setMessage(
                 error.message,
                 true
@@ -6250,7 +6255,7 @@
         url,
         options = {}
     ) {
-        const response = await fetch(
+        const response = await window.MaydayTelemetry.fetch(
             url,
             {
                 cache: "no-store",
@@ -6801,6 +6806,7 @@
             }
 
         } catch (error) {
+            if (error.name === "AbortError") return;
             badge.textContent =
                 "Map refresh unavailable";
 
@@ -7781,7 +7787,7 @@
 
         try {
             const response =
-                await fetch(
+                await window.MaydayTelemetry.fetch(
                     PROOF_STREAM_URL,
                     {
                         cache: "no-store"
