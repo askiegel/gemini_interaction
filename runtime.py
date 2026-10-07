@@ -2880,13 +2880,18 @@ class CognitiveRuntime:
             if strict is None or not dispatch_guard():
                 return dict(base, reason="marvin_lateral_observation_not_authorized")
 
+            duration = None
+
             def validate_selection(sample):
                 association = self._marvin_v2_lidar_arrival(tracker, sample, current_action_jit=True)
                 if association.get("ok") is not True or association.get("arrived_at_marvin"):
                     return {"accepted": False}
                 selection = select_marvin_escape_action(sample, association, expected_session=session,
-                    allow_strafe=True, previous_selection=local_detour_context.get("previous_selection"))
-                accepted = selection.get("action_type") == kind
+                    allow_strafe=True, previous_selection=local_detour_context.get("previous_selection"),
+                    strafe_duration_limit=duration if duration is not None else LOCAL_AVOIDANCE_STRAFE_MAX_SECONDS)
+                candidate_duration = (selection.get("options", {}).get(kind) or {}).get("requested_duration")
+                accepted = (selection.get("action_type") == kind
+                    and (duration is None or candidate_duration == duration))
                 if accepted:
                     self._marvin_last_action_lidar_evidence = (session, sample["acquisition_sequence"])
                 return dict(selection, accepted=accepted, target_association=association)
@@ -2894,6 +2899,8 @@ class CognitiveRuntime:
             selection = validate_selection(lidar)
             if not selection.get("accepted"):
                 return dict(base, reason="marvin_local_detour_jit_veto", local_detour=selection)
+            duration = selection["options"][kind]["requested_duration"]
+            base["requested_duration"] = duration
             # Permanently consume before any transport. Diagnostics never seed this set.
             consumed.add(source_frame_stamp_ns)
             self._marvin_alignment_consensus = []
@@ -2906,7 +2913,7 @@ class CognitiveRuntime:
         try:
             step = self.behavior_manager.execute_guarded_marvin_lateral_step(
                 expected_lidar_session=session, linear_y=signed_speed,
-                duration=LOCAL_AVOIDANCE_STRAFE_MAX_SECONDS, dispatch_guard=dispatch_guard,
+                duration=duration, dispatch_guard=dispatch_guard,
                 selection_validator=validate_selection)
         except Exception as exc:
             step = {"ok": False, "motion_executed": False, "reason": "marvin_lateral_step_exception", "error": str(exc)}
@@ -2923,7 +2930,7 @@ class CognitiveRuntime:
         interrupted = transport.get("bounded_lateral_invalidated") is True
         if moved or (transport.get("transport_result") or {}).get("ok") is True:
             self._marvin_target_range_association.record_forward_bound(
-                LOCAL_AVOIDANCE_STRAFE_SPEED_MPS, LOCAL_AVOIDANCE_STRAFE_MAX_SECONDS)
+                LOCAL_AVOIDANCE_STRAFE_SPEED_MPS, duration)
         return dict(base, ok=moved and stop_ok, motion_executed=moved,
             full_step_completed=moved and stop_ok, actions_executed=int(moved), interrupted=interrupted,
             interruption_reason=transport.get("reason") if interrupted else None,

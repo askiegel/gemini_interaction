@@ -42,7 +42,7 @@ def test_lateral_uses_same_bounded_endpoint_and_interlock(monkeypatch,y):
     {'linear_y':True},{'linear_y':None},{'linear_y':'bad'},
     {'linear_y':float('nan')},{'linear_y':float('inf')},
     {'linear_y':.080001},{'linear_y':-.080001},
-    {'linear_y':.08,'duration':.50001},{'linear_y':.08,'duration':0},
+    {'linear_y':.08,'duration':1.00001},{'linear_y':.08,'duration':0},
     {'linear_y':.08,'duration':float('nan')},{'linear_y':.08,'duration':'bad'},
     {'linear_y':.08,'linear_x':.1},{'linear_y':.08,'angular_z':.25},
 ])

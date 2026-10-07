@@ -126,7 +126,7 @@ def test_live_stale_10925_handoff_uses_new_scan_strafes_once_and_arrives(tmp_pat
     result = run(runtime)
     assert state["pre_stop_stale"] and state["sleeps"] == 2
     assert result["state"] == "ARRIVED" and result["arrived_at_marvin"]
-    assert motions(events) == [("strafe", .08, .5)]
+    assert motions(events) == [("strafe", .08, 1.)]
     refresh, = result["avoidance_lidar_refresh_history"]
     assert refresh["blocked_forward_lidar_sequence"] == 10925
     assert refresh["avoidance_planning_lidar_sequence"] == 10926
@@ -143,7 +143,7 @@ def test_live_stale_10925_handoff_uses_new_scan_strafes_once_and_arrives(tmp_pat
     assert result["lidar_wait_history"][0]["snapshot"]["acquisition_sequence"] == 10927
     assert action["result"]["source_stamp_consumed"]
     assert len(behavior.stamps) == 2  # No Gemini/camera reacquisition just for refresh.
-    assert events[events.index(("strafe", .08, .5)) + 1] == "stop"
+    assert events[events.index(("strafe", .08, 1.)) + 1] == "stop"
     assert robot.status()["motion"]["linear_y"] == 0
 
 
@@ -164,7 +164,7 @@ def test_live_1235_marvin_and_0483_obstacle_resume_guarded_pursuit(tmp_path, mon
     assert result["state"] == "ARRIVED" and result["arrived_at_marvin"]
     assert state["pre_stop_stale"] and result["local_avoidance_actions"] == 1
     commands = motions(bundle[3])
-    assert commands[0] == ("strafe", .08, .50)
+    assert commands[0] == ("strafe", .08, 1.)
     assert all(command[0] == "forward" and command[1] == .10 and command[2] <= .50
                for command in commands[1:])
     refresh, = result["avoidance_lidar_refresh_history"]
@@ -211,7 +211,7 @@ def test_new_geometry_reverses_pre_stop_left_ranking_and_selects_right(tmp_path,
     bundle, state = handoff_runtime(tmp_path, monkeypatch, before=LEFT_OPEN, after=RIGHT_OPEN)
     result = run(bundle[0])
     assert result["state"] == "ARRIVED"
-    assert motions(bundle[3]) == [("strafe", -.08, .50)]
+    assert motions(bundle[3]) == [("strafe", -.08, 1.)]
     selection = result["local_avoidance_history"][0]["selection"]
     assert selection["action_type"] == "STRAFE_RIGHT" and selection["acquisition_sequence"] == 10926
     assert selection["right_clearance_m"] > selection["left_clearance_m"]

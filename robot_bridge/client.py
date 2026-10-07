@@ -122,7 +122,7 @@ class RobotBridgeClient:
         if linear_y:
             if (not all(math.isfinite(v) for v in (linear_x, angular_z, float(duration)))
                     or linear_x != 0 or angular_z != 0 or abs(linear_y) > 0.08
-                    or not 0 < float(duration) <= 0.50):
+                    or not 0 < float(duration) <= 1.00):
                 return {"ok": False, "forwarded": False, "error": "invalid_lateral_parameters"}
             readiness = self.status()
             readiness = readiness if isinstance(readiness, dict) else {}

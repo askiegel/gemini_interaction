@@ -202,7 +202,7 @@ def test_full_mission_marginal_distance_change_stops_after_one_strafe(tmp_path, 
     result = run(bundle[0])
     assert result['state'] == 'BLOCKED'
     assert result['reason'] == 'find_marvin_local_avoidance_no_progress'
-    assert motions(bundle[3]) == [('strafe', .08, .5)]
+    assert motions(bundle[3]) == [('strafe', .08, 1.)]
     assert result['local_avoidance_actions'] == 1
     assert MAX_LOCAL_AVOIDANCE_ACTIONS == result['max_local_avoidance_actions'] == 6
     row = result['local_avoidance_history'][0]
@@ -223,7 +223,7 @@ def test_post_strafe_evidence_is_not_overwritten_by_subsequent_alignment(tmp_pat
     bundle, _, _ = strafe_runtime(tmp_path, monkeypatch, [(0,.6),(55,.6),(0,.5)], [LEFT_OPEN, None])
     result = run(bundle[0])
     assert result['state'] == 'ARRIVED'
-    assert motions(bundle[3]) == [('strafe', .08, .5), ('turn', 'RIGHT', .25, .5)]
+    assert motions(bundle[3]) == [('strafe', .08, 1.), ('turn', 'RIGHT', .25, .5)]
     row = result['local_avoidance_history'][0]
     # The first post-strafe camera is the one authorizing alignment, not the
     # later post-alignment ARRIVED observation.

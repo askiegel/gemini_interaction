@@ -57,10 +57,10 @@ def strafe_runtime(tmp_path, monkeypatch, specs, scenes, factory=make_runtime, i
         if method == 'GET' and path == '/status':return robot.status()
         assert path == '/motion' and method == 'POST'
         assert payload['linear_x'] == payload['angular_z'] == 0
-        assert abs(payload['linear_y']) == .08 and payload['duration'] <= .5
+        assert abs(payload['linear_y']) == .08 and payload['duration'] <= 1.0
         events.append(('strafe',payload['linear_y'],payload['duration']))
         interrupted = next(plan, False)
-        clock[0] += 120_000_000 if interrupted else 500_000_000
+        clock[0] += 120_000_000 if interrupted else int(payload['duration'] * 1_000_000_000)
         if interrupted:
             flags['outage'] = True
             behavior.freeze_lidar = True
@@ -99,7 +99,7 @@ def test_live_055_foreground_routes_to_one_guarded_strafe_then_forward(tmp_path,
     assert a['candidate_target_return_distance_m']==pytest.approx(.55)
     assert not a['target_range_association_trusted'] and not a['arrived_at_marvin']
     assert not a['direct_path_blocked'] and a['route_to_marvin_obstructed']
-    assert motions(events)==[('strafe',y,.5),('forward',.1,.5)]
+    assert motions(events)==[('strafe',y,1.),('forward',.1,.5)]
     assert result['local_avoidance_actions']==1
     selection = result['local_avoidance_history'][0]['selection']
     assert set(selection['options'])=={'STRAFE_LEFT','STRAFE_RIGHT','TURN_LEFT','TURN_RIGHT'}
@@ -107,12 +107,12 @@ def test_live_055_foreground_routes_to_one_guarded_strafe_then_forward(tmp_path,
     assert first['result']['source_stamp_consumed'] and first['result']['full_step_completed']
     assert first['source_frame_stamp_ns']<result['history'][1]['source_frame_stamp_ns']
     assert result['lidar_wait_history'][0]['snapshot']['acquisition_sequence']>first['action_lidar_evidence'][1]
-    assert events[events.index(('strafe',y,.5))+1]=='stop'
+    assert events[events.index(('strafe',y,1.))+1]=='stop'
     assert robot.status()['motion']=={'linear_x':0.,'linear_y':0.,'angular_z':0.,'streaming':False}
     diagnostic = result['progress_diagnostics']['actions'][0]
     assert diagnostic['command']['linear_y']==y
     assert diagnostic['type']=='detour_strafe' and result['completed_strafe_actions']==1
-    assert result['progress_diagnostics']['action_summary'][0]['nominal_lateral_displacement_m']==pytest.approx(.04)
+    assert result['progress_diagnostics']['action_summary'][0]['nominal_lateral_displacement_m']==pytest.approx(.08)
     assert diagnostic['post_action_avoidance']['progress_improved']
 
 
@@ -121,7 +121,7 @@ def test_two_strafes_require_new_evidence_and_observed_progress(tmp_path,monkeyp
     bundle,_,_ = strafe_runtime(tmp_path,monkeypatch,[(0,.60)]*3+[(0,.5)],[LEFT_OPEN,second,None])
     result=run(bundle[0]);events=bundle[3]
     assert result['state']=='ARRIVED'
-    assert motions(events)==[('strafe',.08,.5),('strafe',.08,.5),('forward',.1,.5)]
+    assert motions(events)==[('strafe',.08,1.),('strafe',.08,1.),('forward',.1,.5)]
     assert result['local_avoidance_actions']==2
     assert result['local_avoidance_history'][1]['selection']['progress_improved']
     assert len(set(x['source_frame_stamp_ns'] for x in result['history']))==3
@@ -144,7 +144,7 @@ def test_side_and_front_rear_endpoint_corner_hazards_block_lateral(tmp_path,monk
 
 
 def test_strafe_unsafe_turn_safe_without_real_route_gain_fails_closed(tmp_path,monkeypatch):
-    scene=LEFT_OPEN+[(-.02,.475)]
+    scene=LEFT_OPEN+[(-.02,.465),(0.,-.465)]
     bundle,_,_=strafe_runtime(tmp_path,monkeypatch,[(0,.60)]*4,[scene])
     result=run(bundle[0]);selection=result['local_avoidance_history'][0]['selection']
     assert not selection['options']['STRAFE_LEFT']['permitted']
@@ -223,7 +223,7 @@ def test_clear_path_and_trusted_standoff_do_not_select_avoidance(tmp_path,monkey
 
 
 def test_mixed_turns_and_strafes_share_six_action_budget(tmp_path,monkeypatch):
-    scenes=[LEFT_OPEN,LEFT_OPEN+[(-.02,.475)]]*4
+    scenes=[LEFT_OPEN,LEFT_OPEN+[(-.02,.465),(0.,-.465)]]*4
     bundle,_,_=strafe_runtime(tmp_path,monkeypatch,[(0,.6)]*9,scenes)
     def independently_improving(*args,**kwargs):
         kwargs['previous_selection']=None

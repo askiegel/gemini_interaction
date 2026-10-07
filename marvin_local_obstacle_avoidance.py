@@ -83,8 +83,45 @@ def select_marvin_detour(state, *, expected_session, forward_speed,
 
 
 LOCAL_AVOIDANCE_STRAFE_SPEED_MPS = 0.08
-LOCAL_AVOIDANCE_STRAFE_MAX_SECONDS = 0.50
+LOCAL_AVOIDANCE_STRAFE_MAX_SECONDS = 1.00
+LOCAL_AVOIDANCE_STRAFE_MIN_SECONDS = 0.25
 ROUTE_IMPROVEMENT_NEAR_TIE_M = 0.003
+
+
+def safe_marvin_strafe_duration(state, *, expected_session, linear_y,
+                               maximum_seconds=LOCAL_AVOIDANCE_STRAFE_MAX_SECONDS):
+    """Advisory bounded search; every tested path uses the strict full capsule.
+
+    Collision-free lateral capsules are nested as duration grows. Retain the
+    safe lower bound, never the colliding upper bound. The executor independently
+    checks exactly the selected path again immediately before transport.
+    """
+    def evaluate(seconds):
+        return evaluate_local_motion_safety(state, expected_session=expected_session,
+            linear_y=linear_y, duration=seconds, lateral_swept_footprint=True)
+
+    if (type(maximum_seconds) not in (int, float) or not math.isfinite(maximum_seconds)
+            or not LOCAL_AVOIDANCE_STRAFE_MIN_SECONDS <= maximum_seconds <= LOCAL_AVOIDANCE_STRAFE_MAX_SECONDS):
+        return 0.0, {'permitted': False, 'reason': 'marvin_lateral_parameters_invalid'}
+    full = evaluate(maximum_seconds)
+    if full['permitted']:
+        return maximum_seconds, full
+    # Coverage, stale data and starting-footprint failures never admit an escape.
+    if full['reason'] != 'translation_protected_region_violated':
+        return 0.0, full
+    lower = LOCAL_AVOIDANCE_STRAFE_MIN_SECONDS
+    safe = evaluate(lower)
+    if not safe['permitted']:
+        return 0.0, safe
+    upper = maximum_seconds
+    for _ in range(12):
+        middle = (lower + upper) / 2
+        probe = evaluate(middle)
+        if probe['permitted']:
+            lower, safe = middle, probe
+        else:
+            upper = middle
+    return lower, safe
 
 
 def rank_marvin_escape_options(options, eligible):
@@ -117,7 +154,8 @@ def rank_marvin_escape_options(options, eligible):
 
 
 def select_marvin_escape_action(state, association, *, expected_session,
-                                allow_strafe, previous_selection=None):
+                                allow_strafe, previous_selection=None,
+                                strafe_duration_limit=LOCAL_AVOIDANCE_STRAFE_MAX_SECONDS):
     """Evaluate four primitives from one scan; only JIT executors admit motion."""
     from marvin_route_obstruction import evaluate_marvin_route, evaluate_route_progress
     route = evaluate_marvin_route(state, association, expected_session=expected_session)
@@ -136,13 +174,17 @@ def select_marvin_escape_action(state, association, *, expected_session,
     for kind in ('STRAFE_LEFT', 'STRAFE_RIGHT', 'TURN_LEFT', 'TURN_RIGHT'):
         side = kind.split('_')[1]; sign = 1 if side == 'LEFT' else -1
         strafe = kind.startswith('STRAFE')
-        dy = sign * LOCAL_AVOIDANCE_STRAFE_SPEED_MPS * LOCAL_AVOIDANCE_STRAFE_MAX_SECONDS if strafe else 0.0
+        if strafe:
+            duration, safe = safe_marvin_strafe_duration(state, expected_session=expected_session,
+                linear_y=sign * LOCAL_AVOIDANCE_STRAFE_SPEED_MPS,
+                maximum_seconds=strafe_duration_limit)
+        else:
+            duration = TURN_DURATION
+            safe = validate_guarded_turn(side, TURN_SPEED, TURN_DURATION, state,
+                expected_session=expected_session, target_directed=True,
+                safety_mode=ROTATIONAL_SWEPT_FOOTPRINT)
+        dy = sign * LOCAL_AVOIDANCE_STRAFE_SPEED_MPS * duration if strafe else 0.0
         heading = 0.0 if strafe else sign * TURN_SPEED * TURN_DURATION
-        safe = (evaluate_local_motion_safety(state, expected_session=expected_session,
-                    linear_y=sign * LOCAL_AVOIDANCE_STRAFE_SPEED_MPS, duration=LOCAL_AVOIDANCE_STRAFE_MAX_SECONDS,
-                    lateral_swept_footprint=True)
-                if strafe else validate_guarded_turn(side, TURN_SPEED, TURN_DURATION, state,
-                    expected_session=expected_session, target_directed=True, safety_mode=ROTATIONAL_SWEPT_FOOTPRINT))
         prediction = evaluate_marvin_route(state, association, expected_session=expected_session,
             translation_y=dy, heading_change=heading)
         clearance = result[side.lower() + '_clearance_m']
@@ -151,7 +193,9 @@ def select_marvin_escape_action(state, association, *, expected_session,
         permitted = safe['permitted'] and (allow_strafe or not strafe) and clearance is not None
         result['options'][kind] = {'permitted': permitted, 'hard_safety_permitted': safe['permitted'],
             'reason': safe['reason'] if allow_strafe or not strafe else 'bridge_lateral_support_unavailable',
-            'side_clearance_m': clearance, 'predicted_route': prediction,
+            'side_clearance_m': clearance, 'requested_duration': duration,
+            'nominal_lateral_displacement_m': abs(dy) if strafe else None,
+            'predicted_route': prediction,
             'predicted_obstacle_clearance_m': prediction['blocking_obstacle_distance_m'],
             'predicted_route_occupancy': prediction['route_occupancy'],
             'heading_error_deg': prediction.get('heading_error_after_deg'),
