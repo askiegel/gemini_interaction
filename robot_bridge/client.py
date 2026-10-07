@@ -96,14 +96,45 @@ class RobotBridgeClient:
         duration=0.25,
         streaming=False,
         watchdog_timeout=0.50,
+        linear_y=0.0,
+        dispatch_guard=None,
     ):
-        linear_x = float(linear_x)
-        angular_z = float(angular_z)
+        if isinstance(linear_y, bool):
+            return {"ok": False, "forwarded": False, "error": "invalid_lateral_parameters"}
+        try:
+            linear_y = float(linear_y)
+        except (TypeError, ValueError, OverflowError):
+            return {"ok": False, "forwarded": False, "error": "invalid_lateral_parameters"}
+        if not math.isfinite(linear_y):
+            return {"ok": False, "forwarded": False, "error": "invalid_lateral_parameters"}
+        try:
+            linear_x = float(linear_x)
+            angular_z = float(angular_z)
+            duration = float(duration)
+        except (TypeError, ValueError, OverflowError):
+            return {"ok": False, "forwarded": False, "error": "invalid_motion_parameters"}
         payload = {
             "linear_x": linear_x,
             "angular_z": angular_z,
             "duration": float(duration),
         }
+
+        if linear_y:
+            if (not all(math.isfinite(v) for v in (linear_x, angular_z, float(duration)))
+                    or linear_x != 0 or angular_z != 0 or abs(linear_y) > 0.08
+                    or not 0 < float(duration) <= 0.50):
+                return {"ok": False, "forwarded": False, "error": "invalid_lateral_parameters"}
+            readiness = self.status()
+            readiness = readiness if isinstance(readiness, dict) else {}
+            capabilities = readiness.get("motion_capabilities")
+            capabilities = capabilities if isinstance(capabilities, dict) else {}
+            if (readiness.get("ok") is not True or readiness.get("ros_ready") is not True
+                    or readiness.get("status") != "READY" or capabilities.get("linear_y") is not True
+                    or type(capabilities.get("max_linear_y")) not in (int, float)
+                    or not math.isfinite(capabilities["max_linear_y"])
+                    or capabilities["max_linear_y"] < abs(linear_y)):
+                return {"ok": False, "forwarded": False, "error": "bridge_lateral_support_unavailable"}
+            payload["linear_y"] = linear_y
 
         if streaming:
             payload.update(
@@ -115,7 +146,7 @@ class RobotBridgeClient:
                 }
             )
 
-        if linear_x > 0:
+        if linear_x > 0 or linear_y != 0:
             if not streaming:
                 if not math.isfinite(angular_z) or angular_z != 0.0:
                     return {
@@ -137,7 +168,12 @@ class RobotBridgeClient:
             except PermissionError as exc:
                 return {"ok": False, "forwarded": False, "error": str(exc)}
             result = None
+            transport_attempted = False
             try:
+                if dispatch_guard is not None and dispatch_guard() is not True:
+                    result = {"ok": False, "forwarded": False, "error": "motion_dispatch_preempted"}
+                    return result
+                transport_attempted = True
                 result = self._request("POST", "/motion", payload)
                 return result
             finally:
@@ -158,7 +194,7 @@ class RobotBridgeClient:
                         and callable(outcome_reader)
                         else None
                     )
-                    if dispatch_valid is False and isinstance(result, dict):
+                    if dispatch_valid is False and transport_attempted and isinstance(result, dict):
                         transport_result = dict(result)
                         result.clear()
                         result.update(transport_result)
@@ -172,12 +208,13 @@ class RobotBridgeClient:
                             ),
                             "confirmed_forwarded": False,
                             "transport_attempted": True,
-                            "bounded_forward_invalidated": True,
+                            "bounded_forward_invalidated": linear_y == 0,
+                            "bounded_lateral_invalidated": linear_y != 0,
                             "interlock_stop_succeeded": (
                                 isinstance(outcome, dict) and outcome.get("stop_succeeded") is True),
                             "interlock_dispatch_outcome": outcome,
                             "transport_result": transport_result,
-                            "error": "bounded_forward_invalidated",
+                            "error": ("bounded_lateral_invalidated" if linear_y else "bounded_forward_invalidated"),
                             "reason": (
                                 outcome.get("reason")
                                 if isinstance(outcome, dict)
@@ -195,6 +232,7 @@ class RobotBridgeClient:
         linear_x=0.0,
         angular_z=0.0,
         watchdog_timeout=0.50,
+        linear_y=0.0,
     ):
         """
         Refresh a continuous velocity command.
@@ -208,6 +246,7 @@ class RobotBridgeClient:
             duration=0.25,
             streaming=True,
             watchdog_timeout=watchdog_timeout,
+            linear_y=linear_y,
         )
 
     def move_forward(self, speed=0.10, seconds=1.0):
@@ -237,3 +276,7 @@ class RobotBridgeClient:
             angular_z=-abs(speed),
             duration=seconds,
         )
+
+    def move_lateral(self, *, speed, seconds, dispatch_guard=None):
+        """Same bounded Bridge transport and freshness watchdog as forward."""
+        return self.motion(linear_x=0.0, linear_y=speed, angular_z=0.0, duration=seconds, dispatch_guard=dispatch_guard)

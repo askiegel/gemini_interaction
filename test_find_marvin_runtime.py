@@ -463,6 +463,20 @@ def _v2_runtime(preview):
                                   "points": [{"x_m": 1.0, "y_m": y / 1000.0}
                                              for y in range(-200, 201)]},
     }))
+    from test_marvin_lidar_standoff import lidar_at
+    runtime.world_model.get_lidar_obstacles.return_value = lidar_at(1.0)
+    original_points = runtime.world_model.get_lidar_obstacles.return_value["local_motion_geometry"]["points"]
+    target_points = original_points[-7:]
+    def read(**kwargs):
+        import math
+        scan = runtime.world_model.get_lidar_obstacles.return_value
+        if scan["local_motion_geometry"]["points"] is original_points:
+            center = behavior.preview["opencv_tracker"]["center_x"]
+            bearing = math.atan((320.0 - center) / 320.0)
+            for n, point in enumerate(target_points):
+                point.update(x_m=math.cos(bearing), y_m=math.sin(bearing) + (n-3)/1000.0)
+        return scan
+    runtime.world_model.get_lidar_obstacles.side_effect = read
     return runtime, behavior
 
 
@@ -864,6 +878,11 @@ def test_v2_centered_observations_authorize_only_current_guarded_forward():
 
 def test_v2_arrival_never_authorizes_another_pursuit_action(monkeypatch):
     runtime, behavior = _v2_runtime(_v2_preview(0.0, stamp=210))
+    from marvin_target_range_association import MarvinTargetRangeAssociation
+    runtime._marvin_target_range_association = MarvinTargetRangeAssociation()
+    runtime._marvin_target_range_association.anchor = {
+        "measured_distance_m": .5, "target_distance_m": .5, "translation_bound_m": 0.,
+        "producer_session": "v2-lidar", "acquisition_sequence": 0, "source_frame_stamp_ns": 0}
     runtime.world_model.get_lidar_obstacles.return_value["local_motion_geometry"]["points"] = [
         {"x_m": 0.5, "y_m": y / 1000.0} for y in range(-3, 4)
     ]

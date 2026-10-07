@@ -17,7 +17,7 @@ class Provider:
 
 
 def test_one_operator_text_starts_full_v2_mission_without_endpoint_interaction(tmp_path, monkeypatch):
-    runtime, behavior, _, events, _ = make_runtime(tmp_path, monkeypatch, [(0, .8), (0, .5)])
+    runtime, behavior, _, events, _ = make_runtime(tmp_path, monkeypatch, [(0, .60), (0, .5)])
     runtime.provider = Provider()
     runtime.submit_text("Find Marvin")
     result = runtime.run_once()
@@ -51,7 +51,7 @@ def test_acquisition_at_any_search_index_stops_search_immediately(tmp_path, monk
 
 def test_new_mission_reacquires_identity_without_process_lifetime_latch(tmp_path, monkeypatch):
     runtime, behavior, _, events, _ = make_runtime(
-        tmp_path, monkeypatch, [(0, .8), (0, .5), (120, .8), (0, .5)])
+        tmp_path, monkeypatch, [(0, .60), (0, .5), (120, .60), (0, .5)])
     assert run(runtime)["state"] == "ARRIVED"
     assert run(runtime)["state"] == "ARRIVED"
     assert behavior.identity_sources == [

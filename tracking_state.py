@@ -753,4 +753,13 @@ def build_tracking_state(
             "identity_decision"
         ],
         "bbox": bbox,
+        **{key: merged.get(key) for key in (
+            "local_avoidance_active", "local_avoidance_actions", "last_detour_direction",
+            "route_to_marvin_obstructed", "blocking_obstacle_distance_m", "blocking_obstacle_bearing_deg",
+            "blocking_obstacle_x_m", "blocking_obstacle_y_m", "selected_action_type",
+            "previous_action_type", "progress_improved",
+            "left_clearance_m", "right_clearance_m", "direct_path_blocked", "avoidance_reason",
+            "last_detour_improved_direct_path", "nearest_forward_obstacle_distance_m",
+            "candidate_target_return_distance_m", "verified_marvin_distance_m",
+            "target_range_association_trusted", "target_range_association_reason") if key in merged},
     }

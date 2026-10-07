@@ -178,14 +178,17 @@ def _required_sectors(linear_x, linear_y, angular_z):
 
 def evaluate_local_motion_safety(state, *, expected_session, linear_x=0.0,
                                  linear_y=0.0, angular_z=0.0, duration=0.0,
-                                 now=None):
+                                 now=None, lateral_swept_footprint=False):
     """Evaluate a bounded command's circular-footprint clearance.
 
     Pure result only. Translation vetoes a point only when the bounded path
     materially approaches it and enters the protected tube. A circular
     footprint is invariant under pure rotation, so rotation alone does not
     create a static-clearance veto. Combined commands use their translation
-    component without rotational enlargement.
+    component without rotational enlargement. The first-class strafe executor
+    explicitly requests lateral_swept_footprint: a complete 0.45 m swept capsule,
+    including its start and endpoint circles, with all-octant coverage. Existing
+    directional translation probes retain their established semantics.
     """
     # Delayed import avoids a construction-time cycle: lidar_perception
     # publishes geometry made by this pure module.
@@ -198,6 +201,9 @@ def evaluate_local_motion_safety(state, *, expected_session, linear_x=0.0,
               "required_sectors": [], "geometry": None}
     if not validated.get("available") or not validated.get("valid"):
         result["reason"] = validated.get("reason", "untrusted_lidar_state")
+        return result
+    if lateral_swept_footprint and (linear_y == 0 or linear_x != 0 or angular_z != 0):
+        result["reason"] = "lateral_swept_footprint_requires_pure_strafe"
         return result
     values = (linear_x, linear_y, angular_z, duration)
     if (not all(finite_number(value) for value in values)
@@ -219,7 +225,8 @@ def evaluate_local_motion_safety(state, *, expected_session, linear_x=0.0,
     if linear_x == linear_y == angular_z == 0:
         result["reason"] = "invalid_motion_geometry"
         return result
-    required = _required_sectors(linear_x, linear_y, angular_z)
+    required = (_required_sectors(0.0, 0.0, 1.0) if lateral_swept_footprint
+                else _required_sectors(linear_x, linear_y, angular_z))
     result["required_sectors"] = required
     sectors = geometry.get("sectors")
     if not isinstance(sectors, dict) or any(
@@ -253,7 +260,9 @@ def evaluate_local_motion_safety(state, *, expected_session, linear_x=0.0,
         return result
     violates = [
         point for point in valid_points
-        if _translation_approaches_point(point, path_x, path_y)
+        if (_distance_to_segment(point["x_m"], point["y_m"], path_x, path_y)
+                <= LOCAL_LIDAR_PROTECTED_RADIUS_M if lateral_swept_footprint
+            else _translation_approaches_point(point, path_x, path_y))
     ]
     reason = "translation_protected_region_violated"
     if violates:

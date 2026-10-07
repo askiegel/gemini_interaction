@@ -183,7 +183,7 @@ def test_favorable_diagnostics_cannot_override_real_admission(tmp_path, monkeypa
 
 @pytest.mark.parametrize("break_diagnostics", [False, True])
 def test_missing_or_broken_diagnostics_do_not_change_motion_or_standoff(tmp_path, monkeypatch, break_diagnostics):
-    runtime, _, _, events, _ = make_runtime(tmp_path, monkeypatch, [(0, .8), (0, .75), (0, .5)])
+    runtime, _, _, events, _ = make_runtime(tmp_path, monkeypatch, [(0, .65), (0, .60), (0, .5)])
     if break_diagnostics:
         def broken(*args, **kwargs):
             raise RuntimeError("diagnostic storage failed")
@@ -199,7 +199,7 @@ def test_missing_or_broken_diagnostics_do_not_change_motion_or_standoff(tmp_path
         assert [row["nominal_displacement_m"] for row in summary] == pytest.approx([.05, .05])
         assert all(row["odom_translation_m"] is None for row in summary)
         assert summary[0]["target_range_delta_m"] == pytest.approx(-.05)
-        assert summary[0]["jit_selected_return"]["x_m"] == pytest.approx(.9)
+        assert summary[0]["jit_selected_return"]["x_m"] == pytest.approx(.75)
 
 
 @pytest.mark.parametrize("terminal", ["ARRIVED", "BLOCKED", "REVERIFY_REQUIRED", "STOPPED"])
@@ -230,7 +230,7 @@ def test_stop_retains_mission_diagnostics_without_overwriting_operator_stop(tmp_
 
 def test_recovery_retains_first_new_tracker_and_correct_semantic_stamps(tmp_path, monkeypatch):
     runtime, behavior, _, events, _ = recovery_runtime(tmp_path, monkeypatch,
-        [(0, .8), (0, .75), (0, .75), (0, .5)])
+        [(0, .60), (0, .59), (0, .59), (0, .5)])
     # This fixture replaces BehaviorManager after runtime construction.
     behavior.marvin_command_diagnostic_callback = lambda *args: runtime._retain_marvin_diagnostic("command_event", *args)
     behavior.marvin_perception_diagnostic_callback = lambda *args: runtime._retain_marvin_diagnostic("perception_event", *args)
@@ -264,7 +264,7 @@ def test_diagnostic_report_cannot_reauthorize_a_consumed_source_stamp(tmp_path, 
 
 def test_full_mission_keeps_independent_pose_and_first_scan_per_action(tmp_path, monkeypatch):
     runtime, behavior, robot, events, clock = make_runtime(tmp_path, monkeypatch,
-        [(0, .8), (0, .75), (0, .5)])
+        [(0, .60), (0, .59), (0, .5)])
     diagnostic = runtime.marvin_progress_diagnostics
     pose_x, odom_stamp = [0.], [0]
 
@@ -396,7 +396,7 @@ def test_finished_mission_retains_late_post_stop_sample_without_control_wait(mon
 def test_camera_cache_poll_metadata_is_not_reacquisition(tmp_path, monkeypatch):
     from test_find_marvin_camera_recovery import camera_schedule
     from test_find_marvin_closed_loop import delayed_runtime
-    bundle = delayed_runtime(tmp_path, monkeypatch, [(0, .8), (0, .5)])
+    bundle = delayed_runtime(tmp_path, monkeypatch, [(0, .60), (0, .5)])
     runtime, behavior, _, events, _ = bundle
     behavior.marvin_command_diagnostic_callback = lambda *args: runtime._retain_marvin_diagnostic("command_event", *args)
     behavior.marvin_perception_diagnostic_callback = lambda *args: runtime._retain_marvin_diagnostic("perception_event", *args)

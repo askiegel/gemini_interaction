@@ -8,7 +8,7 @@ from unittest.mock import Mock
 import pytest
 
 from behavior_manager import BehaviorManager
-from local_motion_safety_envelope import evaluate_local_motion_safety
+from local_motion_safety_envelope import evaluate_local_motion_safety, build_local_motion_lidar_geometry
 from marvin_lidar_standoff import evaluate_marvin_lidar_standoff
 from test_find_marvin_runtime import _v2_preview, _v2_runtime
 from test_local_motion_safety_envelope import geometry_with_point
@@ -20,19 +20,28 @@ SESSION = "v2-lidar"
 
 
 def lidar_at(distance, *, sequence=1):
+    geometry = build_local_motion_lidar_geometry({
+        "frame_id": "lidar_link", "angle_min": -math.pi, "angle_increment": math.tau / 80,
+        "range_min": .02, "range_max": 8., "ranges": [2.] * 80})
+    geometry["points"].extend({"x_m": distance, "y_m": n * distance * .12 / 3} for n in range(-3, 4))
     return {"available": True, "valid": True, "reason": "fresh",
             "producer_session": SESSION, "effective_age_seconds": 0.0,
             "received_monotonic_seconds": time.monotonic(), "age_at_receipt_seconds": 0.0,
             "acquisition_sequence": sequence,
-            "local_motion_geometry": {"valid": True, "frame_id": "lidar_link",
-                                      "points": [{"x_m": distance, "y_m": n / 1000.0}
-                                                 for n in range(-3, 4)]}}
+            "local_motion_geometry": geometry}
 
 
 def runtime_at(distance):
     runtime, behavior = _v2_runtime(fresh_preview())
     runtime.running = True
     runtime.world_model.get_lidar_obstacles.return_value = lidar_at(distance)
+    from marvin_target_range_association import MarvinTargetRangeAssociation
+    runtime._marvin_target_range_association = MarvinTargetRangeAssociation()
+    if distance <= .50:
+        runtime._marvin_target_range_association.anchor = {
+            "measured_distance_m": distance, "target_distance_m": distance,
+            "producer_session": SESSION, "acquisition_sequence": 0,
+            "source_frame_stamp_ns": 0, "translation_bound_m": 0.0}
     behavior.robot = Mock()
     behavior.robot.stop.return_value = {"ok": True}
     behavior.mark_strict_v2_action_dispatched = Mock(return_value=True)
@@ -112,7 +121,9 @@ def test_range_uncertainty_stops_conservatively_and_missing_returns_block():
     tracker = _v2_preview(0.0)["opencv_tracker"]
     result = evaluate_marvin_lidar_standoff(tracker, lidar_at(0.51),
                                          dict(CAMERA, range_uncertainty_m=0.02), expected_session=SESSION)
-    assert result["arrived_at_marvin"] is True
+    assert result["candidate_at_standoff"] is True
+    assert result["arrived_at_marvin"] is False
+    assert result["target_range_association_trusted"] is False
     missing = lidar_at(1.0)
     missing["local_motion_geometry"]["points"] = []
     assert evaluate_marvin_lidar_standoff(tracker, missing, CAMERA,

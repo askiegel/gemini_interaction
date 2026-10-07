@@ -1,10 +1,11 @@
-"""Fail-closed LiDAR health watchdog for positive streaming motion.
+"""Fail-closed LiDAR health watchdog for guarded translation.
 
-Collision geometry is deliberately not decided here.  Guarded bounded forward
-motion performs its just-in-time base-frame swept-path check before reaching
+Legacy forward method/state names also cover bounded lateral dispatch. Collision
+geometry is deliberately not decided here. Guarded forward and lateral motion
+perform their just-in-time base-frame swept-path checks before reaching
 the Robot Bridge client.  This interlock independently watches whether the
-producer-bound LiDAR state remains readable, valid, and fresh while positive
-motion is pending or active.
+producer-bound LiDAR state remains readable, valid, and fresh while translation
+is pending or active.
 """
 
 import copy

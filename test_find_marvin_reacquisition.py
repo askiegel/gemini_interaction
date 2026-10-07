@@ -62,7 +62,7 @@ def recovery_runtime(tmp_path, monkeypatch, specs, *, failures=(3,), mode="no_bb
 @pytest.mark.parametrize("mode", ["no_bbox", "invalid_bbox"])
 def test_tracker_loss_reacquires_new_episode_and_resumes_until_arrival(tmp_path, monkeypatch, error, mode):
     runtime, behavior, _, events, _ = recovery_runtime(tmp_path, monkeypatch,
-        [(error, .8), (0, .76), (0, .7), (0, .5)], mode=mode)
+        [(error, .60), (0, .59), (0, .58), (0, .5)], mode=mode)
     result = run(runtime)
     assert result["state"] == "ARRIVED"
     assert result["actions_executed"] == 2
@@ -137,7 +137,7 @@ def test_stop_during_reacquisition_preempts_without_followup_motion(tmp_path, mo
 
 def test_retry_can_succeed_after_semantic_negative(tmp_path, monkeypatch):
     runtime, behavior, _, events, _ = recovery_runtime(tmp_path, monkeypatch,
-        [(0, .8), (0, .76), "absent", (0, .7), (0, .5)])
+        [(0, .60), (0, .59), "absent", (0, .58), (0, .5)])
     result = run(runtime)
     assert result["state"] == "ARRIVED"
     assert result["reacquisition_attempts"] == 2
@@ -284,7 +284,7 @@ def test_continuity_diagnostics_explain_frame_and_geometry_failures(monkeypatch,
 
 def test_cached_post_action_frame_waits_without_semantic_reacquisition(tmp_path, monkeypatch):
     runtime, behavior, robot, events, _ = recovery_runtime(tmp_path, monkeypatch,
-        [(0, .8), (0, .76), (0, .5)], failures=())
+        [(0, .60), (0, .59), (0, .5)], failures=())
     robot.on_motion = lambda: setattr(behavior, "refresh_mode", "cached_once")
     result = run(runtime)
     assert result["state"] == "ARRIVED"
@@ -316,7 +316,7 @@ def test_permanently_cached_camera_bounds_recovery_without_semantic_or_motion(tm
 @pytest.mark.parametrize("malformed", [dict(x1=1), dict(x1="bad", y1=0, x2=20, y2=30)])
 def test_malformed_tracker_box_does_not_escape_recovery_diagnostics(tmp_path, monkeypatch, malformed):
     runtime, behavior, _, events, _ = recovery_runtime(tmp_path, monkeypatch,
-        [(0, .8), (0, .76), (0, .5)], failures=())
+        [(0, .60), (0, .59), (0, .5)], failures=())
     factory = behavior.marvin_local_tracker_factory
     count = [0]
 

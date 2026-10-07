@@ -63,7 +63,7 @@ def controlled_producer(bundle, monkeypatch, *, publish=True, before_stop=False,
     return state
 
 
-@pytest.mark.parametrize("initial", ["absent", (120, .8), (0, .8)])
+@pytest.mark.parametrize("initial", ["absent", (120, .60), (0, .60)])
 def test_same_generation_after_stop_waits_then_first_new_scan_continues(
     tmp_path, monkeypatch, initial,
 ):
@@ -84,7 +84,7 @@ def test_same_generation_after_stop_waits_then_first_new_scan_continues(
     assert events.index("lidar_published") < len(events) - 1 - events[::-1].index("observe")
 
 
-@pytest.mark.parametrize("initial", [(120, .8), (0, .8)])
+@pytest.mark.parametrize("initial", [(120, .60), (0, .60)])
 def test_scan_published_during_completed_action_is_not_rebaselined(
     tmp_path, monkeypatch, initial,
 ):
@@ -117,7 +117,7 @@ def test_frozen_generation_times_out_stopped_before_camera_or_additional_action(
 
 
 def test_previous_scan_aged_out_during_action_still_waits_for_fresh_n_plus_one(tmp_path, monkeypatch):
-    bundle = make_runtime(tmp_path, monkeypatch, [(0, .8), (0, .5)])
+    bundle = make_runtime(tmp_path, monkeypatch, [(0, .60), (0, .5)])
     runtime, _, _, events, _ = bundle
     producer = controlled_producer(bundle, monkeypatch, real_freshness=True)
     result = run(runtime)
@@ -207,7 +207,7 @@ def test_new_valid_scan_with_unsafe_geometry_still_hits_forward_safety_veto(tmp_
 
 
 def test_each_forward_step_consumes_distinct_generations_and_arrives_at_standoff(tmp_path, monkeypatch):
-    bundle = make_runtime(tmp_path, monkeypatch, [(0, .8), (0, .76), (0, .72), (0, .50)])
+    bundle = make_runtime(tmp_path, monkeypatch, [(0, .60), (0, .59), (0, .58), (0, .50)])
     runtime, _, _, events, _ = bundle
     producer = controlled_producer(bundle, monkeypatch)
     result = run(runtime)
@@ -222,7 +222,7 @@ def test_each_forward_step_consumes_distinct_generations_and_arrives_at_standoff
 
 def test_tracker_recovery_alignment_wait_and_forward_continue_in_same_mission(tmp_path, monkeypatch):
     bundle = recovery_runtime(tmp_path, monkeypatch,
-        [(0, .8), (0, .76), (120, .72), (0, .70), (0, .50)])
+        [(0, .60), (0, .59), (120, .58), (0, .58), (0, .50)])
     runtime, behavior, _, events, _ = bundle
     producer = controlled_producer(bundle, monkeypatch)
     result = run(runtime)

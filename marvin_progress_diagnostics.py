@@ -142,7 +142,9 @@ class MarvinProgressDiagnostics:
                 rows.pop(0)
                 self.report["actions_dropped"] += 1
             rows.append({"action_number": len(rows) + self.report["actions_dropped"] + 1,
-                         "type": {"ADVANCING": "forward", "ALIGNING": "alignment", "SEARCHING": "search_turn"}.get(kind, kind),
+                         "action_type": observation.get("local_avoidance_action"),
+                         "pre_action_avoidance": copy.deepcopy(observation.get("local_avoidance_selection")),
+                         "type": {"ADVANCING": "forward", "ALIGNING": "alignment", "SEARCHING": "search_turn", "AVOIDING": ("detour_strafe" if (observation.get("local_avoidance_action") or "").startswith("STRAFE") else "detour_turn")}.get(kind, kind),
                          "state": kind, "authorizing_camera": camera_metadata(observation),
                          "pre_action_target_association": copy.deepcopy(observation.get("arrival")),
                          "authorizing_semantic_frame": copy.deepcopy(self.report.get("last_semantic_frame")),
@@ -181,17 +183,21 @@ class MarvinProgressDiagnostics:
                        actual_confirmed_run_duration_seconds=result.get("actual_confirmed_run_duration_seconds"))
             approach = result.get("approach_result") or {}
             turn = result.get("turn_result") or result
-            row["jit_target_association"] = copy.deepcopy(approach.get("target_standoff"))
+            lateral = result.get("lateral_step") or {}
+            row["local_avoidance_selection"] = copy.deepcopy(result.get("local_detour"))
+            row["jit_target_association"] = copy.deepcopy(approach.get("target_standoff") or
+                (lateral.get("local_detour") or {}).get("target_association"))
             if (row["jit_target_association"] or {}).get("ok") is True:
                 self.report["last_target_association"] = copy.deepcopy(row["jit_target_association"])
             row["jit_lidar_evidence"] = copy.deepcopy(
-                approach.get("action_lidar_evidence") or turn.get("action_lidar_evidence"))
+                approach.get("action_lidar_evidence") or lateral.get("action_lidar_evidence") or turn.get("action_lidar_evidence"))
             command = row.get("command") or {}
             if command:
                 command["requested_duration"] = result.get("requested_duration", result.get("duration", command.get("duration")))
             row["stop_events"] = copy.deepcopy(turn.get("stop_events") or [])
-            forward = approach.get("forward_result") or {}
-            if forward.get("bounded_forward_invalidated") is True:
+            forward = approach.get("forward_result") or lateral.get("lateral_result") or {}
+            if (forward.get("bounded_forward_invalidated") is True
+                    or forward.get("bounded_lateral_invalidated") is True):
                 outcome = forward.get("interlock_dispatch_outcome") or {}
                 row["interlock_dispatch_outcome"] = copy.deepcopy(outcome)
                 row["stop_events"] += copy.deepcopy(outcome.get("stop_events") or [])
@@ -296,6 +302,14 @@ class MarvinProgressDiagnostics:
                     and association.get("producer_session") == row["jit_target_association"].get("producer_session")):
                 row["next_target_association"] = copy.deepcopy(association)
                 row["next_associated_camera"] = camera_metadata(observation)
+
+    def avoidance_reassessment(self, route, association, improved):
+        with self.lock:
+            if self.report and self.report["actions"]:
+                row = self.report["actions"][-1]
+                if row.get("action_type") is not None:
+                    row["post_action_avoidance"] = copy.deepcopy({"route": route,
+                        "target_association": association, "progress_improved": improved})
 
     def perception_event(self, phase, metadata):
         with self.lock:
@@ -418,6 +432,9 @@ class MarvinProgressDiagnostics:
             delta = after_range - before_range if type(before_range) in (int, float) and type(after_range) in (int, float) else None
             result["action_summary"].append({
                 "action_number": row["action_number"], "type": row["type"],
+                "action_type": row.get("action_type"),
+                "pre_action_avoidance": row.get("pre_action_avoidance"),
+                "post_action_avoidance": row.get("post_action_avoidance"),
                 "motion_executed": row["motion_executed"],
                 "interrupted": row.get("interrupted", False),
                 "interruption_reason": row.get("interruption_reason"),
@@ -426,7 +443,11 @@ class MarvinProgressDiagnostics:
                 "actual_confirmed_run_duration_seconds": row.get("actual_confirmed_run_duration_seconds"),
                 "source_frame_stamp_ns": row["authorizing_camera"]["source_frame_stamp_ns"],
                 "tracker_quality": row["authorizing_camera"]["tracker_quality"],
-                "command_linear_speed": command.get("linear_x"), "command_angular_speed": command.get("angular_z"),
+                "command_linear_speed": command.get("linear_x"), "command_linear_y": command.get("linear_y", 0.0),
+                "command_angular_speed": command.get("angular_z"),
+                "requested_nominal_lateral_displacement_m": abs(command.get("linear_y", 0.0)) * command.get("duration", 0),
+                "nominal_lateral_displacement_m": (abs(command.get("linear_y", 0.0)) * command.get("duration", 0)
+                    if row.get("full_step_completed") is True else None),
                 "command_duration_seconds": command.get("duration"),
                 "requested_duration_seconds": command.get("requested_duration"),
                 "command_start_monotonic_seconds": command.get("start_monotonic_seconds"),

@@ -85,7 +85,9 @@ class Perception(BehaviorManager):
         if not self.freeze_lidar:
             self.sequence += 1
         x = self.distance + CALIBRATION["range_uncertainty_m"]
-        points = [{"x_m": x, "y_m": y / 1000} for y in range(-6, 7)]
+        # A bounded target surface spans the image box at this calibrated depth.
+        half_width = (x - CALIBRATION["x_m"]) * 58 / CALIBRATION["fx_pixels"]
+        points = [{"x_m": x, "y_m": y * half_width / 6} for y in range(-6, 7)]
         if self.unsafe_forward:
             points.append({"x_m": 0.35, "y_m": 0.20})
         geometry = build_local_motion_lidar_geometry({
@@ -209,10 +211,10 @@ def motions(events):
 
 
 @pytest.mark.parametrize("specs,states", [
-    ([(0, .8), (0, .75), (0, .5)], ["ADVANCING", "ADVANCING"]),
-    ([(120, .8), (0, .8), (0, .5)], ["ALIGNING", "ADVANCING"]),
-    ([(-120, .8), (0, .5)], ["ALIGNING"]),
-    (["absent", "absent", (120, .8), (0, .8), (0, .5)],
+    ([(0, .60), (0, .59), (0, .5)], ["ADVANCING", "ADVANCING"]),
+    ([(120, .60), (0, .60), (0, .5)], ["ALIGNING", "ADVANCING"]),
+    ([(-120, .60), (0, .5)], ["ALIGNING"]),
+    (["absent", "absent", (120, .60), (0, .60), (0, .5)],
      ["SEARCHING", "SEARCHING", "ALIGNING", "ADVANCING"]),
 ])
 def test_one_mission_runs_full_observe_guarded_action_stop_loop(tmp_path, monkeypatch, specs, states):
@@ -249,8 +251,12 @@ def test_search_is_exactly_one_bounded_full_sweep_with_observation_after_every_t
 def test_standoff_or_hard_envelope_never_advances(tmp_path, monkeypatch, distance):
     runtime, _, _, events, _ = make_runtime(tmp_path, monkeypatch, [(0, distance)])
     result = run(runtime)
-    assert result["state"] == "ARRIVED"
+    assert result["state"] == ("BLOCKED" if distance == .4 else "ARRIVED")
     assert motions(events) == []
+    if distance == .4:
+        assert events[-1] == "stop"
+        assert not result["arrived_at_marvin"]
+        assert result["history"][0]["observation"]["arrival"]["target_range_association_trusted"] is False
 
 
 @pytest.mark.parametrize("specs,flag", [
@@ -551,7 +557,7 @@ def test_slow_gemini_identity_refreshes_action_frame_then_continues_without_gemi
     tmp_path, monkeypatch, error,
 ):
     runtime, behavior, _, events, clock = delayed_runtime(
-        tmp_path, monkeypatch, [(error, .8), (error, .7), (0, .5)])
+        tmp_path, monkeypatch, [(error, .60), (error, .58), (0, .5)])
     result = run(runtime)
     assert result["state"] == "ARRIVED"
     assert len(motions(events)) == 2
@@ -724,7 +730,7 @@ def test_post_semantic_refresh_does_not_bypass_lidar(tmp_path, monkeypatch, spec
 
 
 @pytest.mark.parametrize("offset_ns", [75_000_000, 5_000_000_000, -5_000_000_000])
-@pytest.mark.parametrize("spec", [(120, .8), (0, .8), "absent"])
+@pytest.mark.parametrize("spec", [(120, .60), (0, .60), "absent"])
 def test_full_mission_uses_local_receipts_with_independent_camera_clock(
     tmp_path, monkeypatch, offset_ns, spec,
 ):

@@ -1,4 +1,4 @@
-"""Pure metric standoff policy for the strict V2 camera target.
+"""Pure candidate-range measurement for the strict V2 camera target.
 
 Camera calibration is explicit: fx_pixels, cx_pixels, image_width, x_m,
 y_m, yaw_degrees (camera forward in base_link), and range_uncertainty_m.
@@ -19,6 +19,10 @@ from marvin_pursuit_state import FIND_CENTER_TOLERANCE_PIXELS
 
 TARGET_STANDOFF_M = 0.50
 HARD_SAFETY_ENVELOPE_M = LOCAL_LIDAR_PROTECTED_RADIUS_M
+# Association evidence tolerances only; never collision / freshness margins.
+TARGET_RANGE_CLUSTER_TOLERANCE_M = 0.10
+TARGET_RANGE_EDGE_PIXEL_MARGIN = 10.0
+TRACKER_SEED_PADDING_FRACTION = 0.20
 
 
 def _number(value):
@@ -32,10 +36,16 @@ def evaluate_marvin_lidar_standoff(tracker, lidar, camera_model, *, expected_ses
     for camera translation and yaw. Use at most the existing +/-50 px center
     tolerance, clipped to the actual bbox, rather than the whole front scan
     or a wide padded tracker box. Unrelated bearings never set target range.
-    The independent local-motion policy still checks surrounding obstacles.
+    This is a bearing candidate, not verified Marvin depth or arrival authority.
+    Runtime applies mission range continuity/structure before ARRIVED. The
+    independent local-motion policy still checks surrounding obstacles.
     """
     result = {
-        "ok": False, "arrived_at_marvin": False, "reason": None,
+        "ok": False, "arrived_at_marvin": False, "candidate_at_standoff": False,
+        "target_range_association_trusted": False,
+        "target_range_association_reason": "bearing_candidate_only",
+        "verified_marvin_distance_m": None, "candidate_target_return_distance_m": None,
+        "reason": None,
         "authority": "target_bearing_lidar", "target_standoff_m": TARGET_STANDOFF_M,
         "hard_safety_envelope_m": HARD_SAFETY_ENVELOPE_M,
         "hard_safety_condition": False, "target_distance_m": None,
@@ -91,6 +101,7 @@ def evaluate_marvin_lidar_standoff(tracker, lidar, camera_model, *, expected_ses
         math.degrees(yaw + math.atan((cx - left) / fx)),
     ]
     distances = []
+    projected_points = []
     selected_points = {}
     for point in geometry["points"]:
         if (not isinstance(point, dict) or not _number(point.get("x_m"))
@@ -102,6 +113,7 @@ def evaluate_marvin_lidar_standoff(tracker, lidar, camera_model, *, expected_ses
         if forward <= 0:
             continue
         pixel = cx - fx * lateral / forward
+        projected_points.append((pixel, math.hypot(point["x_m"], point["y_m"])))
         if left <= pixel <= right:
             distance_and_bearing = (math.hypot(point["x_m"], point["y_m"]),
                                     math.degrees(math.atan2(point["y_m"], point["x_m"])))
@@ -114,6 +126,25 @@ def evaluate_marvin_lidar_standoff(tracker, lidar, camera_model, *, expected_ses
     if len(distances) < MINIMUM_VALID_SAMPLES_PER_REQUIRED_SECTOR:
         return fail("target_lidar_returns_insufficient")
     measured, measured_bearing = min(distances)
+    # Supporting initial association evidence only: inspect nearby horizontal
+    # bearings outside the full bbox for a continuation of the same near surface.
+    result["candidate_surface_bounded_by_bbox"] = not any(
+        box["x1"] - FIND_CENTER_TOLERANCE_PIXELS <= pixel <= box["x2"] + FIND_CENTER_TOLERANCE_PIXELS
+        and not box["x1"] - TARGET_RANGE_EDGE_PIXEL_MARGIN <= pixel <= box["x2"] + TARGET_RANGE_EDGE_PIXEL_MARGIN
+        and abs(depth - measured) <= TARGET_RANGE_CLUSTER_TOLERANCE_M
+        for pixel, depth in projected_points)
+    near_pixels = [pixel for pixel, depth in projected_points
+                   if abs(depth - measured) <= TARGET_RANGE_CLUSTER_TOLERANCE_M
+                   and box["x1"] - TARGET_RANGE_EDGE_PIXEL_MARGIN <= pixel
+                   <= box["x2"] + TARGET_RANGE_EDGE_PIXEL_MARGIN]
+    result["candidate_surface_point_count"] = len(near_pixels)
+    # Strict tracker templates expand the semantic seed by 20% per side.
+    # Require range support across the inner 60% of that tracked window.
+    edge_margin = max(TARGET_RANGE_EDGE_PIXEL_MARGIN,
+                      (box["x2"] - box["x1"]) * TRACKER_SEED_PADDING_FRACTION)
+    result["candidate_surface_edges_supported"] = bool(near_pixels
+        and min(near_pixels) <= box["x1"] + edge_margin
+        and max(near_pixels) >= box["x2"] - edge_margin)
     result["selected_return"] = selected_points[(measured, measured_bearing)]
     result["measured_bearing_degrees"] = measured_bearing
     _, front_lower, front_upper = OCTANT_SECTORS[0]
@@ -121,7 +152,8 @@ def evaluate_marvin_lidar_standoff(tracker, lidar, camera_model, *, expected_ses
         return fail("target_lidar_not_in_forward_sector")
     distance = max(0.0, measured - camera_model["range_uncertainty_m"])
     arrived = distance <= TARGET_STANDOFF_M
-    return dict(result, ok=True, arrived_at_marvin=arrived,
+    return dict(result, ok=True, candidate_at_standoff=arrived,
+                candidate_target_return_distance_m=measured,
                 measured_distance_m=measured, target_distance_m=distance,
                 hard_safety_condition=distance <= HARD_SAFETY_ENVELOPE_M,
                 reason="marvin_lidar_standoff_reached" if arrived else "marvin_lidar_standoff_not_reached")

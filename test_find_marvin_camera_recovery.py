@@ -59,7 +59,7 @@ def post_action_qualities(behavior, qualities):
 def test_cached_action_stamp_waits_without_tracker_evaluation_or_semantic_budget(
     tmp_path, monkeypatch, cached_polls,
 ):
-    bundle = delayed_runtime(tmp_path, monkeypatch, [(0, .8), (0, .5)])
+    bundle = delayed_runtime(tmp_path, monkeypatch, [(0, .60), (0, .5)])
     runtime, behavior, _, events, _ = bundle
     seen = camera_schedule(bundle, ["action"] * cached_polls + ["fresh"])
     # Allow the same production-bounded behavior with enough simulated time.
@@ -82,7 +82,7 @@ def test_cached_action_stamp_waits_without_tracker_evaluation_or_semantic_budget
 def test_marginal_new_frame_then_cached_copies_then_independent_good_frame_continues(
     tmp_path, monkeypatch,
 ):
-    bundle = delayed_runtime(tmp_path, monkeypatch, [(0, .8), (0, .5)])
+    bundle = delayed_runtime(tmp_path, monkeypatch, [(0, .60), (0, .5)])
     runtime, behavior, _, events, _ = bundle
     seen = camera_schedule(bundle, ["fresh", "last", "last", "fresh"])
     post_action_qualities(behavior, [.786365, .91])
@@ -104,7 +104,7 @@ def test_marginal_new_frame_then_cached_copies_then_independent_good_frame_conti
 
 def test_three_fresh_below_threshold_frames_enter_semantic_reacquisition(tmp_path, monkeypatch):
     bundle = recovery_runtime(tmp_path, monkeypatch,
-        [(0, .8), (0, .76), (0, .70), (0, .5)], failures=())
+        [(0, .60), (0, .59), (0, .58), (0, .5)], failures=())
     runtime, behavior, _, events, _ = bundle
     post_action_qualities(behavior, [.786365, .79, .799999])
     result = run(runtime)
@@ -139,8 +139,8 @@ def test_one_bad_fresh_frame_then_frozen_camera_cannot_be_accepted(tmp_path, mon
 
 def test_success_resets_failure_counter_across_multiple_recovery_episodes(tmp_path, monkeypatch):
     runtime, behavior, _, events, _ = recovery_runtime(tmp_path, monkeypatch,
-        [(0, .8), (0, .76), "absent", "absent", (0, .75),
-         (0, .71), "absent", "absent", (0, .70), (0, .5)], failures=(3, 8))
+        [(0, .60), (0, .59), "absent", "absent", (0, .59),
+         (0, .58), "absent", "absent", (0, .58), (0, .5)], failures=(3, 8))
     result = run(runtime)
     assert result["state"] == "ARRIVED"
     assert result["reacquisition_attempts"] == 6
@@ -196,7 +196,7 @@ def test_initial_semantic_tracker_still_requires_two_independent_support_frames(
 
 
 def test_only_a_frame_independently_meeting_exact_threshold_can_release_refresh(tmp_path, monkeypatch):
-    runtime, behavior, _, events, _ = delayed_runtime(tmp_path, monkeypatch, [(0, .8), (0, .5)])
+    runtime, behavior, _, events, _ = delayed_runtime(tmp_path, monkeypatch, [(0, .60), (0, .5)])
     post_action_qualities(behavior, [.786365, .799999, .80])
     result = run(runtime)
     assert result["state"] == "ARRIVED"
@@ -210,7 +210,7 @@ def test_only_a_frame_independently_meeting_exact_threshold_can_release_refresh(
 
 def test_good_tracker_result_after_refresh_deadline_is_not_admitted(tmp_path, monkeypatch):
     runtime, behavior, _, events, clock = recovery_runtime(tmp_path, monkeypatch,
-        [(0, .8), (0, .76), (0, .70), (0, .5)], failures=())
+        [(0, .60), (0, .59), (0, .58), (0, .5)], failures=())
     factory = behavior.marvin_local_tracker_factory
 
     def slow_factory(frame, box):

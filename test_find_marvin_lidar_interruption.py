@@ -97,12 +97,12 @@ def interrupted_runtime(tmp_path, monkeypatch, specs, *, interruptions=(True, Fa
 
 
 @pytest.mark.parametrize("fresh_distance,replanned_duration", [
-    (.7, .50), (.53, .30), (.51, .10),
+    (.60, .50), (.53, .30), (.51, .10),
 ])
 def test_interruption_stops_consumes_stamp_waits_reobserves_replans_and_arrives(
         tmp_path, monkeypatch, fresh_distance, replanned_duration):
     bundle, state, _ = interrupted_runtime(
-        tmp_path, monkeypatch, [(0, .8), (0, fresh_distance), (0, .5)])
+        tmp_path, monkeypatch, [(0, .60), (0, fresh_distance), (0, .5)])
     runtime, behavior, _, events, _ = bundle
     result = run(runtime)
     assert result["state"] == "ARRIVED"
@@ -157,7 +157,7 @@ def test_fresh_lidar_never_returns_blocks_with_no_additional_motion(tmp_path, mo
 
 
 def test_newer_but_stale_acquisition_keeps_waiting_for_genuinely_fresh_scan(tmp_path, monkeypatch):
-    bundle, state, _ = interrupted_runtime(tmp_path, monkeypatch, [(0, .8), (0, .5)])
+    bundle, state, _ = interrupted_runtime(tmp_path, monkeypatch, [(0, .60), (0, .5)])
     def stale_publication():
         bundle[1].sequence += 1
         state["on_read"] = None
@@ -229,7 +229,7 @@ def test_three_consecutive_interruptions_exhaust_budget(tmp_path, monkeypatch):
 
 
 def test_successful_action_resets_failure_count(tmp_path, monkeypatch):
-    bundle, _, _ = interrupted_runtime(tmp_path, monkeypatch, [(0, .8)] * 5 + [(0, .5)],
+    bundle, _, _ = interrupted_runtime(tmp_path, monkeypatch, [(0, .60)] * 5 + [(0, .5)],
         interruptions=(True, False, True, False, True))
     result = run(bundle[0])
     assert result["state"] == "ARRIVED"
@@ -256,7 +256,7 @@ def test_recovery_cannot_reuse_or_age_out_action_camera(tmp_path, monkeypatch, c
 
 
 def test_recovery_keeps_all_existing_limits(tmp_path, monkeypatch):
-    bundle, _, _ = interrupted_runtime(tmp_path, monkeypatch, [(0, .8), (0, .5)])
+    bundle, _, _ = interrupted_runtime(tmp_path, monkeypatch, [(0, .60), (0, .5)])
     result = run(bundle[0])
     assert result["state"] == "ARRIVED"
     assert MAXIMUM_EFFECTIVE_AGE_SECONDS == .30
@@ -268,7 +268,7 @@ def test_recovery_keeps_all_existing_limits(tmp_path, monkeypatch):
 
 
 def test_reobserve_can_change_plan_from_forward_to_alignment(tmp_path, monkeypatch):
-    bundle, _, _ = interrupted_runtime(tmp_path, monkeypatch, [(0, .8), (120, .8), (0, .5)])
+    bundle, _, _ = interrupted_runtime(tmp_path, monkeypatch, [(0, .60), (120, .60), (0, .5)])
     bundle[2].on_motion = lambda: setattr(bundle[1], "sequence", bundle[1].sequence+1)
     result = run(bundle[0])
     assert result["state"] == "ARRIVED"
@@ -280,7 +280,7 @@ def test_reobserve_can_change_plan_from_forward_to_alignment(tmp_path, monkeypat
 def test_tracker_loss_after_interruption_can_semantically_recover(tmp_path, monkeypatch):
     from test_find_marvin_reacquisition import recovery_runtime
     bundle, _, _ = interrupted_runtime(tmp_path, monkeypatch,
-        [(0, .8), (0, .76), (0, .70), (0, .5)], factory=recovery_runtime)
+        [(0, .60), (0, .59), (0, .58), (0, .5)], factory=recovery_runtime)
     result = run(bundle[0])
     assert result["state"] == "ARRIVED"
     assert result["interrupted_forward_attempts"] == 1

@@ -58,6 +58,7 @@ def _bridge_status_zero(status):
         and status.get("ros_ready") is True
         and isinstance(motion, dict)
         and motion.get("linear_x") == 0
+        and motion.get("linear_y", 0.0) == 0
         and motion.get("angular_z") == 0
         and motion.get("streaming") is False
 )
@@ -1638,7 +1639,7 @@ class BehaviorManager:
             if dispatch_guard is not None and dispatch_guard() is not True:
                 raise RuntimeError("marvin_motion_observation_stale_or_preempted")
             self._emit_marvin_command_diagnostic(
-                "start", start_monotonic_seconds=time.monotonic(), linear_x=0.0,
+                "start", start_monotonic_seconds=time.monotonic(), linear_x=0.0, linear_y=0.0,
                 angular_z=validation["angular_z"], duration=validation["duration"],
             )
             transport_result = self.robot.motion(
@@ -4383,7 +4384,7 @@ class BehaviorManager:
 
     def execute_single_marvin_approach_step(
         self, *, expected_lidar_session, linear_speed, duration,
-        target_tracker=None, camera_model=None, dispatch_guard=None,
+        target_tracker=None, camera_model=None, dispatch_guard=None, target_range_validator=None,
     ):
         """Run one bounded Marvin forward primitive, with no avoidance branch."""
         base = {"ok": False, "decision": "no_motion", "executed_primitive": None,
@@ -4401,6 +4402,8 @@ class BehaviorManager:
                 standoff = evaluate_marvin_lidar_standoff(
                     target_tracker, lidar, camera_model, expected_session=expected_lidar_session,
                 )
+                if target_range_validator is not None:
+                    standoff = target_range_validator(target_tracker, lidar)
                 base["target_standoff"] = standoff
                 base["action_lidar_evidence"] = {
                     "producer_session": lidar.get("producer_session"),
@@ -4409,7 +4412,10 @@ class BehaviorManager:
                     "received_monotonic_seconds": lidar.get("received_monotonic_seconds"),
                     "effective_age_seconds": lidar.get("effective_age_seconds"),
                 }
-                if standoff.get("ok") is not True or standoff.get("arrived_at_marvin") is True:
+                if (standoff.get("ok") is not True or standoff.get("candidate_at_standoff") is True
+                        or standoff.get("arrived_at_marvin") is True
+                        or (target_range_validator is not None and
+                            standoff.get("target_range_association_trusted") is not True)):
                     return dict(base, reason="marvin_single_approach_target_standoff_vetoed")
                 duration = min(duration, (standoff["target_distance_m"] - TARGET_STANDOFF_M) / linear_speed)
             base["duration"] = duration
@@ -4429,7 +4435,7 @@ class BehaviorManager:
             if dispatch_guard is not None and dispatch_guard() is not True:
                 return dict(base, reason="marvin_motion_observation_stale_or_preempted")
             self._emit_marvin_command_diagnostic(
-                "start", start_monotonic_seconds=time.monotonic(), linear_x=linear_speed,
+                "start", start_monotonic_seconds=time.monotonic(), linear_x=linear_speed, linear_y=0.0,
                 angular_z=0.0, duration=duration,
             )
             forward = self.robot.move_forward(
@@ -4459,6 +4465,68 @@ class BehaviorManager:
         return dict(base, ok=True, decision="approach_forward", executed_primitive="forward",
                     motion_executed=True, forward_result=forward,
                     reason="marvin_single_approach_forward_complete")
+
+    def execute_guarded_marvin_lateral_step(self, *, expected_lidar_session,
+            linear_y, duration, dispatch_guard, selection_validator):
+        """One pure lateral command through the existing Bridge health interlock."""
+        from marvin_local_obstacle_avoidance import (
+            LOCAL_AVOIDANCE_STRAFE_SPEED_MPS, LOCAL_AVOIDANCE_STRAFE_MAX_SECONDS)
+        base = {"ok": False, "motion_executed": False, "lateral_result": None}
+        if (type(linear_y) not in (int, float) or not math.isfinite(linear_y)
+                or abs(linear_y) != LOCAL_AVOIDANCE_STRAFE_SPEED_MPS
+                or type(duration) not in (int, float) or not math.isfinite(duration)
+                or not 0 < duration <= LOCAL_AVOIDANCE_STRAFE_MAX_SECONDS):
+            return dict(base, reason="marvin_lateral_parameters_invalid")
+        interlock = getattr(self.robot, "forward_interlock", None)
+        if interlock is None or not callable(getattr(self.robot, "move_lateral", None)):
+            return dict(base, reason="marvin_lateral_interlock_unavailable")
+        evidence = {}
+
+        def final_guard():
+            if not dispatch_guard():
+                evidence["reason"] = "marvin_motion_observation_stale_or_preempted"
+                return False
+            try:
+                lidar = self.world_model.get_lidar_obstacles(expected_session=expected_lidar_session)
+                safe = evaluate_local_motion_safety(lidar, expected_session=expected_lidar_session,
+                    linear_y=linear_y, duration=duration, lateral_swept_footprint=True)
+                selection = selection_validator(lidar)
+                evidence.update(lateral_safety=safe, local_detour=selection,
+                    action_lidar_evidence={k: lidar.get(k) for k in (
+                        "producer_session", "acquisition_sequence", "source", "received_monotonic_seconds",
+                        "effective_age_seconds")})
+                if not safe["permitted"] or not selection.get("accepted"):
+                    evidence["reason"] = "marvin_local_detour_jit_veto"
+                    return False
+                permitted, reason = interlock.refresh()
+                if not permitted:
+                    evidence["reason"] = reason
+                    return False
+            except Exception as exc:
+                evidence.update(reason="marvin_lateral_lidar_evaluation_failed", error=str(exc))
+                return False
+            return dispatch_guard()
+
+        if not final_guard():
+            return dict(base, **evidence)
+        try:
+            self._emit_marvin_command_diagnostic("start", start_monotonic_seconds=time.monotonic(),
+                linear_x=0.0, linear_y=linear_y, angular_z=0.0, duration=duration)
+            result = self.robot.move_lateral(speed=linear_y, seconds=duration, dispatch_guard=final_guard)
+            self._emit_marvin_command_diagnostic("complete", completion_monotonic_seconds=time.monotonic(),
+                bridge_acknowledgement=result)
+        except Exception as exc:
+            return dict(base, **dict(evidence, reason="marvin_lateral_transport_failed", error=str(exc)))
+        canonical = (isinstance(result, dict) and result.get("ok") is True
+            and result.get("action") == "motion" and result.get("mode") == "bounded"
+            and result.get("automatic_stop") is True and result.get("returned_immediately") is False
+            and result.get("linear_x") == 0 and result.get("angular_z") == 0
+            and result.get("linear_y") == linear_y and result.get("duration") == duration
+            and not result.get("error") and result.get("executed") is not False)
+        return dict(dict(base, **evidence), ok=canonical, motion_executed=canonical,
+            lateral_result=result, reason="marvin_lateral_step_complete" if canonical else
+                ((result.get("reason") or result.get("error") or "marvin_lateral_step_failed")
+                 if isinstance(result, dict) else "marvin_lateral_response_invalid"))
 
     def execute_guarded_local_forward(self, *, expected_lidar_session, now=None):
         """Run the established single bounded forward primitive for local use.

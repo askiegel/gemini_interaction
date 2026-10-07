@@ -23,14 +23,8 @@ def camera_clock(monkeypatch):
 
 
 def lidar():
-    return {
-        "available": True, "valid": True, "reason": "fresh",
-        "producer_session": SESSION,
-        "effective_age_seconds": 0.0, "acquisition_sequence": 1,
-        "local_motion_geometry": {"valid": True, "frame_id": "lidar_link",
-                                  "points": [{"x_m": 1.0, "y_m": y / 1000.0}
-                                             for y in range(-3, 4)]},
-    }
+    from test_marvin_lidar_standoff import lidar_at
+    return dict(lidar_at(1.0), producer_session=SESSION)
 
 
 class Robot:
@@ -59,6 +53,8 @@ class World:
     def get_lidar_obstacles(self, *, expected_session, **_kwargs):
         self.calls.append(expected_session)
         if isinstance(self.value, dict):
+            import time
+            self.value["received_monotonic_seconds"] = time.monotonic()
             self.value["acquisition_sequence"] = len(self.calls)
         return self.value
 
@@ -150,6 +146,8 @@ class RuntimeBehavior:
     def execute_single_marvin_approach_step(self, **kwargs):
         assert kwargs["dispatch_guard"]() is True
         kwargs.pop("dispatch_guard")
+        validator = kwargs.pop("target_range_validator")
+        assert validator(kwargs["target_tracker"], self.current_lidar)["target_range_association_trusted"]
         self.calls.append(kwargs)
         return {"ok": True, "motion_executed": True, "forward_safety": safety()}
 
@@ -182,12 +180,14 @@ def active_runtime(*, lidar_value=None):
         "controller_state": "VISUAL_READY_TO_APPROACH",
         "controller_decision": "FORWARD",
         "target_standoff": {"ok": True, "authority": "target_bearing_lidar",
-                            "arrived_at_marvin": False, "target_distance_m": 1.0},
+                            "arrived_at_marvin": False, "target_distance_m": 1.0,
+                            "target_range_association_trusted": True},
     }
     robot = Robot()
     runtime.behavior_manager = RuntimeBehavior(robot)
     runtime.world_model = World(lidar_value)
     runtime.lidar_worker = SimpleNamespace(session=SESSION, running=True)
+    runtime.behavior_manager.current_lidar = runtime.world_model.value
     return runtime, robot
 
 

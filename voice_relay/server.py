@@ -682,6 +682,7 @@ class VoiceRelayHandler(BaseHTTPRequestHandler):
             linear_x = float(
                 motion.get("linear_x")
             )
+            linear_y = float(motion.get("linear_y", 0.0))
             angular_z = float(
                 motion.get("angular_z")
             )
@@ -696,6 +697,7 @@ class VoiceRelayHandler(BaseHTTPRequestHandler):
 
         if (
             linear_x != 0.0
+            or linear_y != 0.0
             or angular_z != 0.0
             or motion.get("streaming") is not False
         ):
@@ -1532,6 +1534,7 @@ class VoiceRelayHandler(BaseHTTPRequestHandler):
             bridge.get("ok")
             and (bridge.get("data") or {}).get("ros_ready") is True
             and motion.get("linear_x") == 0
+            and motion.get("linear_y", 0.0) == 0
             and motion.get("angular_z") == 0
             and motion.get("streaming") is False
         ):
@@ -2360,6 +2363,7 @@ class VoiceRelayHandler(BaseHTTPRequestHandler):
             (robot.get("ros_ready") is True, "Robot Bridge ROS is not ready"),
             (isinstance(motion_value, dict), "Robot Bridge motion telemetry is unavailable"),
             (stopped_number(motion.get("linear_x")), "Robot Bridge linear motion is not zero"),
+            (stopped_number(motion.get("linear_y", 0.0)), "Robot Bridge lateral motion is not zero"),
             (stopped_number(motion.get("angular_z")), "Robot Bridge angular motion is not zero"),
             (motion.get("streaming") is False, "Robot Bridge streaming motion is active"),
             (lidar.get("running") is True, "LiDAR worker is not running"),
@@ -2425,6 +2429,7 @@ class VoiceRelayHandler(BaseHTTPRequestHandler):
             (robot.get("status") == "READY", "Robot Bridge is not READY"),
             (robot.get("ros_ready") is True, "Robot Bridge ROS is not ready"),
             (stopped(motion.get("linear_x")), "Robot Bridge linear motion is not zero"),
+            (stopped(motion.get("linear_y", 0.0)), "Robot Bridge lateral motion is not zero"),
             (stopped(motion.get("angular_z")), "Robot Bridge angular motion is not zero"),
             (motion.get("streaming") is False, "Robot Bridge streaming motion is active"),
             (lidar.get("running") is True, "LiDAR worker is not running"),
@@ -2478,6 +2483,7 @@ class VoiceRelayHandler(BaseHTTPRequestHandler):
             (robot.get("status") == "READY", "Robot Bridge is not READY"),
             (robot.get("ros_ready") is True, "Robot Bridge ROS is not ready"),
             (stopped(motion.get("linear_x")), "Robot Bridge linear motion is not zero"),
+            (stopped(motion.get("linear_y", 0.0)), "Robot Bridge lateral motion is not zero"),
             (stopped(motion.get("angular_z")), "Robot Bridge angular motion is not zero"),
             (motion.get("streaming") is False, "Robot Bridge streaming motion is active"),
             (lidar.get("running") is True, "LiDAR worker is not running"),
