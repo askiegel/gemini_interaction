@@ -559,6 +559,7 @@ class RuntimeAPIHandler(BaseHTTPRequestHandler):
             "/find-marvin/alignment-step",
             "/find-marvin/approach-step",
             "/find-marvin/autonomous-run",
+            "/find-marvin/live-proof-step",
             "/find-marvin/controller",
             "/find-marvin/confirm-identity",
             "/missions",
@@ -715,6 +716,16 @@ class RuntimeAPIHandler(BaseHTTPRequestHandler):
                         request_data["source_frame_stamp_ns"]
                     ),
                 )
+                self.send_json(200 if result.get("ok") is True else 409, result)
+                return
+
+            if path == "/find-marvin/live-proof-step":
+                if (set(request_data) != {"max_physical_actions"}
+                        or type(request_data["max_physical_actions"]) is not int
+                        or request_data["max_physical_actions"] != 1):
+                    raise ValueError("live-proof-step requires exactly max_physical_actions=1.")
+                result = self.server.runtime.execute_find_marvin_live_proof_step(
+                    max_physical_actions=1)
                 self.send_json(200 if result.get("ok") is True else 409, result)
                 return
 
