@@ -224,10 +224,14 @@ def test_saved_live_scan_d0da3104_cannot_declare_arrived(tmp_path, monkeypatch):
     assert gate.anchor is None
 
     runtime, behavior, _, events, _ = make_runtime(tmp_path, monkeypatch, [(0, .444623)])
-    # Use the exact scan/bbox with simulated current receipts/session only.
+    # Use the exact scan/bbox with simulated current receipts/session and
+    # independently advancing producer generations across the stopped handoff.
+    sequence = [scan['acquisition_sequence']]
     def read(**kwargs):
+        sequence[0] += 1
         return dict(scan, producer_session=runtime.lidar_worker.session,
-                    received_monotonic_seconds=time.monotonic())
+                    received_monotonic_seconds=time.monotonic(),
+                    acquisition_sequence=sequence[0])
     runtime.world_model.get_lidar_obstacles = read
     observer = behavior.observe_find_marvin_v2
     def observe():
@@ -243,6 +247,8 @@ def test_saved_live_scan_d0da3104_cannot_declare_arrived(tmp_path, monkeypatch):
     assert mission['reason'] == 'find_marvin_no_safe_local_detour'
     assert mission['final_observation']['route_to_marvin_obstructed']
     assert len(mission['local_avoidance_history'][0]['selection']['options']) == 4
+    refresh, = mission['avoidance_lidar_refresh_history']
+    assert refresh['avoidance_planning_lidar_sequence'] > refresh['blocked_forward_lidar_sequence']
     assert motions(events) == []
 
 

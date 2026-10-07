@@ -1060,6 +1060,63 @@ class CognitiveRuntime:
             time.sleep(min(self.MARVIN_NEW_LIDAR_POLL_SECONDS,
                            max(0.0, deadline - time.monotonic())))
 
+    def _refresh_marvin_avoidance_plan(self, *, tracker, expected_session,
+                                      blocked_sequence, execution_guard):
+        """Rebuild a stopped avoidance decision from one newer World Model scan.
+
+        This is planning evidence only. The existing executor still consumes
+        the camera stamp and independently obtains its final JIT safety scan.
+        """
+        wait = self._wait_for_new_marvin_lidar_evidence(
+            expected_session=expected_session, previous_sequence=blocked_sequence,
+            execution_guard=execution_guard)
+        result = {
+            "ok": False, "decision": None, "wait": wait,
+            "blocked_forward_lidar_sequence": blocked_sequence,
+            "avoidance_planning_lidar_sequence": None,
+            "avoidance_lidar_refresh_required": True,
+            "avoidance_lidar_refresh_wait_seconds": wait["wait_elapsed_seconds"],
+            "avoidance_lidar_refresh_result": wait["reason"],
+        }
+        if wait["ok"] is not True:
+            reason = ("find_marvin_avoidance_new_lidar_required"
+                      if wait["reason"] == "find_marvin_new_lidar_evidence_timeout"
+                      else wait["reason"])
+            return dict(result, reason=reason, avoidance_lidar_refresh_result=reason)
+        lidar = wait["snapshot"]
+        result["avoidance_planning_lidar_sequence"] = lidar["acquisition_sequence"]
+        if not execution_guard():
+            return dict(result, reason="find_marvin_mission_preempted")
+        if not self._marvin_motion_stamp_is_fresh(
+                tracker.get("source_frame_stamp_ns"), tracker.get("received_monotonic_seconds")):
+            return dict(result, reason="marvin_motion_observation_stale")
+        association = self._marvin_v2_lidar_arrival(tracker, lidar, commit_range=True)
+        result.update(lidar=lidar, association=association)
+        if association.get("ok") is not True:
+            return dict(result, reason=association.get("reason"))
+        route = association.get("route") or {}
+        if route.get("valid") is not True:
+            return dict(result, reason=route.get("reason") or "marvin_route_geometry_unavailable")
+        if (association.get("authority") == "target_bearing_lidar"
+                and association.get("target_range_association_trusted") is True
+                and association.get("arrived_at_marvin") is True
+                and association.get("target_distance_m", float("inf")) <= TARGET_STANDOFF_M):
+            return dict(result, ok=True, decision="ARRIVED", reason="arrived_at_marvin")
+        duration = (min(0.50, (association["target_distance_m"] - TARGET_STANDOFF_M)
+                    / FIND_MARVIN_FORWARD_SPEED_MPS)
+                    if association.get("target_range_association_trusted") is True else 0.50)
+        direct = evaluate_local_motion_safety(
+            lidar, expected_session=expected_session,
+            linear_x=FIND_MARVIN_FORWARD_SPEED_MPS, duration=duration)
+        result.update(direct=direct, forward_duration=duration)
+        if direct.get("reason") not in {"protected_region_clear", "translation_protected_region_violated"}:
+            return dict(result, reason=direct.get("reason"))
+        if direct.get("permitted") and not route.get("route_to_marvin_obstructed"):
+            if association.get("target_range_association_trusted") is not True:
+                return dict(result, reason=association["target_range_association_reason"])
+            return dict(result, ok=True, decision="FORWARD", reason="direct_path_restored")
+        return dict(result, ok=True, decision="AVOID", reason="marvin_route_obstructed")
+
     def _execute_normal_marvin_find_mission_locked(
         self, mission, *, control_generation=None,
     ):
@@ -1073,12 +1130,18 @@ class CognitiveRuntime:
         lidar_wait_history = []
         lidar_recovery_history = []
         avoidance_history = []
+        avoidance_lidar_refresh_history = []
         avoidance = {"local_avoidance_active": False, "local_avoidance_actions": 0,
                      "last_detour_direction": None, "left_clearance_m": None,
                      "right_clearance_m": None, "direct_path_blocked": False,
                      "avoidance_reason": None, "last_detour_improved_direct_path": None,
                      "route_to_marvin_obstructed": False, "previous_action_type": None,
-                     "progress_improved": None, "selected_action_type": None}
+                     "progress_improved": None, "selected_action_type": None,
+                     "blocked_forward_lidar_sequence": None,
+                     "avoidance_planning_lidar_sequence": None,
+                     "avoidance_lidar_refresh_required": False,
+                     "avoidance_lidar_refresh_wait_seconds": None,
+                     "avoidance_lidar_refresh_result": None}
         previous_clearances = None
         previous_selection = None
         self._marvin_target_range_association = MarvinTargetRangeAssociation()
@@ -1142,6 +1205,7 @@ class CognitiveRuntime:
                 "lidar_recovery_history": lidar_recovery_history,
                 **avoidance, "max_local_avoidance_actions": self.MAX_LOCAL_AVOIDANCE_ACTIONS,
                 "local_avoidance_history": avoidance_history,
+                "avoidance_lidar_refresh_history": avoidance_lidar_refresh_history,
                 "history": history, "stop_result": stop, "bridge_after_stop": zero,
                 "reacquisition_attempts": reacquisition_attempts,
                 "consecutive_reacquisition_failures": consecutive_reacquisition_failures,
@@ -1347,66 +1411,128 @@ class CognitiveRuntime:
                             if (not isinstance(stopped, dict) or stopped.get("ok") is not True
                                     or zero.get("ok") is not True or zero.get("status") != "READY"):
                                 return finish("BLOCKED", "find_marvin_local_avoidance_stop_failed")
-                            previous_direction = (avoidance["last_detour_direction"]
-                                if avoidance["local_avoidance_active"] else None)
-                            avoidance.update(local_avoidance_active=True,
-                                direct_path_blocked=direct.get("permitted") is not True,
-                                route_to_marvin_obstructed=bool(route_blocked),
-                                last_detour_improved_direct_path=route_progress(
-                                    (previous_selection or {}).get("route"), route) if previous_selection else None)
-                            if avoidance["local_avoidance_actions"] >= self.MAX_LOCAL_AVOIDANCE_ACTIONS:
-                                avoidance["avoidance_reason"] = "find_marvin_local_avoidance_exhausted"
-                                return finish("BLOCKED", avoidance["avoidance_reason"])
-                            allow_strafe = (zero.get("motion_capabilities") or {}).get("linear_y") is True
-                            # Legacy Bridge clients cannot strafe. Preserve their
-                            # existing guarded-turn policy; the new route case
-                            # can still evaluate four options with strafe denied.
-                            four_primitives = allow_strafe or direct.get("permitted") is True
-                            if four_primitives:
-                                detour = select_marvin_escape_action(lidar, standoff, expected_session=session,
-                                    allow_strafe=allow_strafe, previous_selection=previous_selection)
-                            else:
-                                detour = select_marvin_detour(lidar, expected_session=session,
-                                    forward_speed=FIND_MARVIN_FORWARD_SPEED_MPS,
-                                    forward_duration=forward_duration, previous_direction=previous_direction,
-                                    previous_clearances=previous_clearances)
-                                detour["action_type"] = "TURN_" + detour["direction"] if detour["direction"] else None
-                                detour["route"] = route
-                            avoidance.update(left_clearance_m=detour["left_clearance_m"],
-                                right_clearance_m=detour["right_clearance_m"], avoidance_reason=detour["reason"],
-                                selected_action_type=detour["action_type"],
-                                progress_improved=detour.get("progress_improved"))
-                            if previous_selection:
-                                avoidance_history[-1].update(post_action_route=route,
-                                    progress_improved=route_progress(previous_selection.get("route"), route),
-                                    post_action_target_association=standoff)
-                            avoidance_history.append({"source_frame_stamp_ns": stamp,
-                                "selection": detour, "previous_clearances": previous_clearances,
-                                "previous_action_type": (previous_selection or {}).get("action_type"),
-                                "last_detour_improved_direct_path": avoidance["last_detour_improved_direct_path"]})
-                            if detour["direction"] is None:
+                            # The blocked scan justified STOP, never the action
+                            # after the STOP/status round trips. Refresh first.
+                            refreshed = self._refresh_marvin_avoidance_plan(
+                                tracker=tracker, expected_session=session,
+                                blocked_sequence=sequence, execution_guard=current)
+                            avoidance_lidar_refresh_history.append(refreshed)
+                            avoidance.update({key: refreshed[key] for key in (
+                                "blocked_forward_lidar_sequence", "avoidance_planning_lidar_sequence",
+                                "avoidance_lidar_refresh_required", "avoidance_lidar_refresh_wait_seconds",
+                                "avoidance_lidar_refresh_result")})
+                            if not current():
+                                return finish("STOPPED", "find_marvin_mission_preempted")
+                            if refreshed["ok"] is not True:
                                 history.append({"state": "ADVANCING", "decision_only": True,
                                     "source_frame_stamp_ns": stamp, "observation": observation,
                                     "motion_executed": False, "action_lidar_evidence": None,
                                     "result": {"ok": False, "motion_executed": False,
                                         "execution_authorized": False, "actions_executed": 0,
                                         "source_stamp_consumed": False, "full_step_completed": False,
-                                        "reason": detour["reason"], "approach_result": {"forward_safety": direct}}})
-                                return finish("BLOCKED", detour["reason"])
-                            context = {"previous_direction": previous_direction,
-                                "previous_clearances": previous_clearances,
-                                "four_primitives": four_primitives, "previous_selection": previous_selection,
-                                "selected_action_type": detour["action_type"], "allow_strafe": allow_strafe}
-                            state = "AVOIDING"
-                            if detour["action_type"].startswith("STRAFE"):
-                                action = lambda: self._dispatch_marvin_observation_action(
-                                    self._execute_single_marvin_strafe, source_frame_stamp_ns=stamp,
-                                    local_detour_context=context)
+                                        "reason": refreshed["reason"],
+                                        "approach_result": {"forward_safety": direct}}})
+                                return finish("BLOCKED", refreshed["reason"])
+                            lidar, standoff = refreshed["lidar"], refreshed["association"]
+                            decision = refreshed["decision"]
+                            route = standoff["route"]
+                            observation = dict(observation, arrival=standoff,
+                                reason=standoff["reason"],
+                                controller=dict(observation["controller"], decision=decision,
+                                    state="ARRIVED" if decision == "ARRIVED" else VISUAL_READY_TO_APPROACH,
+                                    reason=standoff["reason"],
+                                    distance_state="ARRIVED" if decision == "ARRIVED" else
+                                        "APPROACH" if decision == "FORWARD" else "UNKNOWN",
+                                    path_state="DIRECT_PATH_BLOCKED" if decision == "AVOID" else "DIRECT_PATH_CLEAR"),
+                                **{key: standoff.get(key) for key in (
+                                    "nearest_forward_obstacle_distance_m", "candidate_target_return_distance_m",
+                                    "verified_marvin_distance_m", "target_range_association_trusted",
+                                    "target_range_association_reason", "direct_path_blocked",
+                                    "route_to_marvin_obstructed", "blocking_obstacle_distance_m",
+                                    "blocking_obstacle_bearing_deg", "blocking_obstacle_x_m", "blocking_obstacle_y_m")})
+                            retain("observe", observation)
+                            if decision == "ARRIVED":
+                                avoidance.update(local_avoidance_active=False, direct_path_blocked=False,
+                                    route_to_marvin_obstructed=False, avoidance_reason="arrived_at_marvin")
+                                return finish("ARRIVED", "arrived_at_marvin")
+                            # Rebind the existing, unconsumed visual reference
+                            # to the new route decision without new Gemini work.
+                            # Strict identity and stamp gates remain authoritative.
+                            action_observation = self._marvin_v2_action_observation(
+                                observation, tracker, VISUAL_READY_TO_APPROACH, decision)
+                            with self._state_lock:
+                                self._marvin_alignment_observation = action_observation
+                            direct = refreshed["direct"]
+                            forward_duration = refreshed["forward_duration"]
+                            route_blocked = route["route_to_marvin_obstructed"]
+                            if decision == "FORWARD":
+                                avoidance.update(local_avoidance_active=False, direct_path_blocked=False,
+                                    route_to_marvin_obstructed=False, avoidance_reason="direct_path_restored",
+                                    selected_action_type=None, left_clearance_m=None, right_clearance_m=None,
+                                    last_detour_improved_direct_path=True, progress_improved=True)
+                                previous_clearances = None
+                                previous_selection = None
                             else:
-                                action = lambda: self._dispatch_marvin_observation_action(
-                                    self._execute_single_marvin_alignment, direction=detour["direction"],
-                                    angular_speed=TURN_SPEED, duration=TURN_DURATION,
-                                    source_frame_stamp_ns=stamp, local_detour_context=context)
+                                previous_direction = (avoidance["last_detour_direction"]
+                                    if avoidance["local_avoidance_active"] else None)
+                                avoidance.update(local_avoidance_active=True,
+                                    direct_path_blocked=direct.get("permitted") is not True,
+                                    route_to_marvin_obstructed=bool(route_blocked),
+                                    last_detour_improved_direct_path=route_progress(
+                                        (previous_selection or {}).get("route"), route) if previous_selection else None)
+                                if avoidance["local_avoidance_actions"] >= self.MAX_LOCAL_AVOIDANCE_ACTIONS:
+                                    avoidance["avoidance_reason"] = "find_marvin_local_avoidance_exhausted"
+                                    return finish("BLOCKED", avoidance["avoidance_reason"])
+                                allow_strafe = (zero.get("motion_capabilities") or {}).get("linear_y") is True
+                                # Legacy Bridge clients cannot strafe. Preserve their
+                                # existing guarded-turn policy; the new route case
+                                # can still evaluate four options with strafe denied.
+                                four_primitives = allow_strafe or direct.get("permitted") is True
+                                if four_primitives:
+                                    detour = select_marvin_escape_action(lidar, standoff, expected_session=session,
+                                        allow_strafe=allow_strafe, previous_selection=previous_selection)
+                                else:
+                                    detour = select_marvin_detour(lidar, expected_session=session,
+                                        forward_speed=FIND_MARVIN_FORWARD_SPEED_MPS,
+                                        forward_duration=forward_duration, previous_direction=previous_direction,
+                                        previous_clearances=previous_clearances)
+                                    detour["action_type"] = "TURN_" + detour["direction"] if detour["direction"] else None
+                                    detour["route"] = route
+                                avoidance.update(left_clearance_m=detour["left_clearance_m"],
+                                    right_clearance_m=detour["right_clearance_m"], avoidance_reason=detour["reason"],
+                                    selected_action_type=detour["action_type"],
+                                    progress_improved=detour.get("progress_improved"))
+                                if previous_selection:
+                                    avoidance_history[-1].update(post_action_route=route,
+                                        progress_improved=route_progress(previous_selection.get("route"), route),
+                                        post_action_target_association=standoff)
+                                avoidance_history.append({"source_frame_stamp_ns": stamp,
+                                    "selection": detour, "previous_clearances": previous_clearances,
+                                    "previous_action_type": (previous_selection or {}).get("action_type"),
+                                    "last_detour_improved_direct_path": avoidance["last_detour_improved_direct_path"]})
+                                if detour["direction"] is None:
+                                    history.append({"state": "ADVANCING", "decision_only": True,
+                                        "source_frame_stamp_ns": stamp, "observation": observation,
+                                        "motion_executed": False, "action_lidar_evidence": None,
+                                        "result": {"ok": False, "motion_executed": False,
+                                            "execution_authorized": False, "actions_executed": 0,
+                                            "source_stamp_consumed": False, "full_step_completed": False,
+                                            "reason": detour["reason"], "approach_result": {"forward_safety": direct}}})
+                                    return finish("BLOCKED", detour["reason"])
+                                context = {"previous_direction": previous_direction,
+                                    "previous_clearances": previous_clearances,
+                                    "four_primitives": four_primitives, "previous_selection": previous_selection,
+                                    "selected_action_type": detour["action_type"], "allow_strafe": allow_strafe}
+                                state = "AVOIDING"
+                                if detour["action_type"].startswith("STRAFE"):
+                                    action = lambda: self._dispatch_marvin_observation_action(
+                                        self._execute_single_marvin_strafe, source_frame_stamp_ns=stamp,
+                                        local_detour_context=context)
+                                else:
+                                    action = lambda: self._dispatch_marvin_observation_action(
+                                        self._execute_single_marvin_alignment, direction=detour["direction"],
+                                        angular_speed=TURN_SPEED, duration=TURN_DURATION,
+                                        source_frame_stamp_ns=stamp, local_detour_context=context)
                 else:
                     return finish("BLOCKED", observation.get("reason") or "find_marvin_unexpected_controller_state")
             self._publish_behavior_tracking({

@@ -194,6 +194,15 @@ def test_returning_scan_session_invalid_or_unsafe_fails_closed(tmp_path, monkeyp
         else:
             behavior.unsafe_forward = True
     state["on_publish"] = publish_fault
+    if fault == "unsafe":
+        original_stop = bundle[2].stop
+        def stop_and_publish():
+            stopped = original_stop()
+            # Unsafe geometry persists in genuinely new scans after STOP.
+            if behavior.unsafe_forward:
+                behavior.sequence += 1
+            return stopped
+        bundle[2].stop = stop_and_publish
     result = run(runtime)
     assert result["state"] == "BLOCKED" and result["reason"] == reason
     assert len(motions(events)) == 1

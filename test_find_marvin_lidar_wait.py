@@ -198,12 +198,21 @@ def test_new_valid_scan_with_unsafe_geometry_still_hits_forward_safety_veto(tmp_
     runtime, behavior, _, events, _ = bundle
     producer = controlled_producer(bundle, monkeypatch)
     producer["on_sleep"] = lambda: setattr(behavior, "unsafe_forward", True)
+    original_stop = bundle[2].stop
+    def stop_and_publish_unsafe_scan():
+        stopped = original_stop()
+        if behavior.unsafe_forward:
+            behavior.sequence += 1  # Persistent hazard in a new producer scan after STOP.
+        return stopped
+    bundle[2].stop = stop_and_publish_unsafe_scan
     result = run(runtime)
     assert result["lidar_wait_history"][0]["ok"] is True
     assert result["state"] == "BLOCKED"
     assert len(motions(events)) == 1
     assert result["history"][-1]["result"]["motion_executed"] is False
     assert result["history"][-1]["result"]["approach_result"]["forward_safety"]["permitted"] is False
+    refresh, = result["avoidance_lidar_refresh_history"]
+    assert refresh["avoidance_planning_lidar_sequence"] > refresh["blocked_forward_lidar_sequence"]
 
 
 def test_each_forward_step_consumes_distinct_generations_and_arrives_at_standoff(tmp_path, monkeypatch):

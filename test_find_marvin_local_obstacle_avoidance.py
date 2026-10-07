@@ -180,7 +180,8 @@ def test_stop_preempts_detour_and_no_followup_motion(tmp_path, monkeypatch, phas
     else:
         original = runtime._wait_for_new_marvin_lidar_evidence
         def stop_wait(**kwargs):
-            stop()
+            if motions(events):
+                stop()  # This case specifically tests the physical post-action wait.
             return original(**kwargs)
         runtime._wait_for_new_marvin_lidar_evidence = stop_wait
     result = run(runtime)
