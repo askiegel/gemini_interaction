@@ -12,7 +12,7 @@ MIN_CORRIDOR_OVERLAP_IMPROVEMENT_M = 0.01
 MIN_ROUTE_CENTERLINE_CLEARANCE_IMPROVEMENT_M = 0.01
 
 
-def evaluate_marvin_route(lidar, association, *, expected_session, translation_y=0.0,
+def evaluate_marvin_route(lidar, association, *, expected_session, translation_y=0.0, translation_x=0.0,
                           heading_change=0.0):
     """Project one bounded candidate on current points, not a future scan.
 
@@ -48,10 +48,11 @@ def evaluate_marvin_route(lidar, association, *, expected_session, translation_y
     c, s = math.cos(heading_change), math.sin(heading_change)
 
     def transform(x, y):
+        x -= translation_x
         y -= translation_y
         return c * x + s * y, -s * x + c * y
 
-    world_tx, world_ty = target_depth * math.cos(theta), target_depth * math.sin(theta) - translation_y
+    world_tx, world_ty = target_depth * math.cos(theta) - translation_x, target_depth * math.sin(theta) - translation_y
     target_length = math.hypot(world_tx, world_ty)
     tx, ty = c * world_tx + s * world_ty, -s * world_tx + c * world_ty
     if trusted_history:
@@ -65,22 +66,24 @@ def evaluate_marvin_route(lidar, association, *, expected_session, translation_y
         x, y = point.get('x_m'), point.get('y_m')
         if not all(type(v) in (int, float) and math.isfinite(v) for v in (x, y)):
             return dict(base, reason='invalid_lidar_geometry')
-        translated_y = y - translation_y
-        if length == 0 or x * target_x + translated_y * target_y <= 0:
+        translated_x, translated_y = x - translation_x, y - translation_y
+        if length == 0 or translated_x * target_x + translated_y * target_y <= 0:
             continue
         # Distances are invariant under the common rotation. Compute before
         # rotation so an exact boundary return cannot flicker by roundoff and
         # manufacture one fewer blocker / an apparent pure-turn improvement.
-        gap = _distance_to_segment(x, translated_y, target_x, target_y)
+        gap = _distance_to_segment(translated_x, translated_y, target_x, target_y)
         if gap <= LOCAL_LIDAR_PROTECTED_RADIUS_M:
             bx, by = transform(x, y)
-            blockers.append((gap, math.hypot(x, translated_y), bx, by))
+            blockers.append((gap, math.hypot(translated_x, translated_y), bx, by))
     overlap = max((LOCAL_LIDAR_PROTECTED_RADIUS_M - p[0] for p in blockers), default=0.0)
     nearest = min(blockers, key=lambda p: p[1]) if blockers else None
     return dict(base, valid=True, reason='marvin_route_obstructed' if blockers else 'marvin_route_clear',
         route_to_marvin_obstructed=bool(blockers), route_occupancy=len(blockers),
         corridor_overlap_m=overlap,
         blocking_obstacle_overlap_m=LOCAL_LIDAR_PROTECTED_RADIUS_M - nearest[0] if nearest else 0.0,
+        blocking_obstacle_longitudinal_extent_m=max((p[2] for p in blockers), default=None),
+        blocking_obstacle_minimum_side_separation_m=min((abs(p[3]) for p in blockers), default=None),
         route_lookahead_m=horizon,
         route_depth_source='verified_range_history' if trusted_history else 'bounded_local_lookahead',
         marvin_bearing_deg=predicted_bearing,

@@ -755,6 +755,11 @@ def build_tracking_state(
         "bbox": bbox,
         **{key: merged.get(key) for key in (
             "local_avoidance_active", "local_avoidance_actions", "last_detour_direction",
+            "local_bypass_active", "local_bypass_side", "local_bypass_target_x_m",
+            "local_bypass_target_y_m", "local_bypass_actions", "local_bypass_reason",
+            "route_to_bypass_obstructed", "bypass_corridor_occupancy",
+            "bypass_corridor_overlap_m", "bypass_forward_permitted",
+            "bypass_target_x_m", "bypass_target_y_m", "bypass_distance_m", "bypass_bearing_deg",
             "route_to_marvin_obstructed", "blocking_obstacle_distance_m", "blocking_obstacle_bearing_deg",
             "blocking_obstacle_x_m", "blocking_obstacle_y_m", "selected_action_type",
             "previous_action_type", "progress_improved",

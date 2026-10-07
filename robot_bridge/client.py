@@ -249,11 +249,12 @@ class RobotBridgeClient:
             linear_y=linear_y,
         )
 
-    def move_forward(self, speed=0.10, seconds=1.0):
+    def move_forward(self, speed=0.10, seconds=1.0, *, dispatch_guard=None):
         return self.motion(
             linear_x=speed,
             angular_z=0.0,
             duration=seconds,
+            **({"dispatch_guard": dispatch_guard} if dispatch_guard is not None else {}),
         )
 
     def move_backward(self, speed=0.10, seconds=1.0):

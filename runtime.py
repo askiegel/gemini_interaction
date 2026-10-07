@@ -19,6 +19,7 @@ from marvin_arrival_policy import evaluate_marvin_visual_arrival
 from marvin_lidar_standoff import TARGET_STANDOFF_M, evaluate_marvin_lidar_standoff
 from marvin_target_range_association import MarvinTargetRangeAssociation
 from marvin_route_obstruction import route_progress, evaluate_route_progress
+from marvin_local_bypass import plan_local_bypass, evaluate_avoidance_progress
 from marvin_progress_diagnostics import MarvinProgressDiagnostics
 from marvin_local_obstacle_avoidance import (
     MAX_LOCAL_AVOIDANCE_ACTIONS, TURN_SPEED, TURN_DURATION, select_marvin_detour,
@@ -596,11 +597,19 @@ class CognitiveRuntime:
         with self._state_lock:
             if not hasattr(self, "_marvin_target_range_association"):
                 self._marvin_target_range_association = MarvinTargetRangeAssociation()
-            return self._marvin_target_range_association.evaluate(
+            association = self._marvin_target_range_association.evaluate(
                 result, lidar, tracker, expected_session=session,
                 commit=(commit_range and self._marvin_motion_stamp_is_fresh(
                     tracker.get("source_frame_stamp_ns"),
                     tracker.get("received_monotonic_seconds"))))
+        route = association.get("route") or {}
+        if route.get("valid") and route.get("route_to_marvin_obstructed"):
+            # Advisory evidence on the EXACT association scan. Later reporting
+            # must not mix this route with geometry from another generation.
+            association["local_bypass_candidates"] = {side: plan_local_bypass(
+                lidar, association, route, expected_session=session, side=side)
+                for side in ("LEFT", "RIGHT")}
+        return association
 
     MARVIN_ALIGNMENT_GEOMETRY_HISTORY_WINDOW = 3
     MARVIN_ALIGNMENT_MAX_SEED_CENTER_DELTA_PIXELS = 30.0
@@ -1141,7 +1150,10 @@ class CognitiveRuntime:
                      "avoidance_planning_lidar_sequence": None,
                      "avoidance_lidar_refresh_required": False,
                      "avoidance_lidar_refresh_wait_seconds": None,
-                     "avoidance_lidar_refresh_result": None}
+                     "avoidance_lidar_refresh_result": None,
+                     "local_bypass_active": False, "local_bypass_side": None,
+                     "local_bypass_target_x_m": None, "local_bypass_target_y_m": None,
+                     "local_bypass_actions": 0, "local_bypass_reason": None}
         previous_clearances = None
         previous_selection = None
         self._marvin_target_range_association = MarvinTargetRangeAssociation()
@@ -1165,6 +1177,13 @@ class CognitiveRuntime:
         def current():
             return self._marvin_mission_context_is_current(mission, control_generation)
 
+        def clear_bypass(reason):
+            avoidance.update(local_bypass_active=False, local_bypass_side=None,
+                local_bypass_target_x_m=None, local_bypass_target_y_m=None, local_bypass_reason=reason,
+                bypass_target_x_m=None, bypass_target_y_m=None, bypass_distance_m=None,
+                bypass_bearing_deg=None, route_to_bypass_obstructed=None,
+                bypass_corridor_occupancy=None, bypass_corridor_overlap_m=None, bypass_forward_permitted=False)
+
         def record_avoidance_reassessment(route, association):
             # Capture the first valid reassessment of the last physical detour.
             # Later alignment or planning must not overwrite that action's outcome.
@@ -1172,17 +1191,25 @@ class CognitiveRuntime:
                     or not route.get("valid") or not avoidance_history
                     or avoidance_history[-1].get("actual_route_occupancy") is not None):
                 return
-            progress = evaluate_route_progress(previous_selection.get("route"), route)
+            bypass = (association.get("local_bypass_candidates") or {}).get(previous_selection.get("direction"))
+            progress = evaluate_avoidance_progress(previous_selection, route, bypass)
+            avoidance_history[-1]["post_action_bypass"] = bypass
             improved = progress["meaningful_progress"]
+            if previous_selection.get("action_type") == "BYPASS_FORWARD":
+                # Freeze this action's first actual outcome before any ordinary
+                # alignment changes the coordinate frame. Later turns cannot
+                # manufacture longitudinal passage for an ineffective bypass.
+                previous_selection["first_post_action_bypass_progress"] = dict(progress)
             avoidance_history[-1].update(post_action_route=route, progress_improved=improved,
                 post_action_target_association=association, actual_route_occupancy=route["route_occupancy"],
                 actual_max_overlap_m=route["corridor_overlap_m"],
                 actual_blocker_centerline_clearance_m=route.get("blocking_obstacle_centerline_clearance_m"),
                 meaningful_progress=improved, meaningful_progress_reason=progress["meaningful_progress_reason"],
                 actual_route_progress=progress)
-            retain("avoidance_reassessment", route, association, improved)
+            retain("avoidance_reassessment", route, association, improved, progress)
 
         def finish(state, reason):
+            clear_bypass(reason)
             avoidance["local_avoidance_active"] = False
             self._reset_marvin_alignment_consensus()
             try:
@@ -1208,6 +1235,10 @@ class CognitiveRuntime:
                                     else "safe_incomplete" if safe else "safe_failure"),
                 "search_turns": search_turns, "max_search_turns": MAX_SCAN_TURNS,
                 "actions_executed": sum(row.get("motion_executed") is True for row in history),
+                "completed_bypass_forward_actions": sum(row["result"].get("action_type") == "BYPASS_FORWARD"
+                    and row["result"].get("full_step_completed") is True for row in history),
+                "interrupted_bypass_forward_attempts": sum(row["result"].get("action_type") == "BYPASS_FORWARD"
+                    and row["result"].get("interrupted") is True for row in history),
                 "completed_forward_actions": sum(row["state"] == "ADVANCING"
                     and row["result"].get("full_step_completed") is True for row in history),
                 "interrupted_forward_attempts": sum(row["state"] == "ADVANCING"
@@ -1263,6 +1294,11 @@ class CognitiveRuntime:
                 # The mission owns recovery. No search or action can occur
                 # until new Gemini identity AND a post-Gemini action frame pass
                 # the normal freshness, LiDAR and motion admission gates below.
+                clear_bypass("marvin_identity_reacquisition")
+                if previous_selection:
+                    previous_selection = dict(previous_selection, local_bypass=None)
+                    # Expire the local target through semantic recovery. Fresh
+                    # geometry may re-establish it; retain side and action history.
                 loss = observation
                 tracker_loss_history.append(loss)
                 if len(tracker_loss_history) > self.MAX_MARVIN_REACQUISITION_EPISODES:
@@ -1351,6 +1387,9 @@ class CognitiveRuntime:
             if type(sequence) is not int or sequence < 0 or (prior is not None and sequence <= prior[1]):
                 return finish("BLOCKED", "find_marvin_lidar_acquisition_sequence_invalid")
             decision = (observation.get("controller") or {}).get("decision")
+            observed_route = (observation.get("arrival") or {}).get("route") or {}
+            if observed_route.get("valid") and not observed_route.get("route_to_marvin_obstructed"):
+                clear_bypass("direct_path_restored")
             if previous_selection and observation.get("identity_confirmed") is True:
                 new_association = observation.get("arrival") or {}
                 new_route = new_association.get("route") or {}
@@ -1512,6 +1551,13 @@ class CognitiveRuntime:
                                         previous_clearances=previous_clearances)
                                     detour["action_type"] = "TURN_" + detour["direction"] if detour["direction"] else None
                                     detour["route"] = route
+                                bypass = detour.get("local_bypass") or {}
+                                avoidance.update({key: bypass.get(key) for key in (
+                                    "local_bypass_side", "local_bypass_target_x_m",
+                                    "local_bypass_target_y_m", "local_bypass_reason", "route_to_bypass_obstructed",
+                                    "bypass_corridor_occupancy", "bypass_corridor_overlap_m", "bypass_forward_permitted",
+                    "bypass_target_x_m", "bypass_target_y_m", "bypass_distance_m", "bypass_bearing_deg")})
+                                avoidance["local_bypass_active"] = detour.get("action_type") == "BYPASS_FORWARD"
                                 avoidance.update(left_clearance_m=detour["left_clearance_m"],
                                     right_clearance_m=detour["right_clearance_m"], avoidance_reason=detour["reason"],
                                     selected_action_type=detour["action_type"],
@@ -1534,9 +1580,15 @@ class CognitiveRuntime:
                                 context = {"previous_direction": previous_direction,
                                     "previous_clearances": previous_clearances,
                                     "four_primitives": four_primitives, "previous_selection": previous_selection,
-                                    "selected_action_type": detour["action_type"], "allow_strafe": allow_strafe}
+                                    "selected_action_type": detour["action_type"], "allow_strafe": allow_strafe,
+                                    "selected_direction": detour["direction"]}
                                 state = "AVOIDING"
-                                if detour["action_type"].startswith("STRAFE"):
+                                if detour["action_type"] == "BYPASS_FORWARD":
+                                    action = lambda: self._dispatch_marvin_observation_action(
+                                        self._execute_single_marvin_approach,
+                                        linear_speed=FIND_MARVIN_FORWARD_SPEED_MPS, duration=.50,
+                                        source_frame_stamp_ns=stamp, local_detour_context=context)
+                                elif detour["action_type"].startswith("STRAFE"):
                                     action = lambda: self._dispatch_marvin_observation_action(
                                         self._execute_single_marvin_strafe, source_frame_stamp_ns=stamp,
                                         local_detour_context=context)
@@ -1577,13 +1629,16 @@ class CognitiveRuntime:
             retain("action_result", result)
             if state == "AVOIDING":
                 dispatched = bool(result.get("execution_authorized") is True)
-                lateral = (result.get("lateral_step") or {}).get("lateral_result") or {}
+                lateral = ((result.get("lateral_step") or {}).get("lateral_result") or
+                    (result.get("approach_result") or {}).get("forward_result") or {})
                 physical_dispatch = (result.get("motion_executed") is True
                     or (result.get("turn_result") or {}).get("confirmed_forwarded") is True
                     or (lateral.get("transport_attempted") is True and
                         (lateral.get("transport_result") or {}).get("ok") is True))
                 if physical_dispatch:
                     avoidance["local_avoidance_actions"] += 1
+                    if detour["action_type"] == "BYPASS_FORWARD":
+                        avoidance["local_bypass_actions"] += 1
                     avoidance["last_detour_direction"] = detour["direction"]
                     jit_detour = result["local_detour"]
                     previous_selection = jit_detour
@@ -3159,7 +3214,7 @@ class CognitiveRuntime:
         )
 
     def _execute_single_marvin_approach(self, *, linear_speed, duration, source_frame_stamp_ns,
-                                       dispatch_guard):
+                                       dispatch_guard, local_detour_context=None):
         """Execute one current-observation-bound guarded Marvin forward step."""
         base = {"ok": False, "action": "single_marvin_approach_step",
                 "execution_authorized": False, "motion_executed": False,
@@ -3182,8 +3237,18 @@ class CognitiveRuntime:
             linear_speed=float(linear_speed), duration=float(duration),
             source_frame_stamp_ns=source_frame_stamp_ns,
         )
+        bypass_mode = local_detour_context is not None
+        if bypass_mode and (not isinstance(local_detour_context, dict)
+                or local_detour_context.get("selected_action_type") != "BYPASS_FORWARD"
+                or not self._marvin_motion_owner_is_current()
+                or self.mission_manager.get_active_mission() is None):
+            return dict(base, reason="marvin_local_bypass_ownership_invalid")
         if self.running is not True:
             return dict(base, reason="marvin_approach_runtime_not_running")
+        if bypass_mode:
+            zero = self._marvin_bridge_ready_and_stopped()
+            if zero.get("ok") is not True or zero.get("status") != "READY":
+                return dict(base, reason="marvin_local_bypass_bridge_not_stopped")
         behavior = getattr(self, "behavior_manager", None)
         approach = getattr(behavior, "execute_single_marvin_approach_step", None)
         robot = getattr(behavior, "robot", None)
@@ -3231,7 +3296,7 @@ class CognitiveRuntime:
                     )
                 )
                 and observation.get("controller_state") == VISUAL_READY_TO_APPROACH
-                and observation.get("controller_decision") == "FORWARD"
+                and observation.get("controller_decision") == ("AVOID" if bypass_mode else "FORWARD")
                 and isinstance(tracker, dict)
                 and tracker.get("active") is True
                 and tracker.get("matched") is True
@@ -3252,7 +3317,7 @@ class CognitiveRuntime:
             if (not isinstance(observed_standoff, dict)
                     or observed_standoff.get("ok") is not True
                     or observed_standoff.get("authority") != "target_bearing_lidar"
-                    or observed_standoff.get("target_range_association_trusted") is not True
+                    or (not bypass_mode and observed_standoff.get("target_range_association_trusted") is not True)
                     or observed_standoff.get("arrived_at_marvin") is not False):
                 return dict(base, reason="marvin_approach_target_distance_not_authorized")
             # Recompute target range from current producer-bound points, not
@@ -3260,10 +3325,48 @@ class CognitiveRuntime:
             # evaluates the entire actual forward bound immediately afterward.
             standoff = self._marvin_v2_lidar_arrival(tracker, lidar)
             if (standoff.get("ok") is not True or standoff.get("arrived_at_marvin") is True
-                    or standoff.get("target_range_association_trusted") is not True):
+                    or (not bypass_mode and standoff.get("target_range_association_trusted") is not True)):
                 return dict(base, reason="marvin_approach_target_standoff_veto", target_standoff=standoff)
-            effective_duration = min(float(duration),
-                                     (standoff["target_distance_m"] - TARGET_STANDOFF_M) / float(linear_speed))
+            selection = None
+
+            def validate_bypass(sample):
+                with self._state_lock:
+                    current_observation = self._marvin_alignment_observation or {}
+                    current_tracker = current_observation.get("opencv_tracker") or {}
+                    if (not dispatch_guard()
+                            or current_observation.get("source_frame_stamp_ns") != source_frame_stamp_ns
+                            or current_observation.get("identity_confirmed") is not True
+                            or current_tracker.get("active") is not True
+                            or current_tracker.get("matched") is not True
+                            or current_tracker.get("source_frame_stamp_ns") != source_frame_stamp_ns
+                            or type(current_tracker.get("quality")) not in (int, float)
+                            or type(current_tracker.get("threshold")) not in (int, float)
+                            or not math.isfinite(current_tracker["quality"])
+                            or not math.isfinite(current_tracker["threshold"])
+                            or current_tracker["quality"] < max(.80, current_tracker["threshold"])):
+                        return {"accepted": False}
+                association = self._marvin_v2_lidar_arrival(tracker, sample, current_action_jit=True)
+                if association.get("ok") is not True or association.get("arrived_at_marvin"):
+                    return {"accepted": False}
+                selected = select_marvin_escape_action(sample, association, expected_session=session,
+                    allow_strafe=local_detour_context["allow_strafe"],
+                    previous_selection=local_detour_context.get("previous_selection"))
+                accepted = (selected.get("action_type") == "BYPASS_FORWARD"
+                    and selected.get("direction") == local_detour_context["selected_direction"]
+                    and (selected.get("local_bypass") or {}).get("bypass_forward_permitted") is True)
+                if accepted:
+                    self._marvin_last_action_lidar_evidence = (session, sample["acquisition_sequence"])
+                return dict(selected, accepted=accepted, target_association=association)
+
+            if bypass_mode:
+                selection = validate_bypass(lidar)
+                if not selection.get("accepted"):
+                    return dict(base, reason="marvin_local_bypass_jit_veto", local_detour=selection)
+                effective_duration = float(duration)
+                base.update(action_type="BYPASS_FORWARD", direction=selection["direction"], local_detour=selection)
+            else:
+                effective_duration = min(float(duration),
+                    (standoff["target_distance_m"] - TARGET_STANDOFF_M) / float(linear_speed))
             base.update(requested_duration=float(duration), duration=effective_duration,
                         target_standoff=standoff)
             # As with a turn, consume immediately before the guarded dispatch.
@@ -3279,7 +3382,8 @@ class CognitiveRuntime:
         try:
             approach_result = approach(expected_lidar_session=session,
                                        linear_speed=float(linear_speed), duration=effective_duration,
-                                       target_tracker=dict(tracker),
+                                       target_tracker=None if bypass_mode else dict(tracker),
+                                       **({"local_selection_validator": validate_bypass} if bypass_mode else {}),
                                        camera_model=getattr(self, "marvin_camera_model", None),
                                        target_range_validator=lambda tracker, sample: self._marvin_v2_lidar_arrival(
                                            tracker, sample, current_action_jit=True),
@@ -3297,6 +3401,11 @@ class CognitiveRuntime:
                 with self._state_lock:
                     self._marvin_last_action_lidar_evidence = (session, latest_standoff["acquisition_sequence"])
         stop_ok = isinstance(stop_result, dict) and stop_result.get("ok") is True
+        if bypass_mode:
+            zero = self._marvin_bridge_ready_and_stopped()
+            stop_ok = stop_ok and zero.get("ok") is True and zero.get("status") == "READY"
+            base.update(bridge_after_stop=zero, bridge_stop_confirmed=stop_ok,
+                local_detour=approach_result.get("local_detour") or selection)
         forward = (approach_result or {}).get("forward_result") or {}
         if moved or (forward.get("transport_result") or {}).get("ok") is True:
             with self._state_lock:

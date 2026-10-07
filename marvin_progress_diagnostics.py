@@ -144,7 +144,7 @@ class MarvinProgressDiagnostics:
             rows.append({"action_number": len(rows) + self.report["actions_dropped"] + 1,
                          "action_type": observation.get("local_avoidance_action"),
                          "pre_action_avoidance": copy.deepcopy(observation.get("local_avoidance_selection")),
-                         "type": {"ADVANCING": "forward", "ALIGNING": "alignment", "SEARCHING": "search_turn", "AVOIDING": ("detour_strafe" if (observation.get("local_avoidance_action") or "").startswith("STRAFE") else "detour_turn")}.get(kind, kind),
+                         "type": {"ADVANCING": "forward", "ALIGNING": "alignment", "SEARCHING": "search_turn", "AVOIDING": ("detour_strafe" if (observation.get("local_avoidance_action") or "").startswith("STRAFE") else "bypass_forward" if observation.get("local_avoidance_action") == "BYPASS_FORWARD" else "detour_turn")}.get(kind, kind),
                          "state": kind, "authorizing_camera": camera_metadata(observation),
                          "pre_action_target_association": copy.deepcopy(observation.get("arrival")),
                          "authorizing_semantic_frame": copy.deepcopy(self.report.get("last_semantic_frame")),
@@ -308,14 +308,14 @@ class MarvinProgressDiagnostics:
                 row["next_target_association"] = copy.deepcopy(association)
                 row["next_associated_camera"] = camera_metadata(observation)
 
-    def avoidance_reassessment(self, route, association, improved):
+    def avoidance_reassessment(self, route, association, improved, progress=None):
         from marvin_route_obstruction import evaluate_route_progress
         with self.lock:
             if self.report and self.report["actions"]:
                 row = self.report["actions"][-1]
                 if row.get("action_type") is not None and row.get("post_action_avoidance") is None:
                     selection = row.get("local_avoidance_selection") or row.get("pre_action_avoidance") or {}
-                    progress = evaluate_route_progress(selection.get("route"), route)
+                    progress = progress or evaluate_route_progress(selection.get("route"), route)
                     row["post_action_avoidance"] = copy.deepcopy({"route": route,
                         "target_association": association, "progress_improved": improved,
                         "actual_route_occupancy": route.get("route_occupancy"),

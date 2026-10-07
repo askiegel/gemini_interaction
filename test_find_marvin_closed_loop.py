@@ -36,7 +36,9 @@ class Robot:
         self.events.append("stop")
         return {"ok": True}
 
-    def move_forward(self, *, speed, seconds):
+    def move_forward(self, *, speed, seconds, dispatch_guard=None):
+        if dispatch_guard is not None and not dispatch_guard():
+            return {"ok": False, "reason": "motion_dispatch_preempted"}
         self.events.append(("forward", speed, seconds))
         self.clock[0] += int(seconds * 1_000_000_000)
         if self.on_motion:

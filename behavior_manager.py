@@ -4385,6 +4385,7 @@ class BehaviorManager:
     def execute_single_marvin_approach_step(
         self, *, expected_lidar_session, linear_speed, duration,
         target_tracker=None, camera_model=None, dispatch_guard=None, target_range_validator=None,
+        local_selection_validator=None,
     ):
         """Run one bounded Marvin forward primitive, with no avoidance branch."""
         base = {"ok": False, "decision": "no_motion", "executed_primitive": None,
@@ -4431,9 +4432,27 @@ class BehaviorManager:
             return dict(base, reason="marvin_single_approach_lidar_not_trusted")
         if safety.get("permitted") is not True:
             return dict(base, reason="marvin_single_approach_translation_vetoed")
+        def bypass_dispatch_guard():
+            if dispatch_guard is None or not dispatch_guard():
+                return False
+            sample = self.world_model.get_lidar_obstacles(expected_session=expected_lidar_session)
+            selection = local_selection_validator(sample)
+            safe = evaluate_local_motion_safety(sample, expected_session=expected_lidar_session,
+                linear_x=linear_speed, duration=duration)
+            base.update(local_detour=selection, forward_safety=safe,
+                target_standoff=selection.get("target_association"),
+                action_lidar_evidence={key: sample.get(key) for key in (
+                    "producer_session", "acquisition_sequence", "source",
+                    "received_monotonic_seconds", "effective_age_seconds")})
+            interlock = getattr(self.robot, "forward_interlock", None)
+            return (selection.get("accepted") is True and safe["permitted"]
+                and interlock is not None and interlock.refresh()[0] and dispatch_guard())
+
         try:
             if dispatch_guard is not None and dispatch_guard() is not True:
                 return dict(base, reason="marvin_motion_observation_stale_or_preempted")
+            if local_selection_validator is not None and not bypass_dispatch_guard():
+                return dict(base, reason="marvin_local_bypass_jit_veto")
             self._emit_marvin_command_diagnostic(
                 "start", start_monotonic_seconds=time.monotonic(), linear_x=linear_speed, linear_y=0.0,
                 angular_z=0.0, duration=duration,
@@ -4441,6 +4460,7 @@ class BehaviorManager:
             forward = self.robot.move_forward(
                 speed=linear_speed,
                 seconds=duration,
+                **({"dispatch_guard": bypass_dispatch_guard} if local_selection_validator is not None else {}),
             )
             self._emit_marvin_command_diagnostic(
                 "complete", completion_monotonic_seconds=time.monotonic(),
