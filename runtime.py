@@ -18,7 +18,7 @@ from guarded_turn_policy import ROTATIONAL_SWEPT_FOOTPRINT
 from marvin_arrival_policy import evaluate_marvin_visual_arrival
 from marvin_lidar_standoff import TARGET_STANDOFF_M, evaluate_marvin_lidar_standoff
 from marvin_target_range_association import MarvinTargetRangeAssociation
-from marvin_route_obstruction import route_progress
+from marvin_route_obstruction import route_progress, evaluate_route_progress
 from marvin_progress_diagnostics import MarvinProgressDiagnostics
 from marvin_local_obstacle_avoidance import (
     MAX_LOCAL_AVOIDANCE_ACTIONS, TURN_SPEED, TURN_DURATION, select_marvin_detour,
@@ -1165,6 +1165,23 @@ class CognitiveRuntime:
         def current():
             return self._marvin_mission_context_is_current(mission, control_generation)
 
+        def record_avoidance_reassessment(route, association):
+            # Capture the first valid reassessment of the last physical detour.
+            # Later alignment or planning must not overwrite that action's outcome.
+            if (not previous_selection or not history or history[-1]["state"] != "AVOIDING"
+                    or not route.get("valid") or not avoidance_history
+                    or avoidance_history[-1].get("actual_route_occupancy") is not None):
+                return
+            progress = evaluate_route_progress(previous_selection.get("route"), route)
+            improved = progress["meaningful_progress"]
+            avoidance_history[-1].update(post_action_route=route, progress_improved=improved,
+                post_action_target_association=association, actual_route_occupancy=route["route_occupancy"],
+                actual_max_overlap_m=route["corridor_overlap_m"],
+                actual_blocker_centerline_clearance_m=route.get("blocking_obstacle_centerline_clearance_m"),
+                meaningful_progress=improved, meaningful_progress_reason=progress["meaningful_progress_reason"],
+                actual_route_progress=progress)
+            retain("avoidance_reassessment", route, association, improved)
+
         def finish(state, reason):
             avoidance["local_avoidance_active"] = False
             self._reset_marvin_alignment_consensus()
@@ -1337,10 +1354,7 @@ class CognitiveRuntime:
             if previous_selection and observation.get("identity_confirmed") is True:
                 new_association = observation.get("arrival") or {}
                 new_route = new_association.get("route") or {}
-                improved = route_progress(previous_selection.get("route"), new_route)
-                avoidance_history[-1].update(post_action_route=new_route, progress_improved=improved,
-                    post_action_target_association=new_association)
-                retain("avoidance_reassessment", new_route, new_association, improved)
+                record_avoidance_reassessment(new_route, new_association)
             if observation.get("identity_confirmed") is not True:
                 # Only a fresh, explicit negative perception result permits
                 # initial search. Camera/semantic errors are not "no target".
@@ -1503,9 +1517,7 @@ class CognitiveRuntime:
                                     selected_action_type=detour["action_type"],
                                     progress_improved=detour.get("progress_improved"))
                                 if previous_selection:
-                                    avoidance_history[-1].update(post_action_route=route,
-                                        progress_improved=route_progress(previous_selection.get("route"), route),
-                                        post_action_target_association=standoff)
+                                    record_avoidance_reassessment(route, standoff)
                                 avoidance_history.append({"source_frame_stamp_ns": stamp,
                                     "selection": detour, "previous_clearances": previous_clearances,
                                     "previous_action_type": (previous_selection or {}).get("action_type"),
@@ -1584,6 +1596,15 @@ class CognitiveRuntime:
                     physical_dispatch_confirmed=physical_dispatch,
                     motion_executed=result.get("motion_executed") is True,
                     action_lidar_evidence=self._marvin_last_action_lidar_evidence)
+                prediction = ((result.get("local_detour") or detour).get("options") or {}).get(
+                    detour["action_type"], {})
+                avoidance_history[-1].update(action_type=detour["action_type"],
+                    predicted_route_occupancy=prediction.get("predicted_route_occupancy"),
+                    predicted_max_overlap_m=prediction.get("predicted_max_overlap_m"),
+                    predicted_blocker_centerline_clearance_m=prediction.get("predicted_blocker_centerline_clearance_m"),
+                    actual_route_occupancy=None, actual_max_overlap_m=None,
+                    actual_blocker_centerline_clearance_m=None,
+                    meaningful_progress=None, meaningful_progress_reason=None)
             if not current():
                 return finish("STOPPED", "find_marvin_mission_preempted")
             if result.get("ok") is not True or result.get("motion_executed") is not True:

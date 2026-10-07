@@ -8,7 +8,8 @@ from local_motion_safety_envelope import (
 from marvin_lidar_standoff import TARGET_STANDOFF_M
 
 LOCAL_ROUTE_LOOKAHEAD_M = 1.0
-PROGRESS_EPSILON_M = 0.001  # Diagnostic geometry improvement, never a safety margin.
+MIN_CORRIDOR_OVERLAP_IMPROVEMENT_M = 0.01
+MIN_ROUTE_CENTERLINE_CLEARANCE_IMPROVEMENT_M = 0.01
 
 
 def evaluate_marvin_route(lidar, association, *, expected_session, translation_y=0.0,
@@ -39,22 +40,41 @@ def evaluate_marvin_route(lidar, association, *, expected_session, translation_y
     distance = association.get('verified_marvin_distance_m')
     trusted_history = type(distance) in (int, float) and math.isfinite(distance)
     horizon = min(LOCAL_ROUTE_LOOKAHEAD_M, max(0.0, distance - TARGET_STANDOFF_M)) if trusted_history else LOCAL_ROUTE_LOOKAHEAD_M
-    # A strafe preserves the world-frame ray to the currently observed target;
-    # rotation predicts an escape heading, which is reassessed after STOP.
-    theta = math.radians(bearing) + heading_change
-    target_x, target_y = horizon * math.cos(theta), horizon * math.sin(theta) - translation_y
+    # Transform the SAME target and all returns into the candidate robot frame.
+    # Move the full target, then rebuild the standoff endpoint: translating an
+    # already-truncated endpoint exaggerates the change in target bearing.
+    theta = math.radians(bearing)
+    target_depth = distance if trusted_history else LOCAL_ROUTE_LOOKAHEAD_M
+    c, s = math.cos(heading_change), math.sin(heading_change)
+
+    def transform(x, y):
+        y -= translation_y
+        return c * x + s * y, -s * x + c * y
+
+    world_tx, world_ty = target_depth * math.cos(theta), target_depth * math.sin(theta) - translation_y
+    target_length = math.hypot(world_tx, world_ty)
+    tx, ty = c * world_tx + s * world_ty, -s * world_tx + c * world_ty
+    if trusted_history:
+        horizon = min(LOCAL_ROUTE_LOOKAHEAD_M, max(0.0, target_length - TARGET_STANDOFF_M))
+    predicted_bearing = math.degrees(math.atan2(ty, tx))
+    target_x, target_y = ((horizon * world_tx / target_length, horizon * world_ty / target_length)
+                          if target_length else (0.0, 0.0))
     length = math.hypot(target_x, target_y)
     blockers = []
     for point in geometry.get('points', []):
         x, y = point.get('x_m'), point.get('y_m')
         if not all(type(v) in (int, float) and math.isfinite(v) for v in (x, y)):
             return dict(base, reason='invalid_lidar_geometry')
-        y -= translation_y
-        if length == 0 or x * target_x + y * target_y <= 0:
+        translated_y = y - translation_y
+        if length == 0 or x * target_x + translated_y * target_y <= 0:
             continue
-        gap = _distance_to_segment(x, y, target_x, target_y)
+        # Distances are invariant under the common rotation. Compute before
+        # rotation so an exact boundary return cannot flicker by roundoff and
+        # manufacture one fewer blocker / an apparent pure-turn improvement.
+        gap = _distance_to_segment(x, translated_y, target_x, target_y)
         if gap <= LOCAL_LIDAR_PROTECTED_RADIUS_M:
-            blockers.append((gap, math.hypot(x, y), x, y))
+            bx, by = transform(x, y)
+            blockers.append((gap, math.hypot(x, translated_y), bx, by))
     overlap = max((LOCAL_LIDAR_PROTECTED_RADIUS_M - p[0] for p in blockers), default=0.0)
     nearest = min(blockers, key=lambda p: p[1]) if blockers else None
     return dict(base, valid=True, reason='marvin_route_obstructed' if blockers else 'marvin_route_clear',
@@ -63,21 +83,50 @@ def evaluate_marvin_route(lidar, association, *, expected_session, translation_y
         blocking_obstacle_overlap_m=LOCAL_LIDAR_PROTECTED_RADIUS_M - nearest[0] if nearest else 0.0,
         route_lookahead_m=horizon,
         route_depth_source='verified_range_history' if trusted_history else 'bounded_local_lookahead',
-        marvin_bearing_deg=bearing,
-        heading_error_after_deg=math.degrees(math.atan2(target_y, target_x)),
+        marvin_bearing_deg=predicted_bearing,
+        heading_error_after_deg=predicted_bearing,
+        blocking_obstacle_centerline_clearance_m=nearest[0] if nearest else None,
         blocking_obstacle_distance_m=nearest[1] if nearest else None,
         blocking_obstacle_bearing_deg=math.degrees(math.atan2(nearest[3], nearest[2])) if nearest else None,
         blocking_obstacle_x_m=nearest[2] if nearest else None,
         blocking_obstacle_y_m=nearest[3] if nearest else None)
 
 
-def route_progress(before, after):
-    """Compare independently refreshed geometry; association may have changed."""
+def evaluate_route_progress(before, after):
+    """Material route improvement; radial range is diagnostic only.
+
+    One fewer return counts only without a material geometry regression.
+    This is advisory planning evidence, never a change to motion clearance.
+    """
+    result = {'meaningful_progress': False, 'meaningful_progress_reason': 'route_evidence_invalid',
+              'corridor_overlap_reduction_m': None, 'centerline_clearance_improvement_m': None,
+              'route_occupancy_reduction': None, 'blocker_distance_change_m': None}
     if not before or not after or not before.get('valid') or not after.get('valid'):
-        return False
+        return result
+    if any(type(row.get(key)) not in (int, float) or not math.isfinite(row[key])
+           for row in (before, after) for key in
+           ('corridor_overlap_m', 'blocking_obstacle_overlap_m', 'route_occupancy')):
+        return result
+    overlap = before['corridor_overlap_m'] - after['corridor_overlap_m']
+    centerline = before.get('blocking_obstacle_overlap_m', 0) - after.get('blocking_obstacle_overlap_m', 0)
+    occupancy = before['route_occupancy'] - after['route_occupancy']
     a, b = before.get('blocking_obstacle_distance_m'), after.get('blocking_obstacle_distance_m')
-    return (not after['route_to_marvin_obstructed']
-            or after['route_occupancy'] < before['route_occupancy']
-            or after['corridor_overlap_m'] < before['corridor_overlap_m'] - PROGRESS_EPSILON_M
-            or after.get('blocking_obstacle_overlap_m', 0) < before.get('blocking_obstacle_overlap_m', 0) - PROGRESS_EPSILON_M
-            or type(a) in (int, float) and type(b) in (int, float) and b > a + PROGRESS_EPSILON_M)
+    result.update(corridor_overlap_reduction_m=overlap,
+                  centerline_clearance_improvement_m=centerline, route_occupancy_reduction=occupancy,
+                  blocker_distance_change_m=b - a if type(a) in (int, float) and type(b) in (int, float) else None)
+    if not after['route_to_marvin_obstructed']:
+        return dict(result, meaningful_progress=True, meaningful_progress_reason='route_cleared')
+    if (overlap < -MIN_CORRIDOR_OVERLAP_IMPROVEMENT_M + 1e-12
+            or centerline < -MIN_ROUTE_CENTERLINE_CLEARANCE_IMPROVEMENT_M + 1e-12):
+        return dict(result, meaningful_progress_reason='route_geometry_worsened')
+    if overlap >= MIN_CORRIDOR_OVERLAP_IMPROVEMENT_M - 1e-12:
+        return dict(result, meaningful_progress=True, meaningful_progress_reason='corridor_overlap_improved')
+    if centerline >= MIN_ROUTE_CENTERLINE_CLEARANCE_IMPROVEMENT_M - 1e-12:
+        return dict(result, meaningful_progress=True, meaningful_progress_reason='blocker_centerline_clearance_improved')
+    if occupancy >= 1:
+        return dict(result, meaningful_progress=True, meaningful_progress_reason='blocking_return_count_reduced')
+    return dict(result, meaningful_progress_reason='no_material_route_improvement')
+
+
+def route_progress(before, after):
+    return evaluate_route_progress(before, after)['meaningful_progress']

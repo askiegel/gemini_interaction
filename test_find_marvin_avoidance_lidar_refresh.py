@@ -17,8 +17,11 @@ from test_find_marvin_closed_loop import motions, run
 from test_marvin_lateral_avoidance import strafe_runtime
 
 
-LEFT_OPEN = [(.485, -.10), (0., 1.2), (0., -.48)]
-RIGHT_OPEN = [(.485, .10), (0., .48), (0., -1.2)]
+# At the fixture's close Marvin range, this geometry both blocks the 5 cm
+# forward probe and permits >1 cm predicted route improvement from a strafe.
+# The exact retained 1.235 m / .483 m live geometry is tested separately below.
+LEFT_OPEN = [(.455, -.17), (0., 1.2), (0., -.48)]
+RIGHT_OPEN = [(.455, .17), (0., .48), (0., -1.2)]
 
 
 @pytest.fixture(autouse=True)

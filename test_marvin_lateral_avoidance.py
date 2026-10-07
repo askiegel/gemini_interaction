@@ -143,13 +143,16 @@ def test_side_and_front_rear_endpoint_corner_hazards_block_lateral(tmp_path,monk
     assert not safe['permitted'] and safe['protected_radius_m']==.45
 
 
-def test_strafe_unsafe_turn_safe_is_available(tmp_path,monkeypatch):
+def test_strafe_unsafe_turn_safe_without_real_route_gain_fails_closed(tmp_path,monkeypatch):
     scene=LEFT_OPEN+[(-.02,.475)]
     bundle,_,_=strafe_runtime(tmp_path,monkeypatch,[(0,.60)]*4,[scene])
     result=run(bundle[0]);selection=result['local_avoidance_history'][0]['selection']
     assert not selection['options']['STRAFE_LEFT']['permitted']
-    assert selection['action_type']=='TURN_LEFT'
-    assert motions(bundle[3])[0]==('turn','LEFT',.25,.5)
+    assert selection['options']['TURN_LEFT']['hard_safety_permitted']
+    assert not selection['options']['TURN_LEFT']['improves_route']
+    assert selection['action_type'] is None
+    assert result['reason']=='find_marvin_no_safe_local_detour'
+    assert motions(bundle[3])==[]
 
 
 def test_six_action_budget_bounds_repeated_strafes(tmp_path,monkeypatch):
@@ -224,7 +227,14 @@ def test_mixed_turns_and_strafes_share_six_action_budget(tmp_path,monkeypatch):
     bundle,_,_=strafe_runtime(tmp_path,monkeypatch,[(0,.6)]*9,scenes)
     def independently_improving(*args,**kwargs):
         kwargs['previous_selection']=None
-        return select_marvin_escape_action(*args,**kwargs)
+        plan=select_marvin_escape_action(*args,**kwargs)
+        # Test the shared physical action counter independently of route
+        # prediction. A coherent pure turn has no spatial route gain; its
+        # advisory usefulness is mocked here, while JIT hard guards remain real.
+        if plan['action_type'] is None:
+            assert plan['options']['TURN_LEFT']['hard_safety_permitted']
+            plan.update(action_type='TURN_LEFT',direction='LEFT',reason='budget_fixture_turn')
+        return plan
     monkeypatch.setattr('runtime.select_marvin_escape_action',independently_improving)
     result=run(bundle[0])
     assert result['reason']=='find_marvin_local_avoidance_exhausted'

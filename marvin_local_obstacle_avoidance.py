@@ -84,12 +84,42 @@ def select_marvin_detour(state, *, expected_session, forward_speed,
 
 LOCAL_AVOIDANCE_STRAFE_SPEED_MPS = 0.08
 LOCAL_AVOIDANCE_STRAFE_MAX_SECONDS = 0.50
+ROUTE_IMPROVEMENT_NEAR_TIE_M = 0.003
+
+
+def rank_marvin_escape_options(options, eligible):
+    """Rank every useful primitive; strafe is only a comparable-score tie break.
+
+    Route benefit is first. Within 3 mm, compare occupancy, clearance at 1 cm
+    resolution and heading error at 1 degree resolution before strafe/LEFT.
+    This helper is advisory and cannot admit motion.
+    """
+    def score(kind):
+        option = options[kind]
+        progress = option['route_progress']
+        gain = max(progress['corridor_overlap_reduction_m'] or 0.0,
+                   progress['centerline_clearance_improvement_m'] or 0.0, 0.0)
+        return (not option['predicted_route']['route_to_marvin_obstructed'], gain,
+                progress['route_occupancy_reduction'] or 0,
+                round(option['side_clearance_m'] / CLEARANCE_TIE_TOLERANCE_M)
+                    if option['side_clearance_m'] is not None else -1,
+                -round(abs(option['heading_error_deg'] or 0.0)), kind.startswith('STRAFE'), kind.endswith('LEFT'))
+
+    for kind in options:
+        options[kind]['ranking_score'] = score(kind)
+    if not eligible:
+        return None
+    best = max(eligible, key=score)
+    first, gain = score(best)[:2]
+    near = [kind for kind in eligible if score(kind)[0] == first
+            and gain - score(kind)[1] <= ROUTE_IMPROVEMENT_NEAR_TIE_M]
+    return max(near, key=lambda kind: score(kind)[2:])
 
 
 def select_marvin_escape_action(state, association, *, expected_session,
                                 allow_strafe, previous_selection=None):
     """Evaluate four primitives from one scan; only JIT executors admit motion."""
-    from marvin_route_obstruction import evaluate_marvin_route, route_progress
+    from marvin_route_obstruction import evaluate_marvin_route, evaluate_route_progress
     route = evaluate_marvin_route(state, association, expected_session=expected_session)
     result = {'action_type': None, 'direction': None, 'reason': route['reason'],
         'producer_session': state.get('producer_session'),
@@ -116,7 +146,8 @@ def select_marvin_escape_action(state, association, *, expected_session,
         prediction = evaluate_marvin_route(state, association, expected_session=expected_session,
             translation_y=dy, heading_change=heading)
         clearance = result[side.lower() + '_clearance_m']
-        improves = route_progress(route, prediction)
+        progress = evaluate_route_progress(route, prediction)
+        improves = progress['meaningful_progress']
         permitted = safe['permitted'] and (allow_strafe or not strafe) and clearance is not None
         result['options'][kind] = {'permitted': permitted, 'hard_safety_permitted': safe['permitted'],
             'reason': safe['reason'] if allow_strafe or not strafe else 'bridge_lateral_support_unavailable',
@@ -124,16 +155,24 @@ def select_marvin_escape_action(state, association, *, expected_session,
             'predicted_obstacle_clearance_m': prediction['blocking_obstacle_distance_m'],
             'predicted_route_occupancy': prediction['route_occupancy'],
             'heading_error_deg': prediction.get('heading_error_after_deg'),
+            'predicted_max_overlap_m': prediction['corridor_overlap_m'],
+            'predicted_blocker_centerline_clearance_m': prediction.get('blocking_obstacle_centerline_clearance_m'),
+            'route_progress': progress,
             'improves_route': improves, 'reverses_previous_direction': False,
             'undoes_previous_progress': False}
+    rank_marvin_escape_options(result['options'], [])  # Retain scores even when every option loses.
     eligible = [k for k, o in result['options'].items() if o['permitted'] and o['improves_route']]
     if not eligible:
         return dict(result, reason='find_marvin_no_safe_local_detour')
     old = (previous_selection or {}).get('action_type')
     previous_route = (previous_selection or {}).get('route')
     if old:
-        improved = route_progress(previous_route, route)
+        progress = evaluate_route_progress(previous_route, route)
+        improved = progress['meaningful_progress']
         result['progress_improved'] = improved
+        result.update(meaningful_progress=improved,
+                      meaningful_progress_reason=progress['meaningful_progress_reason'],
+                      actual_route_progress=progress)
         old_side = old.split('_')[1]
         for k, o in result['options'].items():
             o['reverses_previous_direction'] = k.split('_')[1] != old_side
@@ -152,20 +191,10 @@ def select_marvin_escape_action(state, association, *, expected_session,
             if k.split('_')[1] != old_side:
                 prior = (previous_selection or {}).get(k.split('_')[1].lower() + '_clearance_m')
                 now = result[k.split('_')[1].lower() + '_clearance_m']
-                old_useful = result['options'][old]['permitted'] and result['options'][old]['improves_route']
+                old_useful = old in eligible
                 if old_useful or type(prior) not in (int, float) or now <= prior + 0.005:
                     eligible.remove(k)
         if not eligible:
             return dict(result, reason='find_marvin_local_avoidance_no_progress')
-    # Useful safe strafes preserve heading. Prioritize clearing the nearest
-    # route blocker so farther ambiguous returns cannot dominate the ranking.
-    # Then consider total corridor overlap, occupancy and side clearance.
-    useful_strafes = [k for k in eligible if k.startswith('STRAFE')]
-    ranked = useful_strafes or eligible
-    chosen = max(ranked, key=lambda k: (
-        route['blocking_obstacle_overlap_m'] - result['options'][k]['predicted_route']['blocking_obstacle_overlap_m'],
-        route['corridor_overlap_m'] - result['options'][k]['predicted_route']['corridor_overlap_m'],
-        route['route_occupancy'] - result['options'][k]['predicted_route_occupancy'],
-        round(result['options'][k]['side_clearance_m'] / CLEARANCE_TIE_TOLERANCE_M),
-        k.endswith('LEFT')))
+    chosen = rank_marvin_escape_options(result['options'], eligible)
     return dict(result, action_type=chosen, direction=chosen.split('_')[1], reason='find_marvin_local_detour_selected')

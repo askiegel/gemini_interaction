@@ -185,6 +185,11 @@ class MarvinProgressDiagnostics:
             turn = result.get("turn_result") or result
             lateral = result.get("lateral_step") or {}
             row["local_avoidance_selection"] = copy.deepcopy(result.get("local_detour"))
+            selection = row["local_avoidance_selection"] or {}
+            prediction = (selection.get("options") or {}).get(row.get("action_type"), {})
+            row.update(predicted_route_occupancy=prediction.get("predicted_route_occupancy"),
+                       predicted_max_overlap_m=prediction.get("predicted_max_overlap_m"),
+                       predicted_blocker_centerline_clearance_m=prediction.get("predicted_blocker_centerline_clearance_m"))
             row["jit_target_association"] = copy.deepcopy(approach.get("target_standoff") or
                 (lateral.get("local_detour") or {}).get("target_association"))
             if (row["jit_target_association"] or {}).get("ok") is True:
@@ -304,12 +309,19 @@ class MarvinProgressDiagnostics:
                 row["next_associated_camera"] = camera_metadata(observation)
 
     def avoidance_reassessment(self, route, association, improved):
+        from marvin_route_obstruction import evaluate_route_progress
         with self.lock:
             if self.report and self.report["actions"]:
                 row = self.report["actions"][-1]
-                if row.get("action_type") is not None:
+                if row.get("action_type") is not None and row.get("post_action_avoidance") is None:
+                    selection = row.get("local_avoidance_selection") or row.get("pre_action_avoidance") or {}
+                    progress = evaluate_route_progress(selection.get("route"), route)
                     row["post_action_avoidance"] = copy.deepcopy({"route": route,
-                        "target_association": association, "progress_improved": improved})
+                        "target_association": association, "progress_improved": improved,
+                        "actual_route_occupancy": route.get("route_occupancy"),
+                        "actual_max_overlap_m": route.get("corridor_overlap_m"),
+                        "actual_blocker_centerline_clearance_m": route.get("blocking_obstacle_centerline_clearance_m"),
+                        **progress})
 
     def perception_event(self, phase, metadata):
         with self.lock:
