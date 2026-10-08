@@ -28,6 +28,21 @@ def offline_only(monkeypatch):
 
 
 def initial(bundle):
+    behavior = bundle[1]
+    if "reacquire_find_marvin_v2" not in behavior.__dict__:
+        # The offline Perception fixture supplies controlled frames rather
+        # than a camera client. Model the existing stopped recovery contract.
+        def reacquire(*, minimum_source_frame_stamp_ns):
+            behavior._clear_marvin_v2_tracker_episode()
+            evidence = behavior.observe_find_marvin_v2()
+            preview = evidence["preview_result"]
+            if preview.get("identity_confirmed") is True:
+                preview["strict_tracker_episode"] = {
+                    "initialized_this_observation": True,
+                    "continued_existing_tracker": False,
+                }
+            return evidence
+        behavior.reacquire_find_marvin_v2 = reacquire
     bundle[0]._set_runtime_state("IDLE")
     return step(bundle[0])
 
@@ -247,16 +262,16 @@ def test_corrupt_or_discontinuous_checkpoint_fails_closed(tmp_path, monkeypatch,
     assert len(motions(events)) == 1
 
 
-@pytest.mark.parametrize("fault", ["duplicate_post_camera", "consumed_camera", "session", "identity", "reseed"])
+@pytest.mark.parametrize("fault", ["duplicate_post_camera", "consumed_camera", "session", "identity", "old_tracker"])
 def test_rearmed_step_requires_new_sources_and_never_replays_consumed_stamp(tmp_path, monkeypatch, fault):
     bundle = forward_bundle(tmp_path, monkeypatch); r, b, _, events, _ = bundle
     complete(bundle, initial(bundle), 0); c = r._marvin_live_proof_continuation
     assert arm(r)["ok"]
     if fault == "session": r.lidar_worker.session = "changed-after-arm"
     else:
-        observe = r.observe_find_marvin_v2
-        def invalid():
-            result = observe()
+        observe = r._observe_find_marvin_v2
+        def invalid(**kwargs):
+            result = observe(**kwargs)
             if fault in {"duplicate_post_camera", "consumed_camera"}:
                 stamp = c.camera_floor_stamp if fault == "duplicate_post_camera" else c.previous_stamp
                 result["source_frame_stamp_ns"] = result["opencv_tracker"]["source_frame_stamp_ns"] = stamp
@@ -264,9 +279,10 @@ def test_rearmed_step_requires_new_sources_and_never_replays_consumed_stamp(tmp_
                 result["identity_source"] = "marvin_locked_tracker_continuity"
                 result["identity_source_frame_stamp_ns"] = c.identity_source_frame_stamp_ns + 1
             else:
-                result["strict_tracker_episode"] = {"continued_existing_tracker":False}
+                result["strict_tracker_episode"] = {
+                    "continued_existing_tracker": True, "initialized_this_observation": False}
             return result
-        r.observe_find_marvin_v2 = invalid
+        r._observe_find_marvin_v2 = invalid
     result = step(r)
     assert not result["motion_executed"] and len(motions(events)) == 1
     assert r._marvin_live_proof_state == "FAILED_LOCKED"

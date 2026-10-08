@@ -100,8 +100,8 @@ class _MarvinLiveProofOwner:
 class _MarvinLiveProofContinuation:
     """Process-local planning checkpoint; contains no dispatch authority.
 
-    Old geometry is comparison history only. The tracker stays in its existing
-    BehaviorManager episode, and every invocation observes and validates again.
+    Old geometry is comparison history only. Rearm discards the visual episode;
+    the next invocation reacquires semantic identity without resetting planning.
     """
     generation: int
     producer_session: str
@@ -986,6 +986,10 @@ class CognitiveRuntime:
                     or proof["camera_received_monotonic_seconds"] <= c.action_finished_monotonic_seconds):
                 return False
             episode = getattr(self.behavior_manager, "_marvin_v2_tracker_episode", None)
+            if self._marvin_live_proof_state == "ARMED":
+                # The sealed completion certificate remains authoritative for
+                # history. No visual episode may survive into a new arm.
+                return episode is None
             return (isinstance(episode, dict)
                 and episode.get("last_tracker_source_frame_stamp_ns") == c.camera_floor_stamp
                 and episode.get("identity_source_frame_stamp_ns") == c.identity_source_frame_stamp_ns)
@@ -1025,6 +1029,14 @@ class CognitiveRuntime:
                         or lidar["acquisition_sequence"] < c.post_lidar_sequence):
                     self._invalidate_marvin_live_proof("marvin_live_proof_lidar_discontinuity")
                     return dict(base, reason="marvin_live_proof_lidar_discontinuity")
+                try:
+                    self.behavior_manager._clear_marvin_v2_tracker_episode()
+                    self._reset_marvin_alignment_consensus()
+                    if self.behavior_manager._marvin_v2_tracker_episode is not None:
+                        raise ValueError("visual_episode_not_cleared")
+                except Exception:
+                    self._invalidate_marvin_live_proof("marvin_live_proof_visual_reset_failed")
+                    return dict(base, reason="marvin_live_proof_visual_reset_failed")
                 self._marvin_live_proof_state = "ARMED"
                 return dict(base, ok=True, reason="marvin_live_proof_rearmed", proof_state="ARMED")
         finally:
@@ -1467,6 +1479,7 @@ class CognitiveRuntime:
         prior_action_state = None
         camera_floor_stamp = None
         expected_identity_stamp = None
+        proof_resume_observation_pending = proof_continuation is not None
         if proof_continuation is not None:
             c = proof_continuation
             avoidance = copy.deepcopy(c.avoidance)
@@ -1476,7 +1489,7 @@ class CognitiveRuntime:
             avoidance_lidar_refresh_history = copy.deepcopy(c.avoidance_lidar_refresh_history)
             previous_stamp = c.previous_stamp
             camera_floor_stamp = c.camera_floor_stamp
-            expected_identity_stamp = c.identity_source_frame_stamp_ns
+            # Prior identity is historical evidence, never resumed authority.
             action_finished_monotonic_seconds = c.action_finished_monotonic_seconds
             prior_action_state = c.last_action_state
             acquired = c.acquired
@@ -1690,22 +1703,43 @@ class CognitiveRuntime:
                 if wait["ok"] is not True:
                     return finish("STOPPED" if not current() else "BLOCKED", wait["reason"])
             # No camera/semantic decision is made before the stopped LiDAR wait.
-            observation = self.observe_find_marvin_v2()
+            if proof_resume_observation_pending:
+                # Reuse the normal stopped semantic reacquisition path. It
+                # obtains fresh Gemini identity and a subsequent action frame.
+                observation = self._observe_find_marvin_v2(
+                    reacquisition_source_floor=camera_floor_stamp)
+            else:
+                observation = self.observe_find_marvin_v2()
             retain("observe", observation)
             if not current():
                 return finish("STOPPED", "find_marvin_mission_preempted")
             tracker = observation.get("opencv_tracker") or {}
             stamp = observation.get("source_frame_stamp_ns")
+            strict_episode = observation.get("strict_tracker_episode")
+            if proof_resume_observation_pending:
+                identity_stamp = observation.get("identity_source_frame_stamp_ns")
+                if (observation.get("ok") is not True
+                        or observation.get("identity_confirmed") is not True
+                        or observation.get("identity_source") != "gemini_marvin_candidate_selection"
+                        or type(identity_stamp) is not int or identity_stamp <= camera_floor_stamp
+                        or type(stamp) is not int or stamp <= identity_stamp
+                        or not isinstance(strict_episode, dict)
+                        or strict_episode.get("initialized_this_observation") is not True
+                        or strict_episode.get("continued_existing_tracker") is not False
+                        or tracker.get("active") is not True or tracker.get("matched") is not True
+                        or type(tracker.get("quality")) not in (int, float)
+                        or type(tracker.get("threshold")) not in (int, float)
+                        or not math.isfinite(tracker["quality"])
+                        or not math.isfinite(tracker["threshold"])
+                        or tracker["quality"] < max(.80, tracker["threshold"])):
+                    return finish("REVERIFY_REQUIRED", observation.get("perception_reason")
+                                  or "marvin_live_proof_fresh_identity_required")
+                expected_identity_stamp = identity_stamp
+                proof_resume_observation_pending = False
             if proof_continuation is not None and (
                     observation.get("identity_source") == "marvin_locked_tracker_continuity"
                     and observation.get("identity_source_frame_stamp_ns")
                         != expected_identity_stamp):
-                return finish("REVERIFY_REQUIRED", "marvin_live_proof_identity_discontinuity")
-            strict_episode = observation.get("strict_tracker_episode")
-            if (proof_continuation is not None and not history
-                    and observation.get("identity_confirmed") is True
-                    and isinstance(strict_episode, dict)
-                    and strict_episode.get("continued_existing_tracker") is not True):
                 return finish("REVERIFY_REQUIRED", "marvin_live_proof_identity_discontinuity")
             if (acquired and observation.get("identity_confirmed") is not True
                     and observation.get("perception_reason") == "post_action_tracker_continuity_lost"):
