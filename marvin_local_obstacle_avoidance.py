@@ -210,6 +210,12 @@ def _select_marvin_escape_action(state, association, *, expected_session,
     previous_route = (previous_selection or {}).get('route')
     if old:
         progress = evaluate_route_progress(previous_route, route)
+        # A recovery's first stopped reassessment owns its outcome. An
+        # intervening alignment cannot turn a failed recovery into progress.
+        frozen = previous_selection.get('first_post_action_lateral_recovery_progress')
+        if (previous_selection.get('post_bypass_lateral_recovery_selected') is True
+                and isinstance(frozen, dict) and type(frozen.get('meaningful_progress')) is bool):
+            progress = dict(frozen)
         improved = progress['meaningful_progress']
         result['progress_improved'] = improved
         result.update(meaningful_progress=improved,
@@ -223,8 +229,19 @@ def _select_marvin_escape_action(state, association, *, expected_session,
         # same side is allowed; reversing requires an unsafe/useless old option
         # and independently improved alternative clearance since last scan.
         ineffective = set((previous_selection or {}).get("ineffective_action_types", []))
+        recovery_used = previous_selection.get('post_bypass_lateral_recovery_used')
+        if recovery_used is not None:
+            recovery_used = recovery_used is not False
+            result['post_bypass_lateral_recovery_used'] = recovery_used
         if improved:
-            ineffective.clear()
+            if recovery_used is True:
+                # A successful recovery establishes a new epoch, but does not
+                # itself restore the failed bypass. A subsequent physical
+                # action needs its own measured progress under ordinary policy.
+                ineffective.discard(old)
+                result['post_bypass_lateral_recovery_used'] = False
+            else:
+                ineffective.clear()
         else:
             ineffective.add(old)
         result["ineffective_action_types"] = sorted(ineffective)
@@ -244,7 +261,8 @@ def _select_marvin_escape_action(state, association, *, expected_session,
 
 def select_marvin_escape_action(state, association, *, expected_session, allow_strafe,
                                 previous_selection=None,
-                                strafe_duration_limit=LOCAL_AVOIDANCE_STRAFE_MAX_SECONDS):
+                                strafe_duration_limit=LOCAL_AVOIDANCE_STRAFE_MAX_SECONDS,
+                                remaining_avoidance_actions=MAX_LOCAL_AVOIDANCE_ACTIONS):
     """Keep useful route clearance actions; otherwise consider one local bypass.
 
     A pure turn cannot magically clear the same Marvin ray. Forward along a
@@ -258,9 +276,15 @@ def select_marvin_escape_action(state, association, *, expected_session, allow_s
     result = _select_marvin_escape_action(state, association, expected_session=expected_session,
         allow_strafe=allow_strafe, previous_selection=None if old_bypass else previous_selection,
         strafe_duration_limit=strafe_duration_limit)
+    if type(remaining_avoidance_actions) is not int or remaining_avoidance_actions <= 0:
+        return dict(result, action_type=None, direction=None,
+                    reason='find_marvin_local_avoidance_exhausted')
     route = result['route']
     if not route.get('valid') or not route['route_to_marvin_obstructed']:
         return result
+    if old_bypass and old.get('direction') not in {'LEFT', 'RIGHT'}:
+        return dict(result, action_type=None, direction=None,
+                    reason='find_marvin_local_avoidance_history_invalid')
     side = old.get('direction')
     if side not in {'LEFT', 'RIGHT'}:
         left, right = result['left_clearance_m'], result['right_clearance_m']
@@ -296,9 +320,35 @@ def select_marvin_escape_action(state, association, *, expected_session, allow_s
             ineffective.add('BYPASS_FORWARD')
         if side_change_allowed:
             ineffective.discard('BYPASS_FORWARD')
+        used = old.get('post_bypass_lateral_recovery_used', False) is not False
+        recovery = 'STRAFE_' + old['direction']
+        if used and not progress['meaningful_progress'] and not side_change_allowed:
+            ineffective.add(recovery)
+        option = result['options'].get(recovery, {})
+        reconsider = (not progress['meaningful_progress'] and not side_change_allowed
+            and not used and recovery in ineffective
+            and option.get('permitted') is True and option.get('hard_safety_permitted') is True
+            and option.get('improves_route') is True
+            and (option.get('route_progress') or {}).get('meaningful_progress') is True)
+        if reconsider:
+            # Remove only this fresh, material, same-side lateral prediction.
+            # The failed bypass and unrelated ineffective primitives survive.
+            ineffective.discard(recovery)
         result['ineffective_action_types'] = sorted(ineffective)
-        if result.get('action_type') in ineffective:
-            result.update(action_type=None, direction=None, reason='find_marvin_local_avoidance_no_progress')
+        eligible = [kind for kind, option in result['options'].items()
+            if option['permitted'] and option['improves_route'] and kind not in ineffective
+            and (kind.endswith('_' + old['direction']) or side_change_allowed)]
+        chosen = rank_marvin_escape_options(result['options'], eligible) if eligible else None
+        result.update(action_type=chosen, direction=chosen.split('_')[1] if chosen else None)
+        if not chosen:
+            result['reason'] = 'find_marvin_local_avoidance_no_progress'
+        if used or reconsider:
+            # Advisory until adopted as previous_selection after dispatch.
+            # Repeated planning/JIT reads cannot accumulate recovery credits.
+            result['post_bypass_lateral_recovery_used'] = used or chosen == recovery
+            result['post_bypass_lateral_recovery_selected'] = reconsider and chosen == recovery
+        if reconsider and chosen == recovery:
+            result['reason'] = 'find_marvin_post_bypass_lateral_recovery_selected'
         result.update(actual_route_progress=progress, progress_improved=progress['meaningful_progress'],
             meaningful_progress=progress['meaningful_progress'],
             meaningful_progress_reason=progress['meaningful_progress_reason'])

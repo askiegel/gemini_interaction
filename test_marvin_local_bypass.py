@@ -104,9 +104,12 @@ def test_measured_longitudinal_progress_allows_one_more_fresh_bypass_not_radial_
     assert next_plan['meaningful_progress_reason'] == 'bypass_longitudinal_passage_improved'
     assert next_plan['actual_route_progress']['bypass_longitudinal_progress_m'] == pytest.approx(.05)
     _, stationary = scene_plan(previous=old)
-    assert stationary['action_type'] is None
-    assert stationary['reason'] == 'find_marvin_local_bypass_no_progress'
+    assert stationary['action_type'] == 'STRAFE_LEFT'
+    assert stationary['post_bypass_lateral_recovery_selected']
     assert 'BYPASS_FORWARD' in stationary['ineffective_action_types']
+    _, failed_recovery = scene_plan(previous=stationary)
+    assert failed_recovery['action_type'] is None
+    assert {'BYPASS_FORWARD', 'STRAFE_LEFT'} <= set(failed_recovery['ineffective_action_types'])
     route = dict(old['route'], blocking_obstacle_distance_m=1.0)
     assert not evaluate_avoidance_progress(old, route, old['local_bypass'])['meaningful_progress']
 
@@ -189,9 +192,10 @@ def test_guarded_bypass_forward_while_marvin_route_blocked_then_resume_pursuit(t
 def test_no_progress_bypass_stops_instead_of_repeating_or_exhausting(tmp_path, monkeypatch):
     bundle, _, _ = strafe_runtime(tmp_path, monkeypatch, [(0.,1.1)]*8, [OPEN_LEFT])
     result = run(bundle[0])
-    assert motions(bundle[3]) == [('strafe', .08, 1.), ('forward', .1, .5)]
-    assert result['state'] == 'BLOCKED' and result['reason'] == 'find_marvin_local_bypass_no_progress'
-    assert result['local_avoidance_actions'] == 2
+    assert motions(bundle[3]) == [('strafe', .08, 1.), ('forward', .1, .5), ('strafe', .08, 1.)]
+    assert result['state'] == 'BLOCKED' and result['reason'] == 'find_marvin_local_avoidance_no_progress'
+    assert result['local_avoidance_actions'] == 3
+    assert result['local_bypass_actions'] == 1
 
 
 def test_bypass_actions_share_unchanged_six_action_budget(tmp_path, monkeypatch):

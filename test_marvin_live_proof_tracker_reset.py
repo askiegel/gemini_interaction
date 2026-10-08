@@ -306,7 +306,7 @@ def test_progress_and_oscillation_gates_still_apply_after_new_semantics(tmp_path
 def test_frozen_first_bypass_outcome_survives_visual_reset_and_alignment(tmp_path, monkeypatch):
     shifted = [(.60,-.25),(0.,1.2),(0.,-.65)]
     bundle,_,_ = strafe_runtime(tmp_path,monkeypatch,
-        [(0,1.1)]*4+[(100,1.1),(0,1.1),(0,1.1)],
+        [(0,1.1)]*4+[(100,1.1)]+[(0,1.1)]*6,
         [OPEN_LEFT,OPEN_LEFT,OPEN_LEFT,shifted],factory=proof_runtime)
     r,b,_,events,_=bundle;begin(bundle)
     assert arm(r)["ok"];complete(bundle,step(r),1)
@@ -320,7 +320,14 @@ def test_frozen_first_bypass_outcome_survives_visual_reset_and_alignment(tmp_pat
     assert motions(events)[-1][0]=="turn"
     assert r._marvin_live_proof_continuation.previous_selection["first_post_action_bypass_progress"]==frozen
     assert arm(r)["ok"];result=step(r)
-    assert result["controller_result"]["state"]=="BLOCKED" and len(motions(events))==3
+    complete(bundle,result,3)
+    recovery=result["controller_result"]["history"][0]["result"]
+    assert recovery["action_type"]=="STRAFE_LEFT"
+    assert recovery["local_detour"]["actual_route_progress"]==frozen
+    assert 'BYPASS_FORWARD' in recovery["local_detour"]["ineffective_action_types"]
+    assert r._marvin_live_proof_continuation.avoidance["local_avoidance_actions"]==3
+    assert arm(r)["ok"];blocked=step(r)
+    assert blocked["controller_result"]["state"]=="BLOCKED" and len(motions(events))==4
 
 
 def test_bypass_direct_forward_arrival_with_fresh_semantics_per_arm(tmp_path, monkeypatch):

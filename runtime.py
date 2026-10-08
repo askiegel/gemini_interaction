@@ -141,6 +141,8 @@ def _marvin_proof_selection_history(selection):
     return copy.deepcopy({key: selection[key] for key in (
         "action_type", "direction", "route", "left_clearance_m", "right_clearance_m",
         "ineffective_action_types", "first_post_action_bypass_progress",
+        "post_bypass_lateral_recovery_used", "post_bypass_lateral_recovery_selected",
+        "first_post_action_lateral_recovery_progress",
     ) if key in selection})
 
 
@@ -1658,6 +1660,8 @@ class CognitiveRuntime:
                 # alignment changes the coordinate frame. Later turns cannot
                 # manufacture longitudinal passage for an ineffective bypass.
                 previous_selection["first_post_action_bypass_progress"] = dict(progress)
+            if previous_selection.get("post_bypass_lateral_recovery_selected") is True:
+                previous_selection["first_post_action_lateral_recovery_progress"] = dict(progress)
             avoidance_history[-1].update(post_action_route=route, progress_improved=improved,
                 post_action_target_association=association, actual_route_occupancy=route["route_occupancy"],
                 actual_max_overlap_m=route["corridor_overlap_m"],
@@ -2178,7 +2182,8 @@ class CognitiveRuntime:
                                 four_primitives = allow_strafe or direct.get("permitted") is True
                                 if four_primitives:
                                     detour = select_marvin_escape_action(lidar, standoff, expected_session=session,
-                                        allow_strafe=allow_strafe, previous_selection=previous_selection)
+                                        allow_strafe=allow_strafe, previous_selection=previous_selection,
+                                        remaining_avoidance_actions=self.MAX_LOCAL_AVOIDANCE_ACTIONS - avoidance["local_avoidance_actions"])
                                 else:
                                     detour = select_marvin_detour(lidar, expected_session=session,
                                         forward_speed=FIND_MARVIN_FORWARD_SPEED_MPS,
@@ -2215,6 +2220,7 @@ class CognitiveRuntime:
                                 context = {"previous_direction": previous_direction,
                                     "previous_clearances": previous_clearances,
                                     "four_primitives": four_primitives, "previous_selection": previous_selection,
+                                    "remaining_avoidance_actions": self.MAX_LOCAL_AVOIDANCE_ACTIONS - avoidance["local_avoidance_actions"],
                                     "selected_action_type": detour["action_type"], "allow_strafe": allow_strafe,
                                     "selected_direction": detour["direction"]}
                                 state = "AVOIDING"
@@ -3618,7 +3624,8 @@ class CognitiveRuntime:
                     return {"accepted": False}
                 selection = select_marvin_escape_action(sample, association, expected_session=session,
                     allow_strafe=True, previous_selection=local_detour_context.get("previous_selection"),
-                    strafe_duration_limit=duration if duration is not None else LOCAL_AVOIDANCE_STRAFE_MAX_SECONDS)
+                    strafe_duration_limit=duration if duration is not None else LOCAL_AVOIDANCE_STRAFE_MAX_SECONDS,
+                    remaining_avoidance_actions=local_detour_context.get("remaining_avoidance_actions", self.MAX_LOCAL_AVOIDANCE_ACTIONS))
                 candidate_duration = (selection.get("options", {}).get(kind) or {}).get("requested_duration")
                 accepted = (selection.get("action_type") == kind
                     and (duration is None or candidate_duration == duration))
@@ -3806,7 +3813,8 @@ class CognitiveRuntime:
                 if local_detour_context.get("four_primitives"):
                     detour = select_marvin_escape_action(lidar, standoff, expected_session=session,
                         allow_strafe=local_detour_context["allow_strafe"],
-                        previous_selection=local_detour_context.get("previous_selection"))
+                        previous_selection=local_detour_context.get("previous_selection"),
+                        remaining_avoidance_actions=local_detour_context.get("remaining_avoidance_actions", self.MAX_LOCAL_AVOIDANCE_ACTIONS))
                     if detour.get("action_type") != local_detour_context["selected_action_type"]:
                         return dict(base, reason="marvin_local_detour_jit_veto", local_detour=detour)
                 else:
@@ -4023,7 +4031,8 @@ class CognitiveRuntime:
                     return {"accepted": False}
                 selected = select_marvin_escape_action(sample, association, expected_session=session,
                     allow_strafe=local_detour_context["allow_strafe"],
-                    previous_selection=local_detour_context.get("previous_selection"))
+                    previous_selection=local_detour_context.get("previous_selection"),
+                    remaining_avoidance_actions=local_detour_context.get("remaining_avoidance_actions", self.MAX_LOCAL_AVOIDANCE_ACTIONS))
                 accepted = (selected.get("action_type") == "BYPASS_FORWARD"
                     and selected.get("direction") == local_detour_context["selected_direction"]
                     and (selected.get("local_bypass") or {}).get("bypass_forward_permitted") is True)

@@ -451,7 +451,7 @@ def test_bypass_and_direct_forward_each_require_separate_arm_then_arrival(tmp_pa
 def test_first_bypass_reassessment_survives_later_alignment(tmp_path, monkeypatch):
     shifted = [(.60,-.25),(0.,1.2),(0.,-.65)]
     bundle, _, _ = strafe_runtime(tmp_path, monkeypatch,
-        [(0,1.1)]*4+[(100,1.1),(0,1.1),(0,1.1)], [OPEN_LEFT,OPEN_LEFT,OPEN_LEFT,shifted])
+        [(0,1.1)]*4+[(100,1.1)]+[(0,1.1)]*6, [OPEN_LEFT,OPEN_LEFT,OPEN_LEFT,shifted])
     r = bundle[0]; complete(bundle, initial(bundle), 0)
     assert arm(r)["ok"]; complete(bundle, step(r), 1)
     frozen = copy.deepcopy(r._marvin_live_proof_continuation.previous_selection["first_post_action_bypass_progress"])
@@ -460,8 +460,12 @@ def test_first_bypass_reassessment_survives_later_alignment(tmp_path, monkeypatc
     assert motions(bundle[3])[-1][0] == "turn"
     assert r._marvin_live_proof_continuation.previous_selection["first_post_action_bypass_progress"] == frozen
     assert arm(r)["ok"]; result = step(r)
-    assert result["controller_result"]["state"] == "BLOCKED"
-    assert len(motions(bundle[3])) == 3
+    complete(bundle, result, 3)
+    recovery = result["controller_result"]["history"][0]["result"]
+    assert recovery["action_type"] == "STRAFE_LEFT"
+    assert recovery["local_detour"]["actual_route_progress"] == frozen
+    assert 'BYPASS_FORWARD' in recovery["local_detour"]["ineffective_action_types"]
+    assert r._marvin_live_proof_continuation.avoidance["local_avoidance_actions"] == 3
 
 
 def test_six_action_avoidance_budget_is_cumulative(tmp_path, monkeypatch):
