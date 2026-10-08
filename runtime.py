@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 
 import argparse
+import copy
+import hashlib
 import json
 import math
 import os
@@ -8,7 +10,7 @@ import signal
 import threading
 import time
 import uuid
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
@@ -92,6 +94,51 @@ class _MarvinLiveProofOwner:
     generation: int
     thread_id: int
     dispatch_opportunities: int = 0
+
+
+@dataclass(frozen=True)
+class _MarvinLiveProofContinuation:
+    """Process-local planning checkpoint; contains no dispatch authority.
+
+    Old geometry is comparison history only. The tracker stays in its existing
+    BehaviorManager episode, and every invocation observes and validates again.
+    """
+    generation: int
+    producer_session: str
+    avoidance: dict
+    previous_selection: Optional[dict]
+    previous_clearances: Optional[dict]
+    avoidance_history: list
+    avoidance_lidar_refresh_history: list
+    action_history: list
+    last_action_state: str
+    previous_stamp: int
+    camera_floor_stamp: int
+    action_finished_monotonic_seconds: float
+    action_lidar_evidence: tuple
+    post_lidar_sequence: int
+    identity_source_frame_stamp_ns: int
+    acquired: bool
+    search_turns: int
+    reacquisition_attempts: int
+    consecutive_reacquisition_failures: int
+    range_association: dict
+    completion: dict
+
+
+def _marvin_proof_selection_history(selection):
+    """Retain selector inputs, never old permission, options or JIT results."""
+    if selection is None:
+        return None
+    return copy.deepcopy({key: selection[key] for key in (
+        "action_type", "direction", "route", "left_clearance_m", "right_clearance_m",
+        "ineffective_action_types", "first_post_action_bypass_progress",
+    ) if key in selection})
+
+
+def _marvin_proof_checkpoint_digest(checkpoint):
+    return hashlib.sha256(json.dumps(asdict(checkpoint), sort_keys=True,
+        allow_nan=False, separators=(",", ":")).encode()).hexdigest()
 
 
 class CognitiveRuntime:
@@ -218,6 +265,10 @@ class CognitiveRuntime:
         self._marvin_autonomous_run_consumed = False
         self._marvin_live_proof_consumed = False
         self._marvin_live_proof_owner = None
+        self._marvin_live_proof_state = "UNINITIALIZED"
+        self._marvin_live_proof_continuation = None
+        self._marvin_live_proof_checkpoint_digest = None
+        self._marvin_live_proof_invalidation_reason = None
         self._marvin_controller_lock = threading.RLock()
         self._active_localization_lock = threading.Lock()
         self._local_reactive_step_lock = threading.Lock()
@@ -880,8 +931,109 @@ class CognitiveRuntime:
             require_fresh_gemini=True,
         )
 
+    def _invalidate_marvin_live_proof(self, reason):
+        """An unrelated owner or failed gate cannot start a fresh proof episode."""
+        if not getattr(self, "_marvin_live_proof_consumed", False):
+            return
+        with self._state_lock:
+            self._marvin_live_proof_continuation = None
+            self._marvin_live_proof_checkpoint_digest = None
+            self._marvin_live_proof_state = "FAILED_LOCKED"
+            self._marvin_live_proof_invalidation_reason = reason
+
+    def _marvin_live_proof_idle(self):
+        return (self.running is True and self._marvin_live_proof_owner is None
+            and self._behavior_execution_generation is None
+            and self.mission_manager.get_active_mission() is None
+            and not self.mission_manager.get_queue()
+            and self.world_model.robot_state.get("runtime_state") == "IDLE")
+
+    def _marvin_live_proof_checkpoint_valid(self):
+        """Verify the sealed checkpoint and its stopped completion certificate.
+
+        Historical freshness is checked at completion, never used as current
+        motion authority. Rearm and the next step independently read sensors.
+        """
+        c = self._marvin_live_proof_continuation
+        try:
+            if (type(c) is not _MarvinLiveProofContinuation
+                    or _marvin_proof_checkpoint_digest(c) != self._marvin_live_proof_checkpoint_digest
+                    or c.generation != self._control_generation
+                    or c.producer_session != getattr(self.lidar_worker, "session", None)
+                    or type(c.previous_stamp) is not int or type(c.camera_floor_stamp) is not int
+                    or not 0 <= c.previous_stamp < c.camera_floor_stamp
+                    or c.previous_stamp not in self._marvin_alignment_consumed_source_frame_stamps
+                    or type(c.post_lidar_sequence) is not int
+                    or c.action_lidar_evidence[0] != c.producer_session
+                    or type(c.action_lidar_evidence[1]) is not int
+                    or c.post_lidar_sequence <= c.action_lidar_evidence[1]
+                    or c.acquired is not True
+                    or type(c.identity_source_frame_stamp_ns) is not int
+                    or not 0 <= c.identity_source_frame_stamp_ns < c.camera_floor_stamp
+                    or not 0 <= c.avoidance["local_avoidance_actions"] <= self.MAX_LOCAL_AVOIDANCE_ACTIONS
+                    or not 0 <= c.avoidance["local_bypass_actions"] <= c.avoidance["local_avoidance_actions"]):
+                return False
+            proof = c.completion
+            if (proof["state"] != "PROOF_COMPLETE" or proof["stop_confirmed"] is not True
+                    or proof["full_step_completed"] is not True
+                    or proof["actions_executed"] != 1 or proof["dispatch_opportunities"] != 1
+                    or proof["physical_dispatches_or_uncertain"] != 1
+                    or proof["delivery_uncertain"] is not False
+                    or proof["lidar_valid"] is not True or proof["lidar_reason"] != "fresh"
+                    or proof["tracker_matched"] is not True
+                    or proof["identity_confirmed"] is not True
+                    or proof["tracker_quality"] < max(.80, proof["tracker_threshold"])
+                    or proof["camera_received_monotonic_seconds"] <= c.action_finished_monotonic_seconds):
+                return False
+            episode = getattr(self.behavior_manager, "_marvin_v2_tracker_episode", None)
+            return (isinstance(episode, dict)
+                and episode.get("last_tracker_source_frame_stamp_ns") == c.camera_floor_stamp
+                and episode.get("identity_source_frame_stamp_ns") == c.identity_source_frame_stamp_ns)
+        except (AttributeError, KeyError, IndexError, TypeError, ValueError, OverflowError, RecursionError):
+            return False
+
+    def rearm_find_marvin_live_proof(self, *, rearm):
+        """Grant one later continuation invocation; never execute or observe."""
+        base = {"ok": False, "action": "find_marvin_live_proof_rearm",
+                "max_physical_actions": 1, "motion_executed": False}
+        if rearm is not True:
+            return dict(base, reason="marvin_live_proof_rearm_invalid")
+        if not self._marvin_controller_lock.acquire(blocking=False):
+            return dict(base, reason="marvin_live_proof_owner_busy")
+        physical_acquired = False
+        try:
+            with self._state_lock:
+                if not self._marvin_live_proof_idle():
+                    return dict(base, reason="marvin_live_proof_runtime_not_idle")
+                if self._marvin_live_proof_state != "COMPLETE_DISARMED":
+                    return dict(base, reason="marvin_live_proof_not_complete_disarmed",
+                                proof_state=self._marvin_live_proof_state)
+                if not self._marvin_live_proof_checkpoint_valid():
+                    self._invalidate_marvin_live_proof("marvin_live_proof_continuation_invalid")
+                    return dict(base, reason="marvin_live_proof_continuation_invalid")
+                if not self._physical_action_lock.acquire(blocking=False):
+                    return dict(base, reason="marvin_live_proof_physical_owner_busy")
+                physical_acquired = True
+                bridge = self._marvin_bridge_ready_and_stopped()
+                if bridge.get("ok") is not True or bridge.get("status") != "READY":
+                    self._invalidate_marvin_live_proof("marvin_live_proof_bridge_not_stopped")
+                    return dict(base, reason="marvin_live_proof_bridge_not_stopped")
+                session, lidar = self._active_localization_lidar_is_current()
+                c = self._marvin_live_proof_continuation
+                if (session != c.producer_session or lidar is None
+                        or type(lidar.get("acquisition_sequence")) is not int
+                        or lidar["acquisition_sequence"] < c.post_lidar_sequence):
+                    self._invalidate_marvin_live_proof("marvin_live_proof_lidar_discontinuity")
+                    return dict(base, reason="marvin_live_proof_lidar_discontinuity")
+                self._marvin_live_proof_state = "ARMED"
+                return dict(base, ok=True, reason="marvin_live_proof_rearmed", proof_state="ARMED")
+        finally:
+            if physical_acquired:
+                self._physical_action_lock.release()
+            self._marvin_controller_lock.release()
+
     def execute_find_marvin_live_proof_step(self, *, max_physical_actions):
-        """One-shot proof of the real closed loop, with no queued mission.
+        """One explicitly armed step of the real loop, with no queued mission.
 
         The explicit lease shares generation/thread admission and all existing
         dispatch locks. It never impersonates or registers an active mission.
@@ -898,15 +1050,27 @@ class CognitiveRuntime:
         consumed_before = set()
         try:
             with self._state_lock:
-                if self._marvin_live_proof_consumed:
-                    return dict(base, reason="marvin_live_proof_already_consumed")
+                if self._marvin_live_proof_state not in {"UNINITIALIZED", "ARMED"}:
+                    return dict(base, reason="marvin_live_proof_already_consumed",
+                                proof_state=self._marvin_live_proof_state)
                 if (self.running is not True or self._marvin_live_proof_owner is not None
                         or self._behavior_execution_generation is not None
                         or self.mission_manager.get_active_mission() is not None
                         or self.mission_manager.get_queue()
                         or self.world_model.robot_state.get("runtime_state") != "IDLE"):
                     return dict(base, reason="marvin_live_proof_runtime_not_idle")
+                continuation = None
+                if self._marvin_live_proof_state == "ARMED":
+                    if not self._marvin_live_proof_checkpoint_valid():
+                        self._invalidate_marvin_live_proof("marvin_live_proof_continuation_invalid")
+                        return dict(base, reason="marvin_live_proof_continuation_invalid")
+                    continuation = copy.deepcopy(self._marvin_live_proof_continuation)
+                if self._physical_action_lock.locked():
+                    return dict(base, reason="marvin_live_proof_physical_owner_busy")
                 self._marvin_live_proof_consumed = True
+                self._marvin_live_proof_state = "EXECUTING"  # Consume before observation/dispatch.
+                self._marvin_live_proof_continuation = None
+                self._marvin_live_proof_checkpoint_digest = None
                 consumed_before = set(self._marvin_alignment_consumed_source_frame_stamps)
                 owner = _MarvinLiveProofOwner("marvin-proof-" + uuid.uuid4().hex,
                     self._control_generation, threading.get_ident())
@@ -918,7 +1082,7 @@ class CognitiveRuntime:
             try:
                 result = self._execute_normal_marvin_find_mission_locked(
                     owner, control_generation=owner.generation,
-                    proof_max_physical_actions=1)
+                    proof_max_physical_actions=1, proof_continuation=continuation)
             except Exception as exc:
                 try:
                     stopped = self.robot_client.stop()
@@ -934,6 +1098,16 @@ class CognitiveRuntime:
                         "source_stamps": [{"source_frame_stamp_ns": stamp, "consumed": True}
                             for stamp in sorted(self._marvin_alignment_consumed_source_frame_stamps - consumed_before)]})
             with self._state_lock:
+                if (result.get("state") == "PROOF_COMPLETE"
+                        and self._marvin_live_proof_checkpoint_valid()):
+                    self._marvin_live_proof_state = "COMPLETE_DISARMED"
+                else:
+                    self._invalidate_marvin_live_proof(result.get("reason") or "marvin_live_proof_failed")
+                    if result.get("state") == "ARRIVED" and result.get("ok") is True:
+                        self._marvin_live_proof_state = "ARRIVED_DISARMED"
+                    clear = getattr(self.behavior_manager, "_clear_marvin_v2_tracker_episode", None)
+                    if callable(clear):
+                        clear()
                 if owner.generation == self._control_generation:
                     self.last_result = result
                     self.tracking_state = build_tracking_state(result, previous=self.tracking_state)
@@ -941,7 +1115,9 @@ class CognitiveRuntime:
             return dict(base, ok=result.get("ok") is True,
                 actions_executed=result.get("actions_executed", 0),
                 motion_executed=result.get("actions_executed", 0) > 0,
-                reason=result.get("reason"), controller_result=result)
+                reason=result.get("reason"), controller_result=result,
+                proof_state=self._marvin_live_proof_state,
+                continuation_available=self._marvin_live_proof_continuation is not None)
         finally:
             try:
                 if owner is not None:
@@ -951,6 +1127,8 @@ class CognitiveRuntime:
                             clear_scan(owner.mission_id)
                     finally:
                         with self._state_lock:
+                            if self._marvin_live_proof_state == "EXECUTING":
+                                self._invalidate_marvin_live_proof("marvin_live_proof_exception")
                             self._marvin_live_proof_owner = None
                             if self._behavior_execution_thread_id == owner.thread_id:
                                 self._behavior_execution_generation = None
@@ -1019,11 +1197,14 @@ class CognitiveRuntime:
         if controller_lock is None or not controller_lock.acquire(blocking=False):
             return dict(base, reason="marvin_autonomous_controller_already_running")
         try:
+            if getattr(self, "_marvin_live_proof_owner", None) is not None:
+                return dict(base, reason="marvin_autonomous_controller_already_running")
             if consume_one_shot:
                 with self._state_lock:
                     if self._marvin_autonomous_run_consumed:
                         return dict(base, reason="marvin_autonomous_run_already_consumed")
                     self._marvin_autonomous_run_consumed = True
+            self._invalidate_marvin_live_proof("another_physical_behavior")
             base["execution_authorized"] = True
             state_provider = self.build_find_marvin_controller_state
             if require_fresh_gemini:
@@ -1238,6 +1419,7 @@ class CognitiveRuntime:
 
     def _execute_normal_marvin_find_mission_locked(
         self, mission, *, control_generation=None, proof_max_physical_actions=None,
+        proof_continuation=None,
     ):
         """Own the complete V2 observe/action/STOP loop for one mission."""
         if proof_max_physical_actions is not None and (
@@ -1272,7 +1454,8 @@ class CognitiveRuntime:
                      "local_bypass_actions": 0, "local_bypass_reason": None}
         previous_clearances = None
         previous_selection = None
-        self._marvin_target_range_association = MarvinTargetRangeAssociation()
+        if proof_continuation is None:
+            self._marvin_target_range_association = MarvinTargetRangeAssociation()
         consecutive_lidar_interruptions = 0
         reacquisition_attempts = 0
         consecutive_reacquisition_failures = 0
@@ -1281,13 +1464,34 @@ class CognitiveRuntime:
         observation = None
         previous_stamp = None
         action_finished_monotonic_seconds = None
+        prior_action_state = None
+        camera_floor_stamp = None
+        expected_identity_stamp = None
+        if proof_continuation is not None:
+            c = proof_continuation
+            avoidance = copy.deepcopy(c.avoidance)
+            previous_selection = copy.deepcopy(c.previous_selection)
+            previous_clearances = copy.deepcopy(c.previous_clearances)
+            avoidance_history = copy.deepcopy(c.avoidance_history)
+            avoidance_lidar_refresh_history = copy.deepcopy(c.avoidance_lidar_refresh_history)
+            previous_stamp = c.previous_stamp
+            camera_floor_stamp = c.camera_floor_stamp
+            expected_identity_stamp = c.identity_source_frame_stamp_ns
+            action_finished_monotonic_seconds = c.action_finished_monotonic_seconds
+            prior_action_state = c.last_action_state
+            acquired = c.acquired
+            search_turns = c.search_turns
+            reacquisition_attempts = c.reacquisition_attempts
+            consecutive_reacquisition_failures = c.consecutive_reacquisition_failures
+            self._marvin_target_range_association.__dict__.update(copy.deepcopy(c.range_association))
+            self._marvin_last_action_lidar_evidence = c.action_lidar_evidence
         retain = self._retain_marvin_diagnostic
         retain("begin", mission.mission_id,
                expected_session=getattr(self.lidar_worker, "session", None),
                camera_model=self.marvin_camera_model)
         self._reset_marvin_alignment_consensus()
         clear_episode = getattr(behavior, "_clear_marvin_v2_tracker_episode", None)
-        if callable(clear_episode):
+        if proof_continuation is None and callable(clear_episode):
             clear_episode()  # A new mission requires fresh semantic acquisition.
 
         def current():
@@ -1303,7 +1507,8 @@ class CognitiveRuntime:
         def record_avoidance_reassessment(route, association):
             # Capture the first valid reassessment of the last physical detour.
             # Later alignment or planning must not overwrite that action's outcome.
-            if (not previous_selection or not history or history[-1]["state"] != "AVOIDING"
+            if (not previous_selection or
+                    (history[-1]["state"] if history else prior_action_state) != "AVOIDING"
                     or not route.get("valid") or not avoidance_history
                     or avoidance_history[-1].get("actual_route_occupancy") is not None):
                 return
@@ -1325,6 +1530,9 @@ class CognitiveRuntime:
             retain("avoidance_reassessment", route, association, improved, progress)
 
         def finish(state, reason):
+            # Capture planning state before terminal reporting clears bypass
+            # telemetry. No returned mutable result is the checkpoint authority.
+            planning_avoidance = copy.deepcopy(avoidance)
             clear_bypass(reason)
             avoidance["local_avoidance_active"] = False
             self._reset_marvin_alignment_consensus()
@@ -1338,7 +1546,9 @@ class CognitiveRuntime:
                     and zero.get("ok") is True and zero.get("status") == "READY")
             if not safe:
                 state, reason = "BLOCKED", "find_marvin_stop_or_bridge_failed"
-            if callable(clear_episode):
+            resumable = (proof_max_physical_actions is not None and safe
+                         and state == "PROOF_COMPLETE" and acquired)
+            if not resumable and callable(clear_episode):
                 clear_episode()
             retain("mission_stop", stop, zero, stop_completed_monotonic_seconds)
             retain("terminal", state, reason)
@@ -1393,6 +1603,76 @@ class CognitiveRuntime:
                     "post_action_evidence": proof_post_action_evidence,
                     "action_complete": safe and state == "PROOF_COMPLETE",
                 }
+                if resumable:
+                    evidence = proof_post_action_evidence
+                    post = evidence["observation"]
+                    tracker = post["opencv_tracker"]
+                    snapshot = evidence["lidar_wait"]["snapshot"]
+                    action_result = history[-1]["result"]
+                    transport = ((action_result.get("lateral_step") or {}).get("lateral_result") or
+                        (action_result.get("approach_result") or {}).get("forward_result") or {})
+                    # Retain side memory, not a target or permission from an
+                    # old corridor. The existing selector rebuilds both sides.
+                    for key in list(planning_avoidance):
+                        if key.startswith("bypass_") or key in {
+                                "local_bypass_active", "local_bypass_target_x_m", "local_bypass_target_y_m"}:
+                            planning_avoidance[key] = False if key.endswith(("active", "permitted")) else None
+                    retained_avoidance_history = []
+                    for row in avoidance_history:
+                        item = {key: copy.deepcopy(row[key]) for key in (
+                            "source_frame_stamp_ns", "previous_clearances", "previous_action_type",
+                            "last_detour_improved_direct_path", "dispatched", "physical_dispatch_confirmed",
+                            "motion_executed", "action_lidar_evidence", "action_type",
+                            "actual_route_occupancy", "actual_max_overlap_m",
+                            "actual_blocker_centerline_clearance_m", "meaningful_progress",
+                            "meaningful_progress_reason", "post_action_route", "actual_route_progress",
+                            "progress_improved",
+                        ) if key in row}
+                        item["selection"] = _marvin_proof_selection_history(row.get("selection"))
+                        retained_avoidance_history.append(item)
+                    action_history = list(proof_continuation.action_history) if proof_continuation else []
+                    action_history.append({"state": history[-1]["state"],
+                        "source_frame_stamp_ns": previous_stamp,
+                        "action_type": action_result.get("action_type"),
+                        "action_lidar_evidence": self._marvin_last_action_lidar_evidence})
+                    checkpoint = _MarvinLiveProofContinuation(
+                        generation=control_generation,
+                        producer_session=snapshot["producer_session"],
+                        avoidance=planning_avoidance,
+                        previous_selection=_marvin_proof_selection_history(previous_selection),
+                        previous_clearances=copy.deepcopy(previous_clearances),
+                        avoidance_history=retained_avoidance_history,
+                        avoidance_lidar_refresh_history=[{key: copy.deepcopy(value)
+                            for key, value in row.items() if not isinstance(value, (dict, list))}
+                            for row in avoidance_lidar_refresh_history],
+                        action_history=copy.deepcopy(action_history), last_action_state=history[-1]["state"],
+                        previous_stamp=previous_stamp, camera_floor_stamp=post["source_frame_stamp_ns"],
+                        action_finished_monotonic_seconds=action_finished_monotonic_seconds,
+                        action_lidar_evidence=self._marvin_last_action_lidar_evidence,
+                        post_lidar_sequence=snapshot["acquisition_sequence"],
+                        identity_source_frame_stamp_ns=post["identity_source_frame_stamp_ns"],
+                        acquired=acquired, search_turns=search_turns,
+                        reacquisition_attempts=reacquisition_attempts,
+                        consecutive_reacquisition_failures=consecutive_reacquisition_failures,
+                        range_association=copy.deepcopy(vars(self._marvin_target_range_association)),
+                        completion={"state": state, "stop_confirmed": safe,
+                            "full_step_completed": action_result.get("full_step_completed",
+                                action_result.get("ok") is True) is True,
+                            "actions_executed": result["actions_executed"],
+                            "dispatch_opportunities": mission.dispatch_opportunities,
+                            "physical_dispatches_or_uncertain": proof_dispatches,
+                            "delivery_uncertain": bool(action_result.get("delivery_uncertain")
+                                or transport.get("delivery_uncertain")),
+                            "lidar_valid": snapshot.get("valid"), "lidar_reason": snapshot.get("reason"),
+                            "tracker_matched": tracker.get("active") is True and tracker.get("matched") is True,
+                            "identity_confirmed": post.get("identity_confirmed"),
+                            "tracker_quality": tracker.get("quality"), "tracker_threshold": tracker.get("threshold"),
+                            "camera_received_monotonic_seconds": post.get("received_monotonic_seconds")})
+                    with self._state_lock:
+                        if current():
+                            self._marvin_live_proof_continuation = checkpoint
+                            self._marvin_live_proof_checkpoint_digest = _marvin_proof_checkpoint_digest(checkpoint)
+                    result["proof"]["cumulative_actions_completed"] = len(action_history)
             return result
 
         while current():
@@ -1416,6 +1696,17 @@ class CognitiveRuntime:
                 return finish("STOPPED", "find_marvin_mission_preempted")
             tracker = observation.get("opencv_tracker") or {}
             stamp = observation.get("source_frame_stamp_ns")
+            if proof_continuation is not None and (
+                    observation.get("identity_source") == "marvin_locked_tracker_continuity"
+                    and observation.get("identity_source_frame_stamp_ns")
+                        != expected_identity_stamp):
+                return finish("REVERIFY_REQUIRED", "marvin_live_proof_identity_discontinuity")
+            strict_episode = observation.get("strict_tracker_episode")
+            if (proof_continuation is not None and not history
+                    and observation.get("identity_confirmed") is True
+                    and isinstance(strict_episode, dict)
+                    and strict_episode.get("continued_existing_tracker") is not True):
+                return finish("REVERIFY_REQUIRED", "marvin_live_proof_identity_discontinuity")
             if (acquired and observation.get("identity_confirmed") is not True
                     and observation.get("perception_reason") == "post_action_tracker_continuity_lost"):
                 # The mission owns recovery. No search or action can occur
@@ -1501,6 +1792,7 @@ class CognitiveRuntime:
             if not self._marvin_motion_stamp_is_fresh(stamp, receipt):
                 return finish("BLOCKED", "marvin_motion_observation_stale")
             if (previous_stamp is not None and stamp <= previous_stamp
+                    or camera_floor_stamp is not None and stamp <= camera_floor_stamp
                     or action_finished_monotonic_seconds is not None
                     and receipt <= action_finished_monotonic_seconds):
                 return finish("REVERIFY_REQUIRED", "find_marvin_new_camera_frame_required")
@@ -1513,6 +1805,11 @@ class CognitiveRuntime:
                 return finish("BLOCKED", "find_marvin_lidar_producer_session_changed")
             if type(sequence) is not int or sequence < 0 or (prior is not None and sequence <= prior[1]):
                 return finish("BLOCKED", "find_marvin_lidar_acquisition_sequence_invalid")
+            if (proof_continuation is not None
+                    and sequence < proof_continuation.post_lidar_sequence):
+                return finish("BLOCKED", "marvin_live_proof_lidar_discontinuity")
+            if observation.get("identity_confirmed") is True:
+                expected_identity_stamp = observation.get("identity_source_frame_stamp_ns")
             decision = (observation.get("controller") or {}).get("decision")
             observed_route = (observation.get("arrival") or {}).get("route") or {}
             if observed_route.get("valid") and not observed_route.get("route_to_marvin_obstructed"):
@@ -1540,6 +1837,12 @@ class CognitiveRuntime:
                     return finish("REVERIFY_REQUIRED", "find_marvin_live_proof_post_action_tracker_invalid")
                 complete = history[-1]["result"].get("full_step_completed",
                     history[-1]["result"].get("ok") is True) is True
+                action_result = history[-1]["result"]
+                transport = ((action_result.get("lateral_step") or {}).get("lateral_result") or
+                    (action_result.get("approach_result") or {}).get("forward_result") or {})
+                complete = (complete and action_result.get("interrupted") is not True
+                    and action_result.get("delivery_uncertain") is not True
+                    and transport.get("delivery_uncertain") is not True)
                 return finish("PROOF_COMPLETE" if complete else "PROOF_INTERRUPTED",
                     "find_marvin_live_proof_action_complete" if complete else
                     "find_marvin_live_proof_action_interrupted")
@@ -2414,6 +2717,7 @@ class CognitiveRuntime:
             if not physical_lock.acquire(blocking=False):
                 return dict(base, reason="physical_behavior_already_active")
             physical_acquired = True
+            self._invalidate_marvin_live_proof("another_physical_behavior")
             if self._active_localization_lock.locked():
                 return dict(base, reason="active_localization_already_running")
             navigation_goal_active = self._local_reactive_navigation_goal_active()
@@ -2844,6 +3148,7 @@ class CognitiveRuntime:
                     terminal_reason="ACTIVE_LOCALIZATION_TURN_BLOCKED",
                     reason="physical_behavior_already_active",
                 )
+            self._invalidate_marvin_live_proof("another_physical_behavior")
             status = self.localization_facade.get_localization_status()
             base["last_localization_result"] = status
             if self._active_localization_pose_is_trusted(status):
@@ -3013,6 +3318,8 @@ class CognitiveRuntime:
                 if not self._marvin_motion_owner_is_current():
                     return rejected
                 proof_owner = getattr(self, "_marvin_live_proof_owner", None)
+                if proof_owner is None:
+                    self._invalidate_marvin_live_proof("another_physical_behavior")
                 if proof_owner is not None:
                     if proof_owner.dispatch_opportunities >= 1:
                         return dict(rejected, reason="marvin_live_proof_action_limit_reached")
@@ -3981,6 +4288,7 @@ class CognitiveRuntime:
         with self._state_lock:
             if intent_name != "STOP" and getattr(self, "_marvin_live_proof_owner", None) is not None:
                 raise ValueError("marvin_live_proof_owns_runtime")
+            self._invalidate_marvin_live_proof("stop_intent" if intent_name == "STOP" else "normal_mission_submission")
             if intent_name == "STOP":
                 self._control_generation += 1
                 self._reset_marvin_alignment_consensus()
@@ -4067,6 +4375,7 @@ class CognitiveRuntime:
                 return None
 
             mission_id = mission.mission_id
+            self._invalidate_marvin_live_proof("normal_mission_execution")
             control_generation = self._control_generation
             self._behavior_execution_generation = control_generation
             self._behavior_execution_thread_id = threading.get_ident()
@@ -4266,6 +4575,7 @@ class CognitiveRuntime:
         Request a clean runtime shutdown.
         """
         self.running = False
+        self._invalidate_marvin_live_proof("runtime_shutdown")
         self._retain_marvin_diagnostic("stop")
         self._stop_lidar()
         if self.forward_interlock is not None:

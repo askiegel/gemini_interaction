@@ -560,6 +560,7 @@ class RuntimeAPIHandler(BaseHTTPRequestHandler):
             "/find-marvin/approach-step",
             "/find-marvin/autonomous-run",
             "/find-marvin/live-proof-step",
+            "/find-marvin/live-proof-rearm",
             "/find-marvin/controller",
             "/find-marvin/confirm-identity",
             "/missions",
@@ -716,6 +717,13 @@ class RuntimeAPIHandler(BaseHTTPRequestHandler):
                         request_data["source_frame_stamp_ns"]
                     ),
                 )
+                self.send_json(200 if result.get("ok") is True else 409, result)
+                return
+
+            if path == "/find-marvin/live-proof-rearm":
+                if set(request_data) != {"rearm"} or request_data["rearm"] is not True:
+                    raise ValueError("live-proof-rearm requires exactly rearm=true.")
+                result = self.server.runtime.rearm_find_marvin_live_proof(rearm=True)
                 self.send_json(200 if result.get("ok") is True else 409, result)
                 return
 
