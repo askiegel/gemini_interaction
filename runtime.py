@@ -22,7 +22,12 @@ from guarded_turn_policy import ROTATIONAL_SWEPT_FOOTPRINT
 from marvin_arrival_policy import evaluate_marvin_visual_arrival
 from marvin_lidar_standoff import TARGET_STANDOFF_M, evaluate_marvin_lidar_standoff
 from marvin_target_range_association import MarvinTargetRangeAssociation
-from marvin_route_obstruction import route_progress, evaluate_route_progress
+from marvin_route_obstruction import route_progress, evaluate_route_progress, evaluate_marvin_route
+from marvin_blocked_wait import (
+    BLOCKED_WAIT_REASONS, INITIAL_RECHECK_SECONDS, MAX_RECHECK_SECONDS,
+    MAX_RECHECKS, MAX_STATIONARY_SECONDS, blocked_wait_diagnostics,
+    material_route_change, stationary_geometry_epoch,
+)
 from marvin_local_bypass import plan_local_bypass, evaluate_avoidance_progress
 from marvin_progress_diagnostics import MarvinProgressDiagnostics
 from marvin_local_obstacle_avoidance import (
@@ -143,6 +148,7 @@ def _marvin_proof_selection_history(selection):
         "ineffective_action_types", "first_post_action_bypass_progress",
         "post_bypass_lateral_recovery_used", "post_bypass_lateral_recovery_selected",
         "first_post_action_lateral_recovery_progress",
+        "stationary_lateral_reconsidered",
     ) if key in selection})
 
 
@@ -185,6 +191,8 @@ class CognitiveRuntime:
     # Allow two freshness windows for a new publication, without relaxing age.
     MARVIN_NEW_LIDAR_TIMEOUT_SECONDS = 2 * MAXIMUM_EFFECTIVE_AGE_SECONDS
     MARVIN_NEW_LIDAR_POLL_SECONDS = LOCAL_AVOIDANCE_LIDAR_POLL_INTERVAL_SECONDS
+    MARVIN_BLOCKED_WAIT_MAX_RECHECKS = MAX_RECHECKS
+    MARVIN_BLOCKED_WAIT_MAX_SECONDS = MAX_STATIONARY_SECONDS
     MAX_ACTIVE_LOCALIZATION_TURNS = 6
     ACTIVE_LOCALIZATION_TURN_SPEED = 0.25
     ACTIVE_LOCALIZATION_TURN_DURATION = 0.50
@@ -1494,6 +1502,110 @@ class CognitiveRuntime:
             time.sleep(min(self.MARVIN_NEW_LIDAR_POLL_SECONDS,
                            max(0.0, deadline - time.monotonic())))
 
+    def _wait_for_marvin_blocked_route(self, *, expected_session, lidar, association,
+                                     execution_guard, diagnostics, history):
+        """Production-only stationary re-sensing. Returns a wakeup, never authority.
+
+        The historical target bearing/range only selects when to acquire fresh
+        identity. It cannot authorize movement, arrival or reuse a camera stamp.
+        Counters/time are cumulative across every blocked episode in a mission.
+        """
+        started = time.monotonic()
+        prior_total = diagnostics["blocked_wait_total_seconds"]
+        entry_route = association.get("route") or {}
+        sequence = lidar.get("acquisition_sequence")
+        diagnostics.update(blocked_wait_active=True,
+            blocked_wait_initial_lidar_sequence=sequence,
+            blocked_wait_latest_lidar_sequence=sequence,
+            blocked_wait_route_obstructed=True, blocked_wait_geometry_changed=False,
+            blocked_wait_camera_recheck_performed=False, blocked_wait_resume_reason=None)
+        with self._state_lock:
+            self._marvin_alignment_observation = None  # Expire, never consume, old authority.
+        self._reset_marvin_alignment_consensus()
+
+        def publish():
+            diagnostics["blocked_wait_total_seconds"] = prior_total + max(0.0, time.monotonic() - started)
+            self._publish_behavior_tracking({"behavior": "FIND_OBJECT", "target": "marvin",
+                "state": "BLOCKED_WAIT", **diagnostics})
+
+        def done(reason, *, ok=False, route=None):
+            publish()
+            diagnostics["blocked_wait_active"] = False
+            diagnostics["blocked_wait_resume_reason"] = reason if ok else None
+            return {"ok": ok, "reason": reason, "entry_route": entry_route, "route": route}
+
+        if (entry_route.get("valid") is not True or entry_route.get("route_to_marvin_obstructed") is not True
+                or type(sequence) is not int or sequence < 0):
+            return done("find_marvin_blocked_wait_evidence_invalid")
+        if not execution_guard():
+            return done("find_marvin_mission_preempted")
+        try:
+            stop = self.robot_client.stop()
+        except Exception:
+            return done("find_marvin_blocked_wait_stop_failed")
+        bridge = self._marvin_bridge_ready_and_stopped()
+        if (not isinstance(stop, dict) or stop.get("ok") is not True
+                or bridge.get("ok") is not True or bridge.get("status") != "READY"):
+            return done("find_marvin_blocked_wait_stop_failed")
+        command_at = (bridge.get("motion") or {}).get("last_command_at")
+        publish()
+        while execution_guard():
+            remaining = self.MARVIN_BLOCKED_WAIT_MAX_SECONDS - (prior_total + time.monotonic() - started)
+            if diagnostics["blocked_wait_recheck_count"] >= self.MARVIN_BLOCKED_WAIT_MAX_RECHECKS or remaining <= 0:
+                return done("find_marvin_blocked_wait_exhausted")
+            interval = min(MAX_RECHECK_SECONDS,
+                INITIAL_RECHECK_SECONDS * 2 ** min(diagnostics["blocked_wait_recheck_count"], 2))
+            diagnostics["blocked_wait_interval_seconds"] = interval
+            publish()
+            wake_at = time.monotonic() + min(interval, remaining)
+            while time.monotonic() < wake_at:
+                if not execution_guard():
+                    return done("find_marvin_mission_preempted")
+                time.sleep(min(self.MARVIN_NEW_LIDAR_POLL_SECONDS, wake_at - time.monotonic()))
+            if not execution_guard():
+                return done("find_marvin_mission_preempted")
+            bridge = self._marvin_bridge_ready_and_stopped()
+            if (bridge.get("ok") is not True or bridge.get("status") != "READY"
+                    or (bridge.get("motion") or {}).get("last_command_at") != command_at):
+                return done("find_marvin_blocked_wait_bridge_changed")
+            remaining = self.MARVIN_BLOCKED_WAIT_MAX_SECONDS - (prior_total + time.monotonic() - started)
+            if remaining <= 0:
+                return done("find_marvin_blocked_wait_exhausted")
+            wait = self._wait_for_new_marvin_lidar_evidence(
+                expected_session=expected_session, previous_sequence=sequence, execution_guard=execution_guard,
+                timeout_seconds=min(self.MARVIN_NEW_LIDAR_TIMEOUT_SECONDS, remaining))
+            if wait.get("ok") is not True:
+                return done(wait["reason"])
+            snapshot = wait["snapshot"]
+            geometry = snapshot.get("local_motion_geometry") or {}
+            sectors = geometry.get("sectors") or {}
+            if (geometry.get("valid") is not True or any(
+                    (sectors.get(name) or {}).get("available") is not True
+                    or (sectors.get(name) or {}).get("valid_sample_count", 0) < MINIMUM_VALID_SAMPLES_PER_REQUIRED_SECTOR
+                    for name, _, _ in OCTANT_SECTORS)):
+                return done("find_marvin_blocked_wait_geometry_invalid")
+            sequence = snapshot["acquisition_sequence"]
+            route = evaluate_marvin_route(snapshot, association, expected_session=expected_session)
+            if route.get("valid") is not True:
+                return done(route.get("reason") or "find_marvin_blocked_wait_geometry_invalid")
+            changed = material_route_change(entry_route, route)
+            direct = evaluate_local_motion_safety(snapshot, expected_session=expected_session,
+                linear_x=FIND_MARVIN_FORWARD_SPEED_MPS, duration=.50)
+            cleared = route["route_to_marvin_obstructed"] is False and direct.get("permitted") is True
+            diagnostics.update(blocked_wait_recheck_count=diagnostics["blocked_wait_recheck_count"] + 1,
+                blocked_wait_latest_lidar_sequence=sequence,
+                blocked_wait_route_obstructed=route["route_to_marvin_obstructed"],
+                blocked_wait_geometry_changed=changed)
+            history.append({"lidar_sequence": sequence, "producer_session": expected_session,
+                "route": route, "direct_safety_permitted": direct.get("permitted") is True,
+                "geometry_changed": changed, "camera_recheck_performed": False,
+                "motion_executed": False, "source_stamp_consumed": False, "wait": wait})
+            publish()
+            if cleared or changed:
+                return done("find_marvin_blocked_wait_route_cleared" if cleared else
+                    "find_marvin_blocked_wait_geometry_changed", ok=True, route=route)
+        return done("find_marvin_mission_preempted")
+
     def _refresh_marvin_avoidance_plan(self, *, tracker, expected_session,
                                       blocked_sequence, execution_guard):
         """Rebuild a stopped avoidance decision from one newer World Model scan.
@@ -1575,6 +1687,9 @@ class CognitiveRuntime:
         lidar_recovery_history = []
         avoidance_history = []
         avoidance_lidar_refresh_history = []
+        blocked_wait = blocked_wait_diagnostics()
+        blocked_wait_history = []
+        blocked_resume_context = None
         avoidance = {"local_avoidance_active": False, "local_avoidance_actions": 0,
                      "last_detour_direction": None, "left_clearance_m": None,
                      "right_clearance_m": None, "direct_path_blocked": False,
@@ -1660,7 +1775,8 @@ class CognitiveRuntime:
                 # alignment changes the coordinate frame. Later turns cannot
                 # manufacture longitudinal passage for an ineffective bypass.
                 previous_selection["first_post_action_bypass_progress"] = dict(progress)
-            if previous_selection.get("post_bypass_lateral_recovery_selected") is True:
+            if (previous_selection.get("post_bypass_lateral_recovery_selected") is True
+                    or previous_selection.get("stationary_lateral_reconsidered") is True):
                 previous_selection["first_post_action_lateral_recovery_progress"] = dict(progress)
             avoidance_history[-1].update(post_action_route=route, progress_improved=improved,
                 post_action_target_association=association, actual_route_occupancy=route["route_occupancy"],
@@ -1734,6 +1850,10 @@ class CognitiveRuntime:
                 "final_observation": observation,
                 "progress_diagnostics": retain("snapshot"),
             }
+            if proof_max_physical_actions is None:
+                result.update(**blocked_wait, blocked_wait_history=blocked_wait_history,
+                    blocked_wait_max_rechecks=self.MARVIN_BLOCKED_WAIT_MAX_RECHECKS,
+                    blocked_wait_max_seconds=self.MARVIN_BLOCKED_WAIT_MAX_SECONDS)
             if proof_max_physical_actions is not None:
                 consumed = self._marvin_alignment_consumed_source_frame_stamps
                 result["proof"] = {
@@ -1822,7 +1942,9 @@ class CognitiveRuntime:
             bridge = self._marvin_bridge_ready_and_stopped()
             if bridge.get("ok") is not True or bridge.get("status") != "READY":
                 return finish("BLOCKED", "find_marvin_bridge_not_ready_or_stopped")
-            prior = self._marvin_last_action_lidar_evidence
+            resumed_blocked_wait = blocked_resume_context
+            prior = ((resumed_blocked_wait["session"], resumed_blocked_wait["lidar_sequence"])
+                     if resumed_blocked_wait else self._marvin_last_action_lidar_evidence)
             if prior is not None:
                 wait = self._wait_for_new_marvin_lidar_evidence(
                     expected_session=prior[0], previous_sequence=prior[1], execution_guard=current,
@@ -1843,6 +1965,13 @@ class CognitiveRuntime:
                 # obtains fresh Gemini identity and a subsequent action frame.
                 observation = self._observe_find_marvin_v2(
                     reacquisition_source_floor=camera_floor_stamp)
+            elif resumed_blocked_wait:
+                if callable(clear_episode):
+                    clear_episode()  # A stationary wait is a fresh semantic boundary.
+                blocked_wait["blocked_wait_camera_recheck_performed"] = True
+                blocked_wait_history[-1]["camera_recheck_performed"] = True
+                observation = self._observe_find_marvin_v2(
+                    reacquisition_source_floor=resumed_blocked_wait["camera_floor"])
             else:
                 observation = self.observe_find_marvin_v2()
             retain("observe", observation)
@@ -1895,7 +2024,9 @@ class CognitiveRuntime:
                         != expected_identity_stamp):
                 return finish("REVERIFY_REQUIRED", "marvin_live_proof_identity_discontinuity")
             if (acquired and observation.get("identity_confirmed") is not True
-                    and observation.get("perception_reason") == "post_action_tracker_continuity_lost"):
+                    and (observation.get("perception_reason") == "post_action_tracker_continuity_lost"
+                         or resumed_blocked_wait is not None and observation.get("perception_reason") in {
+                             "marvin_identity_not_confirmed", "Marvin was not found in the current camera frame."})):
                 # The mission owns recovery. No search or action can occur
                 # until new Gemini identity AND a post-Gemini action frame pass
                 # the normal freshness, LiDAR and motion admission gates below.
@@ -1911,7 +2042,8 @@ class CognitiveRuntime:
                 self._reset_marvin_alignment_consensus()
                 if callable(clear_episode):
                     clear_episode()
-                floor = max(value for value in (previous_stamp, stamp)
+                floor = max(value for value in (previous_stamp, stamp,
+                            resumed_blocked_wait["camera_floor"] if resumed_blocked_wait else None)
                             if type(value) is int)
                 recovered = False
                 while consecutive_reacquisition_failures < self.MAX_CONSECUTIVE_MARVIN_REACQUISITION_FAILURES:
@@ -1967,6 +2099,15 @@ class CognitiveRuntime:
                     return finish("REVERIFY_REQUIRED", "find_marvin_semantic_reacquisition_exhausted")
                 tracker = observation.get("opencv_tracker") or {}
                 stamp = observation.get("source_frame_stamp_ns")
+            if resumed_blocked_wait:
+                identity_stamp = observation.get("identity_source_frame_stamp_ns")
+                if (observation.get("identity_confirmed") is not True
+                        or observation.get("identity_source") != "gemini_marvin_candidate_selection"
+                        or type(identity_stamp) is not int
+                        or identity_stamp <= resumed_blocked_wait["camera_floor"]
+                        or type(stamp) is not int or stamp <= identity_stamp):
+                    return finish("REVERIFY_REQUIRED", "find_marvin_blocked_wait_fresh_identity_required")
+                blocked_resume_context = None
             if acquired and observation.get("identity_confirmed") is not True:
                 return finish("REVERIFY_REQUIRED", observation.get("perception_reason")
                               or observation.get("reason") or "marvin_identity_lost")
@@ -1992,6 +2133,8 @@ class CognitiveRuntime:
                 return finish("BLOCKED", "find_marvin_lidar_producer_session_changed")
             if type(sequence) is not int or sequence < 0 or (prior is not None and sequence <= prior[1]):
                 return finish("BLOCKED", "find_marvin_lidar_acquisition_sequence_invalid")
+            if resumed_blocked_wait and session != resumed_blocked_wait["session"]:
+                return finish("BLOCKED", "find_marvin_lidar_producer_session_changed")
             if (proof_continuation is not None
                     and sequence < proof_continuation.post_lidar_sequence):
                 return finish("BLOCKED", "marvin_live_proof_lidar_discontinuity")
@@ -1999,6 +2142,13 @@ class CognitiveRuntime:
                 expected_identity_stamp = observation.get("identity_source_frame_stamp_ns")
             decision = (observation.get("controller") or {}).get("decision")
             observed_route = (observation.get("arrival") or {}).get("route") or {}
+            if resumed_blocked_wait and observed_route.get("valid"):
+                blocked_wait["blocked_wait_route_obstructed"] = observed_route["route_to_marvin_obstructed"]
+                blocked_wait_history[-1]["semantic_route"] = observed_route
+                if observed_route["route_to_marvin_obstructed"] is False:
+                    blocked_wait["blocked_wait_resume_reason"] = "find_marvin_blocked_wait_route_cleared"
+                previous_selection = stationary_geometry_epoch(previous_selection,
+                    resumed_blocked_wait["entry_route"], observed_route)
             if observed_route.get("valid") and not observed_route.get("route_to_marvin_obstructed"):
                 clear_bypass("direct_path_restored")
             if previous_selection and observation.get("identity_confirmed") is True:
@@ -2216,6 +2366,21 @@ class CognitiveRuntime:
                                             "execution_authorized": False, "actions_executed": 0,
                                             "source_stamp_consumed": False, "full_step_completed": False,
                                             "reason": detour["reason"], "approach_result": {"forward_safety": direct}}})
+                                    if proof_max_physical_actions is None and detour["reason"] in BLOCKED_WAIT_REASONS:
+                                        blocked_wait["blocked_wait_reason"] = detour["reason"]
+                                        waited = self._wait_for_marvin_blocked_route(
+                                            expected_session=session, lidar=lidar, association=standoff,
+                                            execution_guard=current, diagnostics=blocked_wait,
+                                            history=blocked_wait_history)
+                                        retain("blocked_wait", blocked_wait, waited)
+                                        if waited["ok"] is not True:
+                                            return finish("STOPPED" if not current() else "BLOCKED", waited["reason"])
+                                        blocked_resume_context = {
+                                            "camera_floor": stamp, "session": session,
+                                            "lidar_sequence": blocked_wait["blocked_wait_latest_lidar_sequence"],
+                                            "entry_route": waited["entry_route"],
+                                        }
+                                        continue  # Fresh identity; never dispatch this expired observation.
                                     return finish("BLOCKED", detour["reason"])
                                 context = {"previous_direction": previous_direction,
                                     "previous_clearances": previous_clearances,
@@ -2244,6 +2409,7 @@ class CognitiveRuntime:
                 "behavior": "FIND_OBJECT", "target": "marvin", "state": state,
                 "opencv_tracker": tracker, "source_frame_stamp_ns": stamp,
                 **avoidance,
+                **(blocked_wait if proof_max_physical_actions is None else {}),
                 **{key: (observation.get("arrival") or {}).get(key) for key in (
                     "nearest_forward_obstacle_distance_m", "candidate_target_return_distance_m",
                     "verified_marvin_distance_m", "target_range_association_trusted",
@@ -2283,6 +2449,11 @@ class CognitiveRuntime:
                             "observation": observation, "result": result,
                             "action_lidar_evidence": self._marvin_last_action_lidar_evidence,
                             "motion_executed": result.get("motion_executed") is True})
+            if state != "AVOIDING" and result.get("motion_executed") is True and previous_selection:
+                # A stationary geometry epoch expires at the first physical
+                # action. Alignment must never carry its reconsideration grant.
+                previous_selection = dict(previous_selection)
+                previous_selection.pop("stationary_geometry_epoch", None)
             if proof_max_physical_actions is not None:
                 forward = ((result.get("lateral_step") or {}).get("lateral_result") or
                            (result.get("approach_result") or {}).get("forward_result") or {})

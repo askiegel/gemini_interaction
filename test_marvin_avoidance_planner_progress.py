@@ -201,7 +201,9 @@ def test_full_mission_marginal_distance_change_stops_after_one_strafe(tmp_path, 
     bundle, _, _ = strafe_runtime(tmp_path, monkeypatch, [(0,.6)]*3, [LEFT_OPEN, second])
     result = run(bundle[0])
     assert result['state'] == 'BLOCKED'
-    assert result['reason'] == 'find_marvin_local_avoidance_no_progress'
+    assert result['reason'] == 'find_marvin_blocked_wait_exhausted'
+    assert result['blocked_wait_reason'] == 'find_marvin_local_avoidance_no_progress'
+    assert result['blocked_wait_recheck_count'] == 12
     assert motions(bundle[3]) == [('strafe', .08, 1.)]
     assert result['local_avoidance_actions'] == 1
     assert MAX_LOCAL_AVOIDANCE_ACTIONS == result['max_local_avoidance_actions'] == 6

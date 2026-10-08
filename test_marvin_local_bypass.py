@@ -193,7 +193,9 @@ def test_no_progress_bypass_stops_instead_of_repeating_or_exhausting(tmp_path, m
     bundle, _, _ = strafe_runtime(tmp_path, monkeypatch, [(0.,1.1)]*8, [OPEN_LEFT])
     result = run(bundle[0])
     assert motions(bundle[3]) == [('strafe', .08, 1.), ('forward', .1, .5), ('strafe', .08, 1.)]
-    assert result['state'] == 'BLOCKED' and result['reason'] == 'find_marvin_local_avoidance_no_progress'
+    assert result['state'] == 'BLOCKED' and result['reason'] == 'find_marvin_blocked_wait_exhausted'
+    assert result['blocked_wait_reason'] == 'find_marvin_local_avoidance_no_progress'
+    assert result['blocked_wait_recheck_count'] == 12
     assert result['local_avoidance_actions'] == 3
     assert result['local_bypass_actions'] == 1
 

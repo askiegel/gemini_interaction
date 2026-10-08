@@ -217,7 +217,8 @@ def test_production_continuous_loop_uses_one_recovery_and_stops_without_loop(tmp
     assert result['state']=='BLOCKED'
     assert result['local_avoidance_actions']==4 and result['local_bypass_actions']==1
     assert len(motions(bundle[3]))==4
-    assert result['reason']=='find_marvin_local_avoidance_no_progress'
+    assert result['reason']=='find_marvin_blocked_wait_exhausted'
+    assert result['blocked_wait_reason']=='find_marvin_local_avoidance_no_progress'
     assert result['local_avoidance_history'][-2]['selection']['post_bypass_lateral_recovery_selected']
 
 

@@ -244,7 +244,8 @@ def test_saved_live_scan_d0da3104_cannot_declare_arrived(tmp_path, monkeypatch):
     monkeypatch.setattr('runtime.select_marvin_detour', lambda *a, **k: pytest.fail('A clear motion probe cannot trigger detour'))
     mission = run(runtime)
     assert mission['state'] == 'BLOCKED' and not mission['arrived_at_marvin']
-    assert mission['reason'] == 'find_marvin_no_safe_local_detour'
+    assert mission['reason'] == 'find_marvin_blocked_wait_exhausted'
+    assert mission['blocked_wait_reason'] == 'find_marvin_no_safe_local_detour'
     assert mission['final_observation']['route_to_marvin_obstructed']
     assert len(mission['local_avoidance_history'][0]['selection']['options']) == 4
     refresh, = mission['avoidance_lidar_refresh_history']

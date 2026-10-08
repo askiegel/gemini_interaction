@@ -151,7 +151,8 @@ def test_strafe_unsafe_turn_safe_without_real_route_gain_fails_closed(tmp_path,m
     assert selection['options']['TURN_LEFT']['hard_safety_permitted']
     assert not selection['options']['TURN_LEFT']['improves_route']
     assert selection['action_type'] is None
-    assert result['reason']=='find_marvin_no_safe_local_detour'
+    assert result['reason']=='find_marvin_blocked_wait_exhausted'
+    assert result['blocked_wait_reason']=='find_marvin_no_safe_local_detour'
     assert motions(bundle[3])==[]
 
 

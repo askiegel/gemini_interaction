@@ -4,6 +4,7 @@ from copy import deepcopy
 from datetime import datetime, timezone
 import math
 from typing import Any, Dict, Optional
+from marvin_blocked_wait import blocked_wait_diagnostics
 
 
 VISUAL_BEHAVIORS = {
@@ -766,5 +767,6 @@ def build_tracking_state(
             "left_clearance_m", "right_clearance_m", "direct_path_blocked", "avoidance_reason",
             "last_detour_improved_direct_path", "nearest_forward_obstacle_distance_m",
             "candidate_target_return_distance_m", "verified_marvin_distance_m",
-            "target_range_association_trusted", "target_range_association_reason") if key in merged},
+            "target_range_association_trusted", "target_range_association_reason",
+            *blocked_wait_diagnostics()) if key in merged},
     }

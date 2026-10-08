@@ -9,6 +9,7 @@ import math
 
 from guarded_turn_policy import ROTATIONAL_SWEPT_FOOTPRINT, validate_guarded_turn
 from local_motion_safety_envelope import evaluate_local_motion_safety
+from marvin_blocked_wait import stationary_lateral_reconsideration
 
 
 TURN_SPEED = 0.25
@@ -213,7 +214,8 @@ def _select_marvin_escape_action(state, association, *, expected_session,
         # A recovery's first stopped reassessment owns its outcome. An
         # intervening alignment cannot turn a failed recovery into progress.
         frozen = previous_selection.get('first_post_action_lateral_recovery_progress')
-        if (previous_selection.get('post_bypass_lateral_recovery_selected') is True
+        if ((previous_selection.get('post_bypass_lateral_recovery_selected') is True
+                or previous_selection.get('stationary_lateral_reconsidered') is True)
                 and isinstance(frozen, dict) and type(frozen.get('meaningful_progress')) is bool):
             progress = dict(frozen)
         improved = progress['meaningful_progress']
@@ -244,6 +246,12 @@ def _select_marvin_escape_action(state, association, *, expected_session,
                 ineffective.clear()
         else:
             ineffective.add(old)
+        lateral = 'STRAFE_' + old_side
+        option = result['options'].get(lateral, {})
+        if (stationary_lateral_reconsideration(previous_selection, route)
+                and option.get('permitted') is True and option.get('improves_route') is True):
+            ineffective.discard(lateral)
+            result['stationary_lateral_reconsidered'] = True
         result["ineffective_action_types"] = sorted(ineffective)
         eligible = [k for k in eligible if k not in ineffective]
         for k in list(eligible):
@@ -326,7 +334,7 @@ def select_marvin_escape_action(state, association, *, expected_session, allow_s
             ineffective.add(recovery)
         option = result['options'].get(recovery, {})
         reconsider = (not progress['meaningful_progress'] and not side_change_allowed
-            and not used and recovery in ineffective
+            and (not used or stationary_lateral_reconsideration(old, route)) and recovery in ineffective
             and option.get('permitted') is True and option.get('hard_safety_permitted') is True
             and option.get('improves_route') is True
             and (option.get('route_progress') or {}).get('meaningful_progress') is True)
