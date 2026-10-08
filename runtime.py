@@ -126,6 +126,14 @@ class _MarvinLiveProofContinuation:
     completion: dict
 
 
+@dataclass(frozen=True)
+class _MarvinLiveProofReverify:
+    """Retry freshness only; never changes the sealed completion certificate."""
+    checkpoint_digest: str
+    camera_floor_stamp: int
+    lidar_sequence: int
+
+
 def _marvin_proof_selection_history(selection):
     """Retain selector inputs, never old permission, options or JIT results."""
     if selection is None:
@@ -268,6 +276,8 @@ class CognitiveRuntime:
         self._marvin_live_proof_state = "UNINITIALIZED"
         self._marvin_live_proof_continuation = None
         self._marvin_live_proof_checkpoint_digest = None
+        self._marvin_live_proof_reverify = None
+        self._marvin_live_proof_reverify_digest = None
         self._marvin_live_proof_invalidation_reason = None
         self._marvin_controller_lock = threading.RLock()
         self._active_localization_lock = threading.Lock()
@@ -938,6 +948,8 @@ class CognitiveRuntime:
         with self._state_lock:
             self._marvin_live_proof_continuation = None
             self._marvin_live_proof_checkpoint_digest = None
+            self._marvin_live_proof_reverify = None
+            self._marvin_live_proof_reverify_digest = None
             self._marvin_live_proof_state = "FAILED_LOCKED"
             self._marvin_live_proof_invalidation_reason = reason
 
@@ -986,7 +998,22 @@ class CognitiveRuntime:
                     or proof["camera_received_monotonic_seconds"] <= c.action_finished_monotonic_seconds):
                 return False
             episode = getattr(self.behavior_manager, "_marvin_v2_tracker_episode", None)
-            if self._marvin_live_proof_state == "ARMED":
+            retry = self._marvin_live_proof_reverify
+            if (retry is None) != (self._marvin_live_proof_reverify_digest is None):
+                return False
+            if retry is not None and (
+                    type(retry) is not _MarvinLiveProofReverify
+                    or _marvin_proof_checkpoint_digest(retry) != self._marvin_live_proof_reverify_digest
+                    or retry.checkpoint_digest != self._marvin_live_proof_checkpoint_digest
+                    or type(retry.camera_floor_stamp) is not int
+                    or retry.camera_floor_stamp <= c.camera_floor_stamp
+                    or retry.camera_floor_stamp in self._marvin_alignment_consumed_source_frame_stamps
+                    or type(retry.lidar_sequence) is not int
+                    or retry.lidar_sequence < c.post_lidar_sequence):
+                return False
+            if self._marvin_live_proof_state == "REVERIFY_DISARMED" and retry is None:
+                return False
+            if self._marvin_live_proof_state in {"ARMED", "REVERIFY_DISARMED"}:
                 # The sealed completion certificate remains authoritative for
                 # history. No visual episode may survive into a new arm.
                 return episode is None
@@ -1009,7 +1036,7 @@ class CognitiveRuntime:
             with self._state_lock:
                 if not self._marvin_live_proof_idle():
                     return dict(base, reason="marvin_live_proof_runtime_not_idle")
-                if self._marvin_live_proof_state != "COMPLETE_DISARMED":
+                if self._marvin_live_proof_state not in {"COMPLETE_DISARMED", "REVERIFY_DISARMED"}:
                     return dict(base, reason="marvin_live_proof_not_complete_disarmed",
                                 proof_state=self._marvin_live_proof_state)
                 if not self._marvin_live_proof_checkpoint_valid():
@@ -1026,7 +1053,9 @@ class CognitiveRuntime:
                 c = self._marvin_live_proof_continuation
                 if (session != c.producer_session or lidar is None
                         or type(lidar.get("acquisition_sequence")) is not int
-                        or lidar["acquisition_sequence"] < c.post_lidar_sequence):
+                        or lidar["acquisition_sequence"] < max(c.post_lidar_sequence,
+                            self._marvin_live_proof_reverify.lidar_sequence
+                            if self._marvin_live_proof_reverify else c.post_lidar_sequence)):
                     self._invalidate_marvin_live_proof("marvin_live_proof_lidar_discontinuity")
                     return dict(base, reason="marvin_live_proof_lidar_discontinuity")
                 try:
@@ -1038,11 +1067,76 @@ class CognitiveRuntime:
                     self._invalidate_marvin_live_proof("marvin_live_proof_visual_reset_failed")
                     return dict(base, reason="marvin_live_proof_visual_reset_failed")
                 self._marvin_live_proof_state = "ARMED"
-                return dict(base, ok=True, reason="marvin_live_proof_rearmed", proof_state="ARMED")
+                return dict(base, ok=True, reason="marvin_live_proof_rearmed", proof_state="ARMED",
+                    reverify_camera_floor_source_frame_stamp_ns=(self._marvin_live_proof_reverify.camera_floor_stamp
+                        if self._marvin_live_proof_reverify else c.camera_floor_stamp))
         finally:
             if physical_acquired:
                 self._physical_action_lock.release()
             self._marvin_controller_lock.release()
+
+    def _preserve_marvin_proof_semantic_miss(self, result, owner, checkpoint,
+                                           checkpoint_digest, retry_floor, lidar_floor, consumed_before):
+        """Recover only the shared loop's fresh negative, before any planning.
+
+        The old checkpoint is restored verbatim. This separate sealed floor
+        prevents replay without claiming the negative frame completed an action.
+        No exception, tracker/JIT failure or ambiguous delivery is recoverable.
+        """
+        if checkpoint is None or not self._marvin_live_proof_owner_is_current(owner):
+            return False
+        proof = result.get("proof") or {}
+        miss = proof.get("semantic_reverify_miss") or {}
+        stamp = miss.get("source_frame_stamp_ns")
+        if (self._marvin_live_proof_invalidation_reason is not None
+                or self._marvin_live_proof_state != "EXECUTING"
+                or self._physical_action_lock.locked()
+                or _marvin_proof_checkpoint_digest(checkpoint) != checkpoint_digest
+                or result.get("state") != "REVERIFY_REQUIRED"
+                or result.get("reason") not in {
+                    "marvin_identity_not_confirmed",
+                    "Marvin was not found in the current camera frame."}
+                or miss.get("reason") != result.get("reason")
+                or type(stamp) is not int or stamp <= retry_floor
+                or result.get("actions_executed") != 0 or result.get("history") != []
+                or owner.dispatch_opportunities != 0
+                or proof.get("dispatch_opportunities") != 0
+                or proof.get("physical_dispatches_or_uncertain") != 0
+                or proof.get("source_stamps") != []
+                or proof.get("post_action_evidence") is not None
+                or type(miss.get("lidar_sequence")) is not int
+                or miss["lidar_sequence"] < lidar_floor
+                or self._marvin_alignment_consumed_source_frame_stamps != consumed_before
+                or self._marvin_alignment_observation is not None
+                or self.behavior_manager._marvin_v2_tracker_episode is not None
+                or self._marvin_last_action_lidar_evidence != checkpoint.action_lidar_evidence
+                or (result.get("stop_result") or {}).get("ok") is not True
+                or (result.get("bridge_after_stop") or {}).get("ok") is not True):
+            return False
+        # Re-read stopped state and current producer evidence after finish/STOP.
+        bridge = self._marvin_bridge_ready_and_stopped()
+        session, lidar = self._active_localization_lidar_is_current()
+        if (bridge.get("ok") is not True or bridge.get("status") != "READY"
+                or (bridge.get("motion") or {}).get("last_command_at") != miss.get("last_command_at")
+                or ((result.get("bridge_after_stop") or {}).get("motion") or {}).get("last_command_at")
+                    != miss.get("last_command_at")
+                or session != checkpoint.producer_session or lidar is None
+                or type(lidar.get("acquisition_sequence")) is not int
+                or lidar["acquisition_sequence"] < miss["lidar_sequence"]):
+            return False
+        self._marvin_live_proof_continuation = checkpoint
+        self._marvin_live_proof_checkpoint_digest = checkpoint_digest
+        retry = _MarvinLiveProofReverify(checkpoint_digest, stamp, lidar["acquisition_sequence"])
+        self._marvin_live_proof_reverify = retry
+        self._marvin_live_proof_reverify_digest = _marvin_proof_checkpoint_digest(retry)
+        self._marvin_live_proof_state = "REVERIFY_DISARMED"
+        if not self._marvin_live_proof_checkpoint_valid():
+            return False
+        self._marvin_target_range_association.__dict__.clear()
+        self._marvin_target_range_association.__dict__.update(copy.deepcopy(checkpoint.range_association))
+        proof["cumulative_actions_completed"] = len(checkpoint.action_history)
+        proof["planning_checkpoint_preserved"] = True
+        return True
 
     def execute_find_marvin_live_proof_step(self, *, max_physical_actions):
         """One explicitly armed step of the real loop, with no queued mission.
@@ -1072,17 +1166,30 @@ class CognitiveRuntime:
                         or self.world_model.robot_state.get("runtime_state") != "IDLE"):
                     return dict(base, reason="marvin_live_proof_runtime_not_idle")
                 continuation = None
+                checkpoint = None
+                checkpoint_digest = None
+                retry_floor = None
+                lidar_floor = None
                 if self._marvin_live_proof_state == "ARMED":
                     if not self._marvin_live_proof_checkpoint_valid():
                         self._invalidate_marvin_live_proof("marvin_live_proof_continuation_invalid")
                         return dict(base, reason="marvin_live_proof_continuation_invalid")
                     continuation = copy.deepcopy(self._marvin_live_proof_continuation)
+                    checkpoint = self._marvin_live_proof_continuation
+                    checkpoint_digest = self._marvin_live_proof_checkpoint_digest
+                    retry = self._marvin_live_proof_reverify
+                    retry_floor = retry.camera_floor_stamp if retry else checkpoint.camera_floor_stamp
+                    lidar_floor = (retry.lidar_sequence
+                        if retry else checkpoint.post_lidar_sequence)
                 if self._physical_action_lock.locked():
                     return dict(base, reason="marvin_live_proof_physical_owner_busy")
                 self._marvin_live_proof_consumed = True
                 self._marvin_live_proof_state = "EXECUTING"  # Consume before observation/dispatch.
                 self._marvin_live_proof_continuation = None
                 self._marvin_live_proof_checkpoint_digest = None
+                self._marvin_live_proof_reverify = None
+                self._marvin_live_proof_reverify_digest = None
+                self._marvin_live_proof_invalidation_reason = None
                 consumed_before = set(self._marvin_alignment_consumed_source_frame_stamps)
                 owner = _MarvinLiveProofOwner("marvin-proof-" + uuid.uuid4().hex,
                     self._control_generation, threading.get_ident())
@@ -1094,7 +1201,8 @@ class CognitiveRuntime:
             try:
                 result = self._execute_normal_marvin_find_mission_locked(
                     owner, control_generation=owner.generation,
-                    proof_max_physical_actions=1, proof_continuation=continuation)
+                    proof_max_physical_actions=1, proof_continuation=continuation,
+                    proof_reverify_camera_floor=retry_floor, proof_reverify_lidar_floor=lidar_floor)
             except Exception as exc:
                 try:
                     stopped = self.robot_client.stop()
@@ -1110,9 +1218,19 @@ class CognitiveRuntime:
                         "source_stamps": [{"source_frame_stamp_ns": stamp, "consumed": True}
                             for stamp in sorted(self._marvin_alignment_consumed_source_frame_stamps - consumed_before)]})
             with self._state_lock:
+                recovered = False
+                if result.get("state") != "PROOF_COMPLETE":
+                    try:
+                        recovered = self._preserve_marvin_proof_semantic_miss(result, owner,
+                            checkpoint, checkpoint_digest, retry_floor, lidar_floor, consumed_before)
+                    except Exception:
+                        # Verification errors never turn into recoverable perception.
+                        recovered = False
                 if (result.get("state") == "PROOF_COMPLETE"
                         and self._marvin_live_proof_checkpoint_valid()):
                     self._marvin_live_proof_state = "COMPLETE_DISARMED"
+                elif recovered:
+                    pass  # Disarmed; only an explicit re-arm can invoke another attempt.
                 else:
                     self._invalidate_marvin_live_proof(result.get("reason") or "marvin_live_proof_failed")
                     if result.get("state") == "ARRIVED" and result.get("ok") is True:
@@ -1129,7 +1247,9 @@ class CognitiveRuntime:
                 motion_executed=result.get("actions_executed", 0) > 0,
                 reason=result.get("reason"), controller_result=result,
                 proof_state=self._marvin_live_proof_state,
-                continuation_available=self._marvin_live_proof_continuation is not None)
+                continuation_available=self._marvin_live_proof_continuation is not None,
+                reverify_camera_floor_source_frame_stamp_ns=(self._marvin_live_proof_reverify.camera_floor_stamp
+                    if self._marvin_live_proof_reverify else None))
         finally:
             try:
                 if owner is not None:
@@ -1432,6 +1552,8 @@ class CognitiveRuntime:
     def _execute_normal_marvin_find_mission_locked(
         self, mission, *, control_generation=None, proof_max_physical_actions=None,
         proof_continuation=None,
+        proof_reverify_camera_floor=None,
+        proof_reverify_lidar_floor=None,
     ):
         """Own the complete V2 observe/action/STOP loop for one mission."""
         if proof_max_physical_actions is not None and (
@@ -1440,6 +1562,7 @@ class CognitiveRuntime:
             return {"ok": False, "reason": "marvin_live_proof_owner_or_limit_invalid"}
         proof_dispatches = 0
         proof_post_action_evidence = None
+        proof_semantic_miss = None
         behavior = self.behavior_manager
         if control_generation is None:
             control_generation = self._control_generation
@@ -1488,7 +1611,8 @@ class CognitiveRuntime:
             avoidance_history = copy.deepcopy(c.avoidance_history)
             avoidance_lidar_refresh_history = copy.deepcopy(c.avoidance_lidar_refresh_history)
             previous_stamp = c.previous_stamp
-            camera_floor_stamp = c.camera_floor_stamp
+            camera_floor_stamp = max(c.camera_floor_stamp,
+                proof_reverify_camera_floor if proof_reverify_camera_floor is not None else c.camera_floor_stamp)
             # Prior identity is historical evidence, never resumed authority.
             action_finished_monotonic_seconds = c.action_finished_monotonic_seconds
             prior_action_state = c.last_action_state
@@ -1616,6 +1740,8 @@ class CognitiveRuntime:
                     "post_action_evidence": proof_post_action_evidence,
                     "action_complete": safe and state == "PROOF_COMPLETE",
                 }
+                if proof_semantic_miss is not None:
+                    result["proof"]["semantic_reverify_miss"] = proof_semantic_miss
                 if resumable:
                     evidence = proof_post_action_evidence
                     post = evidence["observation"]
@@ -1704,6 +1830,11 @@ class CognitiveRuntime:
                     return finish("STOPPED" if not current() else "BLOCKED", wait["reason"])
             # No camera/semantic decision is made before the stopped LiDAR wait.
             if proof_resume_observation_pending:
+                session, resume_lidar = self._active_localization_lidar_is_current()
+                if (session != proof_continuation.producer_session or resume_lidar is None
+                        or type(resume_lidar.get("acquisition_sequence")) is not int
+                        or resume_lidar["acquisition_sequence"] < proof_reverify_lidar_floor):
+                    return finish("BLOCKED", "marvin_live_proof_lidar_discontinuity")
                 # Reuse the normal stopped semantic reacquisition path. It
                 # obtains fresh Gemini identity and a subsequent action frame.
                 observation = self._observe_find_marvin_v2(
@@ -1718,6 +1849,24 @@ class CognitiveRuntime:
             strict_episode = observation.get("strict_tracker_episode")
             if proof_resume_observation_pending:
                 identity_stamp = observation.get("identity_source_frame_stamp_ns")
+                # Explicit fresh negatives are the only recovery candidates.
+                # This point precedes range/route planning and all JIT/dispatch.
+                miss_reason = observation.get("perception_reason")
+                miss_stamp = (identity_stamp if miss_reason == "marvin_identity_not_confirmed"
+                              else stamp)
+                if (miss_reason in {"marvin_identity_not_confirmed",
+                                    "Marvin was not found in the current camera frame."}
+                        and observation.get("identity_confirmed") is False
+                        and observation.get("target_found") is False
+                        and observation.get("strict_tracker_episode") is None
+                        and tracker.get("active") is False
+                        and tracker.get("matched") is False
+                        and tracker.get("source_frame_stamp_ns") is None
+                        and type(miss_stamp) is int and miss_stamp > camera_floor_stamp):
+                    proof_semantic_miss = {"reason": miss_reason, "source_frame_stamp_ns": miss_stamp,
+                        "lidar_sequence": resume_lidar["acquisition_sequence"],
+                        "last_command_at": (bridge.get("motion") or {}).get("last_command_at")}
+                    return finish("REVERIFY_REQUIRED", miss_reason)
                 if (observation.get("ok") is not True
                         or observation.get("identity_confirmed") is not True
                         or observation.get("identity_source") != "gemini_marvin_candidate_selection"

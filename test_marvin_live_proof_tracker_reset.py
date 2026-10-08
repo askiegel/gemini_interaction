@@ -210,9 +210,12 @@ def test_fresh_visual_failure_locks_without_old_tracker_fallback(tmp_path, monke
     result = step(r)
     assert not result["motion_executed"] and len(motions(events)) == 1
     assert r._marvin_alignment_consumed_source_frame_stamps == consumed
-    assert result["proof_state"] == "FAILED_LOCKED" and not result["continuation_available"]
+    recoverable = fault == "gemini_negative"
+    assert result["proof_state"] == ("REVERIFY_DISARMED" if recoverable else "FAILED_LOCKED")
+    assert result["continuation_available"] is recoverable
     assert b._marvin_v2_tracker_episode is None and r._marvin_alignment_observation is None
-    assert not arm(r)["ok"] and not step(r)["execution_authorized"]
+    assert not step(r)["execution_authorized"]
+    assert arm(r)["ok"] is recoverable
     assert b.created_trackers.count(old) == 1
     assert events[-1] == "stop"
 
