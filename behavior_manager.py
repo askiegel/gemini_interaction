@@ -9,6 +9,7 @@ from guarded_turn_policy import (
     validate_guarded_turn,
 )
 from lidar_perception import MAXIMUM_EFFECTIVE_AGE_SECONDS
+from marvin_blocked_wait import pre_transport_jit_veto_evidence
 from local_obstacle_policy import (
     plan_local_obstacle_avoidance,
     recommend_local_avoidance,
@@ -4432,10 +4433,13 @@ class BehaviorManager:
             return dict(base, reason="marvin_single_approach_lidar_not_trusted")
         if safety.get("permitted") is not True:
             return dict(base, reason="marvin_single_approach_translation_vetoed")
+        bypass_sample = None
         def bypass_dispatch_guard():
+            nonlocal bypass_sample
             if dispatch_guard is None or not dispatch_guard():
                 return False
             sample = self.world_model.get_lidar_obstacles(expected_session=expected_lidar_session)
+            bypass_sample = sample
             selection = local_selection_validator(sample)
             safe = evaluate_local_motion_safety(sample, expected_session=expected_lidar_session,
                 linear_x=linear_speed, duration=duration)
@@ -4452,7 +4456,12 @@ class BehaviorManager:
             if dispatch_guard is not None and dispatch_guard() is not True:
                 return dict(base, reason="marvin_motion_observation_stale_or_preempted")
             if local_selection_validator is not None and not bypass_dispatch_guard():
-                return dict(base, reason="marvin_local_bypass_jit_veto")
+                veto = ((base.get("local_detour") or {}).get("accepted") is False
+                    or (base.get("forward_safety") or {}).get("permitted") is False)
+                return dict(base, reason="marvin_local_bypass_jit_veto",
+                    **({"pre_transport_jit_veto": pre_transport_jit_veto_evidence(
+                        bypass_sample, (base.get("local_detour") or {}).get("target_association"))}
+                       if veto and bypass_sample is not None else {}))
             self._emit_marvin_command_diagnostic(
                 "start", start_monotonic_seconds=time.monotonic(), linear_x=linear_speed, linear_y=0.0,
                 angular_z=0.0, duration=duration,
@@ -4501,13 +4510,16 @@ class BehaviorManager:
         if interlock is None or not callable(getattr(self.robot, "move_lateral", None)):
             return dict(base, reason="marvin_lateral_interlock_unavailable")
         evidence = {}
+        veto_sample = None
 
         def final_guard():
+            nonlocal veto_sample
             if not dispatch_guard():
                 evidence["reason"] = "marvin_motion_observation_stale_or_preempted"
                 return False
             try:
                 lidar = self.world_model.get_lidar_obstacles(expected_session=expected_lidar_session)
+                veto_sample = lidar
                 safe = evaluate_local_motion_safety(lidar, expected_session=expected_lidar_session,
                     linear_y=linear_y, duration=duration, lateral_swept_footprint=True)
                 selection = selection_validator(lidar)
@@ -4528,6 +4540,10 @@ class BehaviorManager:
             return dispatch_guard()
 
         if not final_guard():
+            if evidence.get("reason") == "marvin_local_detour_jit_veto":
+                return dict(base, **evidence,
+                    pre_transport_jit_veto=pre_transport_jit_veto_evidence(
+                        veto_sample, (evidence.get("local_detour") or {}).get("target_association")))
             return dict(base, **evidence)
         try:
             self._emit_marvin_command_diagnostic("start", start_monotonic_seconds=time.monotonic(),

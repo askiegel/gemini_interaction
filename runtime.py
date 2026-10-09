@@ -27,6 +27,7 @@ from marvin_blocked_wait import (
     BLOCKED_WAIT_REASONS, INITIAL_RECHECK_SECONDS, MAX_RECHECK_SECONDS,
     MAX_RECHECKS, MAX_STATIONARY_SECONDS, blocked_wait_diagnostics,
     material_route_change, stationary_geometry_epoch,
+    pre_transport_jit_veto_evidence, explicit_pre_transport_jit_veto,
 )
 from marvin_local_bypass import plan_local_bypass, evaluate_avoidance_progress
 from marvin_progress_diagnostics import MarvinProgressDiagnostics
@@ -43,7 +44,7 @@ from marvin_pursuit_state import (
 )
 from config import load_config
 from lidar_perception import (
-    LidarPerceptionWorker, MAXIMUM_EFFECTIVE_AGE_SECONDS, unavailable_state,
+    LidarPerceptionWorker, MAXIMUM_EFFECTIVE_AGE_SECONDS, unavailable_state, read_lidar_state,
 )
 from robot_bridge.forward_interlock import (
     ForwardMotionInterlock,
@@ -1502,6 +1503,77 @@ class CognitiveRuntime:
             time.sleep(min(self.MARVIN_NEW_LIDAR_POLL_SECONDS,
                            max(0.0, deadline - time.monotonic())))
 
+    def _marvin_jit_veto_wait_evidence(self, result, *, stamp, expected_session,
+                                     planning_sequence, execution_guard):
+        """Fail-closed admission for a certified pre-transport production veto."""
+        if not explicit_pre_transport_jit_veto(result) or not execution_guard():
+            return None
+        evidence = result["pre_transport_jit_veto"]
+        snapshot, association = evidence.get("lidar_snapshot"), evidence.get("target_association")
+        if not isinstance(snapshot, dict) or not isinstance(association, dict):
+            return None
+        if (type(stamp) is not int or type(result.get("source_frame_stamp_ns")) is not int
+                or result.get("source_frame_stamp_ns") != stamp
+                or result.get("source_stamp_consumed", stamp in self._marvin_alignment_consumed_source_frame_stamps)
+                    is not (stamp in self._marvin_alignment_consumed_source_frame_stamps)):
+            return None
+        if result.get("stop_result") is not None and (
+                not isinstance(result["stop_result"], dict) or result["stop_result"].get("ok") is not True):
+            return None  # A failed STOP is never repaired into wait admission.
+        worker = self.lidar_worker
+        if worker.running is not True or worker.session != expected_session:
+            return None
+        snapshot = read_lidar_state(snapshot, expected_session=expected_session)
+        sequence = snapshot.get("acquisition_sequence")
+        if (not _marvin_alignment_lidar_is_current(snapshot, expected_session)
+                or type(sequence) is not int or type(planning_sequence) is not int
+                or sequence < planning_sequence or association.get("ok") is not True
+                or association.get("producer_session") != expected_session
+                or type(association.get("acquisition_sequence")) is not int
+                or association.get("acquisition_sequence") != sequence):
+            return None
+        sectors = snapshot["local_motion_geometry"].get("sectors") or {}
+        if not isinstance(sectors, dict) or any(not isinstance(sectors.get(name), dict)
+                or (sectors.get(name) or {}).get("available") is not True
+                or type((sectors.get(name) or {}).get("valid_sample_count")) is not int
+                or (sectors.get(name) or {}).get("valid_sample_count", 0) < MINIMUM_VALID_SAMPLES_PER_REQUIRED_SECTOR
+                for name, _, _ in OCTANT_SECTORS):
+            return None
+        points = snapshot["local_motion_geometry"].get("points")
+        if not isinstance(points, list) or any(not isinstance(point, dict) for point in points):
+            return None
+        route = evaluate_marvin_route(snapshot, association, expected_session=expected_session)
+        if route.get("valid") is not True or route.get("route_to_marvin_obstructed") is not True:
+            return None
+        try:
+            interlock = self.forward_interlock.status() if self.forward_interlock is not None else {}
+        except Exception:
+            return None
+        if (not isinstance(interlock, dict) or interlock.get("active_forward") is not False
+                or interlock.get("pending_forward") is not False):
+            return None
+        try:
+            stop = self.robot_client.stop()
+        except Exception:
+            return None
+        bridge = self._marvin_bridge_ready_and_stopped()
+        if (not isinstance(stop, dict) or stop.get("ok") is not True
+                or bridge.get("ok") is not True or bridge.get("status") != "READY"
+                or any((bridge.get("motion") or {}).get(k) != 0 for k in ("linear_x", "linear_y", "angular_z"))
+                or not execution_guard() or worker.session != expected_session or worker.running is not True):
+            return None
+        snapshot = read_lidar_state(snapshot, expected_session=expected_session)
+        if not _marvin_alignment_lidar_is_current(snapshot, expected_session):
+            return None
+        try:
+            interlock = self.forward_interlock.status()
+        except Exception:
+            return None
+        if (not isinstance(interlock, dict) or interlock.get("active_forward") is not False
+                or interlock.get("pending_forward") is not False):
+            return None
+        return {"snapshot": snapshot, "association": dict(association, route=route)}
+
     def _wait_for_marvin_blocked_route(self, *, expected_session, lidar, association,
                                      execution_guard, diagnostics, history):
         """Production-only stationary re-sensing. Returns a wakeup, never authority.
@@ -1762,6 +1834,7 @@ class CognitiveRuntime:
             # Capture the first valid reassessment of the last physical detour.
             # Later alignment or planning must not overwrite that action's outcome.
             if (not previous_selection or
+                    (history and history[-1].get("motion_executed") is not True) or
                     (history[-1]["state"] if history else prior_action_state) != "AVOIDING"
                     or not route.get("valid") or not avoidance_history
                     or avoidance_history[-1].get("actual_route_occupancy") is not None):
@@ -2502,6 +2575,25 @@ class CognitiveRuntime:
             if not current():
                 return finish("STOPPED", "find_marvin_mission_preempted")
             if result.get("ok") is not True or result.get("motion_executed") is not True:
+                if proof_max_physical_actions is None and state == "AVOIDING":
+                    veto = self._marvin_jit_veto_wait_evidence(result, stamp=stamp,
+                        expected_session=session, planning_sequence=detour.get("acquisition_sequence"),
+                        execution_guard=current)
+                    if veto is not None:
+                        blocked_wait["blocked_wait_reason"] = result["reason"]
+                        avoidance_history[-1].update(vetoed_before_transport=True,
+                            execution_admitted=result.get("execution_authorized") is True, dispatched=False,
+                            transport_attempted=False, delivery_uncertain=False,
+                            jit_veto_lidar_sequence=veto["snapshot"]["acquisition_sequence"])
+                        waited = self._wait_for_marvin_blocked_route(
+                            expected_session=session, lidar=veto["snapshot"], association=veto["association"],
+                            execution_guard=current, diagnostics=blocked_wait, history=blocked_wait_history)
+                        if waited["ok"] is not True:
+                            return finish("STOPPED" if not current() else "BLOCKED", waited["reason"])
+                        blocked_resume_context = {"camera_floor": stamp, "session": session,
+                            "lidar_sequence": blocked_wait["blocked_wait_latest_lidar_sequence"],
+                            "entry_route": waited["entry_route"]}
+                        continue  # Keep the veto stamp consumed; never retry its action.
                 forward = ((result.get("lateral_step") or {}).get("lateral_result") or
                     (result.get("approach_result") or {}).get("forward_result") or {})
                 recoverable = (state in {"ADVANCING", "AVOIDING"} and result.get("interrupted") is True
@@ -3806,7 +3898,8 @@ class CognitiveRuntime:
 
             selection = validate_selection(lidar)
             if not selection.get("accepted"):
-                return dict(base, reason="marvin_local_detour_jit_veto", local_detour=selection)
+                return dict(base, reason="marvin_local_detour_jit_veto", local_detour=selection,
+                    pre_transport_jit_veto=pre_transport_jit_veto_evidence(lidar, selection.get("target_association")))
             duration = selection["options"][kind]["requested_duration"]
             base["requested_duration"] = duration
             # Permanently consume before any transport. Diagnostics never seed this set.
@@ -3845,6 +3938,7 @@ class CognitiveRuntime:
             lateral_step=step, stop_result=stopped, bridge_after_stop=zero,
             bridge_stop_confirmed=stop_ok,
             local_detour=step.get("local_detour") or selection,
+            **({"pre_transport_jit_veto": step["pre_transport_jit_veto"]} if "pre_transport_jit_veto" in step else {}),
             reason="marvin_lateral_step_complete" if moved and stop_ok else
                 step.get("reason") if not moved else "marvin_lateral_stop_unconfirmed")
 
@@ -3987,14 +4081,16 @@ class CognitiveRuntime:
                         previous_selection=local_detour_context.get("previous_selection"),
                         remaining_avoidance_actions=local_detour_context.get("remaining_avoidance_actions", self.MAX_LOCAL_AVOIDANCE_ACTIONS))
                     if detour.get("action_type") != local_detour_context["selected_action_type"]:
-                        return dict(base, reason="marvin_local_detour_jit_veto", local_detour=detour)
+                        return dict(base, reason="marvin_local_detour_jit_veto", local_detour=detour,
+                            pre_transport_jit_veto=pre_transport_jit_veto_evidence(lidar, standoff))
                 else:
                     detour = select_marvin_detour(lidar, expected_session=session,
                         forward_speed=FIND_MARVIN_FORWARD_SPEED_MPS, forward_duration=effective_duration,
                         previous_direction=local_detour_context.get("previous_direction"),
                         previous_clearances=local_detour_context.get("previous_clearances"))
                 if detour["direction"] != normalized_direction:
-                    return dict(base, reason="marvin_local_detour_jit_veto", local_detour=detour)
+                    return dict(base, reason="marvin_local_detour_jit_veto", local_detour=detour,
+                        pre_transport_jit_veto=pre_transport_jit_veto_evidence(lidar, standoff))
                 base.update(action="single_marvin_local_detour_turn", local_detour=detour)
             # Consume before guarded dispatch: any later transport ambiguity or
             # JIT veto requires a genuinely new strict observation, preventing
@@ -4214,7 +4310,8 @@ class CognitiveRuntime:
             if bypass_mode:
                 selection = validate_bypass(lidar)
                 if not selection.get("accepted"):
-                    return dict(base, reason="marvin_local_bypass_jit_veto", local_detour=selection)
+                    return dict(base, reason="marvin_local_bypass_jit_veto", local_detour=selection,
+                        pre_transport_jit_veto=pre_transport_jit_veto_evidence(lidar, selection.get("target_association")))
                 effective_duration = float(duration)
                 base.update(action_type="BYPASS_FORWARD", direction=selection["direction"], local_detour=selection)
             else:
@@ -4274,6 +4371,8 @@ class CognitiveRuntime:
                     full_step_completed=moved and stop_ok,
                     actual_confirmed_run_duration_seconds=None,
                     approach_result=approach_result, stop_result=stop_result,
+                    **({"pre_transport_jit_veto": approach_result["pre_transport_jit_veto"]}
+                        if "pre_transport_jit_veto" in approach_result else {}),
                     reason=("marvin_approach_step_complete" if moved and stop_ok else
                             (approach_result.get("reason", "marvin_approach_step_failed")
                              if isinstance(approach_result, dict) else "marvin_approach_step_failed")))

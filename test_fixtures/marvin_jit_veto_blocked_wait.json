@@ -1,0 +1,13 @@
+{
+  "origin": "mission-8bfdb2e9 recorded metrics; calibrated synthetic points, original planning/JIT raw scans unavailable",
+  "blocked_baseline": {"occupancy": 21, "overlap_m": 0.359168, "blocker_range_m": 0.595511},
+  "completed_primitives": ["STRAFE_LEFT", "TURN_RIGHT", "TURN_RIGHT"],
+  "camera_horizontal_errors": [0, 72, 56, 14, 14, 14],
+  "planning_sequence": 5957,
+  "jit_sequence": 5958,
+  "synthetic_jit_invalidation": "fresh protected-footprint hazard; real outer executor guard vetoes transport",
+  "veto_source_stamp": "1791504411407983987",
+  "expected_avoidance_count_at_veto": 1,
+  "expected_bypass_count_at_veto": 0,
+  "expected_resume": "FORWARD"
+}

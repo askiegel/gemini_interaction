@@ -13,10 +13,66 @@ BLOCKED_WAIT_REASONS = frozenset({
     "find_marvin_local_bypass_no_progress",
     "find_marvin_no_safe_local_detour",
 })
+PRE_TRANSPORT_JIT_WAIT_REASONS = frozenset({
+    "marvin_local_detour_jit_veto", "marvin_local_bypass_jit_veto",
+})
 INITIAL_RECHECK_SECONDS = 0.5
 MAX_RECHECK_SECONDS = 2.0
 MAX_RECHECKS = 12
 MAX_STATIONARY_SECONDS = 30.0
+
+
+def pre_transport_jit_veto_evidence(snapshot, association):
+    """Issued only at an executor return BEFORE calling any motion transport.
+
+    This is negative dispatch evidence, never permission to move. The runtime
+    independently validates the snapshot, ownership and STOP before waiting.
+    """
+    return {"phase": "before_transport_call", "transport_attempted": False,
+            "delivery_uncertain": False, "physical_dispatch_confirmed": False,
+            "lidar_snapshot": copy.deepcopy(snapshot),
+            "target_association": copy.deepcopy(association)}
+
+
+def explicit_pre_transport_jit_veto(result):
+    if (not isinstance(result, dict) or not isinstance(result.get("reason"), str)
+            or result.get("reason") not in PRE_TRANSPORT_JIT_WAIT_REASONS
+            or result.get("ok") is not False or result.get("motion_executed") is not False
+            or type(result.get("actions_executed")) is not int or result["actions_executed"] != 0):
+        return False
+    evidence = result.get("pre_transport_jit_veto")
+    if (not isinstance(evidence, dict) or evidence.get("phase") != "before_transport_call"
+            or any(evidence.get(k) is not False for k in (
+                "transport_attempted", "delivery_uncertain", "physical_dispatch_confirmed"))):
+        return False
+    # A reason/certificate cannot override contradictory nested executor data.
+    stack, seen = [(result, 0)], set()
+    while stack:
+        value, depth = stack.pop()
+        if depth > 30:
+            return False
+        if isinstance(value, (dict, list)):
+            if id(value) in seen:
+                continue
+            seen.add(id(value))
+        if isinstance(value, dict):
+            for key, item in value.items():
+                if key in {"transport_attempted", "delivery_uncertain", "physical_dispatch_confirmed",
+                           "confirmed_forwarded", "forwarded", "motion_executed", "interrupted"} and item is not False:
+                    return False
+                if key in {"transport_result", "lateral_result", "forward_result", "turn_result"} and item is not None:
+                    return False
+                if key in {"full_step_completed", "physical_motion", "delivery_uncertainty"} and item is not False:
+                    return False
+                if key in {"actions_executed", "physical_dispatch_count", "dispatch_opportunities"} and (
+                        type(item) is not int or item != 0):
+                    return False
+                if key in {"error", "transport_error", "exception"} and item:
+                    return False
+                stack.append((item, depth + 1))
+        elif isinstance(value, list):
+            stack.extend((item, depth + 1) for item in value)
+    return True
 
 
 def blocked_wait_diagnostics():
