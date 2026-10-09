@@ -385,15 +385,17 @@ def test_a6c4d675_replay_resets_trackers_and_keeps_cumulative_six_action_budget(
         assert b._target_bbox_iou({'bbox':old['tracker_bbox']},obs['opencv_tracker'])<.70
     selected=[x['controller_result']['history'][0]['result'].get('action_type') or
               x['controller_result']['history'][0]['state'] for x in results]
-    assert selected==['ADVANCING']+['STRAFE_LEFT']*5+['BYPASS_FORWARD']
+    # Mixed counterfactual sensor progression spends exactly the original six
+    # slots: early handoff, measured passage, then the existing lateral policy.
+    assert selected==['ADVANCING','STRAFE_LEFT','STRAFE_LEFT']+['BYPASS_FORWARD']*3+['STRAFE_LEFT']
     c=r._marvin_live_proof_continuation
-    assert c.avoidance['local_avoidance_actions']==6 and c.avoidance['local_bypass_actions']==1
-    bypass=results[-1]['controller_result']['history'][0]['result']
+    assert c.avoidance['local_avoidance_actions']==6 and c.avoidance['local_bypass_actions']==3
+    bypass=results[5]['controller_result']['history'][0]['result']
     target=bypass['local_detour']['local_bypass']
     assert bypass['direction']=='LEFT' and target['bypass_target_x_m']<=.15 and target['protected_radius_m']==.45
     assert bypass['approach_result']['forward_safety']['permitted']
-    assert bypass['local_detour']['acquisition_sequence']>results[-1]['controller_result']['avoidance_planning_lidar_sequence']
-    assert motions(events)[-1]==('forward',.1,.5)
+    assert bypass['local_detour']['acquisition_sequence']>results[5]['controller_result']['avoidance_planning_lidar_sequence']
+    assert motions(events)[5]==('forward',.1,.5)
     assert not step(r)['execution_authorized'] and len(motions(events))==7
     clear[0]=True;b.specs=iter([(0,1.38),(0,1.33)])
     assert arm(r)['ok'];direct=step(r);complete(bundle,direct,7)

@@ -338,11 +338,13 @@ def test_saved_a6c4d675_replay_survives_miss_reaches_bypass_direct_and_arrival(t
             b.confirm_identity=True
         assert arm(r)['ok']; b.visual_shift=110*(count%2)
         result=step(r); complete(bundle,result,count); results.append(result)
+        if result['controller_result']['history'][0]['result'].get('action_type') == 'BYPASS_FORWARD':
+            break  # Handoff now precedes the old five-strafe prefix.
     selected=[x['controller_result']['history'][0]['result'].get('action_type') or
         x['controller_result']['history'][0]['state'] for x in results]
-    assert selected==['ADVANCING']+['STRAFE_LEFT']*5+['BYPASS_FORWARD']
+    assert selected==['ADVANCING','STRAFE_LEFT','STRAFE_LEFT','BYPASS_FORWARD']
     c=r._marvin_live_proof_continuation
-    assert c.avoidance['local_avoidance_actions']==6 and c.avoidance['local_bypass_actions']==1
+    assert c.avoidance['local_avoidance_actions']==3 and c.avoidance['local_bypass_actions']==1
     bypass=results[-1]['controller_result']['history'][0]['result']
     target=bypass['local_detour']['local_bypass']
     assert bypass['direction']=='LEFT' and target['bypass_target_x_m']<=.15 and target['protected_radius_m']==.45
@@ -350,18 +352,18 @@ def test_saved_a6c4d675_replay_survives_miss_reaches_bypass_direct_and_arrival(t
     assert bypass['approach_result']['forward_safety']['permitted']
     assert bypass['local_detour']['acquisition_sequence']>results[-1]['controller_result']['avoidance_planning_lidar_sequence']
     assert motions(events)[-1]==('forward',.1,.5)
-    assert not step(r)['execution_authorized'] and len(motions(events))==7
+    assert not step(r)['execution_authorized'] and len(motions(events))==4
     clear[0]=True; b.specs=iter([(0,1.38),(0,1.33)])
-    assert arm(r)['ok']; direct=step(r); complete(bundle,direct,7)
+    assert arm(r)['ok']; direct=step(r); complete(bundle,direct,4)
     assert direct['controller_result']['history'][0]['state']=='ADVANCING'
     assert r._marvin_live_proof_continuation.previous_selection is None
     assert r._marvin_live_proof_continuation.avoidance['local_bypass_target_x_m'] is None
-    direct_count=8
+    direct_count=5
     for cm in range(128,57,-5):
         b.specs=iter([(0,cm/100),(0,(cm-5)/100)])
         assert arm(r)['ok']; result=step(r); complete(bundle,result,direct_count)
         assert result['controller_result']['history'][0]['state']=='ADVANCING'
-        assert result['controller_result']['local_avoidance_actions']==6
+        assert result['controller_result']['local_avoidance_actions']==3
         direct_count+=1
     b.specs=iter([(0,.5)])
     assert arm(r)['ok']; arrival=step(r)

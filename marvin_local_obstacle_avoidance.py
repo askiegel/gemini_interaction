@@ -267,11 +267,77 @@ def _select_marvin_escape_action(state, association, *, expected_session,
     return dict(result, action_type=chosen, direction=chosen.split('_')[1], reason='find_marvin_local_detour_selected')
 
 
+def _bypass_handoff(result, previous_selection, bypass, progress, *, expected_session,
+                    remaining_avoidance_actions):
+    """Compare lateral gain with forward passage after a measured lateral action.
+
+    The first stopped outcome is history, not a permission. A route-clearing
+    strafe wins; otherwise forward passage may win within the existing 3 mm
+    ranking tolerance. Nominal motion is used only for the fresh prediction.
+    """
+    old = previous_selection or {}
+    kind, side = result.get('action_type'), old.get('direction')
+    lateral = result['options'].get(kind, {})
+    lateral_progress = lateral.get('route_progress') or {}
+    gain = max(lateral_progress.get('corridor_overlap_reduction_m') or 0.,
+               lateral_progress.get('centerline_clearance_improvement_m') or 0., 0.)
+    evidence = old.get('first_post_action_strafe_progress')
+    evidence = evidence if isinstance(evidence, dict) else {}
+    measured = evidence.get('progress')
+    measured = measured if isinstance(measured, dict) else {}
+    diagnostic = dict(eligible=False, selected=False, reason='same_side_lateral_history_required',
+        established_side=side, current_avoidance_count=MAX_LOCAL_AVOIDANCE_ACTIONS-remaining_avoidance_actions,
+        remaining_avoidance_actions=remaining_avoidance_actions,
+        predicted_strafe_overlap_improvement_m=lateral_progress.get('corridor_overlap_reduction_m'),
+        predicted_strafe_centerline_improvement_m=lateral_progress.get('centerline_clearance_improvement_m'),
+        predicted_bypass_longitudinal_improvement_m=progress.get('bypass_longitudinal_progress_m'),
+        bypass_corridor_occupancy=bypass.get('bypass_corridor_occupancy'),
+        bypass_corridor_overlap_m=bypass.get('bypass_corridor_overlap_m'),
+        current_side_clearance_m=result.get(str(side).lower()+'_clearance_m'),
+        measured_lateral_progress=measured.get('meaningful_progress'),
+        near_tie_tolerance_m=ROUTE_IMPROVEMENT_NEAR_TIE_M)
+    if (side not in {'LEFT', 'RIGHT'} or old.get('action_type') != 'STRAFE_'+side
+            or kind != 'STRAFE_'+side or result.get('direction') != side):
+        return diagnostic
+    diagnostic['reason'] = 'measured_lateral_progress_required'
+    action_sequence, outcome_sequence = evidence.get('action_acquisition_sequence'), evidence.get('acquisition_sequence')
+    current_sequence = result.get('acquisition_sequence')
+    if (measured.get('meaningful_progress') is not True or result.get('progress_improved') is not True
+            or evidence.get('producer_session') != expected_session
+            or not all(type(v) is int for v in (action_sequence, outcome_sequence, current_sequence))
+            or not action_sequence < outcome_sequence <= current_sequence):
+        return diagnostic
+    diagnostic['reason'] = 'failed_bypass_or_recovery_suppressed'
+    if ('BYPASS_FORWARD' in old.get('ineffective_action_types', [])
+            or 'BYPASS_FORWARD' in result.get('ineffective_action_types', [])
+            or old.get('post_bypass_lateral_recovery_used', False) is not False
+            or old.get('post_bypass_lateral_recovery_selected') is True
+            or old.get('stationary_lateral_reconsidered') is True):
+        return diagnostic
+    diagnostic['reason'] = 'fresh_bypass_passage_required'
+    passage = progress.get('bypass_longitudinal_progress_m')
+    from marvin_local_bypass import MIN_BYPASS_PROGRESS_M
+    if (bypass.get('local_bypass_side') != side or bypass.get('bypass_forward_permitted') is not True
+            or bypass.get('bypass_corridor_occupancy') != 0 or bypass.get('bypass_corridor_overlap_m') != 0.
+            or progress.get('meaningful_progress') is not True
+            or type(passage) not in (int, float) or not math.isfinite(passage)
+            or passage < MIN_BYPASS_PROGRESS_M - 1e-12):
+        return diagnostic
+    diagnostic['eligible'] = True
+    if not lateral.get('predicted_route', {}).get('route_to_marvin_obstructed', True):
+        diagnostic['reason'] = 'strafe_clears_direct_route'
+    elif gain > passage + ROUTE_IMPROVEMENT_NEAR_TIE_M:
+        diagnostic['reason'] = 'strafe_gain_exceeds_bypass_passage'
+    else:
+        diagnostic.update(selected=True, reason='established_corridor_forward_passage_preferred')
+    return diagnostic
+
+
 def select_marvin_escape_action(state, association, *, expected_session, allow_strafe,
                                 previous_selection=None,
                                 strafe_duration_limit=LOCAL_AVOIDANCE_STRAFE_MAX_SECONDS,
                                 remaining_avoidance_actions=MAX_LOCAL_AVOIDANCE_ACTIONS):
-    """Keep useful route clearance actions; otherwise consider one local bypass.
+    """Rank lateral clearance against bounded passage on an established corridor.
 
     A pure turn cannot magically clear the same Marvin ray. Forward along a
     separate short free-space corridor is a different planning objective.
@@ -326,6 +392,11 @@ def select_marvin_escape_action(state, association, *, expected_session, allow_s
             ineffective.clear()
         if not progress['meaningful_progress'] and not side_change_allowed:
             ineffective.add('BYPASS_FORWARD')
+            if old.get('bypass_handoff_from_strafe') is True:
+                # Handoff did not mark the successful strafe ineffective. A
+                # failed bypass nevertheless permits only the existing one-use
+                # lateral recovery, never an unmarked ordinary retry.
+                ineffective.add('STRAFE_' + old['direction'])
         if side_change_allowed:
             ineffective.discard('BYPASS_FORWARD')
         used = old.get('post_bypass_lateral_recovery_used', False) is not False
@@ -365,15 +436,24 @@ def select_marvin_escape_action(state, association, *, expected_session, allow_s
         chosen = result.get('action_type')
         if chosen and result['direction'] != old['direction'] and not side_change_allowed:
             result.update(action_type=None, direction=None, reason='find_marvin_local_avoidance_no_progress')
-    # Preserve established route-improving ranking, especially useful strafes.
+    # Preserve the fallback/continuation and failed-recovery policies. Evaluate
+    # fresh bypass passage alongside a useful strafe, without admitting motion.
     # An already-active useful bypass may continue without chasing marginal
     # direct-ray changes, but still needs measured progress and a fresh corridor.
     use_bypass = (result['action_type'] is None or old_bypass and result['progress_improved'])
-    if not use_bypass or not bypass['bypass_forward_permitted']:
+    if not bypass['bypass_forward_permitted']:
+        result['bypass_handoff'] = {'eligible': False, 'selected': False,
+            'reason': bypass['local_bypass_reason']}
+        return result
+    if old_bypass and not use_bypass:
+        # A selected one-use recovery retains its reason and suppression. The
+        # new handoff only compares ordinary same-side strafes, never recovery.
         return result
     if old_bypass and not result['progress_improved'] and not side_change_allowed:
         return dict(result, reason='find_marvin_local_bypass_no_progress')
     if 'BYPASS_FORWARD' in result.get('ineffective_action_types', old.get('ineffective_action_types', [])):
+        result['bypass_handoff'] = {'eligible': False, 'selected': False,
+            'reason': 'failed_bypass_or_recovery_suppressed'}
         return result
     from marvin_route_obstruction import evaluate_marvin_route
     prediction = evaluate_marvin_route(
@@ -381,6 +461,11 @@ def select_marvin_escape_action(state, association, *, expected_session, allow_s
     predicted_selection = dict(result, action_type='BYPASS_FORWARD', direction=side)
     predicted_bypass = dict(bypass)
     progress = evaluate_avoidance_progress(predicted_selection, prediction, predicted_bypass)
+    handoff = _bypass_handoff(result, old, bypass, progress, expected_session=expected_session,
+        remaining_avoidance_actions=remaining_avoidance_actions)
+    result['bypass_handoff'] = handoff
+    if not use_bypass and not handoff['selected']:
+        return result
     result['options']['BYPASS_FORWARD'] = dict(permitted=True, hard_safety_permitted=True,
         reason='local_bypass_corridor_clear', requested_duration=.50,
         predicted_route=prediction, predicted_route_occupancy=prediction['route_occupancy'],
@@ -391,5 +476,8 @@ def select_marvin_escape_action(state, association, *, expected_session, allow_s
         heading_error_deg=0., nominal_forward_displacement_m=.05, local_bypass=bypass)
     if not progress['meaningful_progress']:
         return dict(result, reason='find_marvin_local_bypass_no_progress')
+    if handoff['selected']:
+        result['bypass_handoff_from_strafe'] = True  # History, never permission.
     return dict(result, action_type='BYPASS_FORWARD', direction=side,
-                reason='find_marvin_local_bypass_selected')
+                reason='find_marvin_local_bypass_handoff_selected' if handoff['selected'] else
+                    'find_marvin_local_bypass_selected')

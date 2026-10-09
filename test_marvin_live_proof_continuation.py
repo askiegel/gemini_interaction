@@ -528,23 +528,25 @@ def test_retained_a6c4d675_replay_selects_bypass_without_injected_selection(tmp_
     for count in range(1,7):
         assert arm(r)['ok']
         results.append(step(r));complete(bundle,results[-1],count)
+        if results[-1]['controller_result']['history'][0]['result'].get('action_type') == 'BYPASS_FORWARD':
+            break  # Recorded strafe scans cannot prove counterfactual bypass outcomes.
     selected=[result['controller_result']['history'][0]['result'].get('action_type') or
         result['controller_result']['history'][0]['state'] for result in results]
-    assert selected==['ADVANCING']+['STRAFE_LEFT']*5+['BYPASS_FORWARD']
+    assert selected==['ADVANCING','STRAFE_LEFT','STRAFE_LEFT','BYPASS_FORWARD']
     assert fixture['mission_id']=='mission-a6c4d675'
     c=r._marvin_live_proof_continuation
-    assert c.avoidance['local_avoidance_actions']==6 and c.avoidance['local_bypass_actions']==1
+    assert c.avoidance['local_avoidance_actions']==3 and c.avoidance['local_bypass_actions']==1
     bypass=results[-1]['controller_result']['history'][0]['result']
     target=bypass['local_detour']['local_bypass']
     assert bypass['direction']=='LEFT' and target['bypass_target_x_m']<=.15
     assert target['protected_radius_m']==.45
     assert motions(events)[-1]==('forward',.1,.5)
-    assert not step(r)['execution_authorized'] and len(motions(events))==7
+    assert not step(r)['execution_authorized'] and len(motions(events))==4
     clear[0]=True;b.specs=iter([(0,1.38),(0,1.33)])
-    assert arm(r)['ok'];direct=step(r);complete(bundle,direct,7)
+    assert arm(r)['ok'];direct=step(r);complete(bundle,direct,4)
     assert direct['controller_result']['history'][0]['state']=='ADVANCING'
     assert r._marvin_live_proof_continuation.previous_selection is None
-    assert direct['controller_result']['local_avoidance_actions']==6
+    assert direct['controller_result']['local_avoidance_actions']==3
     assert motions(events)[-1]==('forward',.1,.5)
     print('a6c4d675 replay:',selected+['ADVANCING'])
 

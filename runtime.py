@@ -149,6 +149,8 @@ def _marvin_proof_selection_history(selection):
         "ineffective_action_types", "first_post_action_bypass_progress",
         "post_bypass_lateral_recovery_used", "post_bypass_lateral_recovery_selected",
         "first_post_action_lateral_recovery_progress",
+        "first_post_action_strafe_progress",
+        "bypass_handoff_from_strafe",
         "stationary_lateral_reconsidered",
     ) if key in selection})
 
@@ -1843,6 +1845,16 @@ class CognitiveRuntime:
             progress = evaluate_avoidance_progress(previous_selection, route, bypass)
             avoidance_history[-1]["post_action_bypass"] = bypass
             improved = progress["meaningful_progress"]
+            if (previous_selection.get("action_type") in {"STRAFE_LEFT", "STRAFE_RIGHT"}
+                    and (not history or history[-1]["result"].get("full_step_completed") is True
+                         and history[-1]["result"].get("interrupted") is not True)):
+                # Historical measured outcome only. Alignment/replanning cannot
+                # create handoff credit; every bypass still needs fresh JIT.
+                previous_selection["first_post_action_strafe_progress"] = {
+                    "progress": dict(progress), "producer_session": association.get("producer_session"),
+                    "action_acquisition_sequence": previous_selection.get("acquisition_sequence"),
+                    "acquisition_sequence": association.get("acquisition_sequence"),
+                }
             if previous_selection.get("action_type") == "BYPASS_FORWARD":
                 # Freeze this action's first actual outcome before any ordinary
                 # alignment changes the coordinate frame. Later turns cannot

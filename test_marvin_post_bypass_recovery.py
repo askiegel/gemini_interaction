@@ -159,7 +159,10 @@ def test_repeated_planning_does_not_mutate_history_or_accumulate_recovery_credit
 SECOND = [(.65,-.29),(0.,1.2),(0.,-.65)]
 
 def recovery_bundle(tmp_path, monkeypatch, *, success=False):
-    scenes = [OPEN_LEFT, SECOND, SECOND, SECOND,
+    # Two measured lateral actions are needed to establish the 0.15 m side
+    # separation. Once established, the new priority legitimately hands off.
+    scenes = [[(.65,-.10),(0.,1.2),(0.,-.65)],
+              [(.65,-.14),(0.,1.2),(0.,-.65)], SECOND, SECOND,
               [(.65,-.34),(0.,1.2),(0.,-.65)] if success else SECOND, None]
     bundle, flags, client = strafe_runtime(tmp_path,monkeypatch,[(0,1.1)]*40,scenes)
     r,_,_,_,clock = bundle; read = r.world_model.get_lidar_obstacles
@@ -295,15 +298,15 @@ def test_saved_a6c4d675_extended_replay_recovers_then_direct_forward_and_arrives
         return sample
     r.world_model.get_lidar_obstacles=acquire
     results=[initial(bundle)];complete(bundle,results[0],0)
-    for count in range(1,5):
+    for count in range(1,4):
         assert arm(r)['ok'];results.append(step(r));complete(bundle,results[-1],count)
     selected=[x['controller_result']['history'][0]['result'].get('action_type') or x['controller_result']['history'][0]['state'] for x in results]
-    assert selected==['ADVANCING','STRAFE_LEFT','STRAFE_LEFT','BYPASS_FORWARD','STRAFE_LEFT']
+    assert selected==['ADVANCING','STRAFE_LEFT','BYPASS_FORWARD','STRAFE_LEFT']
     assert r._marvin_live_proof_continuation.previous_selection['post_bypass_lateral_recovery_used']
-    assert results[3]['controller_result']['local_avoidance_history'][-1]['actual_route_progress']['meaningful_progress'] is False
-    assert results[4]['controller_result']['local_avoidance_actions']==4
+    assert results[2]['controller_result']['local_avoidance_history'][-1]['actual_route_progress']['meaningful_progress'] is False
+    assert results[3]['controller_result']['local_avoidance_actions']==3
     clear[0]=True;b.specs=iter([(0,1.38),(0,1.33)])
-    assert arm(r)['ok'];direct=step(r);complete(bundle,direct,5)
+    assert arm(r)['ok'];direct=step(r);complete(bundle,direct,4)
     assert direct['controller_result']['history'][0]['state']=='ADVANCING'
     assert r._marvin_live_proof_continuation.previous_selection is None
     assert not direct['controller_result']['local_bypass_active']
@@ -316,6 +319,6 @@ def test_saved_a6c4d675_extended_replay_recovers_then_direct_forward_and_arrives
     assert arrived['proof_state']=='ARRIVED_DISARMED' and not arrived['continuation_available']
     assert robot.status()['motion']['streaming'] is False
     print('Post-bypass recovery replay:',json.dumps({'saved_fixture':fixture['mission_id'],
-        'selected':selected+['FORWARD','ARRIVED'],'avoidance_actions':4,'bypass_actions':1,
-        'failed_bypass_progress':results[3]['controller_result']['local_avoidance_history'][-1]['actual_route_progress'],
-        'recovery_reason':results[4]['controller_result']['history'][0]['result']['local_detour']['reason']}))
+        'selected':selected+['FORWARD','ARRIVED'],'avoidance_actions':3,'bypass_actions':1,
+        'failed_bypass_progress':results[2]['controller_result']['local_avoidance_history'][-1]['actual_route_progress'],
+        'recovery_reason':results[3]['controller_result']['history'][0]['result']['local_detour']['reason']}))
