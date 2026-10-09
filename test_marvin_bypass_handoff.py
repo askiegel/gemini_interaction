@@ -361,8 +361,8 @@ def test_failed_bypass_still_gets_one_recovery_then_stationary_wait(tmp_path, mo
     result = run(bundle[0])
     assert result['reason'] == 'find_marvin_blocked_wait_exhausted'
     assert result['blocked_wait_reason'] == 'find_marvin_local_avoidance_no_progress'
-    assert result['local_avoidance_actions'] == 3 and result['local_bypass_actions'] == 1
-    assert motions(bundle[3]) == [('strafe', .08, 1.), ('forward', .1, .5), ('strafe', .08, 1.)]
+    assert result['local_avoidance_actions'] == 5 and result['local_bypass_actions'] == 3
+    assert motions(bundle[3]) == [('strafe', .08, 1.)] + [('forward', .1, .5)]*3 + [('strafe', .08, 1.)]
     assert result['blocked_wait_recheck_count'] == 12
     assert MAX_LOCAL_AVOIDANCE_ACTIONS == 6
     assert_sensor_contracts(result, bundle[0])

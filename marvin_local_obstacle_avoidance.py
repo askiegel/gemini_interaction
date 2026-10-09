@@ -345,16 +345,26 @@ def select_marvin_escape_action(state, association, *, expected_session, allow_s
     materially better clearance. No source data here authorizes transport.
     """
     from marvin_local_bypass import plan_local_bypass, evaluate_avoidance_progress
+    from marvin_bypass_episode import start_bypass_episode, bypass_continuation, end_bypass_episode
     old = previous_selection or {}
     old_bypass = old.get('action_type') == 'BYPASS_FORWARD'
     result = _select_marvin_escape_action(state, association, expected_session=expected_session,
         allow_strafe=allow_strafe, previous_selection=None if old_bypass else previous_selection,
         strafe_duration_limit=strafe_duration_limit)
     if type(remaining_avoidance_actions) is not int or remaining_avoidance_actions <= 0:
+        if old.get('bypass_episode'):
+            ended = end_bypass_episode(old, 'avoidance_budget_exhausted')
+            result.update(bypass_episode=ended['bypass_episode'],
+                          ineffective_action_types=ended['ineffective_action_types'])
         return dict(result, action_type=None, direction=None,
+                    bypass_continuation=False, bypass_episode_active=False,
+                    bypass_episode_reason='avoidance_budget_exhausted',
                     reason='find_marvin_local_avoidance_exhausted')
     route = result['route']
     if not route.get('valid') or not route['route_to_marvin_obstructed']:
+        if old.get('bypass_episode'):
+            result.update(bypass_continuation=False, bypass_episode_active=False,
+                bypass_episode_reason='direct_route_clear' if route.get('valid') else 'current_route_invalid')
         return result
     if old_bypass and old.get('direction') not in {'LEFT', 'RIGHT'}:
         return dict(result, action_type=None, direction=None,
@@ -370,8 +380,19 @@ def select_marvin_escape_action(state, association, *, expected_session, allow_s
         side = ('LEFT' if blocker_y < 0 else 'RIGHT') if type(blocker_y) in (int, float) else (
             'RIGHT' if right > left + CLEARANCE_TIE_TOLERANCE_M else 'LEFT')
     bypass = plan_local_bypass(state, association, route, expected_session=expected_session, side=side)
+    measured = evaluate_avoidance_progress(old, route, bypass) if old_bypass else None
+    continuing = (bypass_continuation(old, bypass, measured,
+        expected_session=expected_session, current_sequence=result.get('acquisition_sequence'))
+        if old_bypass else {'eligible': False, 'reason': 'previous_bypass_required'})
+    if old_bypass:
+        result.update(bypass_episode_diagnostics=continuing, bypass_continuation=False,
+            bypass_episode_active=False, bypass_episode_reason=continuing['reason'])
+        if old.get('bypass_episode') and not continuing['eligible']:
+            result['bypass_episode'] = dict(old['bypass_episode'], active=False,
+                                           ended_reason=continuing['reason'])
     side_change_allowed = False
-    if old_bypass and not bypass['bypass_forward_permitted']:
+    if (old_bypass and not bypass['bypass_forward_permitted']
+            and (not old.get('bypass_episode') or measured['meaningful_progress'])):
         alternative = 'RIGHT' if side == 'LEFT' else 'LEFT'
         prior = old.get(alternative.lower() + '_clearance_m')
         current = result.get(alternative.lower() + '_clearance_m')
@@ -390,9 +411,9 @@ def select_marvin_escape_action(state, association, *, expected_session, allow_s
             # Measured passage establishes new geometry in which a previously
             # ineffective lateral primitive can be reconsidered, never replayed.
             ineffective.clear()
-        if not progress['meaningful_progress'] and not side_change_allowed:
+        if not progress['meaningful_progress'] and not side_change_allowed and not continuing['eligible']:
             ineffective.add('BYPASS_FORWARD')
-            if old.get('bypass_handoff_from_strafe') is True:
+            if old.get('bypass_handoff_from_strafe') is True or old.get('bypass_episode'):
                 # Handoff did not mark the successful strafe ineffective. A
                 # failed bypass nevertheless permits only the existing one-use
                 # lateral recovery, never an unmarked ordinary retry.
@@ -404,7 +425,7 @@ def select_marvin_escape_action(state, association, *, expected_session, allow_s
         if used and not progress['meaningful_progress'] and not side_change_allowed:
             ineffective.add(recovery)
         option = result['options'].get(recovery, {})
-        reconsider = (not progress['meaningful_progress'] and not side_change_allowed
+        reconsider = (not progress['meaningful_progress'] and not side_change_allowed and not continuing['eligible']
             and (not used or stationary_lateral_reconsideration(old, route)) and recovery in ineffective
             and option.get('permitted') is True and option.get('hard_safety_permitted') is True
             and option.get('improves_route') is True
@@ -438,9 +459,10 @@ def select_marvin_escape_action(state, association, *, expected_session, allow_s
             result.update(action_type=None, direction=None, reason='find_marvin_local_avoidance_no_progress')
     # Preserve the fallback/continuation and failed-recovery policies. Evaluate
     # fresh bypass passage alongside a useful strafe, without admitting motion.
-    # An already-active useful bypass may continue without chasing marginal
-    # direct-ray changes, but still needs measured progress and a fresh corridor.
-    use_bypass = (result['action_type'] is None or old_bypass and result['progress_improved'])
+    # Genuine progress uses the old path. A bounded no-progress episode needs
+    # completion history and a fresh corridor without claiming measured success.
+    use_bypass = (result['action_type'] is None or old_bypass and result['progress_improved']
+                  or continuing['eligible'])
     if not bypass['bypass_forward_permitted']:
         result['bypass_handoff'] = {'eligible': False, 'selected': False,
             'reason': bypass['local_bypass_reason']}
@@ -449,7 +471,7 @@ def select_marvin_escape_action(state, association, *, expected_session, allow_s
         # A selected one-use recovery retains its reason and suppression. The
         # new handoff only compares ordinary same-side strafes, never recovery.
         return result
-    if old_bypass and not result['progress_improved'] and not side_change_allowed:
+    if old_bypass and not result['progress_improved'] and not side_change_allowed and not continuing['eligible']:
         return dict(result, reason='find_marvin_local_bypass_no_progress')
     if 'BYPASS_FORWARD' in result.get('ineffective_action_types', old.get('ineffective_action_types', [])):
         result['bypass_handoff'] = {'eligible': False, 'selected': False,
@@ -475,9 +497,26 @@ def select_marvin_escape_action(state, association, *, expected_session, allow_s
         side_clearance_m=result[side.lower() + '_clearance_m'],
         heading_error_deg=0., nominal_forward_displacement_m=.05, local_bypass=bypass)
     if not progress['meaningful_progress']:
+        if continuing['eligible']:
+            result.update(bypass_continuation=False, bypass_episode_active=False,
+                bypass_episode=dict(old['bypass_episode'], active=False,
+                    ended_reason='fresh_bypass_prediction_no_progress'),
+                bypass_episode_reason='fresh_bypass_prediction_no_progress',
+                ineffective_action_types=sorted(set(result.get('ineffective_action_types', [])) | {'BYPASS_FORWARD'}))
         return dict(result, reason='find_marvin_local_bypass_no_progress')
     if handoff['selected']:
         result['bypass_handoff_from_strafe'] = True  # History, never permission.
+    if continuing['eligible']:
+        episode = dict(old['bypass_episode'], step=continuing['next_step'])
+    else:
+        episode = start_bypass_episode(bypass, expected_session)
+    result.update(bypass_episode=episode, bypass_episode_active=True,
+        bypass_episode_step=episode['step'], bypass_episode_max_steps=episode['max_steps'],
+        bypass_continuation=continuing['eligible'],
+        bypass_episode_reason=continuing['reason'] if old_bypass else 'bypass_episode_started')
+    if continuing['eligible'] and old.get('bypass_handoff_from_strafe') is True:
+        result['bypass_handoff_from_strafe'] = True
     return dict(result, action_type='BYPASS_FORWARD', direction=side,
-                reason='find_marvin_local_bypass_handoff_selected' if handoff['selected'] else
+                reason='find_marvin_local_bypass_continuation_selected' if continuing['eligible'] else
+                    'find_marvin_local_bypass_handoff_selected' if handoff['selected'] else
                     'find_marvin_local_bypass_selected')

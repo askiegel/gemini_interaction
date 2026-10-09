@@ -189,15 +189,15 @@ def test_guarded_bypass_forward_while_marvin_route_blocked_then_resume_pursuit(t
     assert robot.status()['motion'] == {'linear_x': 0., 'linear_y': 0., 'angular_z': 0., 'streaming': False}
 
 
-def test_no_progress_bypass_stops_instead_of_repeating_or_exhausting(tmp_path, monkeypatch):
-    bundle, _, _ = strafe_runtime(tmp_path, monkeypatch, [(0.,1.1)]*8, [OPEN_LEFT])
+def test_no_progress_bypass_is_bounded_then_recovers_and_waits(tmp_path, monkeypatch):
+    bundle, _, _ = strafe_runtime(tmp_path, monkeypatch, [(0.,1.1)]*16, [OPEN_LEFT])
     result = run(bundle[0])
-    assert motions(bundle[3]) == [('strafe', .08, 1.), ('forward', .1, .5), ('strafe', .08, 1.)]
+    assert motions(bundle[3]) == [('strafe', .08, 1.)] + [('forward', .1, .5)]*3 + [('strafe', .08, 1.)]
     assert result['state'] == 'BLOCKED' and result['reason'] == 'find_marvin_blocked_wait_exhausted'
     assert result['blocked_wait_reason'] == 'find_marvin_local_avoidance_no_progress'
     assert result['blocked_wait_recheck_count'] == 12
-    assert result['local_avoidance_actions'] == 3
-    assert result['local_bypass_actions'] == 1
+    assert result['local_avoidance_actions'] == 5
+    assert result['local_bypass_actions'] == 3
 
 
 def test_bypass_actions_share_unchanged_six_action_budget(tmp_path, monkeypatch):
@@ -447,6 +447,9 @@ def test_bypass_progress_is_not_a_changed_selected_nearest_return_alone():
 
 def test_side_change_requires_old_bypass_unusable_and_new_measurably_better_side():
     _,old=bypass_plan()
+    # Legacy history has no pending bounded episode; retain the existing
+    # independently measured reversal policy for that state.
+    old.pop('bypass_episode')
     points=[(.65,.25),(0.,.65),(0.,1.2),(0.,-1.2)]
     _,changed=scene_plan(points,previous=old)
     assert changed['bypass_side_change_allowed']

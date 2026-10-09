@@ -151,6 +151,7 @@ def _marvin_proof_selection_history(selection):
         "first_post_action_lateral_recovery_progress",
         "first_post_action_strafe_progress",
         "bypass_handoff_from_strafe",
+        "bypass_episode", "bypass_step_completion", "bypass_step_outcome",
         "stationary_lateral_reconsidered",
     ) if key in selection})
 
@@ -1860,6 +1861,13 @@ class CognitiveRuntime:
                 # alignment changes the coordinate frame. Later turns cannot
                 # manufacture longitudinal passage for an ineffective bypass.
                 previous_selection["first_post_action_bypass_progress"] = dict(progress)
+                completion = previous_selection.get("bypass_step_completion") or {}
+                previous_selection["bypass_step_outcome"] = {
+                    "producer_session": association.get("producer_session"),
+                    "action_acquisition_sequence": completion.get("acquisition_sequence"),
+                    "acquisition_sequence": association.get("acquisition_sequence"),
+                    "progress": dict(progress),
+                }
             if (previous_selection.get("post_bypass_lateral_recovery_selected") is True
                     or previous_selection.get("stationary_lateral_reconsidered") is True):
                 previous_selection["first_post_action_lateral_recovery_progress"] = dict(progress)
@@ -1872,6 +1880,16 @@ class CognitiveRuntime:
             retain("avoidance_reassessment", route, association, improved, progress)
 
         def finish(state, reason):
+            if (previous_selection and previous_selection.get("bypass_episode")
+                    and state not in {"PROOF_COMPLETE", "REVERIFY_REQUIRED"}):
+                # Termination is final, never an admission for a later step.
+                previous_selection["bypass_episode"] = dict(
+                    previous_selection["bypass_episode"], active=False, ended_reason=reason)
+                previous_selection["bypass_continuation"] = False
+                if (state != "ARRIVED" and
+                        (previous_selection.get("first_post_action_bypass_progress") or {}).get("meaningful_progress") is not True):
+                    from marvin_bypass_episode import end_bypass_episode
+                    previous_selection.update(end_bypass_episode(previous_selection, reason))
             # Capture planning state before terminal reporting clears bypass
             # telemetry. No returned mutable result is the checkpoint authority.
             planning_avoidance = copy.deepcopy(avoidance)
@@ -2439,6 +2457,14 @@ class CognitiveRuntime:
                                     progress_improved=detour.get("progress_improved"))
                                 if previous_selection:
                                     record_avoidance_reassessment(route, standoff)
+                                    if (previous_selection.get("bypass_episode", {}).get("active") is True
+                                            and detour.get("bypass_episode_active") is False
+                                            and detour.get("progress_improved") is not True):
+                                        from marvin_bypass_episode import end_bypass_episode
+                                        # A rejected corridor/bound closes the episode even
+                                        # when no physical alternative is dispatched before wait.
+                                        previous_selection = end_bypass_episode(previous_selection,
+                                            detour.get("bypass_episode_reason", "bypass_episode_ended"))
                                 avoidance_history.append({"source_frame_stamp_ns": stamp,
                                     "selection": detour, "previous_clearances": previous_clearances,
                                     "previous_action_type": (previous_selection or {}).get("action_type"),
@@ -2592,6 +2618,9 @@ class CognitiveRuntime:
                         expected_session=session, planning_sequence=detour.get("acquisition_sequence"),
                         execution_guard=current)
                     if veto is not None:
+                        if previous_selection and previous_selection.get("bypass_episode"):
+                            from marvin_bypass_episode import end_bypass_episode
+                            previous_selection = end_bypass_episode(previous_selection, result["reason"])
                         blocked_wait["blocked_wait_reason"] = result["reason"]
                         avoidance_history[-1].update(vetoed_before_transport=True,
                             execution_admitted=result.get("execution_authorized") is True, dispatched=False,
@@ -2671,6 +2700,10 @@ class CognitiveRuntime:
             bridge = self._marvin_bridge_ready_and_stopped()
             if bridge.get("ok") is not True or bridge.get("status") != "READY":
                 return finish("BLOCKED", "find_marvin_bridge_not_stopped_after_action")
+            if state == "AVOIDING" and result.get("action_type") == "BYPASS_FORWARD":
+                from marvin_bypass_episode import bypass_completion
+                previous_selection["bypass_step_completion"] = bypass_completion(
+                    result, bridge, self._marvin_last_action_lidar_evidence)
             action_finished_monotonic_seconds = time.monotonic()
             retain("action_result", result, action_finished_monotonic_seconds)
             previous_stamp = stamp

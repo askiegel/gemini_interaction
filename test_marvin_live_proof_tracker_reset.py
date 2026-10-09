@@ -321,13 +321,14 @@ def test_frozen_first_bypass_outcome_survives_visual_reset_and_alignment(tmp_pat
     assert r._marvin_live_proof_continuation.previous_selection["first_post_action_bypass_progress"]==frozen
     assert arm(r)["ok"];result=step(r)
     complete(bundle,result,3)
-    recovery=result["controller_result"]["history"][0]["result"]
-    assert recovery["action_type"]=="STRAFE_LEFT"
-    assert recovery["local_detour"]["actual_route_progress"]==frozen
-    assert 'BYPASS_FORWARD' in recovery["local_detour"]["ineffective_action_types"]
+    continuation=result["controller_result"]["history"][0]["result"]
+    assert continuation["action_type"]=="BYPASS_FORWARD"
+    assert continuation["local_detour"]["actual_route_progress"]==frozen
+    assert 'BYPASS_FORWARD' not in continuation["local_detour"]["ineffective_action_types"]
     assert r._marvin_live_proof_continuation.avoidance["local_avoidance_actions"]==3
-    assert arm(r)["ok"];blocked=step(r)
-    assert blocked["controller_result"]["state"]=="BLOCKED" and len(motions(events))==4
+    assert continuation["local_detour"]["bypass_continuation"]
+    assert continuation["local_detour"]["bypass_episode_step"]==2
+    assert not continuation["local_detour"]["actual_route_progress"]["meaningful_progress"]
 
 
 def test_bypass_direct_forward_arrival_with_fresh_semantics_per_arm(tmp_path, monkeypatch):
@@ -386,10 +387,10 @@ def test_a6c4d675_replay_resets_trackers_and_keeps_cumulative_six_action_budget(
     selected=[x['controller_result']['history'][0]['result'].get('action_type') or
               x['controller_result']['history'][0]['state'] for x in results]
     # Mixed counterfactual sensor progression spends exactly the original six
-    # slots: early handoff, measured passage, then the existing lateral policy.
-    assert selected==['ADVANCING','STRAFE_LEFT','STRAFE_LEFT']+['BYPASS_FORWARD']*3+['STRAFE_LEFT']
+    # slots: early handoff, measured passage, then bounded continuation.
+    assert selected==['ADVANCING','STRAFE_LEFT','STRAFE_LEFT']+['BYPASS_FORWARD']*4
     c=r._marvin_live_proof_continuation
-    assert c.avoidance['local_avoidance_actions']==6 and c.avoidance['local_bypass_actions']==3
+    assert c.avoidance['local_avoidance_actions']==6 and c.avoidance['local_bypass_actions']==4
     bypass=results[5]['controller_result']['history'][0]['result']
     target=bypass['local_detour']['local_bypass']
     assert bypass['direction']=='LEFT' and target['bypass_target_x_m']<=.15 and target['protected_radius_m']==.45

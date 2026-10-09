@@ -461,10 +461,10 @@ def test_first_bypass_reassessment_survives_later_alignment(tmp_path, monkeypatc
     assert r._marvin_live_proof_continuation.previous_selection["first_post_action_bypass_progress"] == frozen
     assert arm(r)["ok"]; result = step(r)
     complete(bundle, result, 3)
-    recovery = result["controller_result"]["history"][0]["result"]
-    assert recovery["action_type"] == "STRAFE_LEFT"
-    assert recovery["local_detour"]["actual_route_progress"] == frozen
-    assert 'BYPASS_FORWARD' in recovery["local_detour"]["ineffective_action_types"]
+    continuation = result["controller_result"]["history"][0]["result"]
+    assert continuation["action_type"] == "BYPASS_FORWARD"
+    assert continuation["local_detour"]["actual_route_progress"] == frozen
+    assert 'BYPASS_FORWARD' not in continuation["local_detour"]["ineffective_action_types"]
     assert r._marvin_live_proof_continuation.avoidance["local_avoidance_actions"] == 3
 
 

@@ -161,9 +161,13 @@ SECOND = [(.65,-.29),(0.,1.2),(0.,-.65)]
 def recovery_bundle(tmp_path, monkeypatch, *, success=False):
     # Two measured lateral actions are needed to establish the 0.15 m side
     # separation. Once established, the new priority legitimately hands off.
+    # A newly observed point occupies the forward bypass capsule after step
+    # one, but leaves lateral motion safe. This ends continuation and exercises
+    # the existing one-use recovery rather than a still-clear bypass episode.
+    blocked = SECOND + [(.58,0.)]
     scenes = [[(.65,-.10),(0.,1.2),(0.,-.65)],
-              [(.65,-.14),(0.,1.2),(0.,-.65)], SECOND, SECOND,
-              [(.65,-.34),(0.,1.2),(0.,-.65)] if success else SECOND, None]
+              [(.65,-.14),(0.,1.2),(0.,-.65)], SECOND, blocked,
+              [(.65,-.34),(0.,1.2),(0.,-.65),(.58,-.08)] if success else blocked, None]
     bundle, flags, client = strafe_runtime(tmp_path,monkeypatch,[(0,1.1)]*40,scenes)
     r,_,_,_,clock = bundle; read = r.world_model.get_lidar_obstacles
     def acquire(**kw):
@@ -282,12 +286,12 @@ def test_recovery_reacquires_jit_geometry_and_budget_before_dispatch(tmp_path,mo
     assert len(motions(bundle[3]))==3 and result['controller_result']['local_avoidance_actions']==3
 
 
-def test_saved_a6c4d675_extended_replay_recovers_then_direct_forward_and_arrives(tmp_path,monkeypatch):
+def test_saved_a6c4d675_extended_replay_continues_then_direct_forward_and_arrives(tmp_path,monkeypatch):
     fixture=json.loads((Path(__file__).parent/'test_fixtures/marvin_a6c4d675_bypass_geometry.json').read_text())
     bundle,_,_=strafe_runtime(tmp_path,monkeypatch,[(0,1.38)]+[(40,1.38)]*30,[None])
     r,b,robot,events,clock=bundle;read=r.world_model.get_lidar_obstacles;clear=[False]
-    # Downsample the saved scan sequence so a recovery fits the unchanged
-    # six-action budget. The unmodified full replay is also run separately.
+    # Replay saved scans, followed by an explicitly synthetic clear-route
+    # continuation. These counterfactual scenes do not imply measured travel.
     def acquire(**kw):
         count=len(motions(events));clock[0]+=1000
         if count==0 or clear[0]:return read(**kw)
@@ -301,8 +305,9 @@ def test_saved_a6c4d675_extended_replay_recovers_then_direct_forward_and_arrives
     for count in range(1,4):
         assert arm(r)['ok'];results.append(step(r));complete(bundle,results[-1],count)
     selected=[x['controller_result']['history'][0]['result'].get('action_type') or x['controller_result']['history'][0]['state'] for x in results]
-    assert selected==['ADVANCING','STRAFE_LEFT','BYPASS_FORWARD','STRAFE_LEFT']
-    assert r._marvin_live_proof_continuation.previous_selection['post_bypass_lateral_recovery_used']
+    assert selected==['ADVANCING','STRAFE_LEFT','BYPASS_FORWARD','BYPASS_FORWARD']
+    assert results[3]['controller_result']['history'][0]['result']['local_detour']['bypass_continuation']
+    assert r._marvin_live_proof_continuation.previous_selection['bypass_episode']['step']==2
     assert results[2]['controller_result']['local_avoidance_history'][-1]['actual_route_progress']['meaningful_progress'] is False
     assert results[3]['controller_result']['local_avoidance_actions']==3
     clear[0]=True;b.specs=iter([(0,1.38),(0,1.33)])
@@ -318,7 +323,7 @@ def test_saved_a6c4d675_extended_replay_recovers_then_direct_forward_and_arrives
     assert arrived['controller_result']['state']=='ARRIVED' and not arrived['motion_executed']
     assert arrived['proof_state']=='ARRIVED_DISARMED' and not arrived['continuation_available']
     assert robot.status()['motion']['streaming'] is False
-    print('Post-bypass recovery replay:',json.dumps({'saved_fixture':fixture['mission_id'],
-        'selected':selected+['FORWARD','ARRIVED'],'avoidance_actions':3,'bypass_actions':1,
+    print('Bounded bypass continuation replay:',json.dumps({'saved_fixture':fixture['mission_id'],
+        'selected':selected+['FORWARD','ARRIVED'],'avoidance_actions':3,'bypass_actions':2,
         'failed_bypass_progress':results[2]['controller_result']['local_avoidance_history'][-1]['actual_route_progress'],
-        'recovery_reason':results[3]['controller_result']['history'][0]['result']['local_detour']['reason']}))
+        'continuation_reason':results[3]['controller_result']['history'][0]['result']['local_detour']['reason']}))

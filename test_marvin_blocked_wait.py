@@ -411,7 +411,7 @@ def test_changed_scan_alone_is_not_identity_or_motion_authority(tmp_path,monkeyp
 def test_full_live_evidence_replay_waits_then_forward_without_forcing_selector(tmp_path,monkeypatch):
     fixture=json.loads((Path(__file__).parent/'test_fixtures/marvin_blocked_clear_evidence.json').read_text())
     bundle,_,_=strafe_runtime(tmp_path,monkeypatch,
-        [(48,1.4267992355563468)]*5+[(48,1.3767992355563468)], [live_points()])
+        [(48,1.4267992355563468)]*12+[(48,1.3767992355563468)], [live_points()])
     r,behavior,robot,events,clock=bundle
     flags={"waiting":False,"removed":False,"checks":0,"wait_motion_count":None}
     read=r.world_model.get_lidar_obstacles
