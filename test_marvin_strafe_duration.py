@@ -149,8 +149,12 @@ def test_jit_reduced_safe_duration_vetoes_original_longer_command(tmp_path, monk
         return response
     client._request = changed
     result = run(bundle[0])
-    assert result['state'] == 'BLOCKED' and motions(bundle[3]) == []
-    assert result['history'][0]['result']['source_stamp_consumed']
+    assert result['state'] == 'REVERIFY_REQUIRED' and motions(bundle[3]) == []
+    refused = result['history'][0]['result']
+    assert refused['source_stamp_consumed'] and refused['bridge_stop_confirmed']
+    assert refused['dispatch_guard_rejection']['reason'] == 'LOCAL_SELECTION_REJECTED'
+    assert refused['dispatch_guard_rejection']['selection_rejection_class'] is None
+    assert refused['pre_transport_jit_veto']['transport_attempted'] is False
 
 
 def test_safe_longer_strafe_remains_clear_side_bounded_by_stagnation(tmp_path, monkeypatch):

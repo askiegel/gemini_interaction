@@ -1713,7 +1713,12 @@ class CognitiveRuntime:
         if not isinstance(result, dict):
             return None
         approach = result.get("approach_result") or {}
-        forward = approach.get("forward_result") or {}
+        lateral = result.get("lateral_step") or {}
+        transports = [v for v in (approach.get("forward_result"), lateral.get("lateral_result"))
+            if isinstance(v, dict)]
+        if len(transports) != 1:
+            return None
+        forward = transports[0]
         certificate = result.get("dispatch_guard_rejection")
         if (not isinstance(certificate, dict) or certificate != forward.get("dispatch_guard_rejection")
                 or type(certificate.get("version")) is not int or certificate["version"] != 1
@@ -1774,14 +1779,21 @@ class CognitiveRuntime:
             # Independently certified final-boundary zero transport can use the
             # existing native snapshot/association/STOP/phase-veto validation.
             result = dict(result, reason="marvin_local_bypass_jit_veto")
-            result["approach_result"] = dict(result["approach_result"])
-            result["approach_result"].pop("forward_result", None)
+            container, transport = ("approach_result", "forward_result") if result.get("approach_result") else (
+                "lateral_step", "lateral_result")
+            result[container] = dict(result[container])
+            result[container].pop(transport, None)
         if not explicit_pre_transport_jit_veto(result) or not execution_guard():
             return None
         evidence = result["pre_transport_jit_veto"]
         snapshot, association = evidence.get("lidar_snapshot"), evidence.get("target_association")
         if not isinstance(snapshot, dict) or not isinstance(association, dict):
             return None
+        if rejection is not None and rejection.get("final_jit_lidar_sequence") is not None and (
+                type(rejection["final_jit_lidar_sequence"]) is not int
+                or rejection["final_jit_lidar_sequence"] != snapshot.get("acquisition_sequence")
+                or rejection.get("producer_session") != snapshot.get("producer_session")):
+            return None  # The refusal must describe the exact veto scan, not an earlier evaluation.
         if (type(stamp) is not int or type(result.get("source_frame_stamp_ns")) is not int
                 or result.get("source_frame_stamp_ns") != stamp
                 or result.get("source_stamp_consumed", stamp in self._marvin_alignment_consumed_source_frame_stamps)
@@ -3016,6 +3028,7 @@ class CognitiveRuntime:
                                     "remaining_avoidance_actions": (self.MAX_LOCAL_AVOIDANCE_ACTIONS - avoidance["local_avoidance_actions"]
                                         if proof_max_physical_actions is not None else None),
                                     "selected_action_type": detour["action_type"], "allow_strafe": allow_strafe,
+                                    "planning_lidar_sequence": detour["acquisition_sequence"],
                                     "selected_direction": detour["direction"]}
                                 state = "AVOIDING"
                                 if detour["action_type"] == "BYPASS_FORWARD":
@@ -4649,7 +4662,8 @@ class CognitiveRuntime:
             step = self.behavior_manager.execute_guarded_marvin_lateral_step(
                 expected_lidar_session=session, linear_y=signed_speed,
                 duration=duration, dispatch_guard=dispatch_guard,
-                selection_validator=validate_selection)
+                selection_validator=validate_selection,
+                planning_lidar_sequence=local_detour_context.get("planning_lidar_sequence", lidar["acquisition_sequence"]))
         except Exception as exc:
             step = {"ok": False, "motion_executed": False, "reason": "marvin_lateral_step_exception", "error": str(exc)}
         try:
@@ -4672,6 +4686,8 @@ class CognitiveRuntime:
             lateral_step=step, stop_result=stopped, bridge_after_stop=zero,
             bridge_stop_confirmed=stop_ok,
             local_detour=step.get("local_detour") or selection,
+            **({"dispatch_guard_rejection": step["dispatch_guard_rejection"]}
+                if "dispatch_guard_rejection" in step else {}),
             **({"pre_transport_jit_veto": step["pre_transport_jit_veto"]} if "pre_transport_jit_veto" in step else {}),
             reason="marvin_lateral_step_complete" if moved and stop_ok else
                 step.get("reason") if not moved else "marvin_lateral_stop_unconfirmed")
@@ -5065,7 +5081,11 @@ class CognitiveRuntime:
             approach_result = approach(expected_lidar_session=session,
                                        linear_speed=float(linear_speed), duration=effective_duration,
                                        target_tracker=None if bypass_mode else dict(tracker),
-                                       **({"local_selection_validator": validate_bypass} if bypass_mode else {}),
+                                       **({"local_selection_validator": validate_bypass,
+                                           "planning_lidar_sequence": local_detour_context.get(
+                                               "planning_lidar_sequence", lidar["acquisition_sequence"]),
+                                           "requested_direction": local_detour_context["selected_direction"]}
+                                           if bypass_mode else {}),
                                        camera_model=getattr(self, "marvin_camera_model", None),
                                        target_range_validator=lambda tracker, sample: self._marvin_v2_lidar_arrival(
                                            tracker, sample, current_action_jit=True),

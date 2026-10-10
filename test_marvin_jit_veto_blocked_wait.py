@@ -373,7 +373,7 @@ def test_real_bypass_outer_guard_veto_enters_existing_wait_without_bypass_slot(t
     assert result['previous_action_type']=='STRAFE_LEFT'
 
 
-def test_client_guard_failure_after_motion_method_invocation_is_not_certified(tmp_path,monkeypatch):
+def test_client_final_guard_geometry_refusal_is_certified_before_transport(tmp_path,monkeypatch):
     scenes=[OPEN_LEFT]
     b,_,client=strafe_runtime(tmp_path,monkeypatch,[(0,1.1)]*3,scenes)
     request=client._request
@@ -383,10 +383,14 @@ def test_client_guard_failure_after_motion_method_invocation_is_not_certified(tm
         return value
     client._request=changed
     result=run(b[0])
-    assert result['state']=='BLOCKED' and result['blocked_wait_recheck_count']==0
+    assert result['state']=='BLOCKED' and result['blocked_wait_recheck_count']==12
+    assert result['reason']=='find_marvin_blocked_wait_exhausted'
     assert not motions(b[3])
-    assert result['history'][0]['result']['source_stamp_consumed']
-    assert 'pre_transport_jit_veto' not in result['history'][0]['result']
+    refused=result['history'][0]['result']
+    assert refused['source_stamp_consumed'] and refused['bridge_stop_confirmed']
+    assert refused['pre_transport_jit_veto']['transport_attempted'] is False
+    assert refused['dispatch_guard_rejection']['reason']=='LOCAL_SELECTION_REJECTED'
+    assert refused['dispatch_guard_rejection']['local_safety_permitted'] is False
 
 
 @pytest.mark.parametrize('fault',['session_after_stop','stream_after_stop','malformed_sector','malformed_points'])

@@ -27,6 +27,9 @@ class RobotBridgeClient:
             "local_evaluation_monotonic_seconds",
             "local_selection_reason", "local_safety_permitted", "local_safety_reason",
             "interlock_permitted", "interlock_reason",
+            "requested_action_type", "requested_direction", "final_selected_action_type",
+            "final_selected_direction", "planning_lidar_sequence", "final_jit_lidar_sequence",
+            "selection_rejection_class",
         }
         decision = getattr(guard, "decision", None)
         certificate = {}

@@ -1,0 +1,65 @@
+{
+  "mission_id": "mission-105f2dfe",
+  "provenance": "/tmp/mayday-autonomous-marvin-lidar-retry-20261010T215356Z",
+  "phase_sequence": [
+    "DIRECT",
+    "CLEAR_SIDE",
+    "PASS_OBSTACLE",
+    "CLEAR_SIDE"
+  ],
+  "committed_side": "LEFT",
+  "physical_prefix": [
+    "STRAFE_LEFT",
+    "BYPASS_FORWARD",
+    "TURN_RIGHT",
+    "TURN_RIGHT",
+    "BYPASS_FORWARD",
+    "BYPASS_FORWARD",
+    "BYPASS_FORWARD",
+    "BYPASS_FORWARD",
+    "BYPASS_FORWARD",
+    "BYPASS_FORWARD",
+    "BYPASS_FORWARD",
+    "BYPASS_FORWARD"
+  ],
+  "avoidance_counts": [
+    1,
+    2,
+    2,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    8,
+    9,
+    10
+  ],
+  "final_refusal": {
+    "historical_runtime_certificate": {
+      "reason": "UNKNOWN_FINAL_GUARD_FAILURE",
+      "version": 1,
+      "transport_boundary": "before_POST_motion",
+      "transport_boundary_monotonic_seconds": 323951.41656842,
+      "transport_attempted": false,
+      "delivery_uncertain": false
+    },
+    "requested_action_type": "STRAFE_LEFT",
+    "final_selected_action_type": "BYPASS_FORWARD",
+    "source_stamp": 1791669298519885955,
+    "source_stamp_consumed": true,
+    "planning_sequence": 4093,
+    "final_jit_sequence": 4094,
+    "local_selection_accepted": false,
+    "local_safety_permitted": true,
+    "transport_attempted": false,
+    "source_age_at_transport_boundary_seconds": 0.26204084599157795
+  },
+  "terminal_result": {
+    "state": "BLOCKED",
+    "outcome": "safe_incomplete",
+    "reason": "motion_dispatch_preempted"
+  },
+  "continuation_provenance": "Controlled synthetic scans/camera/acknowledgements in test_marvin_final_jit_action_switch.py; no historical continuation claimed"
+}

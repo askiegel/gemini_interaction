@@ -4401,6 +4401,7 @@ class BehaviorManager:
         self, *, expected_lidar_session, linear_speed, duration,
         target_tracker=None, camera_model=None, dispatch_guard=None, target_range_validator=None,
         local_selection_validator=None,
+        planning_lidar_sequence=None, requested_direction=None,
     ):
         """Run one bounded Marvin forward primitive, with no avoidance branch."""
         base = {"ok": False, "decision": "no_motion", "executed_primitive": None,
@@ -4478,12 +4479,24 @@ class BehaviorManager:
             interlock = getattr(self.robot, "forward_interlock", None)
             facts = dict(producer_session=sample.get("producer_session"),
                 acquisition_sequence=sample.get("acquisition_sequence"),
+                requested_action_type="BYPASS_FORWARD", requested_direction=requested_direction,
+                final_selected_action_type=selection.get("action_type"),
+                final_selected_direction=selection.get("direction"),
+                planning_lidar_sequence=planning_lidar_sequence,
+                final_jit_lidar_sequence=sample.get("acquisition_sequence"),
+                selection_rejection_class=self._marvin_selection_rejection_class(
+                    selection, "BYPASS_FORWARD", requested_direction),
                 local_evaluation_monotonic_seconds=time.monotonic(),
                 local_selection_accepted=selection.get("accepted") is True,
                 local_selection_reason=selection.get("reason"),
                 local_safety_permitted=safe.get("permitted") is True, local_safety_reason=safe.get("reason"),
                 interlock_permitted=None, interlock_reason=None)
             last_bypass_facts = facts
+            runtime_reason = (getattr(dispatch_guard, "decision", {}) or {}).get("reason")
+            if runtime_reason is not None:
+                return record(runtime_reason, **facts)
+            if "action_type" not in selection or not isinstance(selection.get("reason"), str):
+                return record("UNKNOWN_FINAL_GUARD_FAILURE", **facts)
             if selection.get("accepted") is not True:
                 return record("LOCAL_SELECTION_REJECTED", **facts)
             if safe.get("permitted") is not True:
@@ -4534,7 +4547,8 @@ class BehaviorManager:
         if not forward_ok:
             rejection = forward.get("dispatch_guard_rejection") if isinstance(forward, dict) else None
             if (isinstance(rejection, dict) and forward.get("error") == "motion_dispatch_preempted"
-                    and forward.get("transport_attempted") is False):
+                    and forward.get("transport_attempted") is False and forward.get("delivery_uncertain") is False
+                    and forward.get("ok") is False and forward.get("forwarded") is False):
                 extra = {}
                 if (rejection.get("reason") in {"LOCAL_SELECTION_REJECTED", "LOCAL_MOTION_SAFETY_REJECTED"}
                         or rejection.get("reason") == "FORWARD_INTERLOCK_REJECTED"
@@ -4553,7 +4567,7 @@ class BehaviorManager:
                     reason="marvin_single_approach_forward_complete")
 
     def execute_guarded_marvin_lateral_step(self, *, expected_lidar_session,
-            linear_y, duration, dispatch_guard, selection_validator):
+            linear_y, duration, dispatch_guard, selection_validator, planning_lidar_sequence=None):
         """One pure lateral command through the existing Bridge health interlock."""
         from marvin_local_obstacle_avoidance import (
             LOCAL_AVOIDANCE_STRAFE_SPEED_MPS, LOCAL_AVOIDANCE_STRAFE_MAX_SECONDS)
@@ -4568,13 +4582,27 @@ class BehaviorManager:
             return dict(base, reason="marvin_lateral_interlock_unavailable")
         evidence = {}
         veto_sample = None
+        last_facts = {}
+        requested_direction = "LEFT" if linear_y > 0 else "RIGHT"
+        requested_action = "STRAFE_" + requested_direction
 
         def final_guard():
-            nonlocal veto_sample
+            nonlocal veto_sample, last_facts
+            def record(reason):
+                decision = dict(getattr(dispatch_guard, "decision", {}) or {})
+                decision.update(last_facts)
+                decision.update(guard_stage="lateral_dispatch", reason=reason,
+                    evaluation_monotonic_seconds=time.monotonic())
+                final_guard.decision = decision
+                return reason is None
             if not dispatch_guard():
                 evidence["reason"] = "marvin_motion_observation_stale_or_preempted"
-                return False
+                return record((getattr(dispatch_guard, "decision", {}) or {}).get("reason")
+                    or "UNKNOWN_FINAL_GUARD_FAILURE")
             try:
+                # A new evaluation must never certify a previous scan's refusal.
+                veto_sample = None
+                last_facts = {}
                 lidar = self.world_model.get_lidar_obstacles(expected_session=expected_lidar_session)
                 veto_sample = lidar
                 if getattr(self, "_marvin_shadow_capture_enabled", False) is True:
@@ -4586,17 +4614,38 @@ class BehaviorManager:
                     action_lidar_evidence={k: lidar.get(k) for k in (
                         "producer_session", "acquisition_sequence", "source", "received_monotonic_seconds",
                         "effective_age_seconds")})
+                last_facts = dict(producer_session=lidar.get("producer_session"),
+                    acquisition_sequence=lidar.get("acquisition_sequence"),
+                    requested_action_type=requested_action, requested_direction=requested_direction,
+                    final_selected_action_type=selection.get("action_type"),
+                    final_selected_direction=selection.get("direction"),
+                    planning_lidar_sequence=planning_lidar_sequence,
+                    final_jit_lidar_sequence=lidar.get("acquisition_sequence"),
+                    selection_rejection_class=self._marvin_selection_rejection_class(
+                        selection, requested_action, requested_direction),
+                    local_evaluation_monotonic_seconds=time.monotonic(),
+                    local_selection_accepted=selection.get("accepted") is True,
+                    local_selection_reason=selection.get("reason"),
+                    local_safety_permitted=safe.get("permitted") is True,
+                    local_safety_reason=safe.get("reason"), interlock_permitted=None, interlock_reason=None)
+                if "action_type" not in selection or not isinstance(selection.get("reason"), str):
+                    return record("UNKNOWN_FINAL_GUARD_FAILURE")
                 if not safe["permitted"] or not selection.get("accepted"):
                     evidence["reason"] = "marvin_local_detour_jit_veto"
-                    return False
+                    return record("LOCAL_SELECTION_REJECTED" if selection.get("accepted") is not True
+                        else "LOCAL_MOTION_SAFETY_REJECTED")
                 permitted, reason = interlock.refresh()
+                last_facts.update(interlock_permitted=permitted is True, interlock_reason=reason)
                 if not permitted:
                     evidence["reason"] = reason
-                    return False
+                    return record("FORWARD_INTERLOCK_REJECTED")
             except Exception as exc:
                 evidence.update(reason="marvin_lateral_lidar_evaluation_failed", error=str(exc))
-                return False
-            return dispatch_guard()
+                return record("UNKNOWN_FINAL_GUARD_FAILURE")
+            if not dispatch_guard():
+                return record((getattr(dispatch_guard, "decision", {}) or {}).get("reason")
+                    or "UNKNOWN_FINAL_GUARD_FAILURE")
+            return record(None)
 
         if not final_guard():
             if evidence.get("reason") == "marvin_local_detour_jit_veto":
@@ -4612,6 +4661,19 @@ class BehaviorManager:
                 bridge_acknowledgement=result)
         except Exception as exc:
             return dict(base, **dict(evidence, reason="marvin_lateral_transport_failed", error=str(exc)))
+        rejection = result.get("dispatch_guard_rejection") if isinstance(result, dict) else None
+        if (isinstance(rejection, dict) and result.get("error") == "motion_dispatch_preempted"
+                and result.get("transport_attempted") is False and result.get("delivery_uncertain") is False
+                and result.get("ok") is False and result.get("forwarded") is False):
+            extra = {}
+            if (rejection.get("reason") in {"LOCAL_SELECTION_REJECTED", "LOCAL_MOTION_SAFETY_REJECTED"}
+                    or rejection.get("reason") == "FORWARD_INTERLOCK_REJECTED"
+                        and rejection.get("interlock_reason") == "front_blocked") and veto_sample is not None:
+                extra["pre_transport_jit_veto"] = pre_transport_jit_veto_evidence(
+                    veto_sample, (evidence.get("local_detour") or {}).get("target_association"))
+            return dict(dict(base, **evidence), lateral_result=result,
+                dispatch_guard_rejection=rejection, **extra,
+                reason="marvin_dispatch_guard_" + rejection["reason"].lower())
         canonical = (isinstance(result, dict) and result.get("ok") is True
             and result.get("action") == "motion" and result.get("mode") == "bounded"
             and result.get("automatic_stop") is True and result.get("returned_immediately") is False
@@ -4622,6 +4684,17 @@ class BehaviorManager:
             lateral_result=result, reason="marvin_lateral_step_complete" if canonical else
                 ((result.get("reason") or result.get("error") or "marvin_lateral_step_failed")
                  if isinstance(result, dict) else "marvin_lateral_response_invalid"))
+
+    @staticmethod
+    def _marvin_selection_rejection_class(selection, requested_action, requested_direction):
+        """Explain only an explicit primitive switch; never infer missing selection."""
+        selected = selection.get("action_type")
+        primitives = {"STRAFE_LEFT", "STRAFE_RIGHT", "BYPASS_FORWARD"}
+        if (selection.get("accepted") is False and selected in primitives
+                and selection.get("direction") in {"LEFT", "RIGHT"}
+                and (selected != requested_action or selection["direction"] != requested_direction)):
+            return "LOCAL_SELECTION_CHANGED_AT_FINAL_JIT"
+        return None
 
     def execute_guarded_local_forward(self, *, expected_lidar_session, now=None):
         """Run the established single bounded forward primitive for local use.

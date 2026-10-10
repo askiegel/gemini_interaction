@@ -356,4 +356,11 @@ def test_stop_or_camera_expiration_during_capability_get_preempts_dispatch(tmp_p
     client._request=interrupt_get
     result=run(bundle[0])
     assert motions(bundle[3])==[] and bundle[3][-1]=='stop'
-    assert result['behavior']=='STOP' if change=='STOP' else result['state']=='BLOCKED'
+    if change=='STOP':
+        assert result['behavior']=='STOP'
+    else:
+        assert result['state']=='REVERIFY_REQUIRED'
+        assert result['reason']=='find_marvin_dispatch_fresh_identity_required'
+        refused=result['history'][0]['result']
+        assert refused['dispatch_guard_rejection']['reason']=='SOURCE_OBSERVATION_STALE'
+        assert refused['source_stamp_consumed'] and refused['bridge_stop_confirmed']
