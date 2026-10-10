@@ -1575,9 +1575,74 @@ class CognitiveRuntime:
             time.sleep(min(self.MARVIN_NEW_LIDAR_POLL_SECONDS,
                            max(0.0, deadline - time.monotonic())))
 
+    def _marvin_certified_dispatch_rejection(self, result, stamp):
+        """Validate negative transport provenance; never admits movement."""
+        if not isinstance(result, dict):
+            return None
+        approach = result.get("approach_result") or {}
+        forward = approach.get("forward_result") or {}
+        certificate = result.get("dispatch_guard_rejection")
+        if (not isinstance(certificate, dict) or certificate != forward.get("dispatch_guard_rejection")
+                or type(certificate.get("version")) is not int or certificate["version"] != 1
+                or certificate.get("transport_boundary") != "before_POST_motion"
+                or forward.get("error") != "motion_dispatch_preempted"
+                or any(value.get("transport_attempted") is not False
+                    or value.get("delivery_uncertain") is not False for value in (certificate, forward))
+                or forward.get("ok") is not False or forward.get("forwarded") is not False
+                or result.get("ok") is not False or result.get("motion_executed") is not False
+                or type(result.get("actions_executed")) is not int or result["actions_executed"] != 0
+                or type(stamp) is not int or type(certificate.get("source_stamp")) is not int
+                or certificate["source_stamp"] != stamp or type(result.get("source_frame_stamp_ns")) is not int
+                or result.get("source_frame_stamp_ns") != stamp
+                or result.get("source_stamp_consumed") is not True
+                or stamp not in self._marvin_alignment_consumed_source_frame_stamps
+                or (result.get("stop_result") or {}).get("ok") is not True
+                or result.get("bridge_stop_confirmed") is not True):
+            return None
+        reason = certificate.get("reason")
+        if reason == "SOURCE_OBSERVATION_STALE":
+            age = certificate.get("source_age_seconds")
+            if (certificate.get("source_fresh") is not False or type(age) not in (int, float)
+                    or not math.isfinite(age) or age <= self.MARVIN_MOTION_OBSERVATION_MAX_AGE_SECONDS):
+                return None
+        elif reason == "LOCAL_SELECTION_REJECTED" and certificate.get("local_selection_accepted") is not False:
+            return None
+        elif reason == "LOCAL_MOTION_SAFETY_REJECTED" and certificate.get("local_safety_permitted") is not False:
+            return None
+        elif reason == "FORWARD_INTERLOCK_REJECTED" and certificate.get("interlock_permitted") is not False:
+            return None
+        # A refusal cannot conceal any contradictory delivery/motion evidence.
+        stack = [(result, 0)]
+        while stack:
+            value, depth = stack.pop()
+            if depth > 30:
+                return None
+            if isinstance(value, dict):
+                for key, item in value.items():
+                    if key in {"transport_attempted", "delivery_uncertain", "motion_executed", "forwarded",
+                               "confirmed_forwarded", "physical_dispatch_confirmed", "full_step_completed",
+                               "interrupted"} and item is not False:
+                        return None
+                    if key == "transport_result" and item is not None:
+                        return None
+                    stack.append((item, depth+1))
+            elif isinstance(value, list):
+                stack.extend((item, depth+1) for item in value)
+        return certificate
+
     def _marvin_jit_veto_wait_evidence(self, result, *, stamp, expected_session,
                                      planning_sequence, execution_guard):
         """Fail-closed admission for a certified pre-transport production veto."""
+        rejection = self._marvin_certified_dispatch_rejection(result, stamp)
+        if rejection is not None and (
+                rejection.get("reason") in {"LOCAL_SELECTION_REJECTED", "LOCAL_MOTION_SAFETY_REJECTED"}
+                or rejection.get("reason") == "FORWARD_INTERLOCK_REJECTED"
+                    and rejection.get("interlock_reason") == "front_blocked"):
+            # Independently certified final-boundary zero transport can use the
+            # existing native snapshot/association/STOP/phase-veto validation.
+            result = dict(result, reason="marvin_local_bypass_jit_veto")
+            result["approach_result"] = dict(result["approach_result"])
+            result["approach_result"].pop("forward_result", None)
         if not explicit_pre_transport_jit_veto(result) or not execution_guard():
             return None
         evidence = result["pre_transport_jit_veto"]
@@ -1875,6 +1940,8 @@ class CognitiveRuntime:
         detour_context = DetourContext()
         phase_history = []
         veto_reobserve_floor = None
+        dispatch_reobserve_floor = None
+        dispatch_reverify_count = 0
         watchdog_dispatch_deadline_reached = False
         planned_action_duration = .50
         if proof_continuation is None:
@@ -1925,17 +1992,26 @@ class CognitiveRuntime:
             clear_episode()  # A new mission requires fresh semantic acquisition.
 
         def current():
-            return (self._marvin_mission_context_is_current(mission, control_generation)
-                and not watchdog_dispatch_deadline_reached
+            mission_current = self._marvin_mission_context_is_current(mission, control_generation)
+            watchdog_ok = (not watchdog_dispatch_deadline_reached
                 and detour_context.watchdog.exhaustion(time.monotonic(), include_phase=False) is None)
+            current.decision = dict(mission_context_current=mission_current,
+                watchdog_not_exhausted=watchdog_ok)
+            return mission_current and watchdog_ok
 
         def action_current():
             nonlocal watchdog_dispatch_deadline_reached
             if not current():
+                action_current.decision = dict(current.decision, action_fits_deadline=None,
+                    reason="MISSION_CONTEXT_LOST" if not current.decision["mission_context_current"]
+                        else "DETOUR_DEADLINE_EXHAUSTED")
                 return False
             if not detour_context.watchdog.action_fits_deadline(time.monotonic(), planned_action_duration):
                 watchdog_dispatch_deadline_reached = True
+                action_current.decision = dict(current.decision, action_fits_deadline=False,
+                    reason="ACTION_NO_LONGER_FITS_DEADLINE")
                 return False
+            action_current.decision = dict(current.decision, action_fits_deadline=True, reason=None)
             return True
 
         def enter_phase(phase, evidence, *, side=None):
@@ -2200,7 +2276,22 @@ class CognitiveRuntime:
                 if wait["ok"] is not True:
                     return finish("STOPPED" if not current() else "BLOCKED", wait["reason"])
             # No camera/semantic decision is made before the stopped LiDAR wait.
-            if proof_resume_observation_pending:
+            if dispatch_reobserve_floor is not None:
+                # No resumption of old camera authority: fresh semantic frame,
+                # followed by the normal strictly newer native tracker frame.
+                if callable(clear_episode):
+                    clear_episode()
+                observation = self._observe_find_marvin_v2(
+                    reacquisition_source_floor=dispatch_reobserve_floor)
+                identity_stamp = observation.get("identity_source_frame_stamp_ns")
+                action_stamp = observation.get("source_frame_stamp_ns")
+                if (observation.get("identity_confirmed") is not True
+                        or observation.get("identity_source") != "gemini_marvin_candidate_selection"
+                        or type(identity_stamp) is not int or identity_stamp <= dispatch_reobserve_floor
+                        or type(action_stamp) is not int or action_stamp <= identity_stamp):
+                    return finish("REVERIFY_REQUIRED", "find_marvin_dispatch_fresh_identity_required")
+                dispatch_reobserve_floor = None
+            elif proof_resume_observation_pending:
                 session, resume_lidar = self._active_localization_lidar_is_current()
                 if (session != proof_continuation.producer_session or resume_lidar is None
                         or type(resume_lidar.get("acquisition_sequence")) is not int
@@ -2831,6 +2922,52 @@ class CognitiveRuntime:
                     or (transport.get("transport_result") or {}).get("delivery_uncertain") is True):
                 return finish("BLOCKED", "find_marvin_action_delivery_uncertain")
             if result.get("ok") is not True or result.get("motion_executed") is not True:
+                rejection = self._marvin_certified_dispatch_rejection(result, stamp)
+                rejection_reason = rejection.get("reason") if rejection else None
+                stale_interlock = (rejection_reason == "FORWARD_INTERLOCK_REJECTED"
+                    and rejection.get("interlock_reason") in {"stale", "stale_lidar", "not_fresh"})
+                if (proof_max_physical_actions is None and rejection is not None
+                        and (rejection_reason == "SOURCE_OBSERVATION_STALE" or stale_interlock)):
+                    # No action or progress credit. The consumed stamp remains
+                    # retired, the phase/side stay owned, and the next cycle
+                    # obtains fresh semantic + newer strict tracker authority.
+                    owner_ok = all(rejection.get(k) is True for k in (
+                        "control_generation_current", "motion_owner_current", "mission_context_current",
+                        "watchdog_not_exhausted", "action_fits_deadline"))
+                    bridge = self._marvin_bridge_ready_and_stopped()
+                    interlock = self.forward_interlock.status() if self.forward_interlock is not None else {}
+                    if (not owner_ok or not current() or bridge.get("ok") is not True
+                            or bridge.get("status") != "READY"
+                            or interlock.get("active_forward") is not False
+                            or interlock.get("pending_forward") is not False
+                            or self.lidar_worker.running is not True or self.lidar_worker.session != session):
+                        return finish("BLOCKED", "find_marvin_dispatch_reverify_not_safe")
+                    baseline = self._marvin_last_action_lidar_evidence
+                    if (baseline is None or baseline[0] != session or type(baseline[1]) is not int
+                            or rejection.get("producer_session") != session
+                            or type(rejection.get("acquisition_sequence")) is not int
+                            or rejection["acquisition_sequence"] < baseline[1]):
+                        return finish("BLOCKED", "find_marvin_dispatch_reverify_evidence_invalid")
+                    dispatch_reverify_count += 1
+                    if dispatch_reverify_count > self.MAX_MARVIN_REACQUISITION_EPISODES:
+                        return finish("BLOCKED", "find_marvin_dispatch_reverify_exhausted")
+                    detour_context = replace(detour_context, watchdog=detour_context.watchdog.veto(
+                        detour["action_type"] if state == "AVOIDING" else decision,
+                        detour_context.committed_side, rejection_reason))
+                    wait = self._wait_for_new_marvin_lidar_evidence(
+                        expected_session=session, previous_sequence=rejection["acquisition_sequence"],
+                        execution_guard=current, allow_transient_stale=True)
+                    lidar_wait_history.append(wait)
+                    if wait["ok"] is not True:
+                        return finish("STOPPED" if not current() else "BLOCKED", wait["reason"])
+                    previous_stamp = camera_floor_stamp = veto_reobserve_floor = dispatch_reobserve_floor = stamp
+                    self._marvin_last_action_lidar_evidence = (session, rejection["acquisition_sequence"])
+                    action_finished_monotonic_seconds = time.monotonic()
+                    mark_stopped = getattr(behavior, "mark_strict_v2_action_stopped", None)
+                    if callable(mark_stopped):
+                        mark_stopped(stamp, action_finished_monotonic_seconds)
+                    self._reset_marvin_alignment_consensus()
+                    continue
                 if proof_max_physical_actions is None and state == "AVOIDING":
                     veto = self._marvin_jit_veto_wait_evidence(result, stamp=stamp,
                         expected_session=session, planning_sequence=detour.get("acquisition_sequence"),
@@ -2856,6 +2993,8 @@ class CognitiveRuntime:
                         previous_stamp = stamp
                         camera_floor_stamp = stamp
                         veto_reobserve_floor = stamp
+                        if rejection is not None:
+                            dispatch_reobserve_floor = stamp
                         action_finished_monotonic_seconds = time.monotonic()
                         mark_stopped = getattr(behavior, "mark_strict_v2_action_stopped", None)
                         if callable(mark_stopped):
@@ -4097,10 +4236,40 @@ class CognitiveRuntime:
 
             def dispatch_guard():
                 with self._state_lock:
-                    return (generation == getattr(self, "_control_generation", None)
-                            and self._marvin_motion_owner_is_current()
-                            and (mission_execution_guard is None or mission_execution_guard())
-                            and self._marvin_motion_stamp_is_fresh(kwargs["source_frame_stamp_ns"], receipt))
+                    now = time.monotonic()
+                    d = dict(guard_stage="runtime_observation", evaluation_monotonic_seconds=now,
+                        control_generation_current=generation == getattr(self, "_control_generation", None),
+                        motion_owner_current=None, mission_context_current=None,
+                        watchdog_not_exhausted=None, action_fits_deadline=None,
+                        source_stamp=kwargs["source_frame_stamp_ns"],
+                        source_receipt_monotonic_seconds=receipt,
+                        source_age_seconds=(now-receipt if type(receipt) in (int, float)
+                            and 0 <= receipt <= now and math.isfinite(receipt) else None),
+                        source_fresh=None, reason=None)
+                    if not d["control_generation_current"]:
+                        d["reason"] = "CONTROL_GENERATION_CHANGED"
+                    else:
+                        d["motion_owner_current"] = self._marvin_motion_owner_is_current()
+                        if not d["motion_owner_current"]:
+                            d["reason"] = "MOTION_OWNER_LOST"
+                        elif mission_execution_guard is not None:
+                            admitted = mission_execution_guard()
+                            decision = getattr(mission_execution_guard, "decision", {})
+                            d.update({key: decision.get(key) for key in (
+                                "mission_context_current", "watchdog_not_exhausted", "action_fits_deadline")})
+                            if not admitted:
+                                d["reason"] = decision.get("reason") or "UNKNOWN_FINAL_GUARD_FAILURE"
+                        if d["reason"] is None:
+                            d["source_fresh"] = self._marvin_motion_stamp_is_fresh(kwargs["source_frame_stamp_ns"], receipt)
+                            freshness_now = time.monotonic()
+                            d["evaluation_monotonic_seconds"] = freshness_now
+                            if (type(receipt) in (int, float) and 0 <= receipt <= freshness_now
+                                    and math.isfinite(receipt)):
+                                d["source_age_seconds"] = freshness_now-receipt
+                            if not d["source_fresh"]:
+                                d["reason"] = "SOURCE_OBSERVATION_STALE"
+                    dispatch_guard.decision = d
+                    return d["reason"] is None
 
             return callback(**kwargs, dispatch_guard=dispatch_guard)
         finally:
@@ -4682,6 +4851,8 @@ class CognitiveRuntime:
                     full_step_completed=moved and stop_ok,
                     actual_confirmed_run_duration_seconds=None,
                     approach_result=approach_result, stop_result=stop_result,
+                    **({"dispatch_guard_rejection": approach_result["dispatch_guard_rejection"]}
+                        if "dispatch_guard_rejection" in approach_result else {}),
                     **({"pre_transport_jit_veto": approach_result["pre_transport_jit_veto"]}
                         if "pre_transport_jit_veto" in approach_result else {}),
                     reason=("marvin_approach_step_complete" if moved and stop_ok else

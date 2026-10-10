@@ -1,5 +1,6 @@
 import json
 import math
+import time
 import urllib.request
 import urllib.error
 
@@ -10,6 +11,42 @@ LOCAL_FORWARD_TIMEOUT_SECONDS = 120.0
 
 
 class RobotBridgeClient:
+    @staticmethod
+    def _pre_transport_guard_rejection(guard):
+        """Negative dispatch certificate, issued only before the HTTP call.
+
+        A boolean callback stays the admission boundary. Its bounded decision
+        explains a refusal; it never changes that admission or grants authority.
+        """
+        fields = {
+            "reason", "guard_stage", "evaluation_monotonic_seconds",
+            "control_generation_current", "motion_owner_current",
+            "mission_context_current", "watchdog_not_exhausted", "action_fits_deadline",
+            "source_stamp", "source_receipt_monotonic_seconds", "source_age_seconds", "source_fresh",
+            "producer_session", "acquisition_sequence", "local_selection_accepted",
+            "local_evaluation_monotonic_seconds",
+            "local_selection_reason", "local_safety_permitted", "local_safety_reason",
+            "interlock_permitted", "interlock_reason",
+        }
+        decision = getattr(guard, "decision", None)
+        certificate = {}
+        if isinstance(decision, dict):
+            for key in fields:
+                value = decision.get(key)
+                if value is None or type(value) in (bool, int):
+                    certificate[key] = value
+                elif type(value) is float and math.isfinite(value):
+                    certificate[key] = value
+                elif type(value) is str:
+                    certificate[key] = value[:160]
+        certificate.setdefault("reason", "UNKNOWN_FINAL_GUARD_FAILURE")
+        if not certificate.get("reason"):
+            certificate["reason"] = "UNKNOWN_FINAL_GUARD_FAILURE"
+        certificate.update(version=1, transport_boundary="before_POST_motion",
+            transport_boundary_monotonic_seconds=time.monotonic(),
+            transport_attempted=False, delivery_uncertain=False)
+        return certificate
+
     def __init__(
         self,
         base_url=None,
@@ -171,7 +208,9 @@ class RobotBridgeClient:
             transport_attempted = False
             try:
                 if dispatch_guard is not None and dispatch_guard() is not True:
-                    result = {"ok": False, "forwarded": False, "error": "motion_dispatch_preempted"}
+                    result = {"ok": False, "forwarded": False, "error": "motion_dispatch_preempted",
+                        "transport_attempted": False, "delivery_uncertain": False,
+                        "dispatch_guard_rejection": self._pre_transport_guard_rejection(dispatch_guard)}
                     return result
                 transport_attempted = True
                 result = self._request("POST", "/motion", payload)

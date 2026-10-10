@@ -1,0 +1,69 @@
+{
+  "mission_id": "mission-dced894d",
+  "source_commit": "02a8d52f1c1b8a55b4df44da9b37880c2d71a7c8",
+  "provenance": "/tmp/mayday-autonomous-marvin-final-20261010T185853Z",
+  "phase_sequence": [
+    "DIRECT",
+    "CLEAR_SIDE",
+    "PASS_OBSTACLE"
+  ],
+  "physical_prefix": [
+    "TURN_RIGHT",
+    "STRAFE_LEFT",
+    "BYPASS_FORWARD",
+    "TURN_RIGHT",
+    "TURN_RIGHT",
+    "TURN_RIGHT"
+  ],
+  "failure": {
+    "classification": "UNKNOWN_FINAL_GUARD_FAILURE",
+    "source_stamp": 1791658875641965778,
+    "source_receipt_monotonic_seconds": 313528.223744937,
+    "command_start_monotonic_seconds": 313528.509518179,
+    "command_completion_monotonic_seconds": 313528.775101984,
+    "source_age_at_command_start_seconds": 0.28577324200887233,
+    "source_age_at_command_completion_seconds": 0.5513570469920523,
+    "selection_accepted": true,
+    "local_safety_permitted": true,
+    "planning_sequence": 5674,
+    "JIT_sequence": 5675,
+    "JIT_lidar_receipt_monotonic_seconds": 313528.453064248,
+    "JIT_effective_age_seconds": 0.27974798204377294,
+    "blocker_center_separation_m": 0.19885441528620362,
+    "transport_attempted": false,
+    "source_stamp_consumed": true,
+    "Bridge_zero_confirmed": true,
+    "exact_final_guard_invocation": null,
+    "interlock_final_reason": null,
+    "control_generation": null,
+    "mission_generation": null,
+    "execution_thread_identity": null,
+    "read_after_5675_proven": false
+  },
+  "watchdog": {
+    "detour_started_monotonic": 313522.075635273,
+    "phase_started_monotonic": 313523.860509507,
+    "phase": "PASS_OBSTACLE",
+    "total_detour_actions": 5,
+    "phase_actions": 1,
+    "phase_stagnation_count": 1,
+    "equivalent_veto_count": 0,
+    "total_veto_count": 0,
+    "phase_transitions": 1,
+    "last_veto": null,
+    "pending_passage": null,
+    "pending_reassessment": false,
+    "last_progress": "no_material_passage_gain",
+    "limits": {
+      "detour_seconds": 120.0,
+      "clear_side_unproven_actions": 4,
+      "clear_side_actions": 8,
+      "pass_unproven_actions": 12,
+      "pass_actions": 24,
+      "emergency_physical_actions": 64,
+      "equivalent_vetoes": 6,
+      "total_vetoes": 24,
+      "phase_transitions": 24
+    }
+  }
+}

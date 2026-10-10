@@ -4450,10 +4450,19 @@ class BehaviorManager:
         if safety.get("permitted") is not True:
             return dict(base, reason="marvin_single_approach_translation_vetoed")
         bypass_sample = None
+        last_bypass_facts = {}
         def bypass_dispatch_guard():
-            nonlocal bypass_sample
+            nonlocal bypass_sample, last_bypass_facts
+            def record(reason, **facts):
+                decision = dict(getattr(dispatch_guard, "decision", {}) or {})
+                decision.update(last_bypass_facts)
+                decision.update(guard_stage="bypass_dispatch", evaluation_monotonic_seconds=time.monotonic(),
+                    reason=reason, **facts)
+                bypass_dispatch_guard.decision = decision
+                return reason is None
             if dispatch_guard is None or not dispatch_guard():
-                return False
+                return record((getattr(dispatch_guard, "decision", {}) or {}).get("reason")
+                    or "UNKNOWN_FINAL_GUARD_FAILURE")
             sample = self.world_model.get_lidar_obstacles(expected_session=expected_lidar_session)
             bypass_sample = sample
             if getattr(self, "_marvin_shadow_capture_enabled", False) is True:
@@ -4467,8 +4476,26 @@ class BehaviorManager:
                     "producer_session", "acquisition_sequence", "source",
                     "received_monotonic_seconds", "effective_age_seconds")})
             interlock = getattr(self.robot, "forward_interlock", None)
-            return (selection.get("accepted") is True and safe["permitted"]
-                and interlock is not None and interlock.refresh()[0] and dispatch_guard())
+            facts = dict(producer_session=sample.get("producer_session"),
+                acquisition_sequence=sample.get("acquisition_sequence"),
+                local_evaluation_monotonic_seconds=time.monotonic(),
+                local_selection_accepted=selection.get("accepted") is True,
+                local_selection_reason=selection.get("reason"),
+                local_safety_permitted=safe.get("permitted") is True, local_safety_reason=safe.get("reason"),
+                interlock_permitted=None, interlock_reason=None)
+            last_bypass_facts = facts
+            if selection.get("accepted") is not True:
+                return record("LOCAL_SELECTION_REJECTED", **facts)
+            if safe.get("permitted") is not True:
+                return record("LOCAL_MOTION_SAFETY_REJECTED", **facts)
+            permitted, interlock_reason = interlock.refresh() if interlock is not None else (False, "not_configured")
+            facts.update(interlock_permitted=permitted is True, interlock_reason=interlock_reason)
+            if permitted is not True:
+                return record("FORWARD_INTERLOCK_REJECTED", **facts)
+            if not dispatch_guard():
+                return record((getattr(dispatch_guard, "decision", {}) or {}).get("reason")
+                    or "UNKNOWN_FINAL_GUARD_FAILURE", **facts)
+            return record(None, **facts)
 
         try:
             if dispatch_guard is not None and dispatch_guard() is not True:
@@ -4505,6 +4532,18 @@ class BehaviorManager:
         forward_ok = bool(isinstance(forward, dict) and forward.get("ok") is True
                           and forward.get("executed") is True)
         if not forward_ok:
+            rejection = forward.get("dispatch_guard_rejection") if isinstance(forward, dict) else None
+            if (isinstance(rejection, dict) and forward.get("error") == "motion_dispatch_preempted"
+                    and forward.get("transport_attempted") is False):
+                extra = {}
+                if (rejection.get("reason") in {"LOCAL_SELECTION_REJECTED", "LOCAL_MOTION_SAFETY_REJECTED"}
+                        or rejection.get("reason") == "FORWARD_INTERLOCK_REJECTED"
+                            and rejection.get("interlock_reason") == "front_blocked") and bypass_sample is not None:
+                    extra["pre_transport_jit_veto"] = pre_transport_jit_veto_evidence(
+                        bypass_sample, (base.get("local_detour") or {}).get("target_association"))
+                return dict(base, decision="approach_forward", executed_primitive="forward",
+                    forward_result=forward, dispatch_guard_rejection=rejection, **extra,
+                    reason="marvin_dispatch_guard_" + rejection["reason"].lower())
             return dict(base, decision="approach_forward", executed_primitive="forward",
                         forward_result=forward,
                         reason=(forward.get("reason", "marvin_single_approach_forward_failed")
