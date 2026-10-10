@@ -1,0 +1,509 @@
+{
+  "mission": "mission-729099dd",
+  "evidence_directory": "/tmp/mayday-autonomous-marvin-guard-retry-20261010T202519Z",
+  "historical_terminal_class": "LIDAR_CURRENTNESS_FAILURE_EXACT_PREDICATE_UNKNOWN",
+  "terminal_reason": "find_marvin_lidar_not_current",
+  "terminal_failing_snapshot": null,
+  "committed_side": "LEFT",
+  "physical_prefix": [
+    {
+      "index": 1,
+      "phase": "CLEAR_SIDE",
+      "primitive": "STRAFE_LEFT",
+      "transport_occurred": true,
+      "interrupted": false,
+      "completed": true,
+      "source_stamp": "1791663982669065954",
+      "stamp_consumed": true,
+      "planning_lidar": {
+        "producer_session": "52b8255f8bfd46abbff2fbcb8d3e7c9e",
+        "acquisition_sequence": 9131
+      },
+      "jit_lidar": {
+        "producer_session": "52b8255f8bfd46abbff2fbcb8d3e7c9e",
+        "acquisition_sequence": 9133,
+        "source": {
+          "frame_id": "lidar_link",
+          "stamp_seconds": 1791663982.8538983,
+          "received_at": "2026-10-10T20:26:22.860271+00:00",
+          "age_seconds": 0.0778211840079166,
+          "rotation_to_robot_radians": 1.5707963267948966
+        },
+        "received_monotonic_seconds": 318635.4488403,
+        "effective_age_seconds": 0.12340537400450557
+      },
+      "bridge_zero_confirmed": true,
+      "newer_stopped_lidar": {
+        "producer_session": "52b8255f8bfd46abbff2fbcb8d3e7c9e",
+        "acquisition_sequence": 9147,
+        "effective_age_seconds": 0.21827438799664378,
+        "valid": true,
+        "reason": "fresh"
+      }
+    },
+    {
+      "index": 2,
+      "phase": "PASS_OBSTACLE",
+      "primitive": "BYPASS_FORWARD",
+      "transport_occurred": true,
+      "interrupted": false,
+      "completed": true,
+      "source_stamp": "1791663984326445324",
+      "stamp_consumed": true,
+      "planning_lidar": {
+        "producer_session": "52b8255f8bfd46abbff2fbcb8d3e7c9e",
+        "acquisition_sequence": 9152
+      },
+      "jit_lidar": {
+        "producer_session": "52b8255f8bfd46abbff2fbcb8d3e7c9e",
+        "acquisition_sequence": 9153,
+        "source": {
+          "frame_id": "lidar_link",
+          "stamp_seconds": 1791663984.4538786,
+          "received_at": "2026-10-10T20:26:24.463421+00:00",
+          "age_seconds": 0.0891169419628568,
+          "rotation_to_robot_radians": 1.5707963267948966
+        },
+        "received_monotonic_seconds": 318637.100467173,
+        "effective_age_seconds": 0.18194068898446858
+      },
+      "bridge_zero_confirmed": true,
+      "newer_stopped_lidar": {
+        "producer_session": "52b8255f8bfd46abbff2fbcb8d3e7c9e",
+        "acquisition_sequence": 9162,
+        "effective_age_seconds": 0.12956098292488605,
+        "valid": true,
+        "reason": "fresh"
+      }
+    },
+    {
+      "index": 3,
+      "phase": "PASS_OBSTACLE",
+      "primitive": "BYPASS_FORWARD",
+      "transport_occurred": true,
+      "interrupted": false,
+      "completed": true,
+      "source_stamp": "1791663985381671144",
+      "stamp_consumed": true,
+      "planning_lidar": {
+        "producer_session": "52b8255f8bfd46abbff2fbcb8d3e7c9e",
+        "acquisition_sequence": 9166
+      },
+      "jit_lidar": {
+        "producer_session": "52b8255f8bfd46abbff2fbcb8d3e7c9e",
+        "acquisition_sequence": 9167,
+        "source": {
+          "frame_id": "lidar_link",
+          "stamp_seconds": 1791663985.6542418,
+          "received_at": "2026-10-10T20:26:25.664983+00:00",
+          "age_seconds": 0.011249980016145855,
+          "rotation_to_robot_radians": 1.5707963267948966
+        },
+        "received_monotonic_seconds": 318638.231522186,
+        "effective_age_seconds": 0.10093766602221876
+      },
+      "bridge_zero_confirmed": true,
+      "newer_stopped_lidar": {
+        "producer_session": "52b8255f8bfd46abbff2fbcb8d3e7c9e",
+        "acquisition_sequence": 9176,
+        "effective_age_seconds": 0.04683043499244377,
+        "valid": true,
+        "reason": "fresh"
+      }
+    },
+    {
+      "index": 4,
+      "phase": "PASS_OBSTACLE",
+      "primitive": "BYPASS_FORWARD",
+      "transport_occurred": true,
+      "interrupted": false,
+      "completed": true,
+      "source_stamp": "1791663986424664861",
+      "stamp_consumed": true,
+      "planning_lidar": {
+        "producer_session": "52b8255f8bfd46abbff2fbcb8d3e7c9e",
+        "acquisition_sequence": 9179
+      },
+      "jit_lidar": {
+        "producer_session": "52b8255f8bfd46abbff2fbcb8d3e7c9e",
+        "acquisition_sequence": 9180,
+        "source": {
+          "frame_id": "lidar_link",
+          "stamp_seconds": 1791663986.6564786,
+          "received_at": "2026-10-10T20:26:26.665764+00:00",
+          "age_seconds": 0.0537673449725844,
+          "rotation_to_robot_radians": 1.5707963267948966
+        },
+        "received_monotonic_seconds": 318639.273607426,
+        "effective_age_seconds": 0.14433849998749793
+      },
+      "bridge_zero_confirmed": true,
+      "newer_stopped_lidar": {
+        "producer_session": "52b8255f8bfd46abbff2fbcb8d3e7c9e",
+        "acquisition_sequence": 9189,
+        "effective_age_seconds": 0.19664260192075744,
+        "valid": true,
+        "reason": "fresh"
+      }
+    },
+    {
+      "index": 5,
+      "phase": "PASS_OBSTACLE",
+      "primitive": "BYPASS_FORWARD",
+      "transport_occurred": true,
+      "interrupted": true,
+      "completed": false,
+      "invalidating_age_seconds": 0.32818514801329,
+      "invalidating_sequence": 9196,
+      "source_stamp": "1791663987493112037",
+      "stop_confirmed": true,
+      "stamp_consumed": true,
+      "planning_lidar": {
+        "producer_session": "52b8255f8bfd46abbff2fbcb8d3e7c9e",
+        "acquisition_sequence": 9192
+      },
+      "jit_lidar": {
+        "producer_session": "52b8255f8bfd46abbff2fbcb8d3e7c9e",
+        "acquisition_sequence": 9193,
+        "source": {
+          "frame_id": "lidar_link",
+          "stamp_seconds": 1791663987.7572649,
+          "received_at": "2026-10-10T20:26:27.760529+00:00",
+          "age_seconds": 0.028498790983576328,
+          "rotation_to_robot_radians": 1.5707963267948966
+        },
+        "received_monotonic_seconds": 318640.355032481,
+        "effective_age_seconds": 0.10982779099140316
+      },
+      "bridge_zero_confirmed": true,
+      "newer_stopped_lidar": {
+        "producer_session": "52b8255f8bfd46abbff2fbcb8d3e7c9e",
+        "acquisition_sequence": 9199,
+        "effective_age_seconds": 0.025643856031820178,
+        "valid": true,
+        "reason": "fresh"
+      }
+    },
+    {
+      "index": 6,
+      "phase": "PASS_OBSTACLE",
+      "primitive": "BYPASS_FORWARD",
+      "transport_occurred": true,
+      "interrupted": false,
+      "completed": true,
+      "source_stamp": "1791663988735941640",
+      "stamp_consumed": true,
+      "planning_lidar": {
+        "producer_session": "52b8255f8bfd46abbff2fbcb8d3e7c9e",
+        "acquisition_sequence": 9206
+      },
+      "jit_lidar": {
+        "producer_session": "52b8255f8bfd46abbff2fbcb8d3e7c9e",
+        "acquisition_sequence": 9207,
+        "source": {
+          "frame_id": "lidar_link",
+          "stamp_seconds": 1791663988.7553697,
+          "received_at": "2026-10-10T20:26:28.776153+00:00",
+          "age_seconds": 0.14580919197760522,
+          "rotation_to_robot_radians": 1.5707963267948966
+        },
+        "received_monotonic_seconds": 318641.480087599,
+        "effective_age_seconds": 0.2599104769760743
+      },
+      "bridge_zero_confirmed": true,
+      "newer_stopped_lidar": {
+        "producer_session": "52b8255f8bfd46abbff2fbcb8d3e7c9e",
+        "acquisition_sequence": 9216,
+        "effective_age_seconds": 0.22123123495839536,
+        "valid": true,
+        "reason": "fresh"
+      }
+    },
+    {
+      "index": 7,
+      "phase": "PASS_OBSTACLE",
+      "primitive": "BYPASS_FORWARD",
+      "transport_occurred": true,
+      "interrupted": false,
+      "completed": true,
+      "source_stamp": "1791663993907932770",
+      "stamp_consumed": true,
+      "planning_lidar": {
+        "producer_session": "52b8255f8bfd46abbff2fbcb8d3e7c9e",
+        "acquisition_sequence": 9271
+      },
+      "jit_lidar": {
+        "producer_session": "52b8255f8bfd46abbff2fbcb8d3e7c9e",
+        "acquisition_sequence": 9271,
+        "source": {
+          "frame_id": "lidar_link",
+          "stamp_seconds": 1791663994.0543885,
+          "received_at": "2026-10-10T20:26:34.058481+00:00",
+          "age_seconds": 0.02127595100319013,
+          "rotation_to_robot_radians": 1.5707963267948966
+        },
+        "received_monotonic_seconds": 318646.642908881,
+        "effective_age_seconds": 0.1737411619978957
+      },
+      "bridge_zero_confirmed": true,
+      "newer_stopped_lidar": {
+        "producer_session": "52b8255f8bfd46abbff2fbcb8d3e7c9e",
+        "acquisition_sequence": 9281,
+        "effective_age_seconds": 0.08807676000287756,
+        "valid": true,
+        "reason": "fresh"
+      }
+    },
+    {
+      "index": 8,
+      "phase": "PASS_OBSTACLE",
+      "primitive": "BYPASS_FORWARD",
+      "transport_occurred": true,
+      "interrupted": false,
+      "completed": true,
+      "source_stamp": "1791663994990592852",
+      "stamp_consumed": true,
+      "planning_lidar": {
+        "producer_session": "52b8255f8bfd46abbff2fbcb8d3e7c9e",
+        "acquisition_sequence": 9285
+      },
+      "jit_lidar": {
+        "producer_session": "52b8255f8bfd46abbff2fbcb8d3e7c9e",
+        "acquisition_sequence": 9286,
+        "source": {
+          "frame_id": "lidar_link",
+          "stamp_seconds": 1791663995.2539904,
+          "received_at": "2026-10-10T20:26:35.259580+00:00",
+          "age_seconds": 0.06073979800567031,
+          "rotation_to_robot_radians": 1.5707963267948966
+        },
+        "received_monotonic_seconds": 318647.882737218,
+        "effective_age_seconds": 0.12322128599043936
+      },
+      "bridge_zero_confirmed": true,
+      "newer_stopped_lidar": {
+        "producer_session": "52b8255f8bfd46abbff2fbcb8d3e7c9e",
+        "acquisition_sequence": 9295,
+        "effective_age_seconds": 0.041506913024932146,
+        "valid": true,
+        "reason": "fresh"
+      }
+    },
+    {
+      "index": 9,
+      "phase": "PASS_OBSTACLE",
+      "primitive": "TURN_LEFT",
+      "transport_occurred": true,
+      "interrupted": false,
+      "completed": true,
+      "source_stamp": "1791663996152520108",
+      "stamp_consumed": null,
+      "planning_lidar": {
+        "producer_session": "52b8255f8bfd46abbff2fbcb8d3e7c9e",
+        "acquisition_sequence": 9297
+      },
+      "jit_lidar": {
+        "producer_session": "52b8255f8bfd46abbff2fbcb8d3e7c9e",
+        "acquisition_sequence": 9297
+      },
+      "bridge_zero_confirmed": null,
+      "newer_stopped_lidar": {
+        "producer_session": "52b8255f8bfd46abbff2fbcb8d3e7c9e",
+        "acquisition_sequence": 9305,
+        "effective_age_seconds": 0.17918771598488092,
+        "valid": true,
+        "reason": "fresh"
+      }
+    },
+    {
+      "index": 10,
+      "phase": "PASS_OBSTACLE",
+      "primitive": "BYPASS_FORWARD",
+      "transport_occurred": true,
+      "interrupted": false,
+      "completed": true,
+      "source_stamp": "1791664000911064632",
+      "stamp_consumed": true,
+      "planning_lidar": {
+        "producer_session": "52b8255f8bfd46abbff2fbcb8d3e7c9e",
+        "acquisition_sequence": 9357
+      },
+      "jit_lidar": {
+        "producer_session": "52b8255f8bfd46abbff2fbcb8d3e7c9e",
+        "acquisition_sequence": 9358,
+        "source": {
+          "frame_id": "lidar_link",
+          "stamp_seconds": 1791664001.0538602,
+          "received_at": "2026-10-10T20:26:41.057528+00:00",
+          "age_seconds": 0.12180396396433935,
+          "rotation_to_robot_radians": 1.5707963267948966
+        },
+        "received_monotonic_seconds": 318653.723136919,
+        "effective_age_seconds": 0.22914089396363124
+      },
+      "bridge_zero_confirmed": true,
+      "newer_stopped_lidar": {
+        "producer_session": "52b8255f8bfd46abbff2fbcb8d3e7c9e",
+        "acquisition_sequence": 9368,
+        "effective_age_seconds": 0.050238705007359385,
+        "valid": true,
+        "reason": "fresh"
+      }
+    },
+    {
+      "index": 11,
+      "phase": "PASS_OBSTACLE",
+      "primitive": "BYPASS_FORWARD",
+      "transport_occurred": true,
+      "interrupted": false,
+      "completed": true,
+      "source_stamp": "1791664002004758177",
+      "stamp_consumed": true,
+      "planning_lidar": {
+        "producer_session": "52b8255f8bfd46abbff2fbcb8d3e7c9e",
+        "acquisition_sequence": 9370
+      },
+      "jit_lidar": {
+        "producer_session": "52b8255f8bfd46abbff2fbcb8d3e7c9e",
+        "acquisition_sequence": 9371,
+        "source": {
+          "frame_id": "lidar_link",
+          "stamp_seconds": 1791664002.1538613,
+          "received_at": "2026-10-10T20:26:42.160526+00:00",
+          "age_seconds": 0.0669631629716605,
+          "rotation_to_robot_radians": 1.5707963267948966
+        },
+        "received_monotonic_seconds": 318654.77954308,
+        "effective_age_seconds": 0.2167659249389544
+      },
+      "bridge_zero_confirmed": true,
+      "newer_stopped_lidar": {
+        "producer_session": "52b8255f8bfd46abbff2fbcb8d3e7c9e",
+        "acquisition_sequence": 9380,
+        "effective_age_seconds": 0.1074913979973644,
+        "valid": true,
+        "reason": "fresh"
+      }
+    },
+    {
+      "index": 12,
+      "phase": "PASS_OBSTACLE",
+      "primitive": "BYPASS_FORWARD",
+      "transport_occurred": true,
+      "interrupted": false,
+      "completed": true,
+      "source_stamp": "1791664006700867658",
+      "stamp_consumed": true,
+      "planning_lidar": {
+        "producer_session": "52b8255f8bfd46abbff2fbcb8d3e7c9e",
+        "acquisition_sequence": 9427
+      },
+      "jit_lidar": {
+        "producer_session": "52b8255f8bfd46abbff2fbcb8d3e7c9e",
+        "acquisition_sequence": 9428,
+        "source": {
+          "frame_id": "lidar_link",
+          "stamp_seconds": 1791664006.8567462,
+          "received_at": "2026-10-10T20:26:46.866375+00:00",
+          "age_seconds": 0.05984861898468807,
+          "rotation_to_robot_radians": 1.5707963267948966
+        },
+        "received_monotonic_seconds": 318659.444158271,
+        "effective_age_seconds": 0.1556348159792833
+      },
+      "bridge_zero_confirmed": true,
+      "newer_stopped_lidar": {
+        "producer_session": "52b8255f8bfd46abbff2fbcb8d3e7c9e",
+        "acquisition_sequence": 9436,
+        "effective_age_seconds": 0.06516810297034681,
+        "valid": true,
+        "reason": "fresh"
+      }
+    }
+  ],
+  "avoidance_counts": [
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    8,
+    8,
+    9,
+    10,
+    11
+  ],
+  "first_after_six": {
+    "semantic_stamp": 1791663991224522587,
+    "action_stamp": 1791663993907932770,
+    "tracker_quality": 0.9979817867,
+    "planning_sequence": 9271,
+    "jit_sequence": 9271,
+    "jit_age_seconds": 0.1737411619978957,
+    "newer_stopped_sequence": 9281
+  },
+  "detour_elapsed_seconds": 25.114241529,
+  "watchdog_exhausted": false,
+  "continuations": "All continuations in tests use synthetic controlled scans/camera/robot doubles; no live success claimed.",
+  "native_terminal_context": {
+    "phase": "PASS_OBSTACLE",
+    "committed_side": "LEFT",
+    "phase_entry_evidence": {
+      "producer_session": "52b8255f8bfd46abbff2fbcb8d3e7c9e",
+      "acquisition_sequence": 9152,
+      "source_frame_stamp_ns": "1791663984326445324"
+    },
+    "phase_action_count": 9,
+    "last_completion_evidence": {
+      "producer_session": "52b8255f8bfd46abbff2fbcb8d3e7c9e",
+      "acquisition_sequence": 9428,
+      "source_frame_stamp_ns": "1791664006700867658"
+    },
+    "retired_source_stamp_ns": 1791664006700867658,
+    "watchdog": {
+      "detour_started_monotonic": 318635.368121225,
+      "phase_started_monotonic": 318637.04893697,
+      "phase": "PASS_OBSTACLE",
+      "total_detour_actions": 12,
+      "phase_actions": 9,
+      "phase_stagnation_count": 5,
+      "equivalent_veto_count": 0,
+      "total_veto_count": 0,
+      "phase_transitions": 1,
+      "last_veto": null,
+      "pending_passage": {
+        "session": "52b8255f8bfd46abbff2fbcb8d3e7c9e",
+        "sequence": 9428,
+        "side": "LEFT",
+        "center_separation_m": 0.21549638581924077,
+        "blocker_x_m": 0.5976477937314518,
+        "longitudinal_extent_m": 0.6271097510373131,
+        "pass_safe": true
+      },
+      "pending_reassessment": true,
+      "last_progress": "unproven_pending_fresh_geometry",
+      "limits": {
+        "detour_seconds": 120.0,
+        "clear_side_unproven_actions": 4,
+        "clear_side_actions": 8,
+        "pass_unproven_actions": 12,
+        "pass_actions": 24,
+        "emergency_physical_actions": 64,
+        "equivalent_vetoes": 6,
+        "total_vetoes": 24,
+        "phase_transitions": 24
+      }
+    }
+  },
+  "transported_recovery_wait": {
+    "ok": true,
+    "reason": "find_marvin_new_lidar_evidence_received",
+    "producer_session": "52b8255f8bfd46abbff2fbcb8d3e7c9e",
+    "previous_acquisition_sequence": 9196,
+    "poll_count": 1,
+    "wait_elapsed_seconds": 0.0035738819860853255,
+    "new_sequence": 9204
+  }
+}

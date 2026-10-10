@@ -94,6 +94,22 @@ def _marvin_alignment_lidar_is_current(value, session):
     )
 
 
+def _marvin_complete_lidar_is_current(value, session):
+    """Stopped recovery admits sensing only, never motion."""
+    if not _marvin_alignment_lidar_is_current(value, session):
+        return False
+    age = value.get("effective_age_seconds")
+    sectors = value["local_motion_geometry"].get("sectors")
+    return (type(age) in (int, float) and math.isfinite(age)
+            and 0 <= age <= MAXIMUM_EFFECTIVE_AGE_SECONDS
+            and isinstance(sectors, dict) and all(
+                isinstance(sectors.get(name), dict)
+                and sectors[name].get("available") is True
+                and type(sectors[name].get("valid_sample_count")) is int
+                and sectors[name]["valid_sample_count"] >= MINIMUM_VALID_SAMPLES_PER_REQUIRED_SECTOR
+                for name, _, _ in OCTANT_SECTORS))
+
+
 @dataclass
 class _MarvinLiveProofOwner:
     """Exclusive proof lease, never a MissionManager mission."""
@@ -1507,7 +1523,7 @@ class CognitiveRuntime:
 
     def _wait_for_new_marvin_lidar_evidence(
         self, *, expected_session, previous_sequence, execution_guard,
-        timeout_seconds=None, allow_transient_stale=False,
+        timeout_seconds=None, allow_transient_stale=False, allow_stationary_currentness=False,
     ):
         """Poll World Model telemetry while stopped; never acquire or mint scans."""
         timeout = (self.MARVIN_NEW_LIDAR_TIMEOUT_SECONDS if timeout_seconds is None
@@ -1515,6 +1531,7 @@ class CognitiveRuntime:
         started = time.monotonic()
         polls = 0
         last = None
+        sequence_seen = previous_sequence
 
         def finish(reason, *, ok=False):
             return {"ok": ok, "reason": reason, "snapshot": last,
@@ -1554,8 +1571,13 @@ class CognitiveRuntime:
             if worker.running is not True or not isinstance(last, dict):
                 return finish("find_marvin_lidar_not_current")
             sequence = last.get("acquisition_sequence")
-            if type(sequence) is not int or sequence < previous_sequence:
+            if (allow_stationary_currentness and sequence is None
+                    and last.get("available") is False):
+                sequence = sequence_seen  # Missing unavailable data never releases the wait.
+            if type(sequence) is not int or sequence < sequence_seen:
                 return finish("find_marvin_lidar_acquisition_sequence_invalid")
+            if allow_stationary_currentness:
+                sequence_seen = sequence
             if time.monotonic() >= deadline:
                 return finish("find_marvin_new_lidar_evidence_timeout")
             if sequence > previous_sequence:
@@ -1563,9 +1585,11 @@ class CognitiveRuntime:
                 fresh = (_marvin_alignment_lidar_is_current(last, expected_session)
                          and type(age) in (int, float) and math.isfinite(age)
                          and 0 <= age <= MAXIMUM_EFFECTIVE_AGE_SECONDS)
+                if allow_stationary_currentness:
+                    fresh = fresh and _marvin_complete_lidar_is_current(last, expected_session)
                 if fresh:
                     return finish("find_marvin_new_lidar_evidence_received", ok=True)
-                if not (allow_transient_stale and last.get("reason") in {"stale", "stale_lidar"}):
+                if not (allow_stationary_currentness or allow_transient_stale and last.get("reason") in {"stale", "stale_lidar"}):
                     return finish("find_marvin_lidar_not_current")
             # The old acquisition may age out while stopped. It cannot release
             # this wait; only a new scan's freshness/validity can admit progress.
@@ -1574,6 +1598,115 @@ class CognitiveRuntime:
                 return finish("find_marvin_mission_preempted")
             time.sleep(min(self.MARVIN_NEW_LIDAR_POLL_SECONDS,
                            max(0.0, deadline - time.monotonic())))
+
+    def _recover_marvin_stationary_lidar(self, *, snapshot, expected_session,
+                                         sequence_floors, execution_guard, entry_point, delivery_resolved):
+        """Certify resolved stationary delivery, then wait for sensing only.
+
+        The caller retires visual authority and must reacquire it. No command,
+        phase transition, progress, or action count is produced here.
+        """
+        worker = self.lidar_worker
+        sample = snapshot if isinstance(snapshot, dict) else {}
+        geometry = sample.get("local_motion_geometry") or {}
+        sectors = geometry.get("sectors") if isinstance(geometry, dict) else None
+        front = (sample.get("sectors") or {}).get("front") if isinstance(sample.get("sectors"), dict) else None
+        front = front if isinstance(front, dict) else {}
+        scalar = lambda v: v[:128] if type(v) is str else v if v is None or type(v) in (bool, int, float, str) and (
+            type(v) is not float or math.isfinite(v)) else None
+        evidence = {"recovery_class": "STATIONARY_LIDAR_CURRENTNESS",
+            "entry_point": entry_point, "producer_session": scalar(sample.get("producer_session")),
+            "worker_running": worker.running is True,
+            **{k: scalar(sample.get(k)) for k in ("acquisition_sequence", "effective_age_seconds",
+                "reason", "available", "valid")},
+            "geometry_valid": geometry.get("valid") is True if isinstance(geometry, dict) else False,
+            "required_sectors_valid": isinstance(sectors, dict) and all(
+                isinstance(sectors.get(n), dict) and sectors[n].get("available") is True
+                and type(sectors[n].get("valid_sample_count")) is int
+                and sectors[n]["valid_sample_count"] >= MINIMUM_VALID_SAMPLES_PER_REQUIRED_SECTOR
+                for n, _, _ in OCTANT_SECTORS),
+            "front_state": scalar(front.get("state")),
+            "motion_executed": False, "source_stamp_consumed": False,
+            "delivery_resolved": delivery_resolved is True,
+            "wait_poll_count": 0, "wait_elapsed_seconds": 0.0}
+
+        def done(reason, ok=False, wait=None):
+            evidence.update(final_recovery_result=reason, ok=ok)
+            if wait is not None:
+                evidence.update(wait_poll_count=wait["poll_count"],
+                    wait_elapsed_seconds=wait["wait_elapsed_seconds"],
+                    new_sequence=(wait.get("snapshot") or {}).get("acquisition_sequence") if ok else None)
+            return evidence
+
+        def stationary():
+            if not execution_guard() or not self._marvin_motion_owner_is_current():
+                return "find_marvin_mission_preempted"
+            if worker.session != expected_session:
+                return "find_marvin_lidar_producer_session_changed"
+            if worker.running is not True:
+                return "find_marvin_lidar_worker_stopped"
+            bridge = self._marvin_bridge_ready_and_stopped()
+            motion = bridge.get("motion") or {}
+            evidence["bridge_zero"] = (bridge.get("ok") is True and bridge.get("status") == "READY"
+                and all(type(motion.get(k)) in (int, float) and motion[k] == 0
+                        for k in ("linear_x", "linear_y", "angular_z"))
+                and motion.get("streaming") is False)
+            if not evidence["bridge_zero"]:
+                return "find_marvin_lidar_recovery_bridge_not_stopped"
+            try:
+                interlock = self.forward_interlock.status()
+            except Exception:
+                return "find_marvin_lidar_recovery_interlock_unknown"
+            if not isinstance(interlock, dict):
+                return "find_marvin_lidar_recovery_interlock_unknown"
+            evidence.update(interlock_active=scalar(interlock.get("active_forward")),
+                            interlock_pending=scalar(interlock.get("pending_forward")))
+            if interlock.get("active_forward") is not False or interlock.get("pending_forward") is not False:
+                return "find_marvin_lidar_recovery_interlock_not_stopped"
+            return None
+
+        if delivery_resolved is not True:
+            return done("find_marvin_action_delivery_uncertain")
+        if (not isinstance(expected_session, str) or not expected_session
+                or not isinstance(snapshot, dict) or sample.get("producer_session") != expected_session):
+            return done("find_marvin_lidar_recovery_evidence_invalid")
+        floors = [(name, seq) for name, session, seq in sequence_floors
+                  if session == expected_session and type(seq) is int and seq > 0]
+        if any(session != expected_session for _, session, _ in sequence_floors):
+            return done("find_marvin_lidar_producer_session_changed")
+        sequence = sample.get("acquisition_sequence")
+        if type(sequence) is int and sequence > 0:
+            if floors and sequence < max(seq for _, seq in floors):
+                return done("find_marvin_lidar_acquisition_sequence_invalid")
+            floors.append(("failing_snapshot", sequence))
+        elif not (sequence is None and sample.get("available") is False and floors):
+            return done("find_marvin_lidar_acquisition_sequence_invalid")
+        if not floors:
+            return done("find_marvin_lidar_acquisition_sequence_invalid")
+        source, floor = max(floors, key=lambda row: row[1])
+        evidence.update(selected_sequence_floor=floor, sequence_floor_source=source)
+        failure = stationary()
+        if failure:
+            return done(failure)
+        try:
+            stop = self.robot_client.stop()
+        except Exception:
+            stop = None
+        evidence["stop_ok"] = isinstance(stop, dict) and stop.get("ok") is True
+        if not evidence["stop_ok"]:
+            return done("find_marvin_lidar_recovery_stop_unconfirmed")
+        failure = stationary()
+        if failure:
+            return done(failure)
+        # Recheck zero/ownership/session on both sides of every wait poll.
+        failure = None
+        def guard():
+            nonlocal failure
+            failure = stationary()
+            return failure is None
+        wait = self._wait_for_new_marvin_lidar_evidence(expected_session=expected_session,
+            previous_sequence=floor, execution_guard=guard, allow_stationary_currentness=True)
+        return done(failure or wait["reason"], wait["ok"] is True and failure is None, wait)
 
     def _marvin_certified_dispatch_rejection(self, result, stamp):
         """Validate negative transport provenance; never admits movement."""
@@ -1916,6 +2049,9 @@ class CognitiveRuntime:
         tracker_loss_history = []
         lidar_wait_history = []
         lidar_recovery_history = []
+        stationary_lidar_recovery_history = []
+        stationary_lidar_reobserve_floor = None
+        stationary_lidar_scan_pending = False
         avoidance_history = []
         avoidance_lidar_refresh_history = []
         blocked_wait = blocked_wait_diagnostics()
@@ -1947,6 +2083,8 @@ class CognitiveRuntime:
         if proof_continuation is None:
             self._marvin_target_range_association = MarvinTargetRangeAssociation()
         consecutive_lidar_interruptions = 0
+        consecutive_lidar_currentness_failures = 0
+        lidar_currentness_reobserve_pending = False
         reacquisition_attempts = 0
         consecutive_reacquisition_failures = 0
         search_turns = 0
@@ -2146,9 +2284,11 @@ class CognitiveRuntime:
                 "interrupted_strafe_attempts": sum((row["result"].get("action_type") or "").startswith("STRAFE")
                     and row["result"].get("interrupted") is True for row in history),
                 "consecutive_lidar_interruptions": consecutive_lidar_interruptions,
+                "consecutive_lidar_currentness_failures": consecutive_lidar_currentness_failures,
                 "max_consecutive_lidar_interruptions": self.MAX_CONSECUTIVE_MARVIN_LIDAR_INTERRUPTION_FAILURES,
                 "max_lidar_recovery_episodes": self.MAX_MARVIN_REACQUISITION_EPISODES,
                 "lidar_recovery_history": lidar_recovery_history,
+                "stationary_lidar_recovery_history": stationary_lidar_recovery_history,
                 **avoidance, "max_local_avoidance_actions": self.MAX_LOCAL_AVOIDANCE_ACTIONS,
                 "local_avoidance_history": avoidance_history,
                 "avoidance_lidar_refresh_history": avoidance_lidar_refresh_history,
@@ -2257,6 +2397,52 @@ class CognitiveRuntime:
                     result["proof"]["cumulative_actions_completed"] = len(action_history)
             return result
 
+        def recover_stationary(snapshot, entry_point, floors):
+            nonlocal consecutive_lidar_currentness_failures, lidar_currentness_reobserve_pending
+            nonlocal stationary_lidar_reobserve_floor
+            nonlocal stationary_lidar_scan_pending, detour_context, camera_floor_stamp
+            if proof_max_physical_actions is not None or proof_continuation is not None:
+                return "find_marvin_lidar_not_current"
+            # This path is entered only before dispatch or after its resolved
+            # STOP result. Delivery uncertainty exits earlier and never retries.
+            old_stamp = (observation or {}).get("source_frame_stamp_ns") or previous_stamp
+            if type(old_stamp) is not int or old_stamp <= 0:
+                return "find_marvin_lidar_recovery_evidence_invalid"
+            consecutive_lidar_currentness_failures += 1
+            if (consecutive_lidar_currentness_failures >= self.MAX_CONSECUTIVE_MARVIN_LIDAR_INTERRUPTION_FAILURES
+                    or len(stationary_lidar_recovery_history) + len(lidar_recovery_history)
+                        >= self.MAX_MARVIN_REACQUISITION_EPISODES):
+                stationary_lidar_recovery_history.append({"ok": False, "entry_point": entry_point,
+                    "final_recovery_result": "find_marvin_lidar_recovery_exhausted",
+                    "consecutive_failures": consecutive_lidar_currentness_failures})
+                return "find_marvin_lidar_recovery_exhausted"
+            recovery = self._recover_marvin_stationary_lidar(snapshot=snapshot,
+                expected_session=getattr(self.lidar_worker, "session", None),
+                sequence_floors=floors, execution_guard=current, entry_point=entry_point, delivery_resolved=True)
+            recovery.update(phase=detour_context.phase.value, committed_side=detour_context.committed_side,
+                avoidance_count=avoidance["local_avoidance_actions"],
+                bypass_count=avoidance["local_bypass_actions"],
+                phase_action_count=detour_context.phase_action_count,
+                watchdog=detour_context.watchdog.record(),
+                consecutive_failures=consecutive_lidar_currentness_failures,
+                retired_source_stamp_ns=old_stamp,
+                source_stamp_transport_consumed=old_stamp in self._marvin_alignment_consumed_source_frame_stamps)
+            stationary_lidar_recovery_history.append(recovery)
+            # Retirement is not transport consumption. Never add to the consumed set.
+            if type(recovery.get("selected_sequence_floor")) is int:
+                detour_context = detour_context.retire(Frontier(recovery["producer_session"],
+                    recovery["selected_sequence_floor"], old_stamp))
+            camera_floor_stamp = max(camera_floor_stamp or 0, old_stamp)
+            self._marvin_alignment_observation = None
+            if callable(clear_episode):
+                clear_episode()
+            if not recovery["ok"]:
+                return recovery["final_recovery_result"]
+            stationary_lidar_reobserve_floor = old_stamp
+            stationary_lidar_scan_pending = True
+            lidar_currentness_reobserve_pending = True
+            return None
+
         while current():
             bridge = self._marvin_bridge_ready_and_stopped()
             if bridge.get("ok") is not True or bridge.get("status") != "READY":
@@ -2264,7 +2450,7 @@ class CognitiveRuntime:
             resumed_blocked_wait = blocked_resume_context
             prior = ((resumed_blocked_wait["session"], resumed_blocked_wait["lidar_sequence"])
                      if resumed_blocked_wait else self._marvin_last_action_lidar_evidence)
-            if prior is not None:
+            if prior is not None and not stationary_lidar_scan_pending:
                 wait = self._wait_for_new_marvin_lidar_evidence(
                     expected_session=prior[0], previous_sequence=prior[1], execution_guard=current,
                 )
@@ -2274,9 +2460,35 @@ class CognitiveRuntime:
                     if getattr(self, "_marvin_navigation_shadow", None) is not None:
                         self._emit_marvin_navigation_shadow("STOPPED_LIDAR_RECEIVED", wait=wait)
                 if wait["ok"] is not True:
+                    if wait["reason"] == "find_marvin_lidar_not_current":
+                        reason = recover_stationary(wait.get("snapshot"), "stopped_post_action_wait",
+                            [("last_action_jit", prior[0], prior[1])])
+                        if reason is None:
+                            continue
+                        return finish("BLOCKED", reason)
                     return finish("STOPPED" if not current() else "BLOCKED", wait["reason"])
             # No camera/semantic decision is made before the stopped LiDAR wait.
-            if dispatch_reobserve_floor is not None:
+            if stationary_lidar_reobserve_floor is not None:
+                if callable(clear_episode):
+                    clear_episode()
+                observation = self._observe_find_marvin_v2(
+                    reacquisition_source_floor=stationary_lidar_reobserve_floor)
+                identity_stamp = observation.get("identity_source_frame_stamp_ns")
+                action_stamp = observation.get("source_frame_stamp_ns")
+                tracker = observation.get("opencv_tracker") or {}
+                if (observation.get("identity_confirmed") is not True
+                        or observation.get("identity_source") != "gemini_marvin_candidate_selection"
+                        or type(identity_stamp) is not int or identity_stamp <= stationary_lidar_reobserve_floor
+                        or type(action_stamp) is not int or action_stamp <= identity_stamp
+                        or tracker.get("active") is not True or tracker.get("matched") is not True
+                        or type(tracker.get("quality")) not in (int, float)
+                        or not math.isfinite(tracker["quality"])
+                        or type(tracker.get("threshold")) not in (int, float)
+                        or not math.isfinite(tracker["threshold"])
+                        or tracker["quality"] < max(.8, tracker["threshold"])):
+                    return finish("REVERIFY_REQUIRED", "find_marvin_lidar_recovery_fresh_identity_required")
+                stationary_lidar_scan_pending = False
+            elif dispatch_reobserve_floor is not None:
                 # No resumption of old camera authority: fresh semantic frame,
                 # followed by the normal strictly newer native tracker frame.
                 if callable(clear_episode):
@@ -2464,10 +2676,40 @@ class CognitiveRuntime:
                     or action_finished_monotonic_seconds is not None
                     and receipt <= action_finished_monotonic_seconds):
                 return finish("REVERIFY_REQUIRED", "find_marvin_new_camera_frame_required")
-            session, lidar = self._active_localization_lidar_is_current()
-            if lidar is None:
-                return finish("BLOCKED", "find_marvin_lidar_not_current")
+            session, lidar = (self._active_localization_lidar_is_current()
+                              if proof_max_physical_actions is not None or proof_continuation is not None
+                              else self._active_localization_lidar_is_current(include_noncurrent=True))
             prior = getattr(self, "_marvin_last_action_lidar_evidence", None)
+            observation_currentness_failed = (observation.get("arrival") or {}).get("reason") == "target_lidar_not_current"
+            if not _marvin_complete_lidar_is_current(lidar, session) or observation_currentness_failed:
+                floors = [("last_action_jit", prior[0], prior[1])] if prior else []
+                if stationary_lidar_recovery_history and stationary_lidar_recovery_history[-1].get("ok"):
+                    recovered = stationary_lidar_recovery_history[-1]
+                    floors.append(("stationary_recovery_scan", recovered["producer_session"],
+                                   recovered["new_sequence"]))
+                if lidar_wait_history and lidar_wait_history[-1].get("ok"):
+                    stopped = lidar_wait_history[-1]["snapshot"]
+                    floors.append(("stopped_post_action_scan", stopped.get("producer_session"),
+                                   stopped.get("acquisition_sequence")))
+                reason = recover_stationary(lidar, "observation_route_reassessment"
+                    if observation_currentness_failed else "planning_reassessment", floors)
+                if reason is None:
+                    continue
+                return finish("BLOCKED", reason)
+            if (stationary_lidar_reobserve_floor is not None and
+                    (type(lidar.get("acquisition_sequence")) is not int or
+                     lidar["acquisition_sequence"] < stationary_lidar_recovery_history[-1]["new_sequence"])):
+                return finish("BLOCKED", "find_marvin_lidar_acquisition_sequence_invalid")
+            if stationary_lidar_reobserve_floor is not None:
+                stationary_lidar_recovery_history[-1]["new_camera_source_stamp_ns"] = stamp
+                # The new recovery counter resets only after both evidence gates pass.
+                stationary_lidar_reobserve_floor = None
+            if (lidar_currentness_reobserve_pending and observation.get("identity_confirmed") is True
+                    and tracker.get("active") is True and tracker.get("matched") is True
+                    and type(tracker.get("quality")) in (int, float)
+                    and math.isfinite(tracker["quality"]) and tracker["quality"] >= .8):
+                consecutive_lidar_currentness_failures = 0
+                lidar_currentness_reobserve_pending = False
             sequence = lidar.get("acquisition_sequence")
             if prior is not None and session != prior[0]:
                 return finish("BLOCKED", "find_marvin_lidar_producer_session_changed")
@@ -2632,6 +2874,12 @@ class CognitiveRuntime:
                             if not current():
                                 return finish("STOPPED", "find_marvin_mission_preempted")
                             if refreshed["ok"] is not True:
+                                if refreshed["reason"] == "find_marvin_lidar_not_current":
+                                    reason = recover_stationary(refreshed["wait"].get("snapshot"),
+                                        "avoidance_plan_refresh", [("route_planning_snapshot", session, sequence)])
+                                    if reason is None:
+                                        continue
+                                    return finish("BLOCKED", reason)
                                 history.append({"state": "ADVANCING", "decision_only": True,
                                     "source_frame_stamp_ns": stamp, "observation": observation,
                                     "motion_executed": False, "action_lidar_evidence": None,
@@ -3033,11 +3281,14 @@ class CognitiveRuntime:
                 if not current():
                     return finish("STOPPED", "find_marvin_mission_preempted")
                 consecutive_lidar_interruptions += 1
+                consecutive_lidar_currentness_failures += 1
                 recovery = {"source_frame_stamp_ns": stamp, "motion_executed": False,
                             "consecutive_interruptions": consecutive_lidar_interruptions}
                 lidar_recovery_history.append(recovery)
                 if (consecutive_lidar_interruptions >= self.MAX_CONSECUTIVE_MARVIN_LIDAR_INTERRUPTION_FAILURES
-                        or len(lidar_recovery_history) > self.MAX_MARVIN_REACQUISITION_EPISODES):
+                        or consecutive_lidar_currentness_failures >= self.MAX_CONSECUTIVE_MARVIN_LIDAR_INTERRUPTION_FAILURES
+                        or len(lidar_recovery_history) + len(stationary_lidar_recovery_history)
+                            > self.MAX_MARVIN_REACQUISITION_EPISODES):
                     return finish("BLOCKED", "find_marvin_lidar_recovery_exhausted")
                 action_finished_monotonic_seconds = time.monotonic()
                 previous_stamp = stamp
@@ -3070,6 +3321,7 @@ class CognitiveRuntime:
                     retain("record_lidar", wait["snapshot"])
                 if wait["ok"] is not True:
                     return finish("STOPPED" if not current() else "BLOCKED", wait["reason"])
+                lidar_currentness_reobserve_pending = True
                 # Do not replay/resume the command. The next cycle observes a
                 # new camera frame, checks tracker/identity and replans with JIT.
                 continue
@@ -3378,7 +3630,7 @@ class CognitiveRuntime:
             and navigation.get("goal_active") is False
         )
 
-    def _active_localization_lidar_is_current(self):
+    def _active_localization_lidar_is_current(self, *, include_noncurrent=False):
         worker = getattr(self, "lidar_worker", None)
         session = getattr(worker, "session", None)
         if (
@@ -3396,7 +3648,7 @@ class CognitiveRuntime:
             return session, None
         return (
             session,
-            state if _marvin_alignment_lidar_is_current(state, session) else None,
+            state if include_noncurrent or _marvin_alignment_lidar_is_current(state, session) else None,
         )
 
     def _active_localization_has_behavior_owner(self):

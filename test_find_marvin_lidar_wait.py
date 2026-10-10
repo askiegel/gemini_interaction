@@ -44,8 +44,9 @@ def controlled_producer(bundle, monkeypatch, *, publish=True, before_stop=False,
         return snapshot
 
     def sleep(seconds):
-        assert robot.status()["motion"] == {
-            "linear_x": 0.0, "angular_z": 0.0, "streaming": False}
+        motion = robot.status()["motion"]
+        assert motion["linear_x"] == motion["angular_z"] == motion.get("linear_y", 0.) == 0.
+        assert motion["streaming"] is False
         clock[0] += max(1, round(seconds * 1e9))
         if state["waiting"]:
             # LiDAR must advance before any next-cycle observation/semantics.
@@ -128,17 +129,23 @@ def test_previous_scan_aged_out_during_action_still_waits_for_fresh_n_plus_one(t
 
 
 @pytest.mark.parametrize("fault,reason", [
-    ("stale", "find_marvin_lidar_not_current"),
-    ("invalid", "find_marvin_lidar_not_current"),
-    ("unavailable", "find_marvin_lidar_not_current"),
-    ("geometry", "find_marvin_lidar_not_current"),
+    ("stale", "find_marvin_new_lidar_evidence_timeout"),
+    ("invalid", "find_marvin_new_lidar_evidence_timeout"),
+    ("unavailable", "find_marvin_new_lidar_evidence_timeout"),
+    ("geometry", "find_marvin_new_lidar_evidence_timeout"),
     ("session", "find_marvin_lidar_producer_session_changed"),
     ("bool_sequence", "find_marvin_lidar_acquisition_sequence_invalid"),
     ("regressed_sequence", "find_marvin_lidar_acquisition_sequence_invalid"),
 ])
-def test_new_but_untrusted_scan_blocks_without_waiting_out_timeout(tmp_path, monkeypatch, fault, reason):
+def test_new_but_untrusted_scan_waits_boundedly_without_additional_motion(tmp_path, monkeypatch, fault, reason):
     bundle = make_runtime(tmp_path, monkeypatch, [(0, .8)])
-    runtime, _, _, events, _ = bundle
+    runtime, _, robot, events, _ = bundle
+    # Prove all axes and inactive interlock instead of relying on omitted fields.
+    from types import SimpleNamespace
+    status = robot.status
+    robot.status = lambda: dict(status(), motion=dict(status()["motion"], linear_y=0.))
+    runtime.forward_interlock = SimpleNamespace(status=lambda: {
+        "active_forward": False, "pending_forward": False})
     producer = controlled_producer(bundle, monkeypatch)
 
     def corrupt(snapshot):
@@ -161,6 +168,11 @@ def test_new_but_untrusted_scan_blocks_without_waiting_out_timeout(tmp_path, mon
     assert result["state"] == "BLOCKED" and result["reason"] == reason
     assert len(motions(events)) == events.count("observe") == 1
     assert result["lidar_wait_history"][0]["wait_elapsed_seconds"] == pytest.approx(.10)
+    if fault in {"stale", "invalid", "unavailable", "geometry"}:
+        recovery, = result["stationary_lidar_recovery_history"]
+        assert recovery["entry_point"] == "stopped_post_action_wait"
+        assert recovery["wait_elapsed_seconds"] == pytest.approx(.60)
+        assert recovery["wait_poll_count"] <= 13
     assert events[-1] == "stop"
 
 

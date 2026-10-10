@@ -180,14 +180,20 @@ def test_live_1235_marvin_and_0483_obstacle_resume_guarded_pursuit(tmp_path, mon
 @pytest.mark.parametrize("fault,reason", [
     ("never", "find_marvin_avoidance_new_lidar_required"),
     ("session", "find_marvin_lidar_producer_session_changed"),
-    ("invalid", "find_marvin_lidar_not_current"),
-    ("stale", "find_marvin_lidar_not_current"),
+    ("invalid", "find_marvin_new_lidar_evidence_timeout"),
+    ("stale", "find_marvin_new_lidar_evidence_timeout"),
 ])
 def test_bad_new_evidence_fails_closed_without_motion(tmp_path, monkeypatch, fault, reason):
     bundle, state = handoff_runtime(tmp_path, monkeypatch, publish=fault != "never", fault=fault)
     result = run(bundle[0])
     assert result["state"] == "BLOCKED" and result["reason"] == reason
     assert not motions(bundle[3]) and not state["candidate_scans"]
+    if fault in {"invalid", "stale"}:
+        # A certified stopped handoff now waits boundedly; it never uses the bad scan.
+        recovery, = result["stationary_lidar_recovery_history"]
+        assert recovery["entry_point"] == "avoidance_plan_refresh"
+        assert recovery["wait_elapsed_seconds"] == pytest.approx(.60)
+        assert recovery["bridge_zero"] and recovery["stop_ok"]
     refresh, = result["avoidance_lidar_refresh_history"]
     assert refresh["avoidance_planning_lidar_sequence"] is None
     assert refresh["wait"]["poll_count"] <= 13
