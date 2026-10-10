@@ -102,11 +102,17 @@ def test_one_safe_bounded_strafe_then_new_evidence_and_ordinary_approach(
 
 
 @pytest.mark.parametrize("sides", [(.46, .46), (.40, 1.2), (1.2, .40)])
-def test_no_escape_or_unsafe_rotational_circle_never_moves(tmp_path, monkeypatch, sides):
-    runtime, _, _, events, _ = avoidance_runtime(tmp_path, monkeypatch, [(0, .8)], [sides])
+def test_blocked_lateral_uses_turn_only_when_rotational_sweep_is_safe(tmp_path, monkeypatch, sides):
+    runtime, _, _, events, _ = avoidance_runtime(tmp_path, monkeypatch, [(0, .8)]*8, [sides])
     result = run(runtime)
-    assert result["state"] == "BLOCKED" and motions(events) == []
-    assert result["local_avoidance_actions"] == 0
+    assert result["state"] == "BLOCKED"
+    if sides == (.46,.46):
+        assert all(m[0] == "turn" for m in motions(events))
+        assert result["local_avoidance_actions"] == len(motions(events)) == 4
+        assert result["reason"] == "find_marvin_clear_side_stagnation_exhausted"
+    else:
+        assert motions(events) == [] and result["local_avoidance_actions"] == 0
+    assert result["stop_result"]["ok"]
 
 
 def test_off_center_after_detour_uses_existing_alignment(tmp_path, monkeypatch):
@@ -207,29 +213,36 @@ def test_clear_side_stagnation_bounds_detours(tmp_path, monkeypatch):
 
 def test_ranking_noise_does_not_produce_left_right_ping_pong(tmp_path, monkeypatch):
     runtime, _, _, events, _ = avoidance_runtime(tmp_path, monkeypatch,
-        [(0, .60)] * 4 + [(0, .5)]*2, [(1.3, .8), (.8, 1.3), (1.3, .8), (.8, 1.3), None])
+        [(0, .60)] * 4 + [(0, .5)]*2, [(1.3, .8), (1.299, .801), (1.301, .799), (1.299, .801), None])
     result = run(runtime)
     assert result["state"] == "ARRIVED"
-    assert [motion[1] for motion in motions(events)] == [.08] * 4
+    assert motions(events) == [("strafe",.08,1.)] + [("turn","LEFT",.25,.5)]*3
+    assert all(row["selection"]["committed_side"] == "LEFT" for row in result["local_avoidance_history"])
     assert all(row["last_detour_improved_direct_path"] is False for row in result["local_avoidance_history"][1:])
     assert result["local_avoidance_history"][1]["previous_clearances"] is not None
 
 
-def test_no_improvement_cannot_reverse_when_previous_side_becomes_blocked(tmp_path, monkeypatch):
+def test_no_gain_then_unsafe_commitment_requires_independent_other_side_admission(tmp_path, monkeypatch):
     runtime, _, _, events, _ = avoidance_runtime(tmp_path, monkeypatch,
-        [(0, .8), (0, .8)], [(1.3, .8), (.46, .8)])
+        [(0, .8), (0, .8), (0,.6), (0,.5)], [(1.3, .8), (.46, .8), None])
     result = run(runtime)
-    assert result["state"] == "BLOCKED"
-    assert result["reason"] == "find_marvin_blocked_wait_exhausted"
-    assert len(motions(events)) == 1
+    assert result["state"] == "ARRIVED"
+    assert motions(events)[:2] == [("strafe",.08,1.),("strafe",-.08,1.)]
+    changed = result["local_avoidance_history"][1]["selection"]
+    assert changed["committed_side"] == "RIGHT" and changed["side_change_reason"] == "committed_lateral_unsafe"
+    assert not changed["options"]["STRAFE_LEFT"]["permitted"]
+    assert changed["options"]["STRAFE_RIGHT"]["hard_safety_permitted"]
 
 
-def test_reversal_requires_new_geometry_evidence(tmp_path, monkeypatch):
+def test_unsafe_committed_side_can_reverse_with_fresh_geometry_evidence(tmp_path, monkeypatch):
     runtime, _, _, events, _ = avoidance_runtime(tmp_path, monkeypatch,
-        [(0, .60), (0, .60), (0, .5)], [(1.3, .8), (.46, 1.3)])
+        [(0, .60), (0, .60), (0, .5)], [(1.3, .8), (.46, 1.3), None])
     result = run(runtime)
-    assert result["state"] == "BLOCKED"
-    assert motions(events)==[("strafe",.08,1.)]  # Commitment does not flip to an unrelated hemisphere.
+    assert result["state"] == "ARRIVED"
+    assert motions(events)==[("strafe",.08,1.),("strafe",-.08,1.)]
+    row = result["local_avoidance_history"][1]
+    assert row["selection"]["committed_side"] == "RIGHT"
+    assert row["source_frame_stamp_ns"] > result["local_avoidance_history"][0]["source_frame_stamp_ns"]
 
 
 def test_jit_scene_change_cannot_use_advisory_selection_to_authorize_motion(tmp_path, monkeypatch):

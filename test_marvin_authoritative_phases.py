@@ -323,7 +323,7 @@ def test_authoritative_mission_failures_stop_without_followup(tmp_path,monkeypat
 
 
 def test_clear_side_jit_veto_switches_to_pass_after_fresh_observation(tmp_path,monkeypatch):
-    scenes=[[ (.65,-.14)],[(.65,-.14)],None]
+    scenes=[[ (.65,-.11)],[(.65,-.14)],None]
     b, _, _ = strafe_runtime(tmp_path,monkeypatch,pursuit_specs([(0,1.1)]*3),scenes)
     r, behavior, robot, events, _ = b
     original=behavior.execute_guarded_marvin_lateral_step

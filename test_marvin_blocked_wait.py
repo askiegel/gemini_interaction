@@ -325,7 +325,7 @@ def test_changed_obstacle_resumes_real_selector_on_established_side(tmp_path,mon
     bundle[2].on_motion=lambda:f.update(cleared=True) if len(motions(bundle[3]))==2 else None
     result=run(bundle[0])
     assert result["state"]=="ARRIVED"
-    assert motions(bundle[3])==[("strafe",.08,1.),("strafe",.08,1.)]
+    assert motions(bundle[3])==[("strafe",.08,1.),("turn","LEFT",.25,.5)]
     assert result["local_avoidance_actions"]==2 and result["local_bypass_actions"]==0
     assert result["blocked_wait_history"][0]["geometry_changed"]
     assert result["blocked_wait_history"][0]["route"]["route_to_marvin_obstructed"]

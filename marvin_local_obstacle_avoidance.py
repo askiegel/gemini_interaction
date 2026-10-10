@@ -126,11 +126,12 @@ def safe_marvin_strafe_duration(state, *, expected_session, linear_y,
 
 
 def rank_marvin_escape_options(options, eligible):
-    """Rank every useful primitive; strafe is only a comparable-score tie break.
+    """Prefer independently safe, useful strafes over avoidance turns.
 
-    Route benefit is first. Within 3 mm, compare occupancy, clearance at 1 cm
-    resolution and heading error at 1 degree resolution before strafe/LEFT.
-    This helper is advisory and cannot admit motion.
+    Eligibility (including measured ineffectiveness) is decided by the caller.
+    Within the preferred primitive family retain the native geometry ranking.
+    Predictions select a proposal; they never establish physical progress or
+    authorize transport. Target-alignment turns do not use this ranking.
     """
     def score(kind):
         option = options[kind]
@@ -147,6 +148,11 @@ def rank_marvin_escape_options(options, eligible):
         options[kind]['ranking_score'] = score(kind)
     if not eligible:
         return None
+    lateral = [kind for kind in eligible if kind.startswith('STRAFE')
+        and options[kind].get('permitted') is True
+        and options[kind].get('hard_safety_permitted') is True
+        and options[kind]['route_progress'].get('meaningful_progress') is True]
+    eligible = lateral or eligible
     best = max(eligible, key=score)
     first, gain = score(best)[:2]
     near = [kind for kind in eligible if score(kind)[0] == first

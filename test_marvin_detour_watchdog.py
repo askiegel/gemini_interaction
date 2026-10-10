@@ -271,7 +271,8 @@ def test_unproductive_clear_side_stops_by_phase_watchdog(tmp_path,monkeypatch):
     result=run(b[0])
     assert result['reason']=='find_marvin_clear_side_stagnation_exhausted'
     assert result['local_avoidance_actions']==CLEAR_SIDE_MAX_UNPROVEN_ACTIONS
-    assert motions(b[3])==[('strafe',.08,1.)]*CLEAR_SIDE_MAX_UNPROVEN_ACTIONS and result['stop_result']['ok']
+    assert motions(b[3])==[('strafe',.08,1.)]+[('turn','LEFT',.25,.5)]*(CLEAR_SIDE_MAX_UNPROVEN_ACTIONS-1)
+    assert result['stop_result']['ok']
 
 
 def test_deadline_in_camera_reacquisition_does_not_dispatch_stale_frame(tmp_path,monkeypatch):

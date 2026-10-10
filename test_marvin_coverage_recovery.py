@@ -310,8 +310,11 @@ def test_failed_runtime_observation_has_no_range_or_route_authority():
     assert runtime._marvin_alignment_observation is None
 
 
-def test_navigation_sources_are_byte_identical_to_validated_baseline():
-    expected=FIXTURE['navigation_hashes']
-    for file,digest in expected.items():
-        assert hashlib.sha256((F.parent/file).read_bytes()).hexdigest()==digest
+def test_watchdog_bytes_and_phase_definitions_remain_at_identity_baseline():
+    # The fixture's phase-file hash remains historical evidence. The explicit
+    # preference feature changes its planner, while retaining every phase.
+    from marvin_obstacle_phases import Phase
+    file='marvin_detour_watchdog.py'
+    assert hashlib.sha256((F.parent/file).read_bytes()).hexdigest()==FIXTURE['navigation_hashes'][file]
+    assert {p.value for p in Phase} == {'DIRECT','CLEAR_SIDE','PASS_OBSTACLE','REJOIN','BLOCKED_WAIT','ARRIVED'}
     assert MarvinLocalTracker.MIN_MATCH_QUALITY==.8

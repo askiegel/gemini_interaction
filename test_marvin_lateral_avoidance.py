@@ -130,7 +130,7 @@ def test_two_strafes_require_new_evidence_and_observed_progress(tmp_path,monkeyp
 def test_no_progress_cannot_repeat_strafe_indefinitely(tmp_path,monkeypatch):
     bundle,_,_ = strafe_runtime(tmp_path,monkeypatch,[(0,.60)]*9,[LEFT_OPEN])
     result=run(bundle[0]);actions=[e for e in motions(bundle[3]) if e[0]=='strafe']
-    assert len(actions)==4
+    assert len(actions)==1
     assert result['reason']=='find_marvin_clear_side_stagnation_exhausted'
     assert result['state']=='BLOCKED' and result['local_avoidance_actions']==4
 
@@ -144,17 +144,18 @@ def test_side_and_front_rear_endpoint_corner_hazards_block_lateral(tmp_path,monk
     assert not safe['permitted'] and safe['protected_radius_m']==.45
 
 
-def test_strafe_unsafe_turn_safe_without_real_route_gain_fails_closed(tmp_path,monkeypatch):
+def test_unsafe_strafe_uses_safe_reorientation_without_route_progress_credit(tmp_path,monkeypatch):
     scene=LEFT_OPEN+[(-.02,.465),(0.,-.465)]
-    bundle,_,_=strafe_runtime(tmp_path,monkeypatch,[(0,.60)]*4,[scene])
+    bundle,_,_=strafe_runtime(tmp_path,monkeypatch,[(0,.60)]*8,[scene])
     result=run(bundle[0]);selection=result['local_avoidance_history'][0]['selection']
     assert not selection['options']['STRAFE_LEFT']['permitted']
     assert selection['options']['TURN_LEFT']['hard_safety_permitted']
     assert not selection['options']['TURN_LEFT']['improves_route']
-    assert selection['action_type'] is None
-    assert result['reason']=='find_marvin_blocked_wait_exhausted'
-    assert result['blocked_wait_reason']=='find_marvin_no_safe_local_detour'
-    assert motions(bundle[3])==[]
+    assert selection['action_type'].startswith('TURN')
+    assert result['reason']=='find_marvin_clear_side_stagnation_exhausted'
+    assert all(m[0]=='turn' for m in motions(bundle[3]))
+    assert result['local_avoidance_actions']==len(motions(bundle[3]))==4
+    assert result['detour_context']['watchdog']['last_progress']=='avoidance_turn_no_traversal_credit'
 
 
 def test_phase_stagnation_bounds_repeated_strafes(tmp_path,monkeypatch):
@@ -224,13 +225,13 @@ def test_clear_path_and_trusted_standoff_do_not_select_avoidance(tmp_path,monkey
     assert result['final_observation']['arrival']['target_standoff_m']==.5
 
 
-def test_safe_strafe_then_unsafe_repair_waits_without_injected_detour_turn(tmp_path,monkeypatch):
+def test_safe_strafe_then_blocked_lateral_path_uses_bounded_safe_turn(tmp_path,monkeypatch):
     scenes=[LEFT_OPEN,LEFT_OPEN+[(-.02,.465),(0.,-.465)]]
     bundle,_,_=strafe_runtime(tmp_path,monkeypatch,[(0,.6)]*9,scenes)
     result=run(bundle[0])
-    assert result['reason']=='find_marvin_blocked_wait_exhausted'
-    assert motions(bundle[3])==[('strafe',.08,1.)]
-    assert result['local_avoidance_actions']==1
+    assert result['reason']=='find_marvin_clear_side_stagnation_exhausted'
+    assert motions(bundle[3])==[('strafe',.08,1.)]+[('turn','LEFT',.25,.5)]*3
+    assert result['local_avoidance_actions']==4
     assert result['stop_result']['ok']
 
 

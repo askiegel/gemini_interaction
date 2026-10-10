@@ -82,11 +82,11 @@ def forecast(gain, *, heading=0., clearance=1.):
 
 @pytest.mark.parametrize('strafe_gain,turn_gain,expected', [
     (.060, .014, 'STRAFE_LEFT'),
-    (.014, .060, 'TURN_LEFT'),
+    (.014, .060, 'STRAFE_LEFT'),
     (.058, .060, 'STRAFE_LEFT'),
     (.060, .060, 'STRAFE_LEFT'),
 ])
-def test_all_useful_primitives_compete_and_near_ties_prefer_strafe(strafe_gain, turn_gain, expected):
+def test_safe_useful_strafes_precede_avoidance_turns(strafe_gain, turn_gain, expected):
     options = {'STRAFE_LEFT': forecast(strafe_gain), 'TURN_LEFT': forecast(turn_gain)}
     assert rank_marvin_escape_options(options, list(options)) == expected
     assert all('ranking_score' in v for v in options.values())
@@ -203,7 +203,7 @@ def test_full_mission_marginal_route_change_hits_phase_stagnation(tmp_path, monk
     assert result['state'] == 'BLOCKED'
     assert result['reason'] == 'find_marvin_clear_side_stagnation_exhausted'
     assert result['blocked_wait_recheck_count'] == 0
-    assert motions(bundle[3]) == [('strafe', .08, 1.)]*4
+    assert motions(bundle[3]) == [('strafe', .08, 1.)] + [('turn', 'LEFT', .25, .50)]*3
     assert result['local_avoidance_actions'] == 4
     assert MAX_LOCAL_AVOIDANCE_ACTIONS == result['max_local_avoidance_actions'] == 6
     row = result['local_avoidance_history'][0]

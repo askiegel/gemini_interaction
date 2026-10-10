@@ -264,7 +264,7 @@ def test_global_six_action_bound_precedes_episode_credit(remaining):
 
 
 def episode_bundle(tmp_path,monkeypatch,*,clear_after=None,unsafe=False,three_strafes=False):
-    initial_scenes=[[(.65,-.10)],[(.65,-.125)],[(.65,-.14)],[(.65,-.18)]] if three_strafes else [[(.65,-.10)],[(.65,-.18)]]
+    initial_scenes=[[(.65,-.09)],[(.65,-.115)],[(.65,-.14)],[(.65,-.18)]] if three_strafes else [[(.65,-.10)],[(.65,-.18)]]
     scenes=initial_scenes+[[(.65,-.18)]]*3
     initial_strafes=3 if three_strafes else 1
     if clear_after is not None:

@@ -31,6 +31,7 @@ from marvin_blocked_wait import (
 )
 from marvin_local_bypass import plan_local_bypass, evaluate_avoidance_progress
 from marvin_obstacle_phases import DetourContext, Frontier, Phase, plan_phase_action
+from marvin_detour_watchdog import Passage, MATERIAL_GEOMETRY_CHANGE_M
 from marvin_progress_diagnostics import MarvinProgressDiagnostics
 from marvin_local_obstacle_avoidance import (
     MAX_LOCAL_AVOIDANCE_ACTIONS, TURN_SPEED, TURN_DURATION, select_marvin_detour,
@@ -2085,6 +2086,7 @@ class CognitiveRuntime:
                      "local_bypass_actions": 0, "local_bypass_reason": None}
         previous_clearances = None
         previous_selection = None
+        lateral_progress = None  # First stopped measured outcome, never a motion grant.
         detour_context = DetourContext()
         phase_history = []
         veto_reobserve_floor = None
@@ -2165,10 +2167,14 @@ class CognitiveRuntime:
             return True
 
         def enter_phase(phase, evidence, *, side=None):
-            nonlocal detour_context
+            nonlocal detour_context, lateral_progress
             before = detour_context.phase
+            prior_side = detour_context.committed_side
             detour_context = detour_context.enter(phase, evidence, side=side,
                 now=time.monotonic() if proof_max_physical_actions is None else None)
+            if (detour_context.phase in {Phase.PASS_OBSTACLE, Phase.REJOIN, Phase.DIRECT, Phase.ARRIVED}
+                    or prior_side != detour_context.committed_side):
+                lateral_progress = None
             if before != detour_context.phase:
                 phase_history.append(dict(from_phase=before.value, phase=phase.value,
                     committed_side=detour_context.committed_side, evidence=asdict(evidence)))
@@ -2181,6 +2187,7 @@ class CognitiveRuntime:
                 bypass_corridor_occupancy=None, bypass_corridor_overlap_m=None, bypass_forward_permitted=False)
 
         def record_avoidance_reassessment(route, association):
+            nonlocal lateral_progress
             # Capture the first valid reassessment of the last physical detour.
             # Later alignment or planning must not overwrite that action's outcome.
             if (not previous_selection or
@@ -2198,6 +2205,24 @@ class CognitiveRuntime:
                          and history[-1]["result"].get("interrupted") is not True)):
                 # Historical measured outcome only. Alignment/replanning cannot
                 # create handoff credit; every bypass still needs fresh JIT.
+                before_passage = Passage.from_selection(previous_selection)
+                after_passage = Passage.from_native(association, previous_selection.get("direction"))
+                if (before_passage is not None and after_passage is not None
+                        and before_passage.session == after_passage.session
+                        and after_passage.sequence > before_passage.sequence):
+                    # Reuse the watchdog's measured CLEAR_SIDE criterion. This
+                    # frozen first outcome survives alignment and vetoes, but
+                    # expires when passage is established or the side changes.
+                    gain = after_passage.center_separation_m - before_passage.center_separation_m
+                    opposite = "RIGHT" if after_passage.side == "LEFT" else "LEFT"
+                    old_clearance = previous_selection.get(opposite.lower() + "_clearance_m")
+                    lateral_progress = dict(completed_strafe=True,
+                        producer_session=after_passage.session, side=after_passage.side,
+                        acquisition_sequence=after_passage.sequence,
+                        meaningful_progress=(after_passage.pass_safe and not before_passage.pass_safe
+                            or gain >= MATERIAL_GEOMETRY_CHANGE_M),
+                        center_separation_gain_m=gain,
+                        alternative_clearance_m=old_clearance)
                 previous_selection["first_post_action_strafe_progress"] = {
                     "progress": dict(progress), "producer_session": association.get("producer_session"),
                     "action_acquisition_sequence": previous_selection.get("acquisition_sequence"),
@@ -2962,7 +2987,7 @@ class CognitiveRuntime:
                                 entering_detour = detour_context.phase in {Phase.DIRECT, Phase.REJOIN}
                                 detour = plan_phase_action(lidar, standoff, expected_session=session,
                                     allow_strafe=allow_strafe, committed_side=detour_context.committed_side,
-                                    entering_detour=entering_detour,
+                                    entering_detour=entering_detour, lateral_progress=lateral_progress,
                                     remaining_avoidance_actions=(self.MAX_LOCAL_AVOIDANCE_ACTIONS - avoidance["local_avoidance_actions"]
                                         if proof_max_physical_actions is not None else None))
                                 if detour.get("phase") is None:
@@ -3025,6 +3050,7 @@ class CognitiveRuntime:
                                     "four_primitives": four_primitives, "phase_owned": True,
                                     "entering_detour": entering_detour,
                                     "committed_side": detour_context.committed_side,
+                                    "lateral_progress": copy.deepcopy(lateral_progress),
                                     "remaining_avoidance_actions": (self.MAX_LOCAL_AVOIDANCE_ACTIONS - avoidance["local_avoidance_actions"]
                                         if proof_max_physical_actions is not None else None),
                                     "selected_action_type": detour["action_type"], "allow_strafe": allow_strafe,
@@ -3241,7 +3267,7 @@ class CognitiveRuntime:
                         phase_plan = plan_phase_action(veto["snapshot"], veto["association"],
                             expected_session=session, allow_strafe=context["allow_strafe"],
                             committed_side=detour_context.committed_side,
-                            remaining_avoidance_actions=None)
+                            lateral_progress=lateral_progress, remaining_avoidance_actions=None)
                         enter_phase(Phase(phase_plan["phase"]), frontier, side=phase_plan["committed_side"])
                         detour_context = replace(detour_context, watchdog=detour_context.watchdog.veto(
                             detour["action_type"], detour_context.committed_side, phase_plan["reason"]))
@@ -3370,11 +3396,19 @@ class CognitiveRuntime:
             if (baseline is None or baseline[0] != session
                     or type(baseline[1]) is not int):
                 return finish("BLOCKED", "find_marvin_action_lidar_evidence_invalid")
+            completed_detour = (state == "AVOIDING" and (result.get("full_step_completed") is True
+                or detour["action_type"].startswith("TURN") and result.get("ok") is True))
             detour_context = detour_context.completed(Frontier(session, baseline[1], stamp),
-                traversal=state == "AVOIDING" and result.get("full_step_completed") is True)
-            if state == "AVOIDING" and result.get("full_step_completed") is True:
+                traversal=completed_detour and not detour["action_type"].startswith("TURN"))
+            if completed_detour:
                 detour_context = replace(detour_context, watchdog=detour_context.watchdog.completed_traversal(
                     result.get("local_detour") or detour))
+                if detour["action_type"].startswith("TURN"):
+                    # Charge the existing phase attempt/stagnation budget,
+                    # but an avoidance turn is not measured traversal progress.
+                    detour_context = replace(detour_context, watchdog=replace(detour_context.watchdog,
+                        pending_passage=None, pending_reassessment=False,
+                        last_progress="avoidance_turn_no_traversal_credit"))
             if state == "SEARCHING":
                 search_turns += 1
         return finish("STOPPED", "find_marvin_mission_preempted")
@@ -4587,7 +4621,8 @@ class CognitiveRuntime:
         if context.get("phase_owned") is True:
             return plan_phase_action(lidar, association,
                 committed_side=context.get("committed_side"),
-                entering_detour=context.get("entering_detour", False), **kwargs)
+                entering_detour=context.get("entering_detour", False),
+                lateral_progress=context.get("lateral_progress"), **kwargs)
         return select_marvin_escape_action(lidar, association,
             previous_selection=context.get("previous_selection"), **kwargs)
 

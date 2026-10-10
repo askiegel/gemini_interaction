@@ -5,7 +5,7 @@ here. Previous action selection is diagnostic history, never phase ownership.
 """
 from dataclasses import asdict, dataclass, field, replace
 from enum import Enum
-from marvin_detour_watchdog import DetourWatchdog
+from marvin_detour_watchdog import DetourWatchdog, MATERIAL_GEOMETRY_CHANGE_M, finite
 
 from marvin_local_obstacle_avoidance import (
     _select_marvin_escape_action, rank_marvin_escape_options,
@@ -105,14 +105,15 @@ def phase_from_admission(*, route_obstructed, pass_safe, repair_safe):
 
 def plan_phase_action(state, association, *, expected_session, allow_strafe,
                       committed_side=None,
-                      entering_detour=False,
+                      entering_detour=False, lateral_progress=None,
                       strafe_duration_limit=LOCAL_AVOIDANCE_STRAFE_MAX_SECONDS,
                       remaining_avoidance_actions=None):
     """Recompute WHAT from one scan; never authorize transport or reuse a grant.
 
     Native primitive geometry, ranking and bypass admission are retained. Only
-    high-level ownership changes: no direct-route progress credit, continuation
-    episode or recovery blacklist controls the next phase-admissible primitive.
+    high-level ownership changes. Completed lateral outcomes may suppress an
+    ineffective strafe; predicted gain never credits progress. Safe passage
+    still wins without a direct-route progress requirement.
     """
     result = _select_marvin_escape_action(state, association,
         expected_session=expected_session, allow_strafe=allow_strafe,
@@ -152,21 +153,70 @@ def plan_phase_action(state, association, *, expected_session, allow_strafe,
             y = route.get('blocking_obstacle_y_m')
             if type(y) in (int, float):
                 side = 'LEFT' if y < 0 else 'RIGHT'
-    result['committed_side'] = side
-    bypass = plan_local_bypass(state, association, route,
-        expected_session=expected_session, side=side)
-    result['local_bypass'] = bypass
+    def admission(candidate_side):
+        lateral = result['options'].get('STRAFE_' + candidate_side, {}) if candidate_side else {}
+        bypass = plan_local_bypass(state, association, route,
+            expected_session=expected_session, side=candidate_side)
+        # Only the first stopped same-session outcome of a completed strafe
+        # establishes insufficiency. Vetoes, attempts and predictions cannot.
+        outcome = lateral_progress or {}
+        insufficient = (outcome.get('completed_strafe') is True
+            and outcome.get('producer_session') == expected_session
+            and outcome.get('side') == candidate_side
+            and type(outcome.get('acquisition_sequence')) is int
+            and 0 < outcome['acquisition_sequence'] <= state['acquisition_sequence']
+            and outcome.get('meaningful_progress') is False)
+        # A bounded strafe may improve committed blocker separation even when
+        # the target-route metric stays neutral (e.g. a foreground return).
+        predicted = lateral.get('predicted_route') or {}
+        old_y, new_y = route.get('blocking_obstacle_y_m'), predicted.get('blocking_obstacle_y_m')
+        old_x, new_x = route.get('blocking_obstacle_x_m'), predicted.get('blocking_obstacle_x_m')
+        sign = -1 if candidate_side == 'LEFT' else 1
+        clearance_gain = (sign * (new_y - old_y)
+            if all(finite(v) for v in (old_y, new_y, old_x, new_x))
+                and abs(new_x - old_x) < 1e-9 else None)
+        predicted_useful = (lateral.get('improves_route') is True
+            or finite(clearance_gain) and clearance_gain >= MATERIAL_GEOMETRY_CHANGE_M)
+        useful = (lateral.get('permitted') is True and predicted_useful and not insufficient)
+        return lateral, bypass, useful, insufficient
+
+    lateral, bypass, useful, insufficient = admission(side)
+    initial_lateral = entering_detour and useful
+    # Retain the committed corridor whenever passage or useful same-side
+    # clearance is available. A better-ranked opposite side is not a reason
+    # to reverse. Fresh unsafe admission or a measured ineffective strafe is.
+    side_change_reason = None
+    if (side and bypass.get('bypass_forward_permitted') is not True and not useful
+            and (lateral.get('permitted') is not True or insufficient)):
+        alternative = 'RIGHT' if side == 'LEFT' else 'LEFT'
+        alt_lateral, alt_bypass, alt_useful, alt_insufficient = admission(alternative)
+        prior_clearance = (lateral_progress or {}).get('alternative_clearance_m')
+        clearance = result[alternative.lower() + '_clearance_m']
+        alternative_gain = (clearance - prior_clearance
+            if finite(clearance) and finite(prior_clearance) else None)
+        # Ineffectiveness alone may justify a same-side reorientation, not an
+        # oscillating reversal. Reversal after ineffective traversal additionally
+        # needs a measured material opening on the alternative side.
+        alternative_opened = (finite(alternative_gain)
+            and alternative_gain >= MATERIAL_GEOMETRY_CHANGE_M)
+        if alt_useful and (lateral.get('permitted') is not True or alternative_opened):
+            side_change_reason = ('committed_lateral_unsafe' if lateral.get('permitted') is not True
+                                  else 'committed_lateral_ineffective')
+            side = alternative
+            lateral, bypass, useful, insufficient = alt_lateral, alt_bypass, alt_useful, alt_insufficient
+            initial_lateral = True  # Establish the new side before passing.
+    result.update(committed_side=side, local_bypass=bypass,
+        lateral_progress=lateral_progress, side_change_reason=side_change_reason)
     # Explicitly the production CENTER metric, not minimum-side separation.
     y = route.get('blocking_obstacle_y_m')
     result['blocker_center_separation_m'] = (
         -(1 if side == 'LEFT' else -1) * y if side and type(y) in (int, float) else None)
     result['minimum_side_separation_m'] = route.get('blocking_obstacle_minimum_side_separation_m')
-    lateral_kind = 'STRAFE_' + side if side else None
-    initial_lateral = (entering_detour and
-        (result['options'].get(lateral_kind) or {}).get('permitted') is True)
+    turn_kind = 'TURN_' + side if side else None
+    turn_safe = (result['options'].get(turn_kind) or {}).get('permitted') is True
     phase = phase_from_admission(route_obstructed=True,
         pass_safe=bypass.get('bypass_forward_permitted') is True and not initial_lateral,
-        repair_safe=(result['options'].get(lateral_kind) or {}).get('permitted') is True)
+        repair_safe=useful or turn_safe)
     if phase == Phase.PASS_OBSTACLE:
         prediction = evaluate_marvin_route(state, association,
             expected_session=expected_session, translation_x=.05)
@@ -178,8 +228,11 @@ def plan_phase_action(state, association, *, expected_session, allow_strafe,
             reason='local_bypass_corridor_clear')
         return dict(result, action_type='BYPASS_FORWARD', direction=side,
             phase=Phase.PASS_OBSTACLE.value, reason='find_marvin_phase_pass_corridor_safe')
-    kind = 'STRAFE_' + side if side else None
     if phase == Phase.CLEAR_SIDE:
+        kind = 'STRAFE_' + side if useful else turn_kind
+        reason = ('find_marvin_phase_lateral_repair_safe' if useful else
+            'find_marvin_phase_lateral_progress_insufficient' if insufficient else
+            'find_marvin_phase_lateral_unsafe_or_not_useful')
         return dict(result, action_type=kind, direction=side,
-            phase=Phase.CLEAR_SIDE.value, reason='find_marvin_phase_lateral_repair_safe')
+            phase=Phase.CLEAR_SIDE.value, reason=reason)
     return dict(result, phase=Phase.BLOCKED_WAIT.value, reason='find_marvin_no_safe_local_detour')
