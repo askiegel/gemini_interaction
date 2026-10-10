@@ -174,7 +174,7 @@ def test_newer_but_stale_acquisition_keeps_waiting_for_genuinely_fresh_scan(tmp_
 @pytest.mark.parametrize("fault,reason", [("session", "find_marvin_lidar_producer_session_changed"),
     ("invalid", "find_marvin_lidar_not_current"),
     ("age", "find_marvin_lidar_not_current"),
-    ("unsafe", "marvin_single_approach_translation_vetoed")])
+    ("unsafe", "find_marvin_new_lidar_evidence_timeout")])
 def test_returning_scan_session_invalid_or_unsafe_fails_closed(tmp_path, monkeypatch, fault, reason):
     bundle, state, _ = interrupted_runtime(tmp_path, monkeypatch, [(0, .8), (0, .7)])
     runtime, behavior, _, events, _ = bundle

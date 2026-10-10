@@ -1,3 +1,4 @@
+from marvin_obstacle_phases import plan_phase_action
 """Stopped avoidance handoffs with real freshness, planning and strafe guards.
 
 Only the existing offline sensor/transport fixture is used. Socket/process
@@ -110,13 +111,13 @@ def handoff_runtime(tmp_path, monkeypatch, *, publish=True, fault=None,
         assert scan["acquisition_sequence"] == association["acquisition_sequence"]
         assert scan["acquisition_sequence"] > 10925
         state["candidate_scans"].append(scan["acquisition_sequence"])
-        return select_marvin_escape_action(scan, association, **kwargs)
+        return plan_phase_action(scan, association, **kwargs)
 
     runtime.world_model.get_lidar_obstacles = read
     client.forward_interlock.reader = read
     robot.stop = stop
     monkeypatch.setattr("runtime.time.sleep", sleep)
-    monkeypatch.setattr("runtime.select_marvin_escape_action", select)
+    monkeypatch.setattr("runtime.plan_phase_action", select)
     return bundle, state
 
 
