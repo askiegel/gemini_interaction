@@ -287,11 +287,11 @@ def test_normal_mission_shared_selector_handoff_then_direct_forward_and_arrival(
     assert result['completed_forward_actions'] > 0
     jit = result['history'][1]['result']['local_detour']
     assert jit['accepted'] and jit['action_type'] == 'BYPASS_FORWARD'
-    assert jit['bypass_handoff']['selected']
+    assert jit['phase']=='PASS_OBSTACLE' and 'bypass_handoff' not in jit
     assert jit['acquisition_sequence'] > result['local_avoidance_history'][1]['selection']['acquisition_sequence']
     diagnostics = result['progress_diagnostics']
-    assert diagnostics['action_summary'][1]['pre_action_avoidance']['bypass_handoff']['selected']
-    assert diagnostics['actions'][1]['local_avoidance_selection']['bypass_handoff']['selected']
+    assert diagnostics['action_summary'][1]['pre_action_avoidance']['phase']=='PASS_OBSTACLE'
+    assert diagnostics['actions'][1]['local_avoidance_selection']['phase']=='PASS_OBSTACLE'
     assert_sensor_contracts(result, bundle[0])
     for i, a in enumerate(result['progress_diagnostics']['actions']):
         assert a['first_post_action_lidar'] and a['first_new_post_action_camera']
@@ -308,7 +308,7 @@ def test_proof_same_selector_retains_outcome_and_hands_off_then_direct_forward(t
     assert arm(r)['ok']; second = step(r); complete(bundle, second, 1)
     action = second['controller_result']['history'][0]['result']
     assert action['local_detour']['action_type'] == 'BYPASS_FORWARD'
-    assert action['local_detour']['bypass_handoff']['selected']
+    assert action['local_detour']['phase']=='PASS_OBSTACLE'
     assert r._marvin_live_proof_continuation.avoidance['local_avoidance_actions'] == 2
     assert arm(r)['ok']; third = step(r); complete(bundle, third, 2)
     assert third['controller_result']['history'][0]['state'] == 'ADVANCING'
@@ -351,21 +351,21 @@ def test_alignment_cannot_turn_failed_strafe_outcome_into_handoff_credit(tmp_pat
     behavior.specs = iter([(0, 1.1)] * 6)
     assert arm(r)['ok']; result = step(r); complete(bundle, result, 2)
     selected = result['controller_result']['history'][0]['result']['local_detour']
-    assert selected['action_type'] == 'STRAFE_LEFT'
+    assert selected['action_type']=='BYPASS_FORWARD'
     assert selected['local_bypass']['bypass_forward_permitted']
-    assert selected['bypass_handoff']['reason'] == 'measured_lateral_progress_required'
+    assert selected['phase']=='PASS_OBSTACLE'
+    assert not selected['actual_route_progress']['meaningful_progress']
 
 
-def test_failed_bypass_still_gets_one_recovery_then_stationary_wait(tmp_path, monkeypatch):
+def test_neutral_bypass_retains_phase_without_handoff_credit_until_six(tmp_path, monkeypatch):
     bundle, _, _ = priority_bundle(tmp_path, monkeypatch, clear=False)
     result = run(bundle[0])
-    assert result['reason'] == 'find_marvin_blocked_wait_exhausted'
-    assert result['blocked_wait_reason'] == 'find_marvin_local_avoidance_no_progress'
-    assert result['local_avoidance_actions'] == 5 and result['local_bypass_actions'] == 3
-    assert motions(bundle[3]) == [('strafe', .08, 1.)] + [('forward', .1, .5)]*3 + [('strafe', .08, 1.)]
-    assert result['blocked_wait_recheck_count'] == 12
-    assert MAX_LOCAL_AVOIDANCE_ACTIONS == 6
-    assert_sensor_contracts(result, bundle[0])
+    assert result['reason']=='find_marvin_local_avoidance_exhausted'
+    assert result['local_avoidance_actions']==6 and result['local_bypass_actions']==5
+    assert motions(bundle[3])==[('strafe',.08,1.)]+[('forward',.1,.5)]*5
+    assert result['blocked_wait_recheck_count']==0
+    assert MAX_LOCAL_AVOIDANCE_ACTIONS==6
+    assert_sensor_contracts(result,bundle[0])
 
 
 def test_handoff_final_jit_veto_waits_without_transport_or_budget_spend(tmp_path, monkeypatch):

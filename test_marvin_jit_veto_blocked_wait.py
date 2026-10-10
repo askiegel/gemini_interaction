@@ -409,11 +409,11 @@ def test_post_stop_admission_is_rechecked_and_malformed_geometry_fails_closed(tm
 def test_changed_but_obstructed_geometry_returns_to_shared_avoidance_selector(tmp_path,monkeypatch):
     b,f,c=veto_mission(tmp_path,monkeypatch,resume_scene=[(.62,-.30),(0.,1.2),(0.,-.65)])
     run(b[0]);result=c['result']
-    assert f['resume']==1 and result['blocked_wait_resume_reason']=='find_marvin_blocked_wait_geometry_changed'
-    assert motions(b[3])==[('strafe',.08,1.)]
+    assert f['resume']==1 and result['blocked_wait_resume_reason']=='find_marvin_blocked_wait_phase_action_available'
+    assert motions(b[3])==[('forward',.1,.5)]
     assert result['history'][1]['state']=='AVOIDING'
     assert result['history'][1]['result']['full_step_completed']
-    assert result['local_avoidance_actions']==1 and result['local_bypass_actions']==0
+    assert result['local_avoidance_actions']==1 and result['local_bypass_actions']==1
     assert result['stop_result']['ok'] and result['final_observation']['source_frame_stamp_ns']>result['history'][1]['source_frame_stamp_ns']
 
 

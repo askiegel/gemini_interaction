@@ -30,6 +30,7 @@ from marvin_blocked_wait import (
     pre_transport_jit_veto_evidence, explicit_pre_transport_jit_veto,
 )
 from marvin_local_bypass import plan_local_bypass, evaluate_avoidance_progress
+from marvin_obstacle_phases import DetourContext, Frontier, Phase, plan_phase_action
 from marvin_progress_diagnostics import MarvinProgressDiagnostics
 from marvin_local_obstacle_avoidance import (
     MAX_LOCAL_AVOIDANCE_ACTIONS, TURN_SPEED, TURN_DURATION, select_marvin_detour,
@@ -130,6 +131,7 @@ class _MarvinLiveProofContinuation:
     consecutive_reacquisition_failures: int
     range_association: dict
     completion: dict
+    detour_context: DetourContext = DetourContext()
 
 
 @dataclass(frozen=True)
@@ -1651,7 +1653,7 @@ class CognitiveRuntime:
         return {"snapshot": snapshot, "association": dict(association, route=route)}
 
     def _wait_for_marvin_blocked_route(self, *, expected_session, lidar, association,
-                                     execution_guard, diagnostics, history):
+                                     execution_guard, diagnostics, history, detour_context=None):
         """Production-only stationary re-sensing. Returns a wakeup, never authority.
 
         The historical target bearing/range only selects when to acquire fresh
@@ -1754,8 +1756,17 @@ class CognitiveRuntime:
                 "geometry_changed": changed, "camera_recheck_performed": False,
                 "motion_executed": False, "source_stamp_consumed": False, "wait": wait})
             publish()
-            if cleared or changed:
+            phase_wake = None
+            if detour_context is not None:
+                phase_plan = plan_phase_action(snapshot, association,
+                    expected_session=expected_session,
+                    allow_strafe=(bridge.get('motion_capabilities') or {}).get('linear_y') is True,
+                    committed_side=detour_context.committed_side)
+                if phase_plan.get('action_type') is not None:
+                    phase_wake = phase_plan['phase']
+            if cleared or phase_wake or (changed and detour_context is None):
                 return done("find_marvin_blocked_wait_route_cleared" if cleared else
+                    "find_marvin_blocked_wait_phase_action_available" if phase_wake else
                     "find_marvin_blocked_wait_geometry_changed", ok=True, route=route)
         return done("find_marvin_mission_preempted")
 
@@ -1859,6 +1870,9 @@ class CognitiveRuntime:
                      "local_bypass_actions": 0, "local_bypass_reason": None}
         previous_clearances = None
         previous_selection = None
+        detour_context = DetourContext()
+        phase_history = []
+        veto_reobserve_floor = None
         if proof_continuation is None:
             self._marvin_target_range_association = MarvinTargetRangeAssociation()
         consecutive_lidar_interruptions = 0
@@ -1877,6 +1891,7 @@ class CognitiveRuntime:
             c = proof_continuation
             avoidance = copy.deepcopy(c.avoidance)
             previous_selection = copy.deepcopy(c.previous_selection)
+            detour_context = c.detour_context
             previous_clearances = copy.deepcopy(c.previous_clearances)
             avoidance_history = copy.deepcopy(c.avoidance_history)
             avoidance_lidar_refresh_history = copy.deepcopy(c.avoidance_lidar_refresh_history)
@@ -1907,6 +1922,14 @@ class CognitiveRuntime:
 
         def current():
             return self._marvin_mission_context_is_current(mission, control_generation)
+
+        def enter_phase(phase, evidence, *, side=None):
+            nonlocal detour_context
+            before = detour_context.phase
+            detour_context = detour_context.enter(phase, evidence, side=side)
+            if before != detour_context.phase:
+                phase_history.append(dict(from_phase=before.value, phase=phase.value,
+                    committed_side=detour_context.committed_side, evidence=asdict(evidence)))
 
         def clear_bypass(reason):
             avoidance.update(local_bypass_active=False, local_bypass_side=None,
@@ -2044,6 +2067,8 @@ class CognitiveRuntime:
                 "lidar_wait_history": lidar_wait_history,
                 "final_observation": observation,
                 "progress_diagnostics": retain("snapshot"),
+                "navigation_phase": detour_context.phase.value,
+                "detour_context": detour_context.record(), "navigation_phase_history": phase_history,
             }
             if proof_max_physical_actions is None:
                 result.update(**blocked_wait, blocked_wait_history=blocked_wait_history,
@@ -2113,6 +2138,7 @@ class CognitiveRuntime:
                         reacquisition_attempts=reacquisition_attempts,
                         consecutive_reacquisition_failures=consecutive_reacquisition_failures,
                         range_association=copy.deepcopy(vars(self._marvin_target_range_association)),
+                        detour_context=detour_context,
                         completion={"state": state, "stop_confirmed": safe,
                             "full_step_completed": action_result.get("full_step_completed",
                                 action_result.get("ok") is True) is True,
@@ -2316,6 +2342,10 @@ class CognitiveRuntime:
             receipt = observation.get("received_monotonic_seconds")
             if not self._marvin_motion_stamp_is_fresh(stamp, receipt):
                 return finish("BLOCKED", "marvin_motion_observation_stale")
+            if (stamp <= detour_context.retired_source_stamp_ns
+                    or veto_reobserve_floor is not None and stamp <= veto_reobserve_floor):
+                return finish("REVERIFY_REQUIRED", "find_marvin_new_camera_frame_required")
+            veto_reobserve_floor = None
             if (previous_stamp is not None and stamp <= previous_stamp
                     or camera_floor_stamp is not None and stamp <= camera_floor_stamp
                     or action_finished_monotonic_seconds is not None
@@ -2344,10 +2374,11 @@ class CognitiveRuntime:
                 blocked_wait_history[-1]["semantic_route"] = observed_route
                 if observed_route["route_to_marvin_obstructed"] is False:
                     blocked_wait["blocked_wait_resume_reason"] = "find_marvin_blocked_wait_route_cleared"
-                previous_selection = stationary_geometry_epoch(previous_selection,
-                    resumed_blocked_wait["entry_route"], observed_route)
+                # Phase ownership uses current geometry; no stationary credit.
             if observed_route.get("valid") and not observed_route.get("route_to_marvin_obstructed"):
                 clear_bypass("direct_path_restored")
+                if detour_context.phase not in {Phase.DIRECT, Phase.REJOIN, Phase.ARRIVED}:
+                    enter_phase(Phase.REJOIN, Frontier(session, sequence, stamp))
             if previous_selection and observation.get("identity_confirmed") is True:
                 new_association = observation.get("arrival") or {}
                 new_route = new_association.get("route") or {}
@@ -2419,6 +2450,7 @@ class CognitiveRuntime:
                             and arrival.get("target_range_association_trusted") is True
                             and arrival.get("arrived_at_marvin") is True
                             and arrival.get("target_distance_m", float("inf")) <= TARGET_STANDOFF_M):
+                        enter_phase(Phase.ARRIVED, Frontier(session, sequence, stamp))
                         return finish("ARRIVED", "arrived_at_marvin")
                     return finish("BLOCKED", "find_marvin_arrival_evidence_invalid")
                 if decision in {"TURN_LEFT", "TURN_RIGHT"}:
@@ -2450,6 +2482,11 @@ class CognitiveRuntime:
                         if direct.get("permitted") and not route_blocked:
                             if decision == "AVOID" or standoff.get("target_range_association_trusted") is not True:
                                 return finish("BLOCKED", standoff["target_range_association_reason"])
+                            if detour_context.phase != Phase.DIRECT:
+                                frontier = Frontier(session, sequence, stamp)
+                                if detour_context.phase != Phase.REJOIN:
+                                    enter_phase(Phase.REJOIN, frontier)
+                                enter_phase(Phase.DIRECT, frontier)
                             if avoidance["local_avoidance_active"]:
                                 avoidance.update(local_avoidance_active=False, direct_path_blocked=False,
                                     route_to_marvin_obstructed=False, avoidance_reason="direct_path_restored",
@@ -2505,6 +2542,7 @@ class CognitiveRuntime:
                                     "blocking_obstacle_bearing_deg", "blocking_obstacle_x_m", "blocking_obstacle_y_m")})
                             retain("observe", observation)
                             if decision == "ARRIVED":
+                                enter_phase(Phase.ARRIVED, Frontier(session, lidar["acquisition_sequence"], stamp))
                                 avoidance.update(local_avoidance_active=False, direct_path_blocked=False,
                                     route_to_marvin_obstructed=False, avoidance_reason="arrived_at_marvin")
                                 return finish("ARRIVED", "arrived_at_marvin")
@@ -2519,6 +2557,10 @@ class CognitiveRuntime:
                             forward_duration = refreshed["forward_duration"]
                             route_blocked = route["route_to_marvin_obstructed"]
                             if decision == "FORWARD":
+                                frontier = Frontier(session, lidar["acquisition_sequence"], stamp)
+                                if detour_context.phase != Phase.DIRECT:
+                                    enter_phase(Phase.REJOIN, frontier)
+                                    enter_phase(Phase.DIRECT, frontier)
                                 avoidance.update(local_avoidance_active=False, direct_path_blocked=False,
                                     route_to_marvin_obstructed=False, avoidance_reason="direct_path_restored",
                                     selected_action_type=None, left_clearance_m=None, right_clearance_m=None,
@@ -2537,21 +2579,18 @@ class CognitiveRuntime:
                                     avoidance["avoidance_reason"] = "find_marvin_local_avoidance_exhausted"
                                     return finish("BLOCKED", avoidance["avoidance_reason"])
                                 allow_strafe = (zero.get("motion_capabilities") or {}).get("linear_y") is True
-                                # Legacy Bridge clients cannot strafe. Preserve their
-                                # existing guarded-turn policy; the new route case
-                                # can still evaluate four options with strafe denied.
-                                four_primitives = allow_strafe or direct.get("permitted") is True
-                                if four_primitives:
-                                    detour = select_marvin_escape_action(lidar, standoff, expected_session=session,
-                                        allow_strafe=allow_strafe, previous_selection=previous_selection,
-                                        remaining_avoidance_actions=self.MAX_LOCAL_AVOIDANCE_ACTIONS - avoidance["local_avoidance_actions"])
-                                else:
-                                    detour = select_marvin_detour(lidar, expected_session=session,
-                                        forward_speed=FIND_MARVIN_FORWARD_SPEED_MPS,
-                                        forward_duration=forward_duration, previous_direction=previous_direction,
-                                        previous_clearances=previous_clearances)
-                                    detour["action_type"] = "TURN_" + detour["direction"] if detour["direction"] else None
-                                    detour["route"] = route
+                                four_primitives = True
+                                entering_detour = detour_context.phase in {Phase.DIRECT, Phase.REJOIN}
+                                detour = plan_phase_action(lidar, standoff, expected_session=session,
+                                    allow_strafe=allow_strafe, committed_side=detour_context.committed_side,
+                                    entering_detour=entering_detour,
+                                    remaining_avoidance_actions=self.MAX_LOCAL_AVOIDANCE_ACTIONS - avoidance["local_avoidance_actions"])
+                                if detour.get("phase") is None:
+                                    return finish("BLOCKED", detour["reason"])
+                                frontier = Frontier(session, lidar["acquisition_sequence"], stamp)
+                                if detour_context.phase == Phase.DIRECT:
+                                    enter_phase(Phase.CLEAR_SIDE, frontier, side=detour["committed_side"])
+                                enter_phase(Phase(detour["phase"]), frontier, side=detour["committed_side"])
                                 bypass = detour.get("local_bypass") or {}
                                 avoidance.update({key: bypass.get(key) for key in (
                                     "local_bypass_side", "local_bypass_target_x_m",
@@ -2565,14 +2604,14 @@ class CognitiveRuntime:
                                     progress_improved=detour.get("progress_improved"))
                                 if previous_selection:
                                     record_avoidance_reassessment(route, standoff)
-                                    if (previous_selection.get("bypass_episode", {}).get("active") is True
-                                            and detour.get("bypass_episode_active") is False
-                                            and detour.get("progress_improved") is not True):
-                                        from marvin_bypass_episode import end_bypass_episode
-                                        # A rejected corridor/bound closes the episode even
-                                        # when no physical alternative is dispatched before wait.
-                                        previous_selection = end_bypass_episode(previous_selection,
-                                            detour.get("bypass_episode_reason", "bypass_episode_ended"))
+                                    progress = (previous_selection.get("first_post_action_bypass_progress") or
+                                        (previous_selection.get("first_post_action_strafe_progress") or {}).get("progress") or
+                                        evaluate_avoidance_progress(previous_selection, route,
+                                            (standoff.get("local_bypass_candidates") or {}).get(previous_selection.get("direction"))))
+                                    detour.update(progress_improved=progress["meaningful_progress"],
+                                        meaningful_progress=progress["meaningful_progress"],
+                                        meaningful_progress_reason=progress["meaningful_progress_reason"],
+                                        actual_route_progress=progress)
                                 avoidance_history.append({"source_frame_stamp_ns": stamp,
                                     "selection": detour, "previous_clearances": previous_clearances,
                                     "previous_action_type": (previous_selection or {}).get("action_type"),
@@ -2590,7 +2629,7 @@ class CognitiveRuntime:
                                         waited = self._wait_for_marvin_blocked_route(
                                             expected_session=session, lidar=lidar, association=standoff,
                                             execution_guard=current, diagnostics=blocked_wait,
-                                            history=blocked_wait_history)
+                                            history=blocked_wait_history, detour_context=detour_context)
                                         retain("blocked_wait", blocked_wait, waited)
                                         if waited["ok"] is not True:
                                             return finish("STOPPED" if not current() else "BLOCKED", waited["reason"])
@@ -2603,7 +2642,9 @@ class CognitiveRuntime:
                                     return finish("BLOCKED", detour["reason"])
                                 context = {"previous_direction": previous_direction,
                                     "previous_clearances": previous_clearances,
-                                    "four_primitives": four_primitives, "previous_selection": previous_selection,
+                                    "four_primitives": four_primitives, "phase_owned": True,
+                                    "entering_detour": entering_detour,
+                                    "committed_side": detour_context.committed_side,
                                     "remaining_avoidance_actions": self.MAX_LOCAL_AVOIDANCE_ACTIONS - avoidance["local_avoidance_actions"],
                                     "selected_action_type": detour["action_type"], "allow_strafe": allow_strafe,
                                     "selected_direction": detour["direction"]}
@@ -2628,6 +2669,8 @@ class CognitiveRuntime:
                 "behavior": "FIND_OBJECT", "target": "marvin", "state": state,
                 "opencv_tracker": tracker, "source_frame_stamp_ns": stamp,
                 **avoidance,
+                "navigation_phase": detour_context.phase.value,
+                "committed_obstacle_side": detour_context.committed_side,
                 **(blocked_wait if proof_max_physical_actions is None else {}),
                 **{key: (observation.get("arrival") or {}).get(key) for key in (
                     "nearest_forward_obstacle_distance_m", "candidate_target_return_distance_m",
@@ -2656,6 +2699,12 @@ class CognitiveRuntime:
                         reacquisition_attempts=reacquisition_attempts,
                         avoidance_count=avoidance["local_avoidance_actions"], blocked_wait=blocked_wait)
                 result = action()
+                if state == "AVOIDING" and isinstance(result, dict) and isinstance(result.get("local_detour"), dict):
+                    # Historical measured outcome, never consulted by JIT or
+                    # the phase selector. Alignment cannot relabel traversal.
+                    result["local_detour"].update({key: detour[key] for key in (
+                        "progress_improved", "meaningful_progress", "meaningful_progress_reason",
+                        "actual_route_progress") if key in detour})
             except Exception as exc:
                 if proof_max_physical_actions is not None:
                     consumed = stamp in self._marvin_alignment_consumed_source_frame_stamps
@@ -2732,29 +2781,54 @@ class CognitiveRuntime:
                     meaningful_progress=None, meaningful_progress_reason=None)
             if not current():
                 return finish("STOPPED", "find_marvin_mission_preempted")
+            transport = ((result.get("lateral_step") or {}).get("lateral_result") or
+                (result.get("approach_result") or {}).get("forward_result") or
+                result.get("turn_result") or {})
+            if proof_max_physical_actions is None and (
+                    result.get("delivery_uncertain") is True or transport.get("delivery_uncertain") is True
+                    or (transport.get("transport_result") or {}).get("delivery_uncertain") is True):
+                return finish("BLOCKED", "find_marvin_action_delivery_uncertain")
             if result.get("ok") is not True or result.get("motion_executed") is not True:
                 if proof_max_physical_actions is None and state == "AVOIDING":
                     veto = self._marvin_jit_veto_wait_evidence(result, stamp=stamp,
                         expected_session=session, planning_sequence=detour.get("acquisition_sequence"),
                         execution_guard=current)
                     if veto is not None:
-                        if previous_selection and previous_selection.get("bypass_episode"):
-                            from marvin_bypass_episode import end_bypass_episode
-                            previous_selection = end_bypass_episode(previous_selection, result["reason"])
-                        blocked_wait["blocked_wait_reason"] = result["reason"]
+                        frontier = Frontier(session, veto["snapshot"]["acquisition_sequence"], stamp)
+                        with self._state_lock:
+                            self._marvin_alignment_consumed_source_frame_stamps.add(stamp)
+                        detour_context = detour_context.retire(frontier)
+                        phase_plan = plan_phase_action(veto["snapshot"], veto["association"],
+                            expected_session=session, allow_strafe=context["allow_strafe"],
+                            committed_side=detour_context.committed_side,
+                            remaining_avoidance_actions=self.MAX_LOCAL_AVOIDANCE_ACTIONS - avoidance["local_avoidance_actions"])
+                        enter_phase(Phase(phase_plan["phase"]), frontier, side=phase_plan["committed_side"])
                         avoidance_history[-1].update(vetoed_before_transport=True,
                             execution_admitted=result.get("execution_authorized") is True, dispatched=False,
                             transport_attempted=False, delivery_uncertain=False,
-                            jit_veto_lidar_sequence=veto["snapshot"]["acquisition_sequence"])
-                        waited = self._wait_for_marvin_blocked_route(
-                            expected_session=session, lidar=veto["snapshot"], association=veto["association"],
-                            execution_guard=current, diagnostics=blocked_wait, history=blocked_wait_history)
-                        if waited["ok"] is not True:
-                            return finish("STOPPED" if not current() else "BLOCKED", waited["reason"])
-                        blocked_resume_context = {"camera_floor": stamp, "session": session,
-                            "lidar_sequence": blocked_wait["blocked_wait_latest_lidar_sequence"],
-                            "entry_route": waited["entry_route"]}
-                        continue  # Keep the veto stamp consumed; never retry its action.
+                            jit_veto_lidar_sequence=frontier.acquisition_sequence,
+                            phase_after_veto=detour_context.phase.value)
+                        self._marvin_last_action_lidar_evidence = (session, frontier.acquisition_sequence)
+                        previous_stamp = stamp
+                        camera_floor_stamp = stamp
+                        veto_reobserve_floor = stamp
+                        action_finished_monotonic_seconds = time.monotonic()
+                        mark_stopped = getattr(behavior, "mark_strict_v2_action_stopped", None)
+                        if callable(mark_stopped):
+                            mark_stopped(stamp, action_finished_monotonic_seconds)
+                        self._reset_marvin_alignment_consensus()
+                        if detour_context.phase == Phase.BLOCKED_WAIT:
+                            blocked_wait["blocked_wait_reason"] = result["reason"]
+                            waited = self._wait_for_marvin_blocked_route(
+                                expected_session=session, lidar=veto["snapshot"], association=veto["association"],
+                                execution_guard=current, diagnostics=blocked_wait,
+                                history=blocked_wait_history, detour_context=detour_context)
+                            if waited["ok"] is not True:
+                                return finish("STOPPED" if not current() else "BLOCKED", waited["reason"])
+                            blocked_resume_context = {"camera_floor": stamp, "session": session,
+                                "lidar_sequence": blocked_wait["blocked_wait_latest_lidar_sequence"],
+                                "entry_route": waited["entry_route"]}
+                        continue  # Fresh stopped LiDAR and strict observation, never veto stamp.
                 forward = ((result.get("lateral_step") or {}).get("lateral_result") or
                     (result.get("approach_result") or {}).get("forward_result") or {})
                 recoverable = (state in {"ADVANCING", "AVOIDING"} and result.get("interrupted") is True
@@ -2820,10 +2894,6 @@ class CognitiveRuntime:
             bridge = self._marvin_bridge_ready_and_stopped()
             if bridge.get("ok") is not True or bridge.get("status") != "READY":
                 return finish("BLOCKED", "find_marvin_bridge_not_stopped_after_action")
-            if state == "AVOIDING" and result.get("action_type") == "BYPASS_FORWARD":
-                from marvin_bypass_episode import bypass_completion
-                previous_selection["bypass_step_completion"] = bypass_completion(
-                    result, bridge, self._marvin_last_action_lidar_evidence)
             action_finished_monotonic_seconds = time.monotonic()
             retain("action_result", result, action_finished_monotonic_seconds)
             if getattr(self, "_marvin_navigation_shadow", None) is not None:
@@ -2852,6 +2922,8 @@ class CognitiveRuntime:
             if (baseline is None or baseline[0] != session
                     or type(baseline[1]) is not int):
                 return finish("BLOCKED", "find_marvin_action_lidar_evidence_invalid")
+            detour_context = detour_context.completed(Frontier(session, baseline[1], stamp),
+                traversal=state == "AVOIDING" and result.get("full_step_completed") is True)
             if state == "SEARCHING":
                 search_turns += 1
         return finish("STOPPED", "find_marvin_mission_preempted")
@@ -4025,6 +4097,15 @@ class CognitiveRuntime:
                     turn_result=turn, reason="find_marvin_search_turn_complete" if moved
                     else "find_marvin_search_guarded_turn_vetoed")
 
+    @staticmethod
+    def _select_marvin_detour_for_context(lidar, association, context, **kwargs):
+        if context.get("phase_owned") is True:
+            return plan_phase_action(lidar, association,
+                committed_side=context.get("committed_side"),
+                entering_detour=context.get("entering_detour", False), **kwargs)
+        return select_marvin_escape_action(lidar, association,
+            previous_selection=context.get("previous_selection"), **kwargs)
+
     def _execute_single_marvin_strafe(self, *, source_frame_stamp_ns,
                                       local_detour_context, dispatch_guard):
         """Private mission-owned executor: new identity frame, one lateral step."""
@@ -4066,8 +4147,8 @@ class CognitiveRuntime:
                 association = self._marvin_v2_lidar_arrival(tracker, sample, current_action_jit=True)
                 if association.get("ok") is not True or association.get("arrived_at_marvin"):
                     return {"accepted": False}
-                selection = select_marvin_escape_action(sample, association, expected_session=session,
-                    allow_strafe=True, previous_selection=local_detour_context.get("previous_selection"),
+                selection = self._select_marvin_detour_for_context(sample, association, local_detour_context, expected_session=session,
+                    allow_strafe=True,
                     strafe_duration_limit=duration if duration is not None else LOCAL_AVOIDANCE_STRAFE_MAX_SECONDS,
                     remaining_avoidance_actions=local_detour_context.get("remaining_avoidance_actions", self.MAX_LOCAL_AVOIDANCE_ACTIONS))
                 candidate_duration = (selection.get("options", {}).get(kind) or {}).get("requested_duration")
@@ -4257,9 +4338,8 @@ class CognitiveRuntime:
                     TARGET_STANDOFF_M) / FIND_MARVIN_FORWARD_SPEED_MPS)
                     if standoff.get("target_range_association_trusted") is True else 0.50)
                 if local_detour_context.get("four_primitives"):
-                    detour = select_marvin_escape_action(lidar, standoff, expected_session=session,
+                    detour = self._select_marvin_detour_for_context(lidar, standoff, local_detour_context, expected_session=session,
                         allow_strafe=local_detour_context["allow_strafe"],
-                        previous_selection=local_detour_context.get("previous_selection"),
                         remaining_avoidance_actions=local_detour_context.get("remaining_avoidance_actions", self.MAX_LOCAL_AVOIDANCE_ACTIONS))
                     if detour.get("action_type") != local_detour_context["selected_action_type"]:
                         return dict(base, reason="marvin_local_detour_jit_veto", local_detour=detour,
@@ -4477,9 +4557,8 @@ class CognitiveRuntime:
                 association = self._marvin_v2_lidar_arrival(tracker, sample, current_action_jit=True)
                 if association.get("ok") is not True or association.get("arrived_at_marvin"):
                     return {"accepted": False}
-                selected = select_marvin_escape_action(sample, association, expected_session=session,
+                selected = self._select_marvin_detour_for_context(sample, association, local_detour_context, expected_session=session,
                     allow_strafe=local_detour_context["allow_strafe"],
-                    previous_selection=local_detour_context.get("previous_selection"),
                     remaining_avoidance_actions=local_detour_context.get("remaining_avoidance_actions", self.MAX_LOCAL_AVOIDANCE_ACTIONS))
                 accepted = (selected.get("action_type") == "BYPASS_FORWARD"
                     and selected.get("direction") == local_detour_context["selected_direction"]

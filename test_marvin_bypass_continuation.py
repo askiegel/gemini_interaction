@@ -290,24 +290,23 @@ def test_production_continuation_then_route_clear_resumes_ordinary_forward(tmp_p
     assert result['local_avoidance_actions']==1+bypasses and result['local_bypass_actions']==bypasses
     assert result['completed_forward_actions']>0 and not result['local_bypass_active']
     rows=[h for h in result['history'] if h['result'].get('action_type')=='BYPASS_FORWARD']
-    assert [h['result']['local_detour']['bypass_episode_step'] for h in rows]==list(range(1,bypasses+1))
-    assert rows[1]['result']['local_detour']['bypass_continuation']
-    assert rows[1]['result']['local_detour']['meaningful_progress'] is False
+    assert all(h['result']['local_detour']['phase']=='PASS_OBSTACLE' for h in rows)
+    assert all('bypass_episode_step' not in h['result']['local_detour'] for h in rows)
+    assert result['local_avoidance_history'][2]['selection']['meaningful_progress'] is False
     ordinary=[h for h in result['history'] if h['state']=='ADVANCING']
     assert ordinary and all(h['observation']['arrival']['route_to_marvin_obstructed'] is False for h in ordinary)
     assert all(h['result'].get('action_type')!='BYPASS_FORWARD' for h in ordinary)
     assert_sensor_contracts(result,bundle[0])
 
 
-def test_production_max_without_progress_suppresses_then_recovers_and_waits(tmp_path,monkeypatch):
+def test_production_neutral_pass_remains_safe_until_global_cap(tmp_path,monkeypatch):
     bundle,_,_=episode_bundle(tmp_path,monkeypatch)
     result=run(bundle[0])
-    assert result['reason']=='find_marvin_blocked_wait_exhausted'
-    assert result['local_bypass_actions']==3 and result['local_avoidance_actions']==5
-    assert motions(bundle[3])==[('strafe',.08,1.)]+[('forward',.1,.5)]*3+[('strafe',.08,1.)]
-    assert result['blocked_wait_recheck_count']==12
-    recovery=result['history'][4]['result']['local_detour']
-    assert recovery['post_bypass_lateral_recovery_selected'] and 'BYPASS_FORWARD' in recovery['ineffective_action_types']
+    assert result['reason']=='find_marvin_local_avoidance_exhausted'
+    assert result['local_bypass_actions']==5 and result['local_avoidance_actions']==6
+    assert motions(bundle[3])==[('strafe',.08,1.)]+[('forward',.1,.5)]*5
+    assert result['blocked_wait_recheck_count']==0
+    assert all(r['selection']['phase']=='PASS_OBSTACLE' for r in result['local_avoidance_history'][1:])
     assert_sensor_contracts(result,bundle[0])
 
 
@@ -333,7 +332,9 @@ def test_proof_checkpoints_preserve_episode_and_alignment_never_resets_credit(tm
     complete(bundle,initial(bundle),0)
     assert arm(r)['ok'];complete(bundle,step(r),1)
     prior=copy.deepcopy(r._marvin_live_proof_continuation.previous_selection)
-    assert prior['bypass_episode']['step']==1 and prior['bypass_step_completion']['confirmed']
+    assert r._marvin_live_proof_continuation.detour_context.phase.value=='PASS_OBSTACLE'
+    assert r._marvin_live_proof_continuation.detour_context.phase_action_count==1
+    assert r._marvin_live_proof_continuation.detour_context.committed_side=='LEFT'
     assert prior['first_post_action_bypass_progress']['meaningful_progress'] is False
     assert not {'options','local_bypass','bypass_handoff'} & prior.keys()
     behavior.specs=iter([(100,1.1),(0,1.1)])
@@ -344,11 +345,11 @@ def test_proof_checkpoints_preserve_episode_and_alignment_never_resets_credit(tm
     behavior.specs=iter([(0,1.1)]*12)
     assert arm(r)['ok'];second=step(r);complete(bundle,second,3)
     chosen=second['controller_result']['history'][0]['result']['local_detour']
-    assert chosen['action_type']=='BYPASS_FORWARD' and chosen['bypass_episode_step']==2
-    assert chosen['bypass_continuation'] and chosen['meaningful_progress'] is False
+    assert chosen['action_type']=='BYPASS_FORWARD' and chosen['phase']=='PASS_OBSTACLE'
+    assert r._marvin_live_proof_continuation.detour_context.phase_action_count==2
     assert r._marvin_live_proof_continuation.avoidance['local_avoidance_actions']==3
     assert arm(r)['ok'];third=step(r);complete(bundle,third,4)
-    assert r._marvin_live_proof_continuation.previous_selection['bypass_episode']['step']==3
+    assert r._marvin_live_proof_continuation.detour_context.phase_action_count==3
     assert r._marvin_live_proof_continuation.avoidance['local_avoidance_actions']==4
 
 

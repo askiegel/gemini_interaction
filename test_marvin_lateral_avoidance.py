@@ -130,8 +130,9 @@ def test_two_strafes_require_new_evidence_and_observed_progress(tmp_path,monkeyp
 def test_no_progress_cannot_repeat_strafe_indefinitely(tmp_path,monkeypatch):
     bundle,_,_ = strafe_runtime(tmp_path,monkeypatch,[(0,.60)]*9,[LEFT_OPEN])
     result=run(bundle[0]);actions=[e for e in motions(bundle[3]) if e[0]=='strafe']
-    assert len(actions)==1
-    assert result['state']=='BLOCKED' and result['local_avoidance_actions']<=6
+    assert len(actions)==6
+    assert result['reason']=='find_marvin_local_avoidance_exhausted'
+    assert result['state']=='BLOCKED' and result['local_avoidance_actions']==6
 
 
 @pytest.mark.parametrize('point',[(0,.44),(.31,.34),(-.31,.34),(.1,.478)])
@@ -223,24 +224,14 @@ def test_clear_path_and_trusted_standoff_do_not_select_avoidance(tmp_path,monkey
     assert result['final_observation']['arrival']['target_standoff_m']==.5
 
 
-def test_mixed_turns_and_strafes_share_six_action_budget(tmp_path,monkeypatch):
-    scenes=[LEFT_OPEN,LEFT_OPEN+[(-.02,.465),(0.,-.465)]]*4
+def test_safe_strafe_then_unsafe_repair_waits_without_injected_detour_turn(tmp_path,monkeypatch):
+    scenes=[LEFT_OPEN,LEFT_OPEN+[(-.02,.465),(0.,-.465)]]
     bundle,_,_=strafe_runtime(tmp_path,monkeypatch,[(0,.6)]*9,scenes)
-    def independently_improving(*args,**kwargs):
-        kwargs['previous_selection']=None
-        plan=select_marvin_escape_action(*args,**kwargs)
-        # Test the shared physical action counter independently of route
-        # prediction. A coherent pure turn has no spatial route gain; its
-        # advisory usefulness is mocked here, while JIT hard guards remain real.
-        if plan['action_type'] is None:
-            assert plan['options']['TURN_LEFT']['hard_safety_permitted']
-            plan.update(action_type='TURN_LEFT',direction='LEFT',reason='budget_fixture_turn')
-        return plan
-    monkeypatch.setattr('runtime.select_marvin_escape_action',independently_improving)
     result=run(bundle[0])
-    assert result['reason']=='find_marvin_local_avoidance_exhausted'
-    assert result['local_avoidance_actions']==6
-    assert [e[0] for e in motions(bundle[3])]==['strafe','turn']*3
+    assert result['reason']=='find_marvin_blocked_wait_exhausted'
+    assert motions(bundle[3])==[('strafe',.08,1.)]
+    assert result['local_avoidance_actions']==1
+    assert result['stop_result']['ok']
 
 
 def test_all_four_candidates_share_exact_scan_and_strafe_tie_prefers_left(tmp_path,monkeypatch):

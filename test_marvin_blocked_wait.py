@@ -107,6 +107,10 @@ def mission_bundle(tmp_path, monkeypatch, *, clear_on_check=3, specs=None):
             for point in scan["local_motion_geometry"]["points"][-len(LEFT_OPEN):]:
                 if point["x_m"] > .4:
                     point["y_m"] += flags["geometry_shift"]
+        elif motions(events):
+            # Phase WAIT requires an actual unsafe repair/pass corridor, not
+            # the obsolete no-route-progress suppression of a safe strafe.
+            scan["local_motion_geometry"]["points"].append({"x_m":0.,"y_m":.3})
         return scan
     r.world_model.get_lidar_obstacles = lidar
     publish = r._publish_behavior_tracking
@@ -260,7 +264,7 @@ def test_proof_harness_still_returns_immediately_on_no_progress(tmp_path, monkey
     assert bundle[0].rearm_find_marvin_live_proof(rearm=True)["ok"]
     second=bundle[0].execute_find_marvin_live_proof_step(max_physical_actions=1)
     assert second["controller_result"]["state"]=="BLOCKED"
-    assert second["reason"]=="find_marvin_local_avoidance_no_progress"
+    assert second["reason"]=="find_marvin_no_safe_local_detour"
     assert len(motions(bundle[3]))==1
     assert not any(d["state"]=="BLOCKED_WAIT" for d in flags["publishes"])
 
@@ -325,7 +329,7 @@ def test_changed_obstacle_resumes_real_selector_on_established_side(tmp_path,mon
     assert result["local_avoidance_actions"]==2 and result["local_bypass_actions"]==0
     assert result["blocked_wait_history"][0]["geometry_changed"]
     assert result["blocked_wait_history"][0]["route"]["route_to_marvin_obstructed"]
-    assert result["local_avoidance_history"][-1]["selection"]["stationary_lateral_reconsidered"]
+    assert result["local_avoidance_history"][-1]["selection"]["phase"] == "CLEAR_SIDE"
     assert result["last_detour_direction"]=="LEFT"
 
 
@@ -351,13 +355,13 @@ def test_stationary_epoch_must_still_pass_current_prediction_and_jit_geometry():
     "find_marvin_local_avoidance_exhausted", "marvin_lateral_transport_failed",
     "marvin_alignment_turn_exception", "invalid_lidar_geometry"])
 def test_only_safe_pre_dispatch_dead_ends_enter_wait(tmp_path,monkeypatch,reason):
-    from marvin_local_obstacle_avoidance import select_marvin_escape_action
+    from marvin_obstacle_phases import plan_phase_action
     bundle,flags=mission_bundle(tmp_path,monkeypatch,clear_on_check=None,specs=[(0,.6)])
     def reject(*a,**kw):
         # A decision-only failure is never a primitive injection or dispatch.
-        result=select_marvin_escape_action(*a,**kw)
+        result=plan_phase_action(*a,**kw)
         return dict(result,direction=None,action_type=None,reason=reason)
-    monkeypatch.setattr("runtime.select_marvin_escape_action",reject)
+    monkeypatch.setattr("runtime.plan_phase_action",reject)
     result=run(bundle[0])
     assert not motions(bundle[3])
     if reason in BLOCKED_WAIT_REASONS:
@@ -408,7 +412,7 @@ def test_changed_scan_alone_is_not_identity_or_motion_authority(tmp_path,monkeyp
     assert b[0]._marvin_alignment_observation is None and not d["blocked_wait_camera_recheck_performed"]
 
 
-def test_full_live_evidence_replay_waits_then_forward_without_forcing_selector(tmp_path,monkeypatch):
+def test_retained_route_with_explicit_unsafe_corridor_waits_then_forward(tmp_path,monkeypatch):
     fixture=json.loads((Path(__file__).parent/'test_fixtures/marvin_blocked_clear_evidence.json').read_text())
     bundle,_,_=strafe_runtime(tmp_path,monkeypatch,
         [(48,1.4267992355563468)]*12+[(48,1.3767992355563468)], [live_points()])
@@ -423,6 +427,11 @@ def test_full_live_evidence_replay_waits_then_forward_without_forcing_selector(t
             point['y_m'] -= (point['x_m'] - .081299) * (368.-321.6103934690693) / 597.6149561338204
         if flags["removed"]:
             state['local_motion_geometry']['points']=state['local_motion_geometry']['points'][:-20]
+        elif motions(events):
+            # Explicit synthetic rear hazard blocks native repair/pass safety
+            # while preserving the recorded forward route summary. This is
+            # not claimed as a historical sensor return.
+            state['local_motion_geometry']['points'].append({'x_m':-.1,'y_m':.3})
         return state
     r.world_model.get_lidar_obstacles=lidar
     publish=r._publish_behavior_tracking
@@ -507,7 +516,7 @@ def test_live_status_projection_exposes_stationary_wait_diagnostics(tmp_path,mon
     result=run(bundle[0])
     assert result['reason']=='find_marvin_blocked_wait_exhausted'
     assert seen and all(d['state']=='BLOCKED_WAIT' and d['blocked_wait_active'] for d in seen)
-    assert all(d['blocked_wait_reason']=='find_marvin_local_avoidance_no_progress' for d in seen)
+    assert all(d['blocked_wait_reason']=='find_marvin_no_safe_local_detour' for d in seen)
     assert all(k in seen[-1] for k in blocked_wait_diagnostics())
 
 

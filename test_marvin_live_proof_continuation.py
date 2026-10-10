@@ -363,15 +363,14 @@ def test_strafe_side_counts_clearances_and_measured_progress_survive(tmp_path, m
     assert second_result["controller_result"]["local_avoidance_history"][1]["previous_action_type"] == "STRAFE_LEFT"
 
 
-def test_no_progress_and_opposite_side_cannot_repeat_across_boundaries(tmp_path, monkeypatch):
+def test_safe_same_side_repair_does_not_need_progress_credit_across_boundaries(tmp_path, monkeypatch):
     bundle, _, _ = strafe_runtime(tmp_path, monkeypatch, [(0,.8)]*8, [LEFT_OPEN])
-    r = bundle[0]; complete(bundle, initial(bundle), 0); assert arm(r)["ok"]
-    result = step(r)
-    assert result["controller_result"]["state"] == "BLOCKED"
-    assert len(motions(bundle[3])) == 1
-    selection = result["controller_result"]["local_avoidance_history"][-1]["selection"]
-    assert "STRAFE_LEFT" in selection["ineffective_action_types"]
-    assert selection["action_type"] is None
+    r = bundle[0];complete(bundle,initial(bundle),0);assert arm(r)['ok']
+    result=step(r);complete(bundle,result,1)
+    selection=result['controller_result']['local_avoidance_history'][-1]['selection']
+    assert selection['direction']=='LEFT' and selection['phase']=='CLEAR_SIDE'
+    assert not selection['meaningful_progress'] and len(motions(bundle[3]))==2
+    assert 'ineffective_action_types' not in selection
 
 
 def test_side_ranking_flicker_cannot_undo_measured_left_progress(tmp_path, monkeypatch):
@@ -382,8 +381,8 @@ def test_side_ranking_flicker_cannot_undo_measured_left_progress(tmp_path, monke
     selection=result['controller_result']['history'][0]['result']['local_detour']
     assert selection['progress_improved']
     assert selection['right_clearance_m']>selection['left_clearance_m']
-    assert selection['options']['STRAFE_RIGHT']['reverses_previous_direction']
-    assert selection['options']['STRAFE_RIGHT']['undoes_previous_progress']
+    assert r._marvin_live_proof_continuation.detour_context.phase.value=='REJOIN'
+    assert r._marvin_live_proof_continuation.detour_context.committed_side is None
     assert selection['direction']=='LEFT' and len(motions(bundle[3]))==2
 
 
@@ -464,7 +463,7 @@ def test_first_bypass_reassessment_survives_later_alignment(tmp_path, monkeypatc
     continuation = result["controller_result"]["history"][0]["result"]
     assert continuation["action_type"] == "BYPASS_FORWARD"
     assert continuation["local_detour"]["actual_route_progress"] == frozen
-    assert 'BYPASS_FORWARD' not in continuation["local_detour"]["ineffective_action_types"]
+    assert 'ineffective_action_types' not in continuation['local_detour']
     assert r._marvin_live_proof_continuation.avoidance["local_avoidance_actions"] == 3
 
 

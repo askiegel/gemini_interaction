@@ -196,16 +196,15 @@ def test_live_geometry_replay_blocks_marginal_repeat_and_keeps_terminal_obstruct
     assert evaluate_route_progress(before, after)['meaningful_progress_reason'] == 'route_geometry_worsened'
 
 
-def test_full_mission_marginal_distance_change_stops_after_one_strafe(tmp_path, monkeypatch):
+def test_full_mission_marginal_route_change_retains_clear_side_until_cap(tmp_path, monkeypatch):
     second = [(x+.004, y) if x>0 else (x, y) for x,y in LEFT_OPEN]
-    bundle, _, _ = strafe_runtime(tmp_path, monkeypatch, [(0,.6)]*3, [LEFT_OPEN, second])
+    bundle, _, _ = strafe_runtime(tmp_path, monkeypatch, [(0,.6)]*8, [LEFT_OPEN, second])
     result = run(bundle[0])
     assert result['state'] == 'BLOCKED'
-    assert result['reason'] == 'find_marvin_blocked_wait_exhausted'
-    assert result['blocked_wait_reason'] == 'find_marvin_local_avoidance_no_progress'
-    assert result['blocked_wait_recheck_count'] == 12
-    assert motions(bundle[3]) == [('strafe', .08, 1.)]
-    assert result['local_avoidance_actions'] == 1
+    assert result['reason'] == 'find_marvin_local_avoidance_exhausted'
+    assert result['blocked_wait_recheck_count'] == 0
+    assert motions(bundle[3]) == [('strafe', .08, 1.)]*6
+    assert result['local_avoidance_actions'] == 6
     assert MAX_LOCAL_AVOIDANCE_ACTIONS == result['max_local_avoidance_actions'] == 6
     row = result['local_avoidance_history'][0]
     assert not row['meaningful_progress']

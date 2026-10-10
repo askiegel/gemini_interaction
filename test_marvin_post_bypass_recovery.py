@@ -194,39 +194,40 @@ def test_proof_recovery_uses_real_shared_selector_and_preserves_budget_stop_and_
     results=checkpoint_after_bypass(bundle);prior=r._marvin_live_proof_continuation
     assert arm(r)['ok'];result=step(r);complete(bundle,result,3);c=r._marvin_live_proof_continuation
     assert c.avoidance['local_avoidance_actions']==4 and c.avoidance['local_bypass_actions']==1
-    assert c.previous_selection['post_bypass_lateral_recovery_used'] is True
-    assert c.previous_selection['post_bypass_lateral_recovery_selected'] is True
-    progress=c.previous_selection['first_post_action_lateral_recovery_progress'];assert progress['meaningful_progress'] is success
+    assert c.detour_context.phase.value=='CLEAR_SIDE' and c.detour_context.committed_side=='LEFT'
+    assert c.detour_context.phase_action_count==1
+    progress=c.previous_selection['first_post_action_strafe_progress']['progress'];assert progress['meaningful_progress'] is success
     assert c.avoidance_history[2]['actual_route_progress']==prior.avoidance_history[2]['actual_route_progress']
     assert motions(events)==[('strafe',.08,1.),('strafe',.08,1.),('forward',.1,.5),('strafe',.08,1.)]
     row=result['controller_result']['history'][0];a=row['result']
     assert a['source_stamp_consumed'] and a['full_step_completed'] and a['bridge_stop_confirmed']
     assert row['source_frame_stamp_ns']>prior.camera_floor_stamp and type(row['source_frame_stamp_ns']) is int
-    assert a['local_detour']['accepted'] and a['local_detour']['post_bypass_lateral_recovery_used']
+    assert a['local_detour']['accepted'] and a['local_detour']['phase']=='CLEAR_SIDE'
     assert a['lateral_step']['lateral_safety']['protected_radius_m']==.45
     assert len(a['lateral_step']['lateral_safety']['required_sectors'])==8
     assert not step(r)['execution_authorized'] and len(motions(events))==4
     assert arm(r)['ok'];later=step(r)
-    if not success:
-        assert later['controller_result']['state']=='BLOCKED'
-        assert later['controller_result']['proof']['dispatch_opportunities']==0
-        assert len(motions(events))==4
-        assert {'STRAFE_LEFT','BYPASS_FORWARD'} <= set(later['controller_result']['local_avoidance_history'][-1]['selection']['ineffective_action_types'])
-    else:
-        complete(bundle,later,4)
-        assert r._marvin_live_proof_continuation.avoidance['local_avoidance_actions']==5
-        assert r._marvin_live_proof_continuation.avoidance['local_bypass_actions']==1
+    complete(bundle,later,4)
+    assert r._marvin_live_proof_continuation.avoidance['local_avoidance_actions']==5
+    assert r._marvin_live_proof_continuation.avoidance['local_bypass_actions']==1
+    assert later['controller_result']['history'][0]['result']['action_type']=='STRAFE_LEFT'
+    assert r._marvin_live_proof_continuation.detour_context.phase.value=='REJOIN'
+    assert r._marvin_live_proof_continuation.detour_context.committed_side is None
     assert robot.status()['motion']['streaming'] is False
 
 
-def test_production_continuous_loop_uses_one_recovery_and_stops_without_loop(tmp_path,monkeypatch):
-    bundle,_,_=recovery_bundle(tmp_path,monkeypatch);result=run(bundle[0])
-    assert result['state']=='BLOCKED'
-    assert result['local_avoidance_actions']==4 and result['local_bypass_actions']==1
-    assert len(motions(bundle[3]))==4
-    assert result['reason']=='find_marvin_blocked_wait_exhausted'
-    assert result['blocked_wait_reason']=='find_marvin_local_avoidance_no_progress'
-    assert result['local_avoidance_history'][-2]['selection']['post_bypass_lateral_recovery_selected']
+def test_production_continuous_loop_repairs_same_side_then_rejoins_and_arrives(tmp_path,monkeypatch):
+    from test_marvin_local_bypass import pursuit_specs
+    bundle,_,_=recovery_bundle(tmp_path,monkeypatch)
+    bundle[1].specs=iter(pursuit_specs([(0,1.1)]*5))
+    result=run(bundle[0])
+    assert result['state']=='ARRIVED'
+    assert result['local_avoidance_actions']==5 and result['local_bypass_actions']==1
+    assert result['reason']=='arrived_at_marvin'
+    assert result['blocked_wait_recheck_count']==0
+    assert [r['selection']['phase'] for r in result['local_avoidance_history']]==[
+        'CLEAR_SIDE','CLEAR_SIDE','PASS_OBSTACLE','CLEAR_SIDE','CLEAR_SIDE']
+    assert result['stop_result']['ok']
 
 
 @pytest.mark.parametrize('phase',['bypass','recovery'])
@@ -306,8 +307,8 @@ def test_saved_a6c4d675_extended_replay_continues_then_direct_forward_and_arrive
         assert arm(r)['ok'];results.append(step(r));complete(bundle,results[-1],count)
     selected=[x['controller_result']['history'][0]['result'].get('action_type') or x['controller_result']['history'][0]['state'] for x in results]
     assert selected==['ADVANCING','STRAFE_LEFT','BYPASS_FORWARD','BYPASS_FORWARD']
-    assert results[3]['controller_result']['history'][0]['result']['local_detour']['bypass_continuation']
-    assert r._marvin_live_proof_continuation.previous_selection['bypass_episode']['step']==2
+    assert results[3]['controller_result']['history'][0]['result']['local_detour']['phase']=='PASS_OBSTACLE'
+    assert r._marvin_live_proof_continuation.detour_context.phase_action_count==2
     assert results[2]['controller_result']['local_avoidance_history'][-1]['actual_route_progress']['meaningful_progress'] is False
     assert results[3]['controller_result']['local_avoidance_actions']==3
     clear[0]=True;b.specs=iter([(0,1.38),(0,1.33)])

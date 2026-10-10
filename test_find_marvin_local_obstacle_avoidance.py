@@ -5,6 +5,8 @@ import pytest
 
 from lidar_perception import MAXIMUM_EFFECTIVE_AGE_SECONDS
 from marvin_local_obstacle_avoidance import select_marvin_detour
+from marvin_obstacle_phases import plan_phase_action
+from test_marvin_lateral_avoidance import strafe_runtime
 from test_find_marvin_closed_loop import make_runtime, motions, run, Worker
 from test_find_marvin_reacquisition import recovery_runtime
 
@@ -48,13 +50,14 @@ def obstacle_geometry(runtime, behavior, events, modes):
         return state
 
     runtime.world_model.get_lidar_obstacles = read
+    if getattr(behavior.robot, 'forward_interlock', None) is not None:
+        behavior.robot.forward_interlock.reader = lambda **kwargs: runtime.world_model.get_lidar_obstacles(**kwargs)
     return read
 
 
 def avoidance_runtime(tmp_path, monkeypatch, specs, modes):
-    bundle = make_runtime(tmp_path, monkeypatch, specs)
-    runtime, behavior, _, events, _ = bundle
-    obstacle_geometry(runtime, behavior, events, modes)
+    scenes = [None if mode is None else [(0.485,0.),(0.,mode[0]),(0.,-mode[1])] for mode in modes]
+    bundle, _, _ = strafe_runtime(tmp_path,monkeypatch,specs,scenes)
     return bundle
 
 
@@ -74,13 +77,13 @@ def test_clear_path_never_calls_detour_selection(tmp_path, monkeypatch):
     ((1.3, .8), "LEFT"), ((.8, 1.3), "RIGHT"),
     ((.9, .9), "LEFT"), ((.9, .905), "LEFT"),
 ])
-def test_one_safe_bounded_turn_then_new_evidence_and_ordinary_approach(
+def test_one_safe_bounded_strafe_then_new_evidence_and_ordinary_approach(
         tmp_path, monkeypatch, sides, direction):
     runtime, behavior, robot, events, _ = avoidance_runtime(tmp_path, monkeypatch,
         [(0, .60), (0, .58), (0, .5)], [sides, None])
     result = run(runtime)
     assert result["state"] == "ARRIVED"
-    assert motions(events) == [("turn", direction, .25, .50), ("forward", .10, .50)]
+    assert motions(events) == [("strafe", .08 if direction == "LEFT" else -.08, 1.), ("forward", .10, .50)]
     assert [row["state"] for row in result["history"]] == ["AVOIDING", "ADVANCING"]
     assert result["local_avoidance_actions"] == 1 and not result["local_avoidance_active"]
     assert result["last_detour_improved_direct_path"] is True
@@ -88,17 +91,17 @@ def test_one_safe_bounded_turn_then_new_evidence_and_ordinary_approach(
     assert len(runtime._marvin_alignment_consumed_source_frame_stamps) == 2
     for row, wait in zip(result["history"], result["lidar_wait_history"]):
         assert wait["snapshot"]["acquisition_sequence"] > row["action_lidar_evidence"][1]
-        index = events.index(("turn", direction, .25, .50)) if row["state"] == "AVOIDING" else events.index(("forward", .10, .50))
+        index = events.index(("strafe", .08 if direction == "LEFT" else -.08, 1.)) if row["state"] == "AVOIDING" else events.index(("forward", .10, .50))
         assert events[index + 1] == "stop"
     detour = result["history"][0]["result"]
-    assert detour["action"] == "single_marvin_local_detour_turn"
+    assert detour["action"] == "single_marvin_local_strafe"
     assert detour["local_detour"]["direction"] == direction
-    assert result["progress_diagnostics"]["actions"][0]["type"] == "detour_turn"
+    assert result["progress_diagnostics"]["actions"][0]["type"] == "detour_strafe"
     assert result["final_observation"]["arrival"]["target_distance_m"] <= .50
-    assert robot.status()["motion"] == {"linear_x": 0, "angular_z": 0, "streaming": False}
+    assert robot.status()["motion"] == {"linear_x": 0, "linear_y":0, "angular_z": 0, "streaming": False}
 
 
-@pytest.mark.parametrize("sides", [(.48, .48), (.40, 1.2), (1.2, .40)])
+@pytest.mark.parametrize("sides", [(.46, .46), (.40, 1.2), (1.2, .40)])
 def test_no_escape_or_unsafe_rotational_circle_never_moves(tmp_path, monkeypatch, sides):
     runtime, _, _, events, _ = avoidance_runtime(tmp_path, monkeypatch, [(0, .8)], [sides])
     result = run(runtime)
@@ -112,14 +115,14 @@ def test_off_center_after_detour_uses_existing_alignment(tmp_path, monkeypatch):
     result = run(runtime)
     assert result["state"] == "ARRIVED"
     assert [row["state"] for row in result["history"]] == ["AVOIDING", "ALIGNING", "ADVANCING"]
-    assert motions(events)[:2] == [("turn", "LEFT", .25, .50), ("turn", "RIGHT", .25, .50)]
+    assert motions(events)[:2] == [("strafe", .08, 1.), ("turn", "RIGHT", .25, .50)]
     assert result["local_avoidance_actions"] == 1
 
 
 def test_tracker_loss_after_detour_uses_real_semantic_recovery(tmp_path, monkeypatch):
-    runtime, behavior, _, events, _ = recovery_runtime(tmp_path, monkeypatch,
-        [(0, .60), (0, .59), (0, .58), (0, .5)])
-    obstacle_geometry(runtime, behavior, events, [(1.2, .48), None])
+    bundle, _, _ = strafe_runtime(tmp_path,monkeypatch,
+        [(0,.60),(0,.59),(0,.58),(0,.5)], [[(.485,0.),(0,1.2),(0,-.48)],None],factory=recovery_runtime)
+    runtime, behavior, _, events, _ = bundle
     result = run(runtime)
     assert result["state"] == "ARRIVED" and result["reacquisition_attempts"] == 1
     assert result["reacquisition_history"][0]["succeeded"]
@@ -127,7 +130,7 @@ def test_tracker_loss_after_detour_uses_real_semantic_recovery(tmp_path, monkeyp
     assert result["local_avoidance_actions"] == 1
     assert behavior.semantic_calls == 2
     assert len(behavior.created_trackers) == 2
-    assert events.index("reacquire") > events.index(("turn", "LEFT", .25, .50))
+    assert events.index("reacquire") > events.index(("strafe", .08, 1.))
 
 
 @pytest.mark.parametrize("fault", ["stale", "invalid", "session", "coverage"])
@@ -167,14 +170,18 @@ def test_stop_preempts_detour_and_no_followup_motion(tmp_path, monkeypatch, phas
         [(0, .8), (0, .7), (0, .5)], [(1.2, .48), None])
     stop = lambda: runtime.submit_intent({"intent": "STOP", "speech": "Stop."})
     if phase == "selection":
-        original = select_marvin_detour
+        original = plan_phase_action
         def stop_select(*args, **kwargs):
             result = original(*args, **kwargs)
             stop()
             return result
-        monkeypatch.setattr("runtime.select_marvin_detour", stop_select)
+        monkeypatch.setattr("runtime.plan_phase_action", stop_select)
     elif phase == "jit":
-        behavior.after_guard_check = stop
+        guarded = behavior.execute_guarded_marvin_lateral_step
+        def stop_jit(**kwargs):
+            stop()
+            return guarded(**kwargs)
+        behavior.execute_guarded_marvin_lateral_step = stop_jit
     elif phase == "motion":
         robot.on_motion = stop
     else:
@@ -200,29 +207,29 @@ def test_six_detours_exhaust_mission_budget(tmp_path, monkeypatch):
 
 def test_ranking_noise_does_not_produce_left_right_ping_pong(tmp_path, monkeypatch):
     runtime, _, _, events, _ = avoidance_runtime(tmp_path, monkeypatch,
-        [(0, .60)] * 4 + [(0, .5)], [(1.3, .8), (.8, 1.3), (1.3, .8), (.8, 1.3)])
+        [(0, .60)] * 4 + [(0, .5)]*2, [(1.3, .8), (.8, 1.3), (1.3, .8), (.8, 1.3), None])
     result = run(runtime)
     assert result["state"] == "ARRIVED"
-    assert [motion[1] for motion in motions(events)] == ["LEFT"] * 4
+    assert [motion[1] for motion in motions(events)] == [.08] * 4
     assert all(row["last_detour_improved_direct_path"] is False for row in result["local_avoidance_history"][1:])
     assert result["local_avoidance_history"][1]["previous_clearances"] is not None
 
 
 def test_no_improvement_cannot_reverse_when_previous_side_becomes_blocked(tmp_path, monkeypatch):
     runtime, _, _, events, _ = avoidance_runtime(tmp_path, monkeypatch,
-        [(0, .8), (0, .8)], [(1.3, .8), (.48, .8)])
+        [(0, .8), (0, .8)], [(1.3, .8), (.46, .8)])
     result = run(runtime)
     assert result["state"] == "BLOCKED"
-    assert result["reason"] == "find_marvin_local_avoidance_oscillation_blocked"
+    assert result["reason"] == "find_marvin_blocked_wait_exhausted"
     assert len(motions(events)) == 1
 
 
 def test_reversal_requires_new_geometry_evidence(tmp_path, monkeypatch):
     runtime, _, _, events, _ = avoidance_runtime(tmp_path, monkeypatch,
-        [(0, .60), (0, .60), (0, .5)], [(1.3, .8), (.48, 1.3)])
+        [(0, .60), (0, .60), (0, .5)], [(1.3, .8), (.46, 1.3)])
     result = run(runtime)
-    assert result["state"] == "ARRIVED"
-    assert [motion[1] for motion in motions(events)] == ["LEFT", "RIGHT"]
+    assert result["state"] == "BLOCKED"
+    assert motions(events)==[("strafe",.08,1.)]  # Commitment does not flip to an unrelated hemisphere.
 
 
 def test_jit_scene_change_cannot_use_advisory_selection_to_authorize_motion(tmp_path, monkeypatch):
@@ -233,13 +240,14 @@ def test_jit_scene_change_cannot_use_advisory_selection_to_authorize_motion(tmp_
         return original(*args, **kwargs)
     runtime._dispatch_marvin_observation_action = dispatch
     result = run(runtime)
-    assert result["state"] == "BLOCKED" and result["reason"] == "marvin_local_detour_jit_veto"
+    assert result["state"] == "BLOCKED"
+    assert result["history"][0]["result"]["reason"] == "marvin_local_detour_jit_veto"
     assert motions(events) == []
 
 
 def test_avoidance_diagnostics_exposed_without_becoming_motion_authority(tmp_path, monkeypatch):
     runtime, _, robot, events, _ = avoidance_runtime(tmp_path, monkeypatch,
-        [(0, .60), (0, .5)], [(1.2, .48)])
+        [(0, .60), (0, .5)]*2, [(1.2, .48), None])
     seen = []
     def capture():
         seen.append(runtime.get_status_summary()["tracking"])
@@ -253,17 +261,23 @@ def test_avoidance_diagnostics_exposed_without_becoming_motion_authority(tmp_pat
     assert runtime.MARVIN_MOTION_OBSERVATION_MAX_AGE_SECONDS == 1.0
 
 
-def test_interrupted_dispatched_turn_counts_once_and_terminates(tmp_path, monkeypatch):
+def test_uncertain_dispatched_strafe_counts_once_and_terminates(tmp_path, monkeypatch):
     runtime, behavior, _, events, _ = avoidance_runtime(tmp_path, monkeypatch,
-        [(0, .8)], [(1.2, .48)])
-    original = behavior._execute_target_directed_turn
-    def interrupted(*args, **kwargs):
-        result = original(*args, **kwargs)
-        return dict(result, ok=False, permitted=False, reason="stale")
-    behavior._execute_target_directed_turn = interrupted
-    result = run(runtime)
-    assert result["state"] == "BLOCKED"
-    assert len(motions(events)) == result["local_avoidance_actions"] == 1
-    assert result["local_avoidance_history"][0]["physical_dispatch_confirmed"]
-    assert not result["local_avoidance_history"][0]["motion_executed"]
-    assert events[-1] == "stop"
+        [(0,.8)], [(1.2,.48)])
+    original = behavior.execute_guarded_marvin_lateral_step
+    def uncertain(**kwargs):
+        result = original(**kwargs)
+        value=dict(result,ok=False,motion_executed=False)
+        # Native client invalidation can preserve a confirmed bounded receipt
+        # while marking the enclosing dispatch uncertain. It still uses one slot.
+        receipt=dict(value['lateral_result'])
+        value['lateral_result'].update(delivery_uncertain=True,
+            transport_attempted=True, transport_result=receipt)
+        return value
+    behavior.execute_guarded_marvin_lateral_step=uncertain
+    result=run(runtime)
+    assert result['state']=='BLOCKED'
+    assert len(motions(events))==result['local_avoidance_actions']==1
+    assert result['local_avoidance_history'][0]['physical_dispatch_confirmed']
+    assert not result['local_avoidance_history'][0]['motion_executed']
+    assert events[-1]=='stop'

@@ -153,14 +153,13 @@ def test_jit_reduced_safe_duration_vetoes_original_longer_command(tmp_path, monk
     assert result['history'][0]['result']['source_stamp_consumed']
 
 
-def test_ineffective_longer_strafe_still_cannot_repeat(tmp_path, monkeypatch):
-    bundle, _, _ = strafe_runtime(tmp_path, monkeypatch, [(0,.6)]*3, [LEFT_OPEN])
+def test_safe_longer_strafe_remains_clear_side_bounded_by_six(tmp_path, monkeypatch):
+    bundle, _, _ = strafe_runtime(tmp_path, monkeypatch, [(0,.6)]*8, [LEFT_OPEN])
     result = run(bundle[0])
-    assert motions(bundle[3]) == [('strafe', .08, 1.)]
-    assert result['reason'] == 'find_marvin_blocked_wait_exhausted'
-    assert result['blocked_wait_reason'] == 'find_marvin_local_avoidance_no_progress'
+    assert motions(bundle[3]) == [('strafe', .08, 1.)]*6
+    assert result['reason'] == 'find_marvin_local_avoidance_exhausted'
     assert not result['local_avoidance_history'][-1]['selection']['meaningful_progress']
-    assert 'STRAFE_LEFT' in result['local_avoidance_history'][-1]['selection']['ineffective_action_types']
+    assert 'ineffective_action_types' not in result['local_avoidance_history'][-1]['selection']
 
 
 def test_progress_threshold_is_not_lowered_for_longer_strafe():

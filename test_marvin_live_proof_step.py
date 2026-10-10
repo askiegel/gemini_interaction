@@ -1,3 +1,4 @@
+from marvin_obstacle_phases import plan_phase_action
 """Offline proof boundary: production loop/safety with mocked sensors/transport."""
 import json
 import copy
@@ -72,8 +73,8 @@ def test_obstructed_route_one_strafe(tmp_path, monkeypatch, scene, expected):
 def test_obstructed_route_one_existing_guarded_turn(tmp_path,monkeypatch):
     r,_,_,events,_=avoidance_runtime(tmp_path,monkeypatch,[(0,.8),(0,.8),(0,.8)],[(1.2,.48),None])
     result=proof(r)
-    assert_complete(r,result,events,("turn","LEFT",.25,.5))
-    assert result["controller_result"]["history"][0]["result"]["action"] == "single_marvin_local_detour_turn"
+    assert_complete(r,result,events,("strafe",.08,1.))
+    assert result["controller_result"]["history"][0]["result"]["action"] == "single_marvin_local_strafe"
 
 
 def established_bypass(tmp_path,monkeypatch):
@@ -215,9 +216,8 @@ def test_retained_a6c4d675_established_side_through_proof_loop(tmp_path,monkeypa
     historical=copy.deepcopy(row["previous_selection"])
     def selector(scan,association,**kw):
         assert scan["producer_session"]==r.lidar_worker.session
-        return select_marvin_escape_action(scan,association,
-            **dict(kw,previous_selection=historical))
-    monkeypatch.setattr("runtime.select_marvin_escape_action",selector)
+        return plan_phase_action(scan,association,**dict(kw,committed_side=historical['direction'],entering_detour=False))
+    monkeypatch.setattr("runtime.plan_phase_action",selector)
     def association_state():
         state=MarvinTargetRangeAssociation()
         state.anchor={"measured_distance_m":row["association"]["verified_marvin_distance_m"],

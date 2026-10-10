@@ -292,15 +292,13 @@ def test_progress_and_oscillation_gates_still_apply_after_new_semantics(tmp_path
     bundle,_,_=strafe_runtime(tmp_path,monkeypatch,[(0,.8)]*6,scenes,factory=proof_runtime)
     r,b,_,events,_=bundle;begin(bundle);assert arm(r)["ok"];b.visual_shift=110
     result=step(r);selection=result["controller_result"]["local_avoidance_history"][-1]["selection"]
-    if progress:
-        complete(bundle,result,1)
-        assert selection["direction"]=="LEFT"
-        assert selection["options"]["STRAFE_RIGHT"]["undoes_previous_progress"]
-    else:
-        assert result["controller_result"]["state"]=="BLOCKED"
-        assert "STRAFE_LEFT" in selection["ineffective_action_types"]
-        assert selection["action_type"] is None and len(motions(events))==1
-        assert result["proof_state"]=="FAILED_LOCKED"
+    complete(bundle,result,1)
+    assert selection['direction']=='LEFT' and selection['phase']=='CLEAR_SIDE'
+    context=r._marvin_live_proof_continuation.detour_context
+    assert context.committed_side == (None if progress else 'LEFT')
+    assert context.phase.value == ('REJOIN' if progress else 'CLEAR_SIDE')
+    assert len(motions(events))==2
+    assert 'ineffective_action_types' not in selection
 
 
 def test_frozen_first_bypass_outcome_survives_visual_reset_and_alignment(tmp_path, monkeypatch):
@@ -324,10 +322,10 @@ def test_frozen_first_bypass_outcome_survives_visual_reset_and_alignment(tmp_pat
     continuation=result["controller_result"]["history"][0]["result"]
     assert continuation["action_type"]=="BYPASS_FORWARD"
     assert continuation["local_detour"]["actual_route_progress"]==frozen
-    assert 'BYPASS_FORWARD' not in continuation["local_detour"]["ineffective_action_types"]
+    assert 'ineffective_action_types' not in continuation['local_detour']
     assert r._marvin_live_proof_continuation.avoidance["local_avoidance_actions"]==3
-    assert continuation["local_detour"]["bypass_continuation"]
-    assert continuation["local_detour"]["bypass_episode_step"]==2
+    assert continuation['local_detour']['phase']=='PASS_OBSTACLE'
+    assert r._marvin_live_proof_continuation.detour_context.phase_action_count==2
     assert not continuation["local_detour"]["actual_route_progress"]["meaningful_progress"]
 
 
