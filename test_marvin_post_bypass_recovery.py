@@ -249,13 +249,14 @@ def test_no_remaining_avoidance_budget_can_enable_recovery(limit):
     f,state,old=live_geometry();assert select(state,f['association'],old,remaining_avoidance_actions=limit)['action_type'] is None
 
 
-def test_six_action_runtime_budget_remains_authoritative(tmp_path,monkeypatch):
+def test_phase_watchdog_replaces_runtime_six_action_termination(tmp_path,monkeypatch):
     scenes=[OPEN_LEFT,OPEN_LEFT]+[[(.65-.011*i,-.25),(0.,1.2),(0.,-.65)] for i in range(1,8)]
     bundle,_,_=strafe_runtime(tmp_path,monkeypatch,[(0,1.1)]*20,scenes)
     result=run(bundle[0])
-    assert result['reason']=='find_marvin_local_avoidance_exhausted'
-    assert result['local_avoidance_actions']==MAX_LOCAL_AVOIDANCE_ACTIONS==6
-    assert len(motions(bundle[3]))==6
+    assert result['reason']=='find_marvin_pass_stagnation_exhausted'
+    assert MAX_LOCAL_AVOIDANCE_ACTIONS==6
+    assert result['local_avoidance_actions']==13
+    assert len(motions(bundle[3]))==13
 
 
 def test_proof_history_retains_markers_and_frozen_progress_but_no_motion_permission():

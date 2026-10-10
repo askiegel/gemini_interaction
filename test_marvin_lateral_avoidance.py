@@ -130,9 +130,9 @@ def test_two_strafes_require_new_evidence_and_observed_progress(tmp_path,monkeyp
 def test_no_progress_cannot_repeat_strafe_indefinitely(tmp_path,monkeypatch):
     bundle,_,_ = strafe_runtime(tmp_path,monkeypatch,[(0,.60)]*9,[LEFT_OPEN])
     result=run(bundle[0]);actions=[e for e in motions(bundle[3]) if e[0]=='strafe']
-    assert len(actions)==6
-    assert result['reason']=='find_marvin_local_avoidance_exhausted'
-    assert result['state']=='BLOCKED' and result['local_avoidance_actions']==6
+    assert len(actions)==4
+    assert result['reason']=='find_marvin_clear_side_stagnation_exhausted'
+    assert result['state']=='BLOCKED' and result['local_avoidance_actions']==4
 
 
 @pytest.mark.parametrize('point',[(0,.44),(.31,.34),(-.31,.34),(.1,.478)])
@@ -157,16 +157,16 @@ def test_strafe_unsafe_turn_safe_without_real_route_gain_fails_closed(tmp_path,m
     assert motions(bundle[3])==[]
 
 
-def test_six_action_budget_bounds_repeated_strafes(tmp_path,monkeypatch):
+def test_phase_stagnation_bounds_repeated_strafes(tmp_path,monkeypatch):
     bundle,_,_=strafe_runtime(tmp_path,monkeypatch,[(0,.60)]*8,[LEFT_OPEN])
-    # Force improving, individually safe repeated plans to reach the existing budget.
+    # Individually safe proposals cannot turn stagnant measured geometry into progress.
     original=select_marvin_escape_action
     def progressing(*a,**k):
         k['previous_selection']=None
         return original(*a,**k)
     monkeypatch.setattr('runtime.select_marvin_escape_action',progressing)
-    result=run(bundle[0]);assert result['reason']=='find_marvin_local_avoidance_exhausted'
-    assert result['local_avoidance_actions']==len(motions(bundle[3]))==6
+    result=run(bundle[0]);assert result['reason']=='find_marvin_clear_side_stagnation_exhausted'
+    assert result['local_avoidance_actions']==len(motions(bundle[3]))==4
 
 
 def test_stale_during_strafe_stops_recovers_new_stamp_and_arrives(tmp_path,monkeypatch):

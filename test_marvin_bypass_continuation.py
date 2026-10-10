@@ -299,12 +299,12 @@ def test_production_continuation_then_route_clear_resumes_ordinary_forward(tmp_p
     assert_sensor_contracts(result,bundle[0])
 
 
-def test_production_neutral_pass_remains_safe_until_global_cap(tmp_path,monkeypatch):
+def test_production_neutral_pass_remains_safe_until_phase_stagnation(tmp_path,monkeypatch):
     bundle,_,_=episode_bundle(tmp_path,monkeypatch)
     result=run(bundle[0])
-    assert result['reason']=='find_marvin_local_avoidance_exhausted'
-    assert result['local_bypass_actions']==5 and result['local_avoidance_actions']==6
-    assert motions(bundle[3])==[('strafe',.08,1.)]+[('forward',.1,.5)]*5
+    assert result['reason']=='find_marvin_pass_stagnation_exhausted'
+    assert result['local_bypass_actions']==12 and result['local_avoidance_actions']==13
+    assert motions(bundle[3])==[('strafe',.08,1.)]+[('forward',.1,.5)]*12
     assert result['blocked_wait_recheck_count']==0
     assert all(r['selection']['phase']=='PASS_OBSTACLE' for r in result['local_avoidance_history'][1:])
     assert_sensor_contracts(result,bundle[0])
@@ -318,12 +318,12 @@ def test_production_unsafe_corridor_dispatches_no_second_bypass(tmp_path,monkeyp
     assert result['state']=='BLOCKED' and result['stop_result']['ok']
 
 
-def test_production_three_strafes_plus_three_bypasses_never_dispatches_seventh(tmp_path,monkeypatch):
+def test_production_three_strafes_then_pass_is_bounded_by_phase_stagnation(tmp_path,monkeypatch):
     bundle,_,_=episode_bundle(tmp_path,monkeypatch,three_strafes=True)
     result=run(bundle[0])
-    assert result['reason']=='find_marvin_local_avoidance_exhausted'
-    assert result['local_avoidance_actions']==6 and result['local_bypass_actions']==3
-    assert motions(bundle[3])==[('strafe',.08,1.)]*3+[('forward',.1,.5)]*3
+    assert result['reason']=='find_marvin_pass_stagnation_exhausted'
+    assert result['local_avoidance_actions']==15 and result['local_bypass_actions']==12
+    assert motions(bundle[3])==[('strafe',.08,1.)]*3+[('forward',.1,.5)]*12
     assert_sensor_contracts(result,bundle[0])
 
 

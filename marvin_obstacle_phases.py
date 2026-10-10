@@ -3,8 +3,9 @@
 No sensor getter, transport, shadow, replay or calibration dependency belongs
 here. Previous action selection is diagnostic history, never phase ownership.
 """
-from dataclasses import asdict, dataclass, replace
+from dataclasses import asdict, dataclass, field, replace
 from enum import Enum
+from marvin_detour_watchdog import DetourWatchdog
 
 from marvin_local_obstacle_avoidance import (
     _select_marvin_escape_action, rank_marvin_escape_options,
@@ -46,16 +47,18 @@ class DetourContext:
     phase_action_count: int = 0
     last_completion_evidence: Frontier | None = None
     retired_source_stamp_ns: int = 0
+    watchdog: DetourWatchdog = field(default_factory=DetourWatchdog)
 
     def __post_init__(self):
-        if (not isinstance(self.phase, Phase) or self.committed_side not in {None, 'LEFT', 'RIGHT'}
+        if (not isinstance(self.watchdog, DetourWatchdog)
+                or not isinstance(self.phase, Phase) or self.committed_side not in {None, 'LEFT', 'RIGHT'}
                 or type(self.phase_action_count) is not int or self.phase_action_count < 0
                 or type(self.retired_source_stamp_ns) is not int or self.retired_source_stamp_ns < 0
                 or any(e is not None and not isinstance(e, Frontier)
                     for e in (self.phase_entry_evidence, self.last_completion_evidence))):
             raise ValueError('Invalid mission detour context')
 
-    def enter(self, phase, evidence, *, side=None):
+    def enter(self, phase, evidence, *, side=None, now=None):
         previous = self.phase_entry_evidence or self.last_completion_evidence
         if previous is not None and previous.producer_session != evidence.producer_session:
             raise ValueError('Detour producer session changed')
@@ -67,6 +70,7 @@ class DetourContext:
         if phase in {Phase.REJOIN, Phase.DIRECT, Phase.ARRIVED}:
             committed = None
         return replace(self, phase=phase, committed_side=committed,
+            watchdog=self.watchdog.enter(phase.value, now) if now is not None else self.watchdog,
             phase_entry_evidence=evidence if phase != self.phase else self.phase_entry_evidence,
             phase_action_count=0 if phase != self.phase else self.phase_action_count)
 
@@ -81,7 +85,7 @@ class DetourContext:
             phase_action_count=self.phase_action_count + int(traversal))
 
     def record(self):
-        return asdict(self)
+        return dict(asdict(self), watchdog=self.watchdog.record())
 
 
 def phase_from_admission(*, route_obstructed, pass_safe, repair_safe):
@@ -103,7 +107,7 @@ def plan_phase_action(state, association, *, expected_session, allow_strafe,
                       committed_side=None,
                       entering_detour=False,
                       strafe_duration_limit=LOCAL_AVOIDANCE_STRAFE_MAX_SECONDS,
-                      remaining_avoidance_actions=MAX_LOCAL_AVOIDANCE_ACTIONS):
+                      remaining_avoidance_actions=None):
     """Recompute WHAT from one scan; never authorize transport or reuse a grant.
 
     Native primitive geometry, ranking and bypass admission are retained. Only
@@ -120,7 +124,10 @@ def plan_phase_action(state, association, *, expected_session, allow_strafe,
         return result
     if not route['route_to_marvin_obstructed']:
         return dict(result, phase=Phase.REJOIN.value, reason='direct_path_restored')
-    if type(remaining_avoidance_actions) is not int or remaining_avoidance_actions <= 0:
+    # Explicit legacy/proof budgets remain compatible. Normal phase navigation
+    # has a mission watchdog, never a global six-action planning/JIT allowance.
+    if remaining_avoidance_actions is not None and (
+            type(remaining_avoidance_actions) is not int or remaining_avoidance_actions <= 0):
         return dict(result, reason='find_marvin_local_avoidance_exhausted')
     if committed_side not in {None, 'LEFT', 'RIGHT'}:
         return dict(result, reason='find_marvin_local_avoidance_history_invalid')

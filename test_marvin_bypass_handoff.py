@@ -357,12 +357,12 @@ def test_alignment_cannot_turn_failed_strafe_outcome_into_handoff_credit(tmp_pat
     assert not selected['actual_route_progress']['meaningful_progress']
 
 
-def test_neutral_bypass_retains_phase_without_handoff_credit_until_six(tmp_path, monkeypatch):
+def test_neutral_bypass_retains_phase_without_handoff_credit_until_stagnation(tmp_path, monkeypatch):
     bundle, _, _ = priority_bundle(tmp_path, monkeypatch, clear=False)
     result = run(bundle[0])
-    assert result['reason']=='find_marvin_local_avoidance_exhausted'
-    assert result['local_avoidance_actions']==6 and result['local_bypass_actions']==5
-    assert motions(bundle[3])==[('strafe',.08,1.)]+[('forward',.1,.5)]*5
+    assert result['reason']=='find_marvin_pass_stagnation_exhausted'
+    assert result['local_avoidance_actions']==13 and result['local_bypass_actions']==12
+    assert motions(bundle[3])==[('strafe',.08,1.)]+[('forward',.1,.5)]*12
     assert result['blocked_wait_recheck_count']==0
     assert MAX_LOCAL_AVOIDANCE_ACTIONS==6
     assert_sensor_contracts(result,bundle[0])

@@ -189,25 +189,26 @@ def test_guarded_bypass_forward_while_marvin_route_blocked_then_resume_pursuit(t
     assert robot.status()['motion'] == {'linear_x': 0., 'linear_y': 0., 'angular_z': 0., 'streaming': False}
 
 
-def test_neutral_bypass_retains_pass_until_six_action_guard(tmp_path, monkeypatch):
+def test_neutral_bypass_retains_pass_until_phase_stagnation(tmp_path, monkeypatch):
     bundle, _, _ = strafe_runtime(tmp_path, monkeypatch, [(0.,1.1)]*16, [OPEN_LEFT])
     result = run(bundle[0])
-    assert motions(bundle[3]) == [('strafe', .08, 1.)] + [('forward', .1, .5)]*5
-    assert result['state'] == 'BLOCKED' and result['reason'] == 'find_marvin_local_avoidance_exhausted'
+    assert motions(bundle[3]) == [('strafe', .08, 1.)] + [('forward', .1, .5)]*12
+    assert result['state'] == 'BLOCKED' and result['reason'] == 'find_marvin_pass_stagnation_exhausted'
     assert result['blocked_wait_recheck_count'] == 0
-    assert result['local_avoidance_actions'] == 6
-    assert result['local_bypass_actions'] == 5
+    assert result['local_avoidance_actions'] == 13
+    assert result['local_bypass_actions'] == 12
     assert result['stop_result']['ok']
 
 
-def test_bypass_actions_share_unchanged_six_action_budget(tmp_path, monkeypatch):
+def test_bypass_actions_retain_legacy_counter_and_new_watchdog(tmp_path, monkeypatch):
     scenes = [OPEN_LEFT, OPEN_LEFT] + [[(.65-.011*i, -.25), (0.,1.2), (0.,-.65)] for i in range(1,8)]
-    bundle, _, _ = strafe_runtime(tmp_path, monkeypatch, [(0.,1.1)]*12, scenes)
+    bundle, _, _ = strafe_runtime(tmp_path, monkeypatch, [(0.,1.1)]*30, scenes)
     result = run(bundle[0])
-    assert result['reason'] == 'find_marvin_local_avoidance_exhausted'
-    assert MAX_LOCAL_AVOIDANCE_ACTIONS == result['local_avoidance_actions'] == 6
-    assert result['local_bypass_actions'] == 5
-    assert len(motions(bundle[3])) == 6
+    assert result['reason'] == 'find_marvin_pass_stagnation_exhausted'
+    assert MAX_LOCAL_AVOIDANCE_ACTIONS == 6
+    assert result['local_avoidance_actions'] == 13
+    assert result['local_bypass_actions'] == 12
+    assert len(motions(bundle[3])) == 13
 
 
 @pytest.mark.parametrize('phase', ['dispatch', 'post'])

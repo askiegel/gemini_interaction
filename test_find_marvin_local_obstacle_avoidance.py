@@ -197,11 +197,11 @@ def test_stop_preempts_detour_and_no_followup_motion(tmp_path, monkeypatch, phas
     assert events[-1] == "stop"
 
 
-def test_six_detours_exhaust_mission_budget(tmp_path, monkeypatch):
+def test_clear_side_stagnation_bounds_detours(tmp_path, monkeypatch):
     runtime, _, _, events, _ = avoidance_runtime(tmp_path, monkeypatch, [(0, .8)] * 7, [(1.2, .48)])
     result = run(runtime)
-    assert result["state"] == "BLOCKED" and result["reason"] == "find_marvin_local_avoidance_exhausted"
-    assert result["local_avoidance_actions"] == 6 and len(motions(events)) == 6
+    assert result["state"] == "BLOCKED" and result["reason"] == "find_marvin_clear_side_stagnation_exhausted"
+    assert result["local_avoidance_actions"] == 4 and len(motions(events)) == 4
     assert all(row["state"] == "AVOIDING" for row in result["history"])
 
 
