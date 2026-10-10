@@ -36,4 +36,7 @@ def status_summary(value):
         result["tracking"]["bbox"] = scalar_fields(tracking["bbox"])
     for key in ("lidar_perception", "forward_interlock"):
         result[key] = scalar_fields(value.get(key))
+    if isinstance(value.get("navigation_shadow"), dict):
+        # Small diagnostics only; no certificate/action authority is exposed.
+        result["navigation_shadow"] = scalar_fields(value["navigation_shadow"])
     return result
