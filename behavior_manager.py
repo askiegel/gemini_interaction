@@ -1456,6 +1456,17 @@ class BehaviorManager:
 
     def _emit_marvin_command_diagnostic(self, phase, **metadata):
         """Best-effort cached retention; its return value has no authority."""
+        if getattr(self, "_marvin_shadow_capture_enabled", False) is True:
+            # Two already-produced references, no copying, I/O or evaluation.
+            # A new dispatch retires the preceding acknowledgement frontier.
+            try:
+                if phase == "start":
+                    self._marvin_shadow_command_evidence = (metadata, None)
+                elif phase == "complete":
+                    start, _ = getattr(self, "_marvin_shadow_command_evidence", (None, None))
+                    self._marvin_shadow_command_evidence = (start, metadata)
+            except Exception:
+                pass
         callback = getattr(self, "marvin_command_diagnostic_callback", None)
         if callable(callback):
             try:

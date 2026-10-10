@@ -374,7 +374,9 @@ class CognitiveRuntime:
         if getattr(self, "_marvin_navigation_shadow", None) is None:
             return
         try:
-            from marvin_navigation_instrumentation import passive_capture
+            from marvin_navigation_instrumentation import passive_capture, completion_snapshot
+            if kind == "ACTION_STOPPED":
+                payload["result"] = completion_snapshot(payload["result"])
             passive_capture(self._marvin_navigation_shadow, kind,
                 mission_id=payload.pop("mission_id", self._marvin_navigation_shadow_mission_id),
                 event_time=time.monotonic(), provenance="CURRENT_RUNTIME_PRODUCER_BOUNDARY",
@@ -2003,7 +2005,8 @@ class CognitiveRuntime:
                 self._emit_marvin_navigation_shadow("TERMINAL", state=state, reason=reason,
                     avoidance_count=avoidance["local_avoidance_actions"], blocked_wait=blocked_wait,
                     stop_result=stop, bridge=zero, stopped_monotonic_seconds=stop_completed_monotonic_seconds,
-                    last_action=history[-1] if history else None)
+                    last_action_source_frame_stamp_ns=previous_stamp,
+                    bypass_count=avoidance["local_bypass_actions"])
             result = {
                 "ok": safe, "completed": True, "behavior": "FIND_OBJECT",
                 "target": "marvin", "mission_id": mission.mission_id,
@@ -2839,6 +2842,7 @@ class CognitiveRuntime:
                     source_frame_stamp_ns=stamp,
                     source_stamp_consumed=stamp in self._marvin_alignment_consumed_source_frame_stamps,
                     bridge=bridge, stopped_monotonic_seconds=action_finished_monotonic_seconds,
+                    command_evidence=getattr(behavior, "_marvin_shadow_command_evidence", (None, None)),
                     jit_pair=(raw, None) if raw else None,
                     jit_sequence=evidence[1] if evidence else None,
                     avoidance_count=avoidance["local_avoidance_actions"])

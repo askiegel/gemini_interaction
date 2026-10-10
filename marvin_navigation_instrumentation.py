@@ -31,6 +31,7 @@ class EventType(str, Enum):
     CERTIFICATE_BUILD_FAILED = 'CERTIFICATE_BUILD_FAILED'
     SHADOW_DECISION = 'SHADOW_DECISION'
     SHADOW_COMPARISON = 'SHADOW_COMPARISON'
+    STREAM_INCOMPLETE = 'STREAM_INCOMPLETE'
 
 
 @dataclass(frozen=True, slots=True)
@@ -135,7 +136,7 @@ class DiagnosticEvent:
 
 
 class PassiveBuffer:
-    """Non-waiting try-lock; drop NEWEST on full, contention, or bad payload.
+    """Non-waiting bounded capture with priority eviction/emergency admission.
 
     CPython's native itertools.count provides atomic diagnostic counters under
     the GIL; readout uses its built-in reduce state. Other interpreters need a
@@ -150,58 +151,132 @@ class PassiveBuffer:
         self.omit_keys=omit_keys;self.max_points=max_points;self._evicted=count()
         self.points_xy_only=points_xy_only
         self._high_water=0
+        self._emergency=deque();self._emergency_lock=threading.Lock()
+        self._drop_reasons={name:count() for name in ('lock_contention','payload_rejection','queue_full',
+            'priority_eviction','shutdown_rejection','shutdown_discard','writer_unavailable',
+            'invalid_snapshot','cloud_budget','node_depth_budget','text_budget')}
+        self._recent_drops=deque(maxlen=limits.capacity)
+        self._closed_reason='shutdown_rejection'
         if type(reserve) is not int or not 0<=reserve<limits.capacity:raise ValueError('critical reserve')
 
     def capture(self,kind,*,mission_id,event_time,provenance,payload):
-        if not self._lock.acquire(blocking=False):next(self._indices);next(self._contention);return False
+        # Freeze outside the admission lock. Normal snapshots cannot hold the
+        # queue lock while a completion/terminal producer tries to enqueue.
+        index=None
+        def reject(reason,detail=None):
+            nonlocal index
+            if index is None:index=next(self._indices)
+            next(self._drop_reasons[reason])
+            self._recent_drops.append(dict(event_index=index,event_type=str(getattr(kind,'value',kind))[:64],
+                reason=reason,detail=detail))
+            return False
+        if not self._accepting:
+            next(self._full);return reject(self._closed_reason)
         try:
-            index=next(self._indices)
-            if not self._accepting:next(self._full);return False
             if (type(mission_id) is not str or len(mission_id)>128
                     or type(provenance) is not str or len(provenance)>256
-                    or type(kind) not in (str,EventType)
-                    or type(kind) is str and len(kind)>64):
-                next(self._failed);return False
+                    or type(kind) not in (str,EventType) or type(kind) is str and len(kind)>64):
+                raise ValueError('invalid envelope')
+            event=DiagnosticEvent(1,mission_id,EventType(kind),1,event_time,provenance,
+                freeze(payload,self.limits,omit_keys=self.omit_keys,max_points=self.max_points,points_xy_only=self.points_xy_only))
+        except Exception as exc:
+            next(self._failed)
+            detail=str(exc)[:128]
+            reason=('cloud_budget' if 'cloud' in detail else 'node_depth_budget' if 'node/depth' in detail
+                else 'text_budget' if 'text budget' in detail else 'invalid_snapshot')
+            next(self._drop_reasons['payload_rejection'])
+            return reject(reason,detail)
+        if not self._lock.acquire(blocking=False):
+            # Separate bounded emergency lane for critical events. No wait,
+            # retries, serialization, phase evaluation or disk I/O.
+            if self.priority and event_priority(kind)>=2 and self.reserve:
+                accepted,reason=self._admit_emergency(event)
+                if accepted:return True
+                if reason!='lock_contention':next(self._full);return reject(reason)
+            next(self._contention);return reject('lock_contention')
+        try:
+            if not self._accepting:next(self._full);return reject(self._closed_reason)
             level=event_priority(kind) if self.priority else 1
-            ceiling=self.limits.capacity if level==2 else self.limits.capacity-self.reserve
+            ceiling=self.limits.capacity-self.reserve
             victim=None
             if len(self._events)>=ceiling:
                 if self.priority and level>0:
                     victim=next((e for rank in range(level) for e in self._events
                         if event_priority(e.event_type)==rank),None)
-                if victim is None:next(self._full);return False
-            try:
-                event=DiagnosticEvent(1,mission_id,EventType(kind),index,event_time,provenance,
-                    freeze(payload,self.limits,omit_keys=self.omit_keys,max_points=self.max_points,points_xy_only=self.points_xy_only))
-                if victim is not None:self._events.remove(victim);next(self._evicted)
-                self._events.append(event);self._high_water=max(self._high_water,len(self._events));return True
-            except Exception:next(self._failed);return False
+                if victim is None:
+                    if level>=2 and self.reserve:
+                        accepted,reason=self._admit_emergency(event)
+                        if accepted:return True
+                        if reason=='lock_contention':next(self._contention);return reject(reason)
+                    next(self._full);return reject('queue_full')
+            if victim is not None:
+                self._events.remove(victim);next(self._evicted);next(self._drop_reasons['priority_eviction'])
+                self._recent_drops.append(dict(event_index=victim.event_index,event_type=victim.event_type.value,
+                    reason='priority_eviction',detail='lower priority displaced'))
+            # Allocate admission indexes inside the short queue lock. A slow
+            # snapshot on another producer cannot later insert a smaller index
+            # after the worker has already written a newer one.
+            event=replace(event,event_index=next(self._indices))
+            self._events.append(event);self._high_water=max(self._high_water,len(self._events)+len(self._emergency));return True
         finally:self._lock.release()
+
+    def _admit_emergency(self,event):
+        if not self._emergency_lock.acquire(blocking=False):return False,'lock_contention'
+        try:
+            if not self._accepting:return False,self._closed_reason
+            if len(self._emergency)>=self.reserve:
+                victim=next((e for e in self._emergency if event_priority(e.event_type)<event_priority(event.event_type)),None)
+                if victim is None:return False,'queue_full'
+                self._emergency.remove(victim);next(self._evicted);next(self._drop_reasons['priority_eviction'])
+                self._recent_drops.append(dict(event_index=victim.event_index,event_type=victim.event_type.value,
+                    reason='priority_eviction',detail='higher priority emergency record'))
+            event=replace(event,event_index=next(self._indices))
+            self._emergency.append(event)
+            self._high_water=max(self._high_water,len(self._events)+len(self._emergency));return True,None
+        finally:self._emergency_lock.release()
 
     def drain(self,max_items=None):
         if not self._lock.acquire(blocking=False):return ()
         try:
-            n=len(self._events) if max_items is None else min(max_items,len(self._events))
-            return tuple(self._events.popleft() for _ in range(n))
+            if not self._emergency_lock.acquire(blocking=False):return ()
+            try:
+                merged=sorted((*self._events,*self._emergency),key=lambda e:e.event_index)
+                n=len(merged) if max_items is None else min(max_items,len(merged))
+                selected=tuple(merged[:n]);self._events.clear();self._emergency.clear()
+                remainder=merged[n:]
+                normal=[e for e in remainder if event_priority(e.event_type)<2]
+                critical=[e for e in remainder if event_priority(e.event_type)>=2]
+                space=self.limits.capacity-self.reserve-len(normal)
+                self._events.extend(normal+critical[:space]);self._emergency.extend(critical[space:])
+                return selected
+            finally:self._emergency_lock.release()
         finally:self._lock.release()
 
     def statistics(self):
         # Atomic snapshots of counts; event length is diagnostic only.
         peek=lambda c:c.__reduce__()[1][0]
-        return dict(capacity=self.limits.capacity,queued=len(self._events),
+        return dict(capacity=self.limits.capacity,queued=len(self._events)+len(self._emergency),
             full_drops=peek(self._full),contention_drops=peek(self._contention),construction_failures=peek(self._failed),
-            evicted_events=peek(self._evicted),accepting=self._accepting,high_water=self._high_water)
+            evicted_events=peek(self._evicted),accepting=self._accepting,high_water=self._high_water,
+            drop_reasons={k:peek(v) for k,v in self._drop_reasons.items()},recent_drops=list(self._recent_drops))
 
-    def close(self):
+    def close(self,reason='shutdown_rejection'):
         # No lock or waiting: capture rechecks this under its own try-lock.
         # A capture already in flight may finish; the bounded drain accepts it.
-        self._accepting=False
+        self._closed_reason=reason;self._accepting=False
+
+    def discard(self,reason='shutdown_discard'):
+        for event in self.drain():
+            next(self._full);next(self._drop_reasons[reason])
+            self._recent_drops.append(dict(event_index=event.event_index,event_type=event.event_type.value,reason=reason,detail='bounded worker termination'))
 
 
 def event_priority(kind):
     """Diagnostic retention only; never consulted by navigation or safety."""
+    if str(getattr(kind,'value',kind))=='TERMINAL':return 3
     if str(getattr(kind,'value',kind)) in {'MISSION_BEGIN','JIT_VETO_RECORDED','JIT_VETO_CERTIFIED',
-        'ACTION_STOPPED','ACTION_COMPLETED','BLOCKED_WAIT','TERMINAL','SHADOW_DECISION'}:return 2
+        'ACTION_STOPPED','ACTION_COMPLETED','BLOCKED_WAIT','TERMINAL','SHADOW_DECISION',
+        'STRICT_OBSERVATION_ACCEPTED','GEOMETRY_EVALUATED'}:return 2
     if str(getattr(kind,'value',kind))=='SHADOW_COMPARISON':return 0
     return 1
 
@@ -217,7 +292,8 @@ def passive_capture(buffer,kind,**kwargs):
         if type(buffer) is PassiveBuffer:buffer.capture(kind,**kwargs)
     except Exception:
         # Diagnostic failure cannot enter the controller return path.
-        if type(buffer) is PassiveBuffer:next(buffer._failed)
+        if type(buffer) is PassiveBuffer:
+            next(buffer._failed);next(buffer._drop_reasons['invalid_snapshot']);next(buffer._drop_reasons['payload_rejection'])
 
 
 def serialize_event(event):
@@ -249,14 +325,48 @@ def native_completion_facts(payload):
     if bounded and physical and (r.get('stop_result') or {}).get('ok') is True and bridge_stationary(payload.get('bridge')):
         attempted=confirmed=True;certain=True
         complete=(r.get('full_step_completed') is True or payload['primitive'] in ('TURN_LEFT','TURN_RIGHT') and turn.get('confirmed_forwarded') is True)
+    start,completion=payload.get('command_evidence') or (None,None)
+    if completion:reject_delivery_contradictions(completion)
+    frontier=None
+    native_ack=(completion or {}).get('bridge_acknowledgement') or {}
+    if bounded and start and completion and native_ack and payload.get('jit_pair') and all(ack.get(k)==v for k,v in native_ack.items()):
+        jit_raw=(payload.get('jit_pair') or ({},))[0]
+        frontier=dict(transport_call_started_monotonic_seconds=start.get('start_monotonic_seconds'),
+            dispatch_lower_bound_monotonic_seconds=max(start['start_monotonic_seconds'],jit_raw['received_monotonic_seconds']),
+            transport_acknowledged_monotonic_seconds=completion.get('completion_monotonic_seconds'),
+            automatic_stop_completed_monotonic_seconds=completion.get('completion_monotonic_seconds'),
+            bridge_zero_confirmed_monotonic_seconds=payload.get('stopped_monotonic_seconds'),
+            automatic_stop_issued_monotonic_seconds=None,boundary_provenance='BOUNDED_ACK_AFTER_AUTOMATIC_STOP')
     return dict(action_type=payload['primitive'],source_frame_stamp_ns=payload['source_frame_stamp_ns'],
         observation_source_frame_stamp_ns=payload['source_frame_stamp_ns'],execution_authorized=r.get('execution_authorized'),
         transport_attempted=attempted,transport_confirmed=confirmed,delivery_uncertain=False if certain else r.get('delivery_uncertain'),
         motion_executed=r.get('motion_executed'),full_step_completed=complete,automatic_stop=ack.get('automatic_stop'),
         source_stamp_consumed=payload.get('source_stamp_consumed'),stop_result=r.get('stop_result'),
-        bridge_after_stop=payload.get('bridge'),stopped_monotonic_seconds=payload.get('stopped_monotonic_seconds'),
+        bridge_after_stop=payload.get('bridge'),
+        stopped_monotonic_seconds=frontier['automatic_stop_completed_monotonic_seconds'] if frontier else payload.get('stopped_monotonic_seconds'),
+        chronology=frontier,
         stop_lidar_sequence=payload.get('jit_sequence'),
         meaningful_progress=payload.get('meaningful_progress'),meaningful_progress_reason=payload.get('meaningful_progress_reason'))
+
+
+def completion_snapshot(result):
+    """Bounded field selection, no recursive traversal on the motion thread.
+
+    Preserve contract results and all native uncertainty/STOP facts, omitting
+    duplicated perception/planner trees. Their exact plan/JIT scans are captured
+    separately. Issuers still reject contradictions on the diagnostic worker.
+    """
+    scalar=('ok','execution_authorized','motion_executed','full_step_completed','source_frame_stamp_ns',
+        'delivery_uncertain','delivery_uncertainty','interrupted','reason','error','transport_error','exception')
+    compact={k:result[k] for k in scalar if k in result}
+    compact['stop_result']=result.get('stop_result')
+    for outer,keys in (('lateral_step',('lateral_result','delivery_uncertain','interrupted','error')),
+                       ('approach_result',('forward_result','delivery_uncertain','interrupted','error')),
+                       ('turn_result',('transport_result','mode','ok','automatic_stop','returned_immediately',
+                           'confirmed_forwarded','delivery_uncertain','interrupted','error','stop_events'))):
+        value=result.get(outer)
+        if isinstance(value,dict):compact[outer]={k:value[k] for k in keys if k in value}
+    return compact
 
 
 def alignment_diagnostics(observation):
@@ -272,13 +382,16 @@ def alignment_diagnostics(observation):
 class OfflineShadowConsumer:
     """Drain explicitly OFFLINE. Never installed or invoked by runtime hooks.
 
-    All caches/results bounded. Missing events retire correlation context.
+    All caches/results bounded. Stream gaps do not replace native provenance.
     Inputs are thawed private snapshots; existing issuer/reducer only, no old
     selector rerun. Failures are local diagnostics, never controller exceptions.
     """
     def __init__(self,*,limits,phase_config):
         from marvin_navigation_shadow import Accounting
-        self.limits=limits;self.config=phase_config;self.records=deque(maxlen=limits.capacity)
+        self.limits=limits;self.config=phase_config
+        # One observation can close every bounded pending action. Correlation
+        # capacity is NOT the derived record budget; avoid silent deque loss.
+        self.records=deque(maxlen=max(16,limits.capacity*2+4))
         self.failures=0;self.last_index=0;self.mission=None;self.context=None
         self.accounting=Accounting();self.pending={};self.plans={};self.last_observation=None
         self.last_geometry=None;self.last_bridge=None;self.latest_wait=None
@@ -286,7 +399,10 @@ class OfflineShadowConsumer:
         self.completion_unresolved=False;self.terminal_failure=False
         self.detour_first_seen=None;self.detour_finished=None;self.recorded_veto_count=0
         self.accounting_incomplete=False
+        self.stream_gaps=0;self.correlation_evictions=0
+        self.correlation_eviction_records=deque(maxlen=limits.capacity)
         self.completed_counts={'lateral':0,'pass':0,'alignment':0,'direct':0}
+        self.completed_stamps=deque(maxlen=limits.capacity)
 
     def record(self,event,kind,**data):
         self.records.append(DiagnosticEvent(1,event.mission_id,EventType(kind),event.event_index,event.event_time,
@@ -299,7 +415,10 @@ class OfflineShadowConsumer:
 
     def limited_put(self,table,key,value):
         table[key]=value
-        if len(table)>self.limits.capacity:table.pop(next(iter(table)))
+        if len(table)>self.limits.capacity:
+            stamp=next(iter(table));table.pop(stamp);self.correlation_evictions+=1
+            self.correlation_eviction_records.append(dict(reason='correlation_eviction',source_stamp_ns=stamp,
+                cache='pending_completion' if table is self.pending else 'planning'))
 
     def process(self,event):
         from marvin_navigation_issuers import (IssuerContext,issue_observation,issue_geometry,issue_completion,
@@ -319,16 +438,19 @@ class OfflineShadowConsumer:
                 self.completion_unresolved=False;self.terminal_failure=False
                 self.detour_first_seen=None;self.detour_finished=None;self.recorded_veto_count=0
                 self.accounting_incomplete=False
+                self.completed_stamps.clear()
             if self.last_index and event.event_index!=self.last_index+1:
-                self.pending.clear();self.plans.clear();self.last_geometry=None;self.last_observation=None
                 # Preserve side commitment/retired-frame floor; losing an
                 # event cannot create a new obstacle episode or action credit.
                 self.accounting_incomplete=True
-                self.failure(event,'EvidenceSnapshot','EVENT_GAP: no correlation across a lost producer boundary')
+                self.stream_gaps+=1
+                self.record(event,EventType.STREAM_INCOMPLETE,reason='EVENT_GAP',previous_index=self.last_index,
+                    current_index=event.event_index,certificate_completeness='INDEPENDENT_NATIVE_FACTS_REQUIRED')
             self.last_index=event.event_index
             if event.event_type==EventType.MISSION_BEGIN:return
             if event.event_type==EventType.TERMINAL:
-                self.record(event,EventType.TERMINAL,**p,native_diagnostic_elapsed=self.detour_elapsed(event.event_time));return
+                self.record(event,EventType.TERMINAL,**p,native_diagnostic_elapsed=self.detour_elapsed(event.event_time))
+                self.pending.clear();self.plans.clear();self.completion_unresolved=False;return
             if event.event_type==EventType.STOPPED_LIDAR_RECEIVED:self.latest_wait=p;return
             if event.event_type==EventType.BLOCKED_WAIT:
                 self.latest_wait=p
@@ -348,6 +470,10 @@ class OfflineShadowConsumer:
             session=p.get('producer_session');ctx=IssuerContext(event.mission_id,session,event.event_time,
                 mission_owned=p.get('mission_owned'),producer_running=p.get('producer_running'))
             if event.event_type in (EventType.STRICT_OBSERVATION_ACCEPTED,EventType.OBSERVATION_RECORDED):
+                predecessor=p.get('previous_source_frame_stamp_ns')
+                if predecessor and predecessor not in self.pending and predecessor not in self.completed_stamps:
+                    self.completion_unresolved=True
+                    self.failure(event,'CompletionCertificate','Missing required ACTION_STOPPED for prior dispatched source',('source_frame_stamp_ns',))
                 self.last_observation=issue_observation(p['observation'],ctx,source_mission_id=event.mission_id)
                 if not self.last_observation.ok:self.failure(event,'ObservationCertificate',self.last_observation.failure.reason,(self.last_observation.failure.field,))
                 else:self.record(event,EventType.STRICT_OBSERVATION_ACCEPTED,certificate=asdict(self.last_observation.certificate),unsupported=list(self.last_observation.unsupported))
@@ -355,7 +481,11 @@ class OfflineShadowConsumer:
                 # post-STOP pairing gap, not a scan acquired solely for logging.
                 pair=p.get('geometry_pair')
                 if pair:
-                    self.last_geometry=issue_geometry(pair[0],pair[1],{},ctx,source_mission_id=event.mission_id)
+                    plan=self.plans.get(p.get('previous_source_frame_stamp_ns'))
+                    options=((plan or {}).get('payload',{}).get('selection') or {}).get('options') or {}
+                    probes={side:options['STRAFE_'+side]['requested_duration'] for side in ('LEFT','RIGHT')
+                        if isinstance(options.get('STRAFE_'+side),dict) and options['STRAFE_'+side].get('requested_duration') is not None}
+                    self.last_geometry=issue_geometry(pair[0],pair[1],{},ctx,source_mission_id=event.mission_id,lateral_probe_durations=probes)
                     if not self.last_geometry.ok:
                         self.failure(event,'GeometryCertificate',self.last_geometry.failure.reason,(self.last_geometry.failure.field,))
                     else:self.record(event,EventType.GEOMETRY_EVALUATED,certificate=asdict(self.last_geometry.certificate),unsupported=list(self.last_geometry.unsupported),boundary='post_observation_association')
@@ -366,11 +496,15 @@ class OfflineShadowConsumer:
                         if not plan:self.failure(event,'CompletionCertificate','Missing original planning snapshot');self.pending.pop(stamp);continue
                         jit=completed.get('jit_pair')
                         if not jit:self.failure(event,'CompletionCertificate','Missing original JIT geometry/freshness');self.pending.pop(stamp);continue
-                        jit_key=EvidenceKey(event.mission_id,session,jit[0]['acquisition_sequence'],jit[0]['received_monotonic_seconds'],jit[0]['age_at_receipt_seconds'])
+                        if ((plan['payload'].get('old_outcome') or {}).get('action_type')!=completed.get('primitive')
+                                or jit[0].get('acquisition_sequence')!=completed.get('jit_sequence')):
+                            self.failure(event,'CompletionCertificate','Contradictory action/JIT correlation identifiers');self.pending.pop(stamp);continue
+                        jit_key=EvidenceKey(event.mission_id,jit[0]['producer_session'],jit[0]['acquisition_sequence'],jit[0]['received_monotonic_seconds'],jit[0]['age_at_receipt_seconds'])
                         facts=native_completion_facts(completed)
                         c=issue_completion(facts,plan['geometry'].certificate.key,jit_key,self.last_geometry.certificate,self.last_observation.certificate,ctx,source_mission_id=event.mission_id)
                         if c.ok:
-                            self.completion_unresolved=False
+                            self.completed_stamps.append(stamp)
+                            self.completion_unresolved=len(self.pending)>1
                             self.record(event,EventType.ACTION_COMPLETED,certificate=asdict(c.certificate),native_facts=facts,
                                 provenance_note='Captured native acknowledgement/ledger/STOP; no displacement inferred',alignment_after=alignment_diagnostics(p['observation']),
                                 alignment_before=alignment_diagnostics(plan['payload'].get('observation') or {}),
@@ -388,8 +522,17 @@ class OfflineShadowConsumer:
                                 completion_data=certificates_to_policy(SnapshotCertificates(self.last_observation,self.last_geometry,completion=c),ctx,
                                     watchdog=WatchdogEvidence(prior_phase=self.context.phase,committed_side=self.context.committed_side),
                                     bridge=completed.get('bridge'),delivery_resolved=True,event=Event.ACTION_COMPLETED)
-                                # Record actual completion, not counterfactual phase action credit.
-                                self.accounting=account(self.accounting,completion_data,PhaseResult(self.context,NavigationIntent(IntentKind.STOP_REVERIFY,'completion_accounting_only')))
+                                # Feed the actual completed frontier through the
+                                # existing reducer, before a newer planning scan
+                                # can hide a transient separation crossing.
+                                completion_phase=phase_policy(completion_data,self.config,context=self.context)
+                                self.accounting=account(self.accounting,completion_data,completion_phase)
+                                before_phase=self.context.phase.value;self.context=completion_phase.context
+                                self.record(event,EventType.SHADOW_DECISION,boundary='native_completion',
+                                    phase_before=before_phase,phase=self.context.phase.value,intent=asdict(completion_phase.intent),
+                                    calibration_required=completion_phase.calibration_required,
+                                    minimum_side_separation_m=next((s.minimum_side_separation_m for s in self.last_geometry.certificate.sides
+                                        if s.side==self.context.committed_side),None))
                         else:
                             self.terminal_failure=self.terminal_failure or c.failure.fail_closed
                             self.failure(event,'CompletionCertificate',c.failure.reason,(c.failure.field,))

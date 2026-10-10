@@ -198,6 +198,8 @@ class ShadowRuntime:
         self.enabled=True;self.healthy=False;self.writer_errors=0;self.processing_errors=0
         self.events_written=0;self.last_event_index=None;self.current_output_file=None
         self.error=None;self.abandoned=False;self.record_index=0
+        self.stream_gaps=0;self.correlation_evictions=0
+        self.certificate_errors=0;self.correlation_eviction_records=[]
         self.run_id=None
 
     def start(self):
@@ -213,7 +215,7 @@ class ShadowRuntime:
 
     def _disable(self,exc):
         self.error=type(exc).__name__;self.healthy=False;self.enabled=False
-        self.buffer.close()
+        self.buffer.close(reason='writer_unavailable')
 
     def _new_consumer(self):
         # Imports/phase construction occur ONLY here on diagnostic worker.
@@ -257,11 +259,23 @@ class ShadowRuntime:
                     if self._stop.is_set():break
                     self._stop.wait(self.resources.wake_seconds);continue
                 for event in events:
-                    if self._stop.is_set() and time.monotonic()>=self._deadline:break
+                    if self._stop.is_set() and time.monotonic()>=self._deadline:
+                        # The already-drained batch is still bounded. Account
+                        # for unprocessed records rather than hiding their loss.
+                        remaining=events[events.index(event):]
+                        for lost in remaining:
+                            next(self.buffer._full);next(self.buffer._drop_reasons['shutdown_discard'])
+                            self.buffer._recent_drops.append(dict(event_index=lost.event_index,event_type=lost.event_type.value,
+                                reason='shutdown_discard',detail='drain deadline'))
+                        break
                     try:
                         before=consumer.failures
                         consumer.process(event)
                         self.processing_errors+=consumer.failures-before
+                        self.certificate_errors=consumer.failures
+                        self.stream_gaps=consumer.stream_gaps
+                        self.correlation_evictions=consumer.correlation_evictions
+                        self.correlation_eviction_records=list(consumer.correlation_eviction_records)
                     except Exception as exc:
                         self.processing_errors+=1
                         # Never restart correlation/reducer state after an
@@ -289,7 +303,7 @@ class ShadowRuntime:
                 try:sink.close()
                 except Exception as exc:self.writer_errors+=1;self._disable(exc)
             # Do not retain queued evidence after normal/failing termination.
-            self.buffer.drain()
+            self.buffer.discard()
 
     def request_shutdown(self):
         """Stop accepting immediately; no join on the signal/STOP path."""
@@ -309,9 +323,19 @@ class ShadowRuntime:
 
     def status(self):
         s=self.buffer.statistics()
-        return dict(enabled=self.enabled,healthy=self.healthy,queue_depth=s['queued'],queue_capacity=s['capacity'],
+        drops=s['full_drops']+s['contention_drops']+s['construction_failures']+s['evicted_events']
+        degraded=bool(drops or self.processing_errors or self.stream_gaps or self.correlation_evictions)
+        state='DISABLED' if not self.enabled and not self.error else 'FAILED' if self.error or self.writer_errors else 'DEGRADED' if degraded else 'HEALTHY' if self.healthy else 'STARTING'
+        return dict(enabled=self.enabled,healthy=self.healthy and not degraded,
+            runtime_writer_healthy=self.healthy,coverage_degraded=degraded,health_state=state,
+            drops_present=bool(drops),certificate_errors_present=bool(self.certificate_errors),
+            certificate_errors=self.certificate_errors,
+            drop_reasons=s['drop_reasons'],recent_drops=s['recent_drops'],
+            stream_gaps=self.stream_gaps,correlation_evictions=self.correlation_evictions,
+            correlation_eviction_records=self.correlation_eviction_records,
+            queue_depth=s['queued'],queue_capacity=s['capacity'],
             queue_high_water=s['high_water'],
-            dropped_events=s['full_drops']+s['contention_drops']+s['construction_failures']+s['evicted_events'],
+            dropped_events=drops,
             writer_errors=self.writer_errors,processing_errors=self.processing_errors,
             events_written=self.events_written,last_event_index=self.last_event_index,
             current_output_file=self.current_output_file,abandoned=self.abandoned,

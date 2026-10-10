@@ -59,10 +59,13 @@ class EvidenceKey:
     sequence: int
     received_monotonic_seconds: float
     age_at_receipt_seconds: float
+    age_basis: str = 'NATIVE_RECEIPT_AGE'
 
     def __post_init__(self):
         text(self.mission_id); text(self.producer_session); positive_int(self.sequence)
         number(self.received_monotonic_seconds); number(self.age_at_receipt_seconds)
+        if self.age_basis not in ('NATIVE_RECEIPT_AGE','RETAINED_EFFECTIVE_AGE_UPPER_BOUND'):
+            raise ValueError('age provenance')
 
     def require_current(self, *, mission_id: str, session: str, now: float, max_age: float):
         number(now); number(max_age)
@@ -123,7 +126,7 @@ class ObservationCertificate:
 class SideGeometry:
     side: Side
     lateral_feasible: bool | None
-    lateral_separation_m: float | None
+    lateral_separation_m: float | None  # Legacy blocker-center alias; never the phase pass metric.
     side_clearance_m: float | None
     target_xy_m: tuple | None
     target_recomputed_sequence: int | None
@@ -132,12 +135,16 @@ class SideGeometry:
     pass_obstructed: bool | None
     protected_capsule_clear: bool | None
     predicted_longitudinal_gain_m: float | None
+    minimum_side_separation_m: float | None = None
+    blocker_center_separation_m: float | None = None
+    separation_provenance: str = 'UNKNOWN'
 
     def __post_init__(self):
         if type(self.side) is not Side: raise ValueError('side enum')
         for x in (self.lateral_feasible, self.pass_obstructed, self.protected_capsule_clear):
             if x is not None: boolean(x)
-        for x in (self.lateral_separation_m, self.side_clearance_m, self.pass_overlap_m):
+        for x in (self.lateral_separation_m, self.side_clearance_m, self.pass_overlap_m,
+                  self.minimum_side_separation_m, self.blocker_center_separation_m):
             if x is not None: number(x)
         if self.predicted_longitudinal_gain_m is not None: number(self.predicted_longitudinal_gain_m, nonnegative=False)
         if self.pass_occupancy is not None:
@@ -149,7 +156,7 @@ class SideGeometry:
 
     def pass_feasible(self, sequence: int) -> bool:
         # Feasibility snapshot only; ordinary safety/JIT must check again later.
-        return (self.lateral_separation_m is not None and self.lateral_separation_m >= .15
+        return (self.minimum_side_separation_m is not None and self.minimum_side_separation_m >= .15
             and self.target_xy_m is not None and self.target_xy_m[0] > 0
             and self.target_recomputed_sequence == sequence and self.pass_occupancy == 0
             and self.pass_overlap_m == 0 and self.pass_obstructed is False
@@ -195,6 +202,61 @@ class GeometryCertificate:
 
 
 @dataclass(frozen=True, slots=True)
+class NativeBridgeZeroFrontier:
+    """Retained production verification, not a fabricated Bridge response.
+
+    MarvinProgressDiagnostics records this only after the runtime's native
+    READY/ROS/zero/nonstreaming check succeeds. This is diagnostic provenance,
+    never an authorization token or a replacement for live admission.
+    """
+    mission_id: str
+    source_stamp_ns: int
+    verified_monotonic_seconds: float
+    provenance: str = 'MarvinProgressDiagnostics.action_result:runtime._marvin_bridge_ready_and_stopped'
+
+    def __post_init__(self):
+        text(self.mission_id);positive_int(self.source_stamp_ns);number(self.verified_monotonic_seconds)
+        if self.provenance != 'MarvinProgressDiagnostics.action_result:runtime._marvin_bridge_ready_and_stopped':
+            raise ValueError('native verification provenance')
+
+
+@dataclass(frozen=True, slots=True)
+class CompletionChronology:
+    transport_call_started_monotonic_seconds: float
+    dispatch_lower_bound_monotonic_seconds: float
+    transport_acknowledged_monotonic_seconds: float
+    automatic_stop_completed_monotonic_seconds: float
+    bridge_zero_confirmed_monotonic_seconds: float
+    dispatch_monotonic_seconds: float | None = None
+    # The Bridge contract proves issuance before bounded return; its internal
+    # issuance clock is not exported. None means unobserved, not invented.
+    automatic_stop_issued_monotonic_seconds: float | None = None
+    boundary_provenance: str = 'BOUNDED_ACK_AFTER_AUTOMATIC_STOP'
+
+    def __post_init__(self):
+        for x in (self.transport_call_started_monotonic_seconds, self.dispatch_lower_bound_monotonic_seconds,
+                  self.transport_acknowledged_monotonic_seconds,
+                  self.automatic_stop_completed_monotonic_seconds, self.bridge_zero_confirmed_monotonic_seconds):
+            number(x)
+        if self.automatic_stop_issued_monotonic_seconds is not None:
+            number(self.automatic_stop_issued_monotonic_seconds)
+        if self.dispatch_monotonic_seconds is not None:
+            number(self.dispatch_monotonic_seconds)
+            if not self.dispatch_lower_bound_monotonic_seconds <= self.dispatch_monotonic_seconds <= self.automatic_stop_completed_monotonic_seconds:
+                raise ValueError('dispatch frontier')
+        if self.boundary_provenance != 'BOUNDED_ACK_AFTER_AUTOMATIC_STOP':
+            raise ValueError('unsupported STOP contract')
+        if not (self.transport_call_started_monotonic_seconds <= self.dispatch_lower_bound_monotonic_seconds
+                <= self.automatic_stop_completed_monotonic_seconds
+                == self.transport_acknowledged_monotonic_seconds <= self.bridge_zero_confirmed_monotonic_seconds):
+            raise ValueError('dispatch/automatic STOP/ack/Bridge chronology')
+        if self.automatic_stop_issued_monotonic_seconds is not None and not (
+                self.dispatch_lower_bound_monotonic_seconds <= self.automatic_stop_issued_monotonic_seconds
+                <= self.automatic_stop_completed_monotonic_seconds):
+            raise ValueError('STOP issuance chronology')
+
+
+@dataclass(frozen=True, slots=True)
 class CompletionCertificate:
     primitive: DispatchedPrimitive
     used_source_stamp_ns: int
@@ -212,6 +274,7 @@ class CompletionCertificate:
     source_stamp_consumed: bool
     stop_lidar_sequence: int
     measured_lateral_gain_m: float | None = None
+    chronology: CompletionChronology | None = None
     # No commanded distance. A gain is comparative geometry, not robot odometry.
 
     def __post_init__(self):
@@ -224,6 +287,10 @@ class CompletionCertificate:
         number(self.stopped_monotonic_seconds); positive_int(self.stop_lidar_sequence)
         if self.measured_direct_route_progress is not None: boolean(self.measured_direct_route_progress)
         if self.measured_lateral_gain_m is not None: number(self.measured_lateral_gain_m, nonnegative=False)
+        if self.chronology is not None:
+            if type(self.chronology) is not CompletionChronology: raise ValueError('typed chronology')
+            if self.stopped_monotonic_seconds != self.chronology.automatic_stop_completed_monotonic_seconds:
+                raise ValueError('STOP frontier contradicts contract')
 
     def require_completed(self, *, mission_id: str, session: str):
         keys=(self.planning, self.jit, self.outcome_geometry.key, self.outcome_observation.key)
@@ -240,6 +307,14 @@ class CompletionCertificate:
             raise ValueError('invalid stopped geometry')
         if self.jit.received_monotonic_seconds < self.planning.received_monotonic_seconds:
             raise ValueError('JIT chronology')
+        if self.chronology is not None:
+            if self.chronology.dispatch_lower_bound_monotonic_seconds < self.jit.received_monotonic_seconds:
+                raise ValueError('dispatch before JIT')
+        # Conservative acquisition lower bound, not merely receipt after
+        # STOP: delayed scans acquired during motion cannot complete it.
+        if (self.outcome_geometry.key.received_monotonic_seconds
+                - self.outcome_geometry.key.age_at_receipt_seconds <= self.stopped_monotonic_seconds):
+            raise ValueError('stopped LiDAR acquisition must follow confirmed STOP')
         if min(self.outcome_geometry.key.received_monotonic_seconds, self.outcome_observation.key.received_monotonic_seconds) <= self.stopped_monotonic_seconds or self.stopped_monotonic_seconds < self.jit.received_monotonic_seconds:
             raise ValueError('outcome must follow confirmed STOP')
 

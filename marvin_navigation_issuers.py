@@ -17,7 +17,7 @@ from local_motion_safety_envelope import evaluate_local_motion_safety, LOCAL_LID
 from marvin_blocked_wait import PRE_TRANSPORT_JIT_WAIT_REASONS, explicit_pre_transport_jit_veto
 from marvin_navigation_certificates import (
     EvidenceKey, ObservationCertificate, GeometryCertificate, SideGeometry,
-    CompletionCertificate, JitVetoCertificate, DispatchedPrimitive,
+    CompletionCertificate, CompletionChronology, NativeBridgeZeroFrontier, JitVetoCertificate, DispatchedPrimitive,
 )
 from marvin_navigation_certificates import VisibilityClass
 from marvin_navigation_phases import Phase, Side, Event, Primitive
@@ -218,7 +218,7 @@ def issue_observation(observation,ctx,*,source_mission_id):
 
 
 @capture
-def issue_geometry(lidar,association,selection,ctx,*,source_mission_id):
+def issue_geometry(lidar,association,selection,ctx,*,source_mission_id,lateral_probe_durations=None):
     """Wrap existing evaluated route/bypass outputs; reuse production safety.
 
     No route or bypass projection is recomputed by this adapter. Existing
@@ -259,6 +259,17 @@ def issue_geometry(lidar,association,selection,ctx,*,source_mission_id):
             evaluated=evaluate_local_motion_safety(state,expected_session=ctx.producer_session,
                 linear_y=.08 if side==Side.LEFT else -.08,duration=duration,now=ctx.now,lateral_swept_footprint=True)
             require(evaluated['permitted']==lateral,FailureCode.GEOMETRY,'lateral_verdict','Recorded hard gate contradicts current production calculation')
+        elif lateral_probe_durations and side.value in lateral_probe_durations:
+            # Worker-only revalidation of the exact preceding native planner
+            # probe duration, on this stopped scan. No selector is rerun and
+            # no prior feasibility verdict is carried across scan frontiers.
+            duration=lateral_probe_durations[side.value]
+            require(type(duration) in (int,float) and math.isfinite(duration) and duration>0,
+                FailureCode.MALFORMED,'lateral_probe_duration','Recorded positive planner duration required')
+            evaluated=evaluate_local_motion_safety(state,expected_session=ctx.producer_session,
+                linear_y=.08 if side==Side.LEFT else -.08,duration=duration,now=ctx.now,lateral_swept_footprint=True)
+            lateral=evaluated['permitted']
+            facts.append(Fact(side.value+'.lateral_probe_duration',duration,'preceding native planner duration; stopped-scan production safety revalidation'))
         else:unsupported.append(side.value+'.lateral_feasible')
         b=candidates.get(side.value) or {}
         if b:
@@ -270,6 +281,7 @@ def issue_geometry(lidar,association,selection,ctx,*,source_mission_id):
         blocker_y=route.get('blocking_obstacle_y_m')
         signed=None if blocker_y is None else (-blocker_y if side==Side.LEFT else blocker_y)
         separation=signed if signed is not None and signed>=0 else None
+        minimum=route.get('blocking_obstacle_minimum_side_separation_m') if separation is not None else None
         # Existing schema cannot represent a blocker on the opposite side.
         # Preserve signed diagnostic fact; missing established separation is
         # never changed into zero or another side's positive separation.
@@ -285,8 +297,11 @@ def issue_geometry(lidar,association,selection,ctx,*,source_mission_id):
         gain=prediction.get('bypass_longitudinal_progress_m') if (selection or {}).get('direction')==side.value else None
         sides.append(SideGeometry(side,lateral,separation,(selection or {}).get(side.value.lower()+'_clearance_m'),
             target,seq if target is not None else None,b.get('bypass_corridor_occupancy'),b.get('bypass_corridor_overlap_m'),
-            b.get('route_to_bypass_obstructed'),capsule,gain))
+            b.get('route_to_bypass_obstructed'),capsule,gain,minimum,separation,
+            'evaluate_marvin_route.blocking_obstacle_minimum_side_separation_m; signed blocker side'))
         facts.extend((Fact(side.value+'.pass_permitted',b.get('bypass_forward_permitted'),'plan_local_bypass'),
+                      Fact(side.value+'.minimum_side_separation_m',minimum,'evaluate_marvin_route.blocking_obstacle_minimum_side_separation_m'),
+                      Fact(side.value+'.blocker_center_separation_m',separation,'plan_local_bypass: -side_sign * blocking_obstacle_y_m'),
                       Fact(side.value+'.signed_separation_m',signed,'evaluate_marvin_route output'),
                       Fact(side.value+'.prediction_is_measured',False,'existing planner prediction')))
     bx=route.get('blocking_obstacle_x_m');by=route.get('blocking_obstacle_y_m')
@@ -351,7 +366,13 @@ def issue_completion(record,planning_key,jit_key,post_geometry,post_observation,
     stop=r.get('stop_result')
     require(stop is None or (type(stop) is dict and stop.get('ok') is True),FailureCode.SAFETY,'stop_result','Explicit STOP failed or malformed')
     require(vals['automatic_stop'] or (stop or {}).get('ok') is True,FailureCode.SAFETY,'STOP','No automatic/explicit STOP confirmation')
-    require(bridge_stationary(required(r,'bridge_after_stop',dict)),FailureCode.SAFETY,'Bridge','READY/ROS/x/y/yaw/streaming proof failed')
+    retained_bridge=r.get('native_bridge_zero_frontier')
+    if retained_bridge is not None:
+        require(type(retained_bridge) is NativeBridgeZeroFrontier
+            and retained_bridge.mission_id==ctx.mission_id and retained_bridge.source_stamp_ns==used,
+            FailureCode.MISSION,'Bridge_frontier','Native verification must bind this mission and dispatch')
+    else:
+        require(bridge_stationary(required(r,'bridge_after_stop',dict)),FailureCode.SAFETY,'Bridge','READY/ROS/x/y/yaw/streaming proof failed')
     require(type(post_geometry) is GeometryCertificate and type(post_observation) is ObservationCertificate,
         FailureCode.MISSING,'post_certificates','No valid matched stopped geometry/strict observation')
     for key in (planning_key,jit_key,post_geometry.key,post_observation.key):
@@ -359,15 +380,73 @@ def issue_completion(record,planning_key,jit_key,post_geometry,post_observation,
         require(key.mission_id==ctx.mission_id,FailureCode.MISSION,'mission_id','Cross-mission completion')
         require(key.producer_session==ctx.producer_session,FailureCode.SESSION,'session','Restart/session crossing')
     stop_time=numeric(r,'stopped_monotonic_seconds');floor=required(r,'stop_lidar_sequence',int)
+    frontier=r.get('chronology')
+    frontier=CompletionChronology(**frontier) if frontier is not None else None
+    if retained_bridge is not None:
+        require(frontier is not None and retained_bridge.verified_monotonic_seconds==frontier.bridge_zero_confirmed_monotonic_seconds,
+            FailureCode.CHRONOLOGY,'Bridge_frontier','Retained verification must match the distinct Bridge poll frontier')
+    if frontier is not None:
+        require(vals['automatic_stop'] and frontier.automatic_stop_completed_monotonic_seconds==stop_time,
+            FailureCode.CHRONOLOGY,'STOP_contract','Automatic STOP frontier must match bounded acknowledgement')
+        require(frontier.bridge_zero_confirmed_monotonic_seconds<=ctx.now,FailureCode.CHRONOLOGY,
+            'Bridge_frontier','Bridge stationary confirmation must already exist')
     chronology(used_stamp=used,observation_stamp=auth,planning_key=planning_key,jit_key=jit_key,
         post_key=post_geometry.key,post_camera=post_observation,stop_time=stop_time,stop_floor=floor)
     post_geometry.require_current(**ctx.current(MAXIMUM_EFFECTIVE_AGE_SECONDS))
     post_observation.require_strict_current(newer_than_stamp=max(used,ctx.camera_floor_ns),**ctx.current(1.))
     progress=r.get('meaningful_progress');gain=r.get('measured_lateral_gain_m')
     c=CompletionCertificate(primitive,used,planning_key,jit_key,post_geometry,post_observation,True,True,True,True,False,
-        progress,stop_time,True,floor,gain)
+        progress,stop_time,True,floor,gain,frontier)
     c.require_completed(mission_id=ctx.mission_id,session=ctx.producer_session)
     return Issuance(c,None,facts+(Fact('meaningful_progress_reason',r.get('meaningful_progress_reason'),'production measured progress'),))
+
+
+@capture
+def issue_retained_completion(row,primitive,planning_key,jit_key,post_geometry,post_observation,ctx,*,source_mission_id):
+    """Explicit offline adapter for the native progress-diagnostic contract.
+
+    No missing result dictionary or Bridge response is invented. Dispatch,
+    transport and automatic STOP come from the retained command callback;
+    completion/consumption from action_result; stationary verification from
+    its separately retained native frontier. Decimal stamps must be decoded
+    by the caller's explicit wire adapter before entering this canonical API.
+    """
+    binding(ctx,source_mission_id)
+    camera=required(row,'authorizing_camera',dict);stamp=required(camera,'source_frame_stamp_ns',int)
+    command=required(row,'command',dict);ack=required(command,'bridge_acknowledgement',dict)
+    reject_delivery_contradictions(row)
+    require(ack.get('ok') is True and ack.get('mode')=='bounded' and ack.get('automatic_stop') is True
+        and ack.get('returned_immediately') is False,FailureCode.SAFETY,'bounded_ack','No native automatic STOP contract')
+    native_primitive=row.get('action_type')
+    if native_primitive is None:
+        yaw=command.get('angular_z')
+        native_primitive='TURN_LEFT' if type(yaw) in (int,float) and yaw>0 else 'TURN_RIGHT' if type(yaw) in (int,float) and yaw<0 else None
+    require(native_primitive==primitive,FailureCode.CHRONOLOGY,'action_primitive','Primitive must match the retained native dispatch')
+    for axis in ('linear_x','linear_y','angular_z','duration'):
+        value=numeric(command,axis)
+        require(type(ack.get(axis)) in (int,float) and ack[axis]==value,
+            FailureCode.SAFETY,'bounded_ack','Acknowledgement contradicts native command '+axis)
+    if primitive in ('FORWARD','BYPASS_FORWARD'):
+        from behavior_manager import BehaviorManager
+        require(BehaviorManager._is_canonical_marvin_bounded_forward_result(ack,speed=command['linear_x'],duration=command['duration']),
+            FailureCode.SAFETY,'bounded_ack','Noncanonical bounded forward acknowledgement')
+    start=numeric(command,'start_monotonic_seconds');ack_time=numeric(command,'completion_monotonic_seconds')
+    zero=numeric(row,'bridge_zero_verified_monotonic_seconds')
+    r=dict(action_type=primitive,source_frame_stamp_ns=stamp,observation_source_frame_stamp_ns=stamp,
+        execution_authorized=True,transport_attempted=True,transport_confirmed=True,delivery_uncertain=False,
+        motion_executed=required(row,'motion_executed',bool),full_step_completed=required(row,'full_step_completed',bool),
+        automatic_stop=True,source_stamp_consumed=required(row,'source_stamp_consumed',bool),
+        stopped_monotonic_seconds=ack_time,stop_lidar_sequence=jit_key.sequence,
+        native_bridge_zero_frontier=NativeBridgeZeroFrontier(ctx.mission_id,stamp,zero),
+        chronology=dict(transport_call_started_monotonic_seconds=start,
+            dispatch_lower_bound_monotonic_seconds=max(start,jit_key.received_monotonic_seconds),
+            transport_acknowledged_monotonic_seconds=ack_time,
+            automatic_stop_completed_monotonic_seconds=ack_time,bridge_zero_confirmed_monotonic_seconds=zero))
+    result=issue_completion(r,planning_key,jit_key,post_geometry,post_observation,ctx,source_mission_id=source_mission_id)
+    if not result.ok:return result
+    return Issuance(result.certificate,None,result.facts+(Fact('retained_completion_basis',
+        'native command dispatch/ack, successful action result and Bridge verification frontier',
+        'MarvinProgressDiagnostics; not reconstructed raw responses'),))
 
 
 @capture
@@ -486,7 +565,7 @@ def certificates_to_policy(bundle,ctx,*,watchdog: WatchdogEvidence,bridge=None,d
         v=sides.get(side)
         if v is None:return SideEvidence(side)
         permitted=bundle.geometry.fact(side.value+'.pass_permitted')
-        return SideEvidence(side,v.lateral_feasible,v.lateral_separation_m,permitted,v.pass_occupancy,v.pass_overlap_m,
+        return SideEvidence(side,v.lateral_feasible,v.minimum_side_separation_m,permitted,v.pass_occupancy,v.pass_overlap_m,
             v.protected_capsule_clear,v.target_recomputed_sequence==g.key.sequence if v.target_xy_m is not None else None)
     error=bundle.observation.fact('horizontal_error');tol=bundle.observation.fact('centering_tolerance')
     alignment=Alignment.UNKNOWN
@@ -499,6 +578,10 @@ def certificates_to_policy(bundle,ctx,*,watchdog: WatchdogEvidence,bridge=None,d
         visibility=TargetVisibility.MAINTAIN_RIGHT if error is not None and error>0 else TargetVisibility.MAINTAIN_LEFT if error is not None and error<0 else TargetVisibility.CALIBRATION_REQUIRED
     stopped=None if bridge is None else bridge_stationary(bridge)
     complete=bundle.completion.certificate if bundle.completion else None
+    if bridge is None and event==Event.ACTION_COMPLETED and complete is not None:
+        # Historical native completion already includes its independently
+        # verified stationary frontier. Do not fabricate a raw Bridge response.
+        stopped=complete.bridge_zero
     veto=bundle.veto.certificate if bundle.veto else None
     outcome=OutcomeEvidence()
     if complete:
@@ -509,6 +592,12 @@ def certificates_to_policy(bundle,ctx,*,watchdog: WatchdogEvidence,bridge=None,d
         outcome=OutcomeEvidence(event_frame_stamp_ns=veto.retired_source_stamp_ns,zero_transport_certified=True,stationary_stop_confirmed=True,old_authority_retired=True)
         stopped=True;delivery_resolved=True
     required_ok=o is not None and g is not None
+    committed=sides.get(watchdog.committed_side)
+    if (committed is not None and g.direct_route_obstructed and committed.minimum_side_separation_m is not None
+            and committed.minimum_side_separation_m<.15 and committed.lateral_feasible is None):
+        # Lost pass separation is real, but missing same-scan repair feasibility
+        # cannot invent a strafe. Existing policy returns STOP_REVERIFY.
+        required_ok=False
     if event==Event.ACTION_JIT_VETO:required_ok=required_ok and veto is not None
     if event==Event.ACTION_COMPLETED:required_ok=required_ok and complete is not None
     # A valid but incomplete side inventory cannot claim a planner dead end.
