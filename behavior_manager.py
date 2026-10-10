@@ -42,6 +42,7 @@ from local_motion_safety_envelope import (
     evaluate_local_motion_safety,
 )
 from camera_motion_gate import evaluate_camera_gate
+from marvin_coverage_candidates import marvin_coverage_candidates
 
 
 FIND_MARVIN_FORWARD_SPEED_MPS = 0.10
@@ -6030,6 +6031,8 @@ class BehaviorManager:
                     negative_preview["strict_tracker_episode"] = observation[
                         "strict_tracker_episode"
                     ]
+                if isinstance(observation.get("identity_selection"), dict):
+                    negative_preview["identity_selection"] = dict(observation["identity_selection"])
                 return negative_preview
             result = self._build_find_object_preview(
                 normalized_target,
@@ -6048,6 +6051,7 @@ class BehaviorManager:
                 "track_id", "tracker_source", "marvin_continuity",
                 "opencv_tracker", "identity_source_frame_stamp_ns",
                 "marvin_tracking_episode", "strict_tracker_episode",
+                "identity_selection", "coverage_candidate_bbox",
             ):
                 if key in observation:
                     result[key] = observation[key]
@@ -6669,25 +6673,26 @@ class BehaviorManager:
             execution_guard()
         if require_fresh_gemini:
             self._emit_marvin_semantic_frame_diagnostic(frame)
+        selection = {
+            "identity_selection_path": "PROPOSAL",
+            "normal_proposal_count": len(proposal_candidates),
+            "normal_submitted_crop_count": len(candidates),
+            "coverage_recovery_attempted": False,
+            "coverage_candidate_count": 0,
+            "coverage_selected_index": None,
+            "coverage_selected_bbox": None,
+            "provisional_tracker_initialized": False,
+            "final_identity_rejection_reason": None,
+        }
         identity = semantic_vision.select_marvin_candidate(frame, candidates)
         if execution_guard is not None:
             execution_guard()
         if not isinstance(identity, dict) or identity.get("confirmed") is not True:
-            if require_fresh_gemini:
-                self._clear_marvin_v2_tracker_episode()
-            # The source stamp identifies the camera observation, not the
-            # semantic result. Preserve it on a negative preview without
-            # promoting the candidate or granting any motion authority.
-            return {
-                "found": False,
-                "source_frame_stamp_ns": diagnostics.get(
-                    "latest_source_frame_stamp_ns"
-                ),
-                "identity_source_frame_stamp_ns": _valid_source_frame_stamp(
-                    getattr(frame, "source_frame_stamp_ns", None)
-                ),
-                "reason": "marvin_identity_not_confirmed",
-            }
+            return self._recover_marvin_coverage_identity(
+                frame, diagnostics, selection, execution_guard=execution_guard,
+            )
+        diagnostics["identity_selection"] = selection
+        selection["identity_selection_path"] = "PROPOSAL"
         identity_source = identity.get(
             "source", "gemini_marvin_candidate_selection",
         )
@@ -6714,7 +6719,7 @@ class BehaviorManager:
         yolo_candidate = candidates[selected_index]
         if require_fresh_gemini:
             self._emit_marvin_semantic_frame_diagnostic(frame, yolo_candidate)
-            return self._acquire_strict_v2_tracker_observation_from_candidate(
+            result = self._acquire_strict_v2_tracker_observation_from_candidate(
                 yolo_candidate, diagnostics,
                 identity_source=identity_source,
                 identity_source_frame_stamp_ns=identity_source_stamp,
@@ -6723,6 +6728,10 @@ class BehaviorManager:
                 action_frame_minimum_stamp_ns=identity_source_stamp,
                 action_frame_minimum_received_monotonic_seconds=time.monotonic(),
             )
+            result["identity_selection"] = selection
+            if result.get("found") is False:
+                selection["final_identity_rejection_reason"] = result.get("reason")
+            return result
         result = self._acquire_marvin_tracker_observation_from_candidate(
             yolo_candidate,
             diagnostics,
@@ -6737,6 +6746,79 @@ class BehaviorManager:
         if not require_fresh_gemini:
             self._set_marvin_preview_continuity(result)
         return result
+
+    def _recover_marvin_coverage_identity(
+        self, frame, diagnostics, selection, *, execution_guard,
+    ):
+        """One coverage selection on the same frame, then normal strict tracking.
+
+        Fixed boxes and semantic selection are only provisional seed evidence.
+        The existing episode association/newer camera/quality gates own identity.
+        """
+        selection["identity_selection_path"] = "NONE"
+        stamp = _valid_source_frame_stamp(getattr(frame, "source_frame_stamp_ns", None))
+        negative = {
+            "found": False,
+            "source_frame_stamp_ns": diagnostics.get("latest_source_frame_stamp_ns"),
+            "identity_source_frame_stamp_ns": stamp,
+            "reason": "marvin_identity_not_confirmed",
+            "identity_selection": selection,
+        }
+        recovery = getattr(self.semantic_vision, "select_marvin_coverage_candidate", None)
+        if stamp is None or not callable(recovery):
+            self._clear_marvin_v2_tracker_episode()
+            selection["final_identity_rejection_reason"] = "marvin_identity_not_confirmed"
+            return negative
+        if execution_guard is not None:
+            execution_guard()
+        try:
+            candidates = marvin_coverage_candidates(frame.width, frame.height, stamp)
+            selection["coverage_candidate_count"] = len(candidates)
+            selection["coverage_recovery_attempted"] = True
+            identity = recovery(frame, candidates)  # One call site, no retry.
+            if execution_guard is not None:
+                execution_guard()
+            if (not isinstance(identity, dict) or identity.get("confirmed") is not True
+                    or identity.get("source") != "gemini_marvin_candidate_selection"):
+                self._clear_marvin_v2_tracker_episode()
+                selection["final_identity_rejection_reason"] = "marvin_identity_not_confirmed"
+                return negative
+            index = identity.get("candidate_index")
+            if type(index) is not int or not 0 <= index < len(candidates):
+                raise ValueError("marvin_candidate_selection_index_invalid")
+            candidate = candidates[index]
+            selection.update(identity_selection_path="COVERAGE_RECOVERY",
+                             coverage_selected_index=index,
+                             coverage_selected_bbox=dict(candidate["bbox"]))
+            diagnostics["identity_selection"] = selection
+            result = self._acquire_strict_v2_tracker_observation_from_candidate(
+                candidate, diagnostics,
+                identity_source="gemini_marvin_candidate_selection",
+                identity_source_frame_stamp_ns=stamp,
+                execution_guard=execution_guard, frame=frame,
+                action_frame_minimum_stamp_ns=stamp,
+                action_frame_minimum_received_monotonic_seconds=time.monotonic(),
+            )
+            result["identity_selection"] = selection
+            if result.get("found") is False:
+                selection["final_identity_rejection_reason"] = result.get("reason")
+            elif (not self._marvin_v2_preview_is_verified(result)
+                    or type((result.get("opencv_tracker") or {}).get("quality"))
+                    not in (int, float)
+                    or result["opencv_tracker"]["quality"] < MarvinLocalTracker.MIN_MATCH_QUALITY):
+                raise ValueError("marvin_coverage_tracker_unverified")
+            return result
+        except _SemanticPreempted:
+            self._clear_marvin_v2_tracker_episode()
+            raise
+        except Exception as exc:
+            self._clear_marvin_v2_tracker_episode()
+            reason = ("find_marvin_post_semantic_tracker_refresh_failed"
+                      if isinstance(exc, _MarvinLocalTrackerConfirmationRequired)
+                      else "marvin_coverage_identity_failed")
+            negative["reason"] = reason
+            selection["final_identity_rejection_reason"] = reason
+            return negative
 
     MARVIN_V2_TRACKER_ASSOCIATION_MIN_IOU = 0.70
 
@@ -7060,6 +7142,9 @@ class BehaviorManager:
             episode["marvin_tracker"] = self.marvin_local_tracker_factory(
                 frame, tracker_seed_bbox,
             )
+            selection = diagnostics.get("identity_selection")
+            if isinstance(selection, dict):
+                selection["provisional_tracker_initialized"] = True
         else:
             episode["marvin_tracker"] = existing_tracker
         current_frame_floor = minimum_source_frame_stamp_ns
@@ -7151,6 +7236,13 @@ class BehaviorManager:
             opencv_tracker=confirmed.get("opencv_tracker"),
             **tracker_metadata,
         )
+        if isinstance(diagnostics.get("identity_selection"), dict):
+            result["identity_selection"] = dict(diagnostics["identity_selection"])
+        if yolo_candidate.get("geometry_source") == "deterministic_coverage":
+            result.update(geometry_source="deterministic_coverage",
+                          coverage_candidate_bbox=yolo_bbox,
+                          yolo_seed_bbox=None,
+                          tracker_seed_source="bounded_coverage_candidate_expansion")
         if require_fresh_gemini:
             tracker = result.get("opencv_tracker")
             tracker = tracker if isinstance(tracker, dict) else {}

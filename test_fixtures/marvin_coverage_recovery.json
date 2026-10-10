@@ -1,0 +1,2060 @@
+{
+  "provenance": "Exact retained October10 semantic JPEG and three unique retained proposal-cache payloads; detector source JPEGs not retained. Manual annotation newly created by prior offline audit. Later tracker/LiDAR frames in tests are synthetic.",
+  "jpeg_sha256": "b2d1dc59d818193cd8ad727781692e61a82e1ebbabd5518671a02cc556660c34",
+  "frame": {
+    "file": "current-camera-00.jpg",
+    "jpeg_sha256": "b2d1dc59d818193cd8ad727781692e61a82e1ebbabd5518671a02cc556660c34",
+    "bytes": 88975,
+    "width": 640,
+    "height": 480,
+    "source_frame_stamp_ns": 1791650915398546697,
+    "received_at": "2026-10-10T16:48:35.283032+00:00",
+    "received_monotonic_seconds": 305567.935342683
+  },
+  "generic_detections": {
+    "timestamp": "2026-10-10T16:48:34.525008+00:00",
+    "source_frame_stamp_ns": 1791650914542534265,
+    "detections": [
+      {
+        "label": "tv",
+        "confidence": 0.657,
+        "x1": 475,
+        "y1": 44,
+        "x2": 546,
+        "y2": 118,
+        "width": 70,
+        "height": 73,
+        "center_x": 511,
+        "center_y": 81,
+        "area": 5110,
+        "image_width": 640,
+        "image_height": 480,
+        "marvin_continuity": {
+          "tracker_id": 223210,
+          "tracker_source": "marvin_continuity_botsort",
+          "tracker_generation": "b2df570884774b11bc80f4e1d93d55b6"
+        }
+      }
+    ],
+    "description": "I see tv.",
+    "camera_running": true,
+    "camera_url": "http://192.168.68.142:8091/camera/latest.jpg",
+    "last_error": null
+  },
+  "proposal_frames": [
+    {
+      "timestamp": "2026-10-10T16:48:34.525008+00:00",
+      "source_frame_stamp_ns": 1791650914542534265,
+      "detections": [
+        {
+          "label": "tv",
+          "confidence": 0.657,
+          "x1": 475,
+          "y1": 44,
+          "x2": 546,
+          "y2": 118,
+          "width": 70,
+          "height": 73,
+          "center_x": 511,
+          "center_y": 81,
+          "area": 5110,
+          "image_width": 640,
+          "image_height": 480,
+          "marvin_continuity": {
+            "tracker_id": 223210,
+            "tracker_source": "marvin_continuity_botsort",
+            "tracker_generation": "b2df570884774b11bc80f4e1d93d55b6"
+          }
+        },
+        {
+          "label": "person",
+          "confidence": 0.221,
+          "x1": 108,
+          "y1": 34,
+          "x2": 173,
+          "y2": 279,
+          "width": 65,
+          "height": 245,
+          "center_x": 140,
+          "center_y": 157,
+          "area": 15925,
+          "image_width": 640,
+          "image_height": 480,
+          "track_id": 226984,
+          "marvin_continuity": {
+            "tracker_id": 227576,
+            "tracker_source": "marvin_continuity_botsort",
+            "tracker_generation": "b2df570884774b11bc80f4e1d93d55b6"
+          }
+        },
+        {
+          "label": "person",
+          "confidence": 0.206,
+          "x1": 111,
+          "y1": 28,
+          "x2": 151,
+          "y2": 78,
+          "width": 39,
+          "height": 49,
+          "center_x": 131,
+          "center_y": 53,
+          "area": 1911,
+          "image_width": 640,
+          "image_height": 480,
+          "marvin_continuity": {
+            "tracker_id": 215457,
+            "tracker_source": "marvin_continuity_botsort",
+            "tracker_generation": "b2df570884774b11bc80f4e1d93d55b6"
+          }
+        },
+        {
+          "label": "handbag",
+          "confidence": 0.143,
+          "x1": 131,
+          "y1": 205,
+          "x2": 171,
+          "y2": 283,
+          "width": 40,
+          "height": 77,
+          "center_x": 151,
+          "center_y": 244,
+          "area": 3080,
+          "image_width": 640,
+          "image_height": 480,
+          "marvin_continuity": {
+            "tracker_id": 219332,
+            "tracker_source": "marvin_continuity_botsort",
+            "tracker_generation": "b2df570884774b11bc80f4e1d93d55b6"
+          }
+        },
+        {
+          "label": "suitcase",
+          "confidence": 0.142,
+          "x1": 456,
+          "y1": 169,
+          "x2": 554,
+          "y2": 301,
+          "width": 98,
+          "height": 132,
+          "center_x": 505,
+          "center_y": 235,
+          "area": 12936,
+          "image_width": 640,
+          "image_height": 480,
+          "marvin_continuity": {
+            "tracker_id": 224340,
+            "tracker_source": "marvin_continuity_botsort",
+            "tracker_generation": "b2df570884774b11bc80f4e1d93d55b6"
+          }
+        },
+        {
+          "label": "bottle",
+          "confidence": 0.086,
+          "x1": 192,
+          "y1": 219,
+          "x2": 226,
+          "y2": 277,
+          "width": 33,
+          "height": 57,
+          "center_x": 209,
+          "center_y": 248,
+          "area": 1881,
+          "image_width": 640,
+          "image_height": 480,
+          "marvin_continuity": {
+            "tracker_id": 219568,
+            "tracker_source": "marvin_continuity_botsort",
+            "tracker_generation": "b2df570884774b11bc80f4e1d93d55b6"
+          }
+        },
+        {
+          "label": "refrigerator",
+          "confidence": 0.081,
+          "x1": 266,
+          "y1": 0,
+          "x2": 322,
+          "y2": 122,
+          "width": 55,
+          "height": 122,
+          "center_x": 294,
+          "center_y": 61,
+          "area": 6710,
+          "image_width": 640,
+          "image_height": 480,
+          "marvin_continuity": {
+            "tracker_id": 217248,
+            "tracker_source": "marvin_continuity_botsort",
+            "tracker_generation": "b2df570884774b11bc80f4e1d93d55b6"
+          }
+        },
+        {
+          "label": "refrigerator",
+          "confidence": 0.075,
+          "x1": 262,
+          "y1": 0,
+          "x2": 321,
+          "y2": 279,
+          "width": 58,
+          "height": 279,
+          "center_x": 292,
+          "center_y": 139,
+          "area": 16182,
+          "image_width": 640,
+          "image_height": 480,
+          "marvin_continuity": {
+            "tracker_id": 222475,
+            "tracker_source": "marvin_continuity_botsort",
+            "tracker_generation": "b2df570884774b11bc80f4e1d93d55b6"
+          }
+        },
+        {
+          "label": "suitcase",
+          "confidence": 0.073,
+          "x1": 526,
+          "y1": 180,
+          "x2": 637,
+          "y2": 391,
+          "width": 110,
+          "height": 211,
+          "center_x": 581,
+          "center_y": 286,
+          "area": 23210,
+          "image_width": 640,
+          "image_height": 480,
+          "marvin_continuity": {
+            "tracker_id": 211652,
+            "tracker_source": "marvin_continuity_botsort",
+            "tracker_generation": "b2df570884774b11bc80f4e1d93d55b6"
+          }
+        },
+        {
+          "label": "person",
+          "confidence": 0.071,
+          "x1": 111,
+          "y1": 28,
+          "x2": 138,
+          "y2": 78,
+          "width": 26,
+          "height": 49,
+          "center_x": 124,
+          "center_y": 53,
+          "area": 1274,
+          "image_width": 640,
+          "image_height": 480
+        },
+        {
+          "label": "microwave",
+          "confidence": 0.056,
+          "x1": 526,
+          "y1": 180,
+          "x2": 636,
+          "y2": 391,
+          "width": 109,
+          "height": 211,
+          "center_x": 581,
+          "center_y": 285,
+          "area": 22999,
+          "image_width": 640,
+          "image_height": 480
+        },
+        {
+          "label": "chair",
+          "confidence": 0.048,
+          "x1": 504,
+          "y1": 104,
+          "x2": 638,
+          "y2": 369,
+          "width": 133,
+          "height": 265,
+          "center_x": 571,
+          "center_y": 236,
+          "area": 35245,
+          "image_width": 640,
+          "image_height": 480,
+          "marvin_continuity": {
+            "tracker_id": 228535,
+            "tracker_source": "marvin_continuity_botsort",
+            "tracker_generation": "b2df570884774b11bc80f4e1d93d55b6"
+          }
+        },
+        {
+          "label": "chair",
+          "confidence": 0.046,
+          "x1": 562,
+          "y1": 104,
+          "x2": 639,
+          "y2": 185,
+          "width": 77,
+          "height": 80,
+          "center_x": 600,
+          "center_y": 145,
+          "area": 6160,
+          "image_width": 640,
+          "image_height": 480,
+          "marvin_continuity": {
+            "tracker_id": 228547,
+            "tracker_source": "marvin_continuity_botsort",
+            "tracker_generation": "b2df570884774b11bc80f4e1d93d55b6"
+          }
+        },
+        {
+          "label": "suitcase",
+          "confidence": 0.045,
+          "x1": 457,
+          "y1": 183,
+          "x2": 531,
+          "y2": 300,
+          "width": 74,
+          "height": 117,
+          "center_x": 494,
+          "center_y": 242,
+          "area": 8658,
+          "image_width": 640,
+          "image_height": 480,
+          "marvin_continuity": {
+            "tracker_id": 228467,
+            "tracker_source": "marvin_continuity_botsort",
+            "tracker_generation": "b2df570884774b11bc80f4e1d93d55b6"
+          }
+        },
+        {
+          "label": "backpack",
+          "confidence": 0.043,
+          "x1": 562,
+          "y1": 104,
+          "x2": 639,
+          "y2": 185,
+          "width": 77,
+          "height": 80,
+          "center_x": 600,
+          "center_y": 144,
+          "area": 6160,
+          "image_width": 640,
+          "image_height": 480,
+          "marvin_continuity": {
+            "tracker_id": 228577,
+            "tracker_source": "marvin_continuity_botsort",
+            "tracker_generation": "b2df570884774b11bc80f4e1d93d55b6"
+          }
+        },
+        {
+          "label": "book",
+          "confidence": 0.043,
+          "x1": 541,
+          "y1": 85,
+          "x2": 623,
+          "y2": 115,
+          "width": 82,
+          "height": 29,
+          "center_x": 582,
+          "center_y": 100,
+          "area": 2378,
+          "image_width": 640,
+          "image_height": 480,
+          "marvin_continuity": {
+            "tracker_id": 228383,
+            "tracker_source": "marvin_continuity_botsort",
+            "tracker_generation": "b2df570884774b11bc80f4e1d93d55b6"
+          }
+        },
+        {
+          "label": "handbag",
+          "confidence": 0.043,
+          "x1": 460,
+          "y1": 169,
+          "x2": 553,
+          "y2": 299,
+          "width": 93,
+          "height": 129,
+          "center_x": 507,
+          "center_y": 234,
+          "area": 11997,
+          "image_width": 640,
+          "image_height": 480
+        },
+        {
+          "label": "person",
+          "confidence": 0.042,
+          "x1": 562,
+          "y1": 105,
+          "x2": 639,
+          "y2": 185,
+          "width": 76,
+          "height": 79,
+          "center_x": 600,
+          "center_y": 145,
+          "area": 6004,
+          "image_width": 640,
+          "image_height": 480,
+          "marvin_continuity": {
+            "tracker_id": 228546,
+            "tracker_source": "marvin_continuity_botsort",
+            "tracker_generation": "b2df570884774b11bc80f4e1d93d55b6"
+          }
+        },
+        {
+          "label": "suitcase",
+          "confidence": 0.039,
+          "x1": 478,
+          "y1": 113,
+          "x2": 625,
+          "y2": 199,
+          "width": 146,
+          "height": 85,
+          "center_x": 551,
+          "center_y": 156,
+          "area": 12410,
+          "image_width": 640,
+          "image_height": 480,
+          "marvin_continuity": {
+            "tracker_id": 228534,
+            "tracker_source": "marvin_continuity_botsort",
+            "tracker_generation": "b2df570884774b11bc80f4e1d93d55b6"
+          }
+        },
+        {
+          "label": "refrigerator",
+          "confidence": 0.035,
+          "x1": 168,
+          "y1": 0,
+          "x2": 321,
+          "y2": 282,
+          "width": 152,
+          "height": 282,
+          "center_x": 245,
+          "center_y": 141,
+          "area": 42864,
+          "image_width": 640,
+          "image_height": 480,
+          "marvin_continuity": {
+            "tracker_id": 219649,
+            "tracker_source": "marvin_continuity_botsort",
+            "tracker_generation": "b2df570884774b11bc80f4e1d93d55b6"
+          }
+        },
+        {
+          "label": "person",
+          "confidence": 0.032,
+          "x1": 59,
+          "y1": 123,
+          "x2": 100,
+          "y2": 205,
+          "width": 41,
+          "height": 82,
+          "center_x": 79,
+          "center_y": 164,
+          "area": 3362,
+          "image_width": 640,
+          "image_height": 480,
+          "marvin_continuity": {
+            "tracker_id": 228380,
+            "tracker_source": "marvin_continuity_botsort",
+            "tracker_generation": "b2df570884774b11bc80f4e1d93d55b6"
+          }
+        },
+        {
+          "label": "tv",
+          "confidence": 0.032,
+          "x1": 0,
+          "y1": 0,
+          "x2": 150,
+          "y2": 136,
+          "width": 150,
+          "height": 136,
+          "center_x": 75,
+          "center_y": 68,
+          "area": 20400,
+          "image_width": 640,
+          "image_height": 480,
+          "marvin_continuity": {
+            "tracker_id": 221289,
+            "tracker_source": "marvin_continuity_botsort",
+            "tracker_generation": "b2df570884774b11bc80f4e1d93d55b6"
+          }
+        },
+        {
+          "label": "chair",
+          "confidence": 0.028,
+          "x1": 456,
+          "y1": 103,
+          "x2": 637,
+          "y2": 307,
+          "width": 181,
+          "height": 203,
+          "center_x": 547,
+          "center_y": 205,
+          "area": 36743,
+          "image_width": 640,
+          "image_height": 480,
+          "marvin_continuity": {
+            "tracker_id": 228553,
+            "tracker_source": "marvin_continuity_botsort",
+            "tracker_generation": "b2df570884774b11bc80f4e1d93d55b6"
+          }
+        },
+        {
+          "label": "chair",
+          "confidence": 0.026,
+          "x1": 543,
+          "y1": 104,
+          "x2": 639,
+          "y2": 383,
+          "width": 95,
+          "height": 278,
+          "center_x": 591,
+          "center_y": 244,
+          "area": 26410,
+          "image_width": 640,
+          "image_height": 480,
+          "marvin_continuity": {
+            "tracker_id": 228571,
+            "tracker_source": "marvin_continuity_botsort",
+            "tracker_generation": "b2df570884774b11bc80f4e1d93d55b6"
+          }
+        },
+        {
+          "label": "chair",
+          "confidence": 0.026,
+          "x1": 492,
+          "y1": 105,
+          "x2": 638,
+          "y2": 283,
+          "width": 145,
+          "height": 178,
+          "center_x": 565,
+          "center_y": 194,
+          "area": 25810,
+          "image_width": 640,
+          "image_height": 480
+        },
+        {
+          "label": "cell phone",
+          "confidence": 0.025,
+          "x1": 530,
+          "y1": 89,
+          "x2": 542,
+          "y2": 109,
+          "width": 12,
+          "height": 20,
+          "center_x": 536,
+          "center_y": 99,
+          "area": 240,
+          "image_width": 640,
+          "image_height": 480
+        },
+        {
+          "label": "person",
+          "confidence": 0.024,
+          "x1": 37,
+          "y1": 123,
+          "x2": 115,
+          "y2": 287,
+          "width": 77,
+          "height": 164,
+          "center_x": 76,
+          "center_y": 205,
+          "area": 12628,
+          "image_width": 640,
+          "image_height": 480
+        },
+        {
+          "label": "person",
+          "confidence": 0.024,
+          "x1": 76,
+          "y1": 123,
+          "x2": 104,
+          "y2": 205,
+          "width": 27,
+          "height": 82,
+          "center_x": 90,
+          "center_y": 164,
+          "area": 2214,
+          "image_width": 640,
+          "image_height": 480,
+          "marvin_continuity": {
+            "tracker_id": 227950,
+            "tracker_source": "marvin_continuity_botsort",
+            "tracker_generation": "b2df570884774b11bc80f4e1d93d55b6"
+          }
+        },
+        {
+          "label": "laptop",
+          "confidence": 0.024,
+          "x1": 475,
+          "y1": 43,
+          "x2": 625,
+          "y2": 117,
+          "width": 150,
+          "height": 73,
+          "center_x": 550,
+          "center_y": 80,
+          "area": 10950,
+          "image_width": 640,
+          "image_height": 480,
+          "marvin_continuity": {
+            "tracker_id": 228434,
+            "tracker_source": "marvin_continuity_botsort",
+            "tracker_generation": "b2df570884774b11bc80f4e1d93d55b6"
+          }
+        },
+        {
+          "label": "person",
+          "confidence": 0.024,
+          "x1": 110,
+          "y1": 29,
+          "x2": 172,
+          "y2": 80,
+          "width": 61,
+          "height": 51,
+          "center_x": 141,
+          "center_y": 55,
+          "area": 3111,
+          "image_width": 640,
+          "image_height": 480,
+          "marvin_continuity": {
+            "tracker_id": 228335,
+            "tracker_source": "marvin_continuity_botsort",
+            "tracker_generation": "b2df570884774b11bc80f4e1d93d55b6"
+          }
+        },
+        {
+          "label": "person",
+          "confidence": 0.022,
+          "x1": 78,
+          "y1": 12,
+          "x2": 172,
+          "y2": 289,
+          "width": 94,
+          "height": 276,
+          "center_x": 125,
+          "center_y": 151,
+          "area": 25944,
+          "image_width": 640,
+          "image_height": 480
+        },
+        {
+          "label": "handbag",
+          "confidence": 0.022,
+          "x1": 457,
+          "y1": 186,
+          "x2": 533,
+          "y2": 301,
+          "width": 75,
+          "height": 114,
+          "center_x": 495,
+          "center_y": 243,
+          "area": 8550,
+          "image_width": 640,
+          "image_height": 480
+        },
+        {
+          "label": "backpack",
+          "confidence": 0.022,
+          "x1": 130,
+          "y1": 223,
+          "x2": 166,
+          "y2": 282,
+          "width": 35,
+          "height": 59,
+          "center_x": 148,
+          "center_y": 253,
+          "area": 2065,
+          "image_width": 640,
+          "image_height": 480
+        },
+        {
+          "label": "suitcase",
+          "confidence": 0.022,
+          "x1": 414,
+          "y1": 222,
+          "x2": 473,
+          "y2": 291,
+          "width": 59,
+          "height": 68,
+          "center_x": 444,
+          "center_y": 257,
+          "area": 4012,
+          "image_width": 640,
+          "image_height": 480,
+          "marvin_continuity": {
+            "tracker_id": 226432,
+            "tracker_source": "marvin_continuity_botsort",
+            "tracker_generation": "b2df570884774b11bc80f4e1d93d55b6"
+          }
+        },
+        {
+          "label": "bottle",
+          "confidence": 0.021,
+          "x1": 209,
+          "y1": 220,
+          "x2": 226,
+          "y2": 275,
+          "width": 17,
+          "height": 55,
+          "center_x": 218,
+          "center_y": 247,
+          "area": 935,
+          "image_width": 640,
+          "image_height": 480
+        },
+        {
+          "label": "bottle",
+          "confidence": 0.021,
+          "x1": 191,
+          "y1": 226,
+          "x2": 207,
+          "y2": 275,
+          "width": 16,
+          "height": 49,
+          "center_x": 199,
+          "center_y": 250,
+          "area": 784,
+          "image_width": 640,
+          "image_height": 480,
+          "marvin_continuity": {
+            "tracker_id": 228478,
+            "tracker_source": "marvin_continuity_botsort",
+            "tracker_generation": "b2df570884774b11bc80f4e1d93d55b6"
+          }
+        }
+      ],
+      "camera_running": true,
+      "camera_url": "http://192.168.68.142:8091/camera/latest.jpg",
+      "last_error": null,
+      "image_width": 640,
+      "image_height": 480
+    },
+    {
+      "timestamp": "2026-10-10T16:48:34.852997+00:00",
+      "source_frame_stamp_ns": 1791650914810135714,
+      "detections": [
+        {
+          "label": "tv",
+          "confidence": 0.591,
+          "x1": 475,
+          "y1": 43,
+          "x2": 546,
+          "y2": 118,
+          "width": 71,
+          "height": 74,
+          "center_x": 511,
+          "center_y": 80,
+          "area": 5254,
+          "image_width": 640,
+          "image_height": 480,
+          "marvin_continuity": {
+            "tracker_id": 223210,
+            "tracker_source": "marvin_continuity_botsort",
+            "tracker_generation": "b2df570884774b11bc80f4e1d93d55b6"
+          }
+        },
+        {
+          "label": "person",
+          "confidence": 0.279,
+          "x1": 111,
+          "y1": 28,
+          "x2": 151,
+          "y2": 78,
+          "width": 40,
+          "height": 49,
+          "center_x": 131,
+          "center_y": 53,
+          "area": 1960,
+          "image_width": 640,
+          "image_height": 480,
+          "track_id": 228259,
+          "marvin_continuity": {
+            "tracker_id": 215457,
+            "tracker_source": "marvin_continuity_botsort",
+            "tracker_generation": "b2df570884774b11bc80f4e1d93d55b6"
+          }
+        },
+        {
+          "label": "person",
+          "confidence": 0.185,
+          "x1": 104,
+          "y1": 69,
+          "x2": 172,
+          "y2": 279,
+          "width": 68,
+          "height": 209,
+          "center_x": 138,
+          "center_y": 174,
+          "area": 14212,
+          "image_width": 640,
+          "image_height": 480,
+          "track_id": 226984,
+          "marvin_continuity": {
+            "tracker_id": 227576,
+            "tracker_source": "marvin_continuity_botsort",
+            "tracker_generation": "b2df570884774b11bc80f4e1d93d55b6"
+          }
+        },
+        {
+          "label": "person",
+          "confidence": 0.173,
+          "x1": 558,
+          "y1": 105,
+          "x2": 639,
+          "y2": 185,
+          "width": 80,
+          "height": 79,
+          "center_x": 599,
+          "center_y": 145,
+          "area": 6320,
+          "image_width": 640,
+          "image_height": 480,
+          "marvin_continuity": {
+            "tracker_id": 228546,
+            "tracker_source": "marvin_continuity_botsort",
+            "tracker_generation": "b2df570884774b11bc80f4e1d93d55b6"
+          }
+        },
+        {
+          "label": "suitcase",
+          "confidence": 0.121,
+          "x1": 457,
+          "y1": 169,
+          "x2": 554,
+          "y2": 301,
+          "width": 96,
+          "height": 132,
+          "center_x": 505,
+          "center_y": 235,
+          "area": 12672,
+          "image_width": 640,
+          "image_height": 480,
+          "marvin_continuity": {
+            "tracker_id": 224340,
+            "tracker_source": "marvin_continuity_botsort",
+            "tracker_generation": "b2df570884774b11bc80f4e1d93d55b6"
+          }
+        },
+        {
+          "label": "handbag",
+          "confidence": 0.099,
+          "x1": 130,
+          "y1": 206,
+          "x2": 171,
+          "y2": 283,
+          "width": 40,
+          "height": 76,
+          "center_x": 150,
+          "center_y": 245,
+          "area": 3040,
+          "image_width": 640,
+          "image_height": 480,
+          "marvin_continuity": {
+            "tracker_id": 219332,
+            "tracker_source": "marvin_continuity_botsort",
+            "tracker_generation": "b2df570884774b11bc80f4e1d93d55b6"
+          }
+        },
+        {
+          "label": "refrigerator",
+          "confidence": 0.097,
+          "x1": 266,
+          "y1": 0,
+          "x2": 321,
+          "y2": 123,
+          "width": 55,
+          "height": 123,
+          "center_x": 294,
+          "center_y": 62,
+          "area": 6765,
+          "image_width": 640,
+          "image_height": 480,
+          "marvin_continuity": {
+            "tracker_id": 217248,
+            "tracker_source": "marvin_continuity_botsort",
+            "tracker_generation": "b2df570884774b11bc80f4e1d93d55b6"
+          }
+        },
+        {
+          "label": "person",
+          "confidence": 0.09,
+          "x1": 109,
+          "y1": 28,
+          "x2": 141,
+          "y2": 79,
+          "width": 31,
+          "height": 51,
+          "center_x": 125,
+          "center_y": 54,
+          "area": 1581,
+          "image_width": 640,
+          "image_height": 480
+        },
+        {
+          "label": "refrigerator",
+          "confidence": 0.087,
+          "x1": 262,
+          "y1": 0,
+          "x2": 321,
+          "y2": 278,
+          "width": 58,
+          "height": 278,
+          "center_x": 292,
+          "center_y": 139,
+          "area": 16124,
+          "image_width": 640,
+          "image_height": 480,
+          "marvin_continuity": {
+            "tracker_id": 222475,
+            "tracker_source": "marvin_continuity_botsort",
+            "tracker_generation": "b2df570884774b11bc80f4e1d93d55b6"
+          }
+        },
+        {
+          "label": "microwave",
+          "confidence": 0.081,
+          "x1": 524,
+          "y1": 180,
+          "x2": 636,
+          "y2": 391,
+          "width": 111,
+          "height": 210,
+          "center_x": 580,
+          "center_y": 286,
+          "area": 23310,
+          "image_width": 640,
+          "image_height": 480
+        },
+        {
+          "label": "bottle",
+          "confidence": 0.067,
+          "x1": 192,
+          "y1": 219,
+          "x2": 226,
+          "y2": 279,
+          "width": 33,
+          "height": 59,
+          "center_x": 209,
+          "center_y": 249,
+          "area": 1947,
+          "image_width": 640,
+          "image_height": 480,
+          "marvin_continuity": {
+            "tracker_id": 219568,
+            "tracker_source": "marvin_continuity_botsort",
+            "tracker_generation": "b2df570884774b11bc80f4e1d93d55b6"
+          }
+        },
+        {
+          "label": "book",
+          "confidence": 0.053,
+          "x1": 539,
+          "y1": 86,
+          "x2": 624,
+          "y2": 116,
+          "width": 85,
+          "height": 30,
+          "center_x": 581,
+          "center_y": 101,
+          "area": 2550,
+          "image_width": 640,
+          "image_height": 480,
+          "marvin_continuity": {
+            "tracker_id": 228383,
+            "tracker_source": "marvin_continuity_botsort",
+            "tracker_generation": "b2df570884774b11bc80f4e1d93d55b6"
+          }
+        },
+        {
+          "label": "laptop",
+          "confidence": 0.053,
+          "x1": 475,
+          "y1": 43,
+          "x2": 626,
+          "y2": 118,
+          "width": 150,
+          "height": 75,
+          "center_x": 550,
+          "center_y": 81,
+          "area": 11250,
+          "image_width": 640,
+          "image_height": 480,
+          "marvin_continuity": {
+            "tracker_id": 228434,
+            "tracker_source": "marvin_continuity_botsort",
+            "tracker_generation": "b2df570884774b11bc80f4e1d93d55b6"
+          }
+        },
+        {
+          "label": "person",
+          "confidence": 0.053,
+          "x1": 75,
+          "y1": 123,
+          "x2": 104,
+          "y2": 209,
+          "width": 28,
+          "height": 85,
+          "center_x": 90,
+          "center_y": 166,
+          "area": 2380,
+          "image_width": 640,
+          "image_height": 480,
+          "marvin_continuity": {
+            "tracker_id": 227950,
+            "tracker_source": "marvin_continuity_botsort",
+            "tracker_generation": "b2df570884774b11bc80f4e1d93d55b6"
+          }
+        },
+        {
+          "label": "person",
+          "confidence": 0.052,
+          "x1": 107,
+          "y1": 119,
+          "x2": 169,
+          "y2": 280,
+          "width": 62,
+          "height": 161,
+          "center_x": 138,
+          "center_y": 200,
+          "area": 9982,
+          "image_width": 640,
+          "image_height": 480,
+          "marvin_continuity": {
+            "tracker_id": 228536,
+            "tracker_source": "marvin_continuity_botsort",
+            "tracker_generation": "b2df570884774b11bc80f4e1d93d55b6"
+          }
+        },
+        {
+          "label": "handbag",
+          "confidence": 0.051,
+          "x1": 460,
+          "y1": 169,
+          "x2": 553,
+          "y2": 298,
+          "width": 93,
+          "height": 129,
+          "center_x": 507,
+          "center_y": 233,
+          "area": 11997,
+          "image_width": 640,
+          "image_height": 480,
+          "marvin_continuity": {
+            "tracker_id": 228467,
+            "tracker_source": "marvin_continuity_botsort",
+            "tracker_generation": "b2df570884774b11bc80f4e1d93d55b6"
+          }
+        },
+        {
+          "label": "tv",
+          "confidence": 0.036,
+          "x1": 0,
+          "y1": 0,
+          "x2": 150,
+          "y2": 138,
+          "width": 150,
+          "height": 137,
+          "center_x": 75,
+          "center_y": 69,
+          "area": 20550,
+          "image_width": 640,
+          "image_height": 480,
+          "marvin_continuity": {
+            "tracker_id": 221289,
+            "tracker_source": "marvin_continuity_botsort",
+            "tracker_generation": "b2df570884774b11bc80f4e1d93d55b6"
+          }
+        },
+        {
+          "label": "chair",
+          "confidence": 0.034,
+          "x1": 557,
+          "y1": 105,
+          "x2": 639,
+          "y2": 195,
+          "width": 81,
+          "height": 89,
+          "center_x": 598,
+          "center_y": 150,
+          "area": 7209,
+          "image_width": 640,
+          "image_height": 480,
+          "marvin_continuity": {
+            "tracker_id": 228571,
+            "tracker_source": "marvin_continuity_botsort",
+            "tracker_generation": "b2df570884774b11bc80f4e1d93d55b6"
+          }
+        },
+        {
+          "label": "person",
+          "confidence": 0.031,
+          "x1": 108,
+          "y1": 28,
+          "x2": 154,
+          "y2": 96,
+          "width": 45,
+          "height": 68,
+          "center_x": 131,
+          "center_y": 62,
+          "area": 3060,
+          "image_width": 640,
+          "image_height": 480
+        },
+        {
+          "label": "suitcase",
+          "confidence": 0.031,
+          "x1": 526,
+          "y1": 179,
+          "x2": 637,
+          "y2": 392,
+          "width": 111,
+          "height": 213,
+          "center_x": 582,
+          "center_y": 286,
+          "area": 23643,
+          "image_width": 640,
+          "image_height": 480,
+          "marvin_continuity": {
+            "tracker_id": 211652,
+            "tracker_source": "marvin_continuity_botsort",
+            "tracker_generation": "b2df570884774b11bc80f4e1d93d55b6"
+          }
+        },
+        {
+          "label": "person",
+          "confidence": 0.028,
+          "x1": 110,
+          "y1": 29,
+          "x2": 170,
+          "y2": 79,
+          "width": 59,
+          "height": 50,
+          "center_x": 140,
+          "center_y": 54,
+          "area": 2950,
+          "image_width": 640,
+          "image_height": 480,
+          "marvin_continuity": {
+            "tracker_id": 228335,
+            "tracker_source": "marvin_continuity_botsort",
+            "tracker_generation": "b2df570884774b11bc80f4e1d93d55b6"
+          }
+        },
+        {
+          "label": "chair",
+          "confidence": 0.028,
+          "x1": 463,
+          "y1": 103,
+          "x2": 638,
+          "y2": 296,
+          "width": 175,
+          "height": 193,
+          "center_x": 550,
+          "center_y": 199,
+          "area": 33775,
+          "image_width": 640,
+          "image_height": 480,
+          "marvin_continuity": {
+            "tracker_id": 228553,
+            "tracker_source": "marvin_continuity_botsort",
+            "tracker_generation": "b2df570884774b11bc80f4e1d93d55b6"
+          }
+        },
+        {
+          "label": "suitcase",
+          "confidence": 0.027,
+          "x1": 477,
+          "y1": 111,
+          "x2": 626,
+          "y2": 198,
+          "width": 148,
+          "height": 86,
+          "center_x": 551,
+          "center_y": 155,
+          "area": 12728,
+          "image_width": 640,
+          "image_height": 480,
+          "marvin_continuity": {
+            "tracker_id": 228534,
+            "tracker_source": "marvin_continuity_botsort",
+            "tracker_generation": "b2df570884774b11bc80f4e1d93d55b6"
+          }
+        },
+        {
+          "label": "cell phone",
+          "confidence": 0.023,
+          "x1": 530,
+          "y1": 89,
+          "x2": 542,
+          "y2": 109,
+          "width": 12,
+          "height": 20,
+          "center_x": 536,
+          "center_y": 99,
+          "area": 240,
+          "image_width": 640,
+          "image_height": 480
+        },
+        {
+          "label": "suitcase",
+          "confidence": 0.023,
+          "x1": 414,
+          "y1": 222,
+          "x2": 473,
+          "y2": 291,
+          "width": 59,
+          "height": 69,
+          "center_x": 443,
+          "center_y": 257,
+          "area": 4071,
+          "image_width": 640,
+          "image_height": 480,
+          "marvin_continuity": {
+            "tracker_id": 226432,
+            "tracker_source": "marvin_continuity_botsort",
+            "tracker_generation": "b2df570884774b11bc80f4e1d93d55b6"
+          }
+        },
+        {
+          "label": "person",
+          "confidence": 0.022,
+          "x1": 112,
+          "y1": 28,
+          "x2": 135,
+          "y2": 69,
+          "width": 23,
+          "height": 40,
+          "center_x": 124,
+          "center_y": 48,
+          "area": 920,
+          "image_width": 640,
+          "image_height": 480
+        },
+        {
+          "label": "chair",
+          "confidence": 0.022,
+          "x1": 524,
+          "y1": 105,
+          "x2": 638,
+          "y2": 394,
+          "width": 114,
+          "height": 289,
+          "center_x": 581,
+          "center_y": 249,
+          "area": 32946,
+          "image_width": 640,
+          "image_height": 480,
+          "marvin_continuity": {
+            "tracker_id": 228535,
+            "tracker_source": "marvin_continuity_botsort",
+            "tracker_generation": "b2df570884774b11bc80f4e1d93d55b6"
+          }
+        },
+        {
+          "label": "handbag",
+          "confidence": 0.022,
+          "x1": 414,
+          "y1": 222,
+          "x2": 473,
+          "y2": 292,
+          "width": 59,
+          "height": 69,
+          "center_x": 443,
+          "center_y": 257,
+          "area": 4071,
+          "image_width": 640,
+          "image_height": 480
+        },
+        {
+          "label": "refrigerator",
+          "confidence": 0.022,
+          "x1": 168,
+          "y1": 0,
+          "x2": 321,
+          "y2": 277,
+          "width": 153,
+          "height": 276,
+          "center_x": 244,
+          "center_y": 138,
+          "area": 42228,
+          "image_width": 640,
+          "image_height": 480,
+          "marvin_continuity": {
+            "tracker_id": 219649,
+            "tracker_source": "marvin_continuity_botsort",
+            "tracker_generation": "b2df570884774b11bc80f4e1d93d55b6"
+          }
+        },
+        {
+          "label": "chair",
+          "confidence": 0.022,
+          "x1": 481,
+          "y1": 104,
+          "x2": 639,
+          "y2": 192,
+          "width": 157,
+          "height": 88,
+          "center_x": 560,
+          "center_y": 148,
+          "area": 13816,
+          "image_width": 640,
+          "image_height": 480,
+          "marvin_continuity": {
+            "tracker_id": 224847,
+            "tracker_source": "marvin_continuity_botsort",
+            "tracker_generation": "b2df570884774b11bc80f4e1d93d55b6"
+          }
+        }
+      ],
+      "camera_running": true,
+      "camera_url": "http://192.168.68.142:8091/camera/latest.jpg",
+      "last_error": null,
+      "image_width": 640,
+      "image_height": 480
+    },
+    {
+      "timestamp": "2026-10-10T16:48:35.143804+00:00",
+      "source_frame_stamp_ns": 1791650915204950039,
+      "detections": [
+        {
+          "label": "tv",
+          "confidence": 0.644,
+          "x1": 475,
+          "y1": 43,
+          "x2": 546,
+          "y2": 117,
+          "width": 70,
+          "height": 74,
+          "center_x": 510,
+          "center_y": 80,
+          "area": 5180,
+          "image_width": 640,
+          "image_height": 480,
+          "marvin_continuity": {
+            "tracker_id": 223210,
+            "tracker_source": "marvin_continuity_botsort",
+            "tracker_generation": "b2df570884774b11bc80f4e1d93d55b6"
+          }
+        },
+        {
+          "label": "suitcase",
+          "confidence": 0.203,
+          "x1": 456,
+          "y1": 169,
+          "x2": 553,
+          "y2": 301,
+          "width": 97,
+          "height": 131,
+          "center_x": 505,
+          "center_y": 235,
+          "area": 12707,
+          "image_width": 640,
+          "image_height": 480,
+          "marvin_continuity": {
+            "tracker_id": 224340,
+            "tracker_source": "marvin_continuity_botsort",
+            "tracker_generation": "b2df570884774b11bc80f4e1d93d55b6"
+          }
+        },
+        {
+          "label": "refrigerator",
+          "confidence": 0.102,
+          "x1": 262,
+          "y1": 0,
+          "x2": 321,
+          "y2": 280,
+          "width": 59,
+          "height": 280,
+          "center_x": 292,
+          "center_y": 140,
+          "area": 16520,
+          "image_width": 640,
+          "image_height": 480,
+          "marvin_continuity": {
+            "tracker_id": 222475,
+            "tracker_source": "marvin_continuity_botsort",
+            "tracker_generation": "b2df570884774b11bc80f4e1d93d55b6"
+          }
+        },
+        {
+          "label": "suitcase",
+          "confidence": 0.102,
+          "x1": 526,
+          "y1": 179,
+          "x2": 637,
+          "y2": 391,
+          "width": 110,
+          "height": 212,
+          "center_x": 582,
+          "center_y": 285,
+          "area": 23320,
+          "image_width": 640,
+          "image_height": 480,
+          "marvin_continuity": {
+            "tracker_id": 228571,
+            "tracker_source": "marvin_continuity_botsort",
+            "tracker_generation": "b2df570884774b11bc80f4e1d93d55b6"
+          }
+        },
+        {
+          "label": "handbag",
+          "confidence": 0.095,
+          "x1": 131,
+          "y1": 206,
+          "x2": 171,
+          "y2": 283,
+          "width": 39,
+          "height": 76,
+          "center_x": 151,
+          "center_y": 244,
+          "area": 2964,
+          "image_width": 640,
+          "image_height": 480,
+          "marvin_continuity": {
+            "tracker_id": 219332,
+            "tracker_source": "marvin_continuity_botsort",
+            "tracker_generation": "b2df570884774b11bc80f4e1d93d55b6"
+          }
+        },
+        {
+          "label": "person",
+          "confidence": 0.091,
+          "x1": 105,
+          "y1": 38,
+          "x2": 173,
+          "y2": 279,
+          "width": 68,
+          "height": 240,
+          "center_x": 139,
+          "center_y": 158,
+          "area": 16320,
+          "image_width": 640,
+          "image_height": 480,
+          "marvin_continuity": {
+            "tracker_id": 227576,
+            "tracker_source": "marvin_continuity_botsort",
+            "tracker_generation": "b2df570884774b11bc80f4e1d93d55b6"
+          }
+        },
+        {
+          "label": "bottle",
+          "confidence": 0.079,
+          "x1": 192,
+          "y1": 220,
+          "x2": 226,
+          "y2": 277,
+          "width": 33,
+          "height": 57,
+          "center_x": 209,
+          "center_y": 249,
+          "area": 1881,
+          "image_width": 640,
+          "image_height": 480,
+          "marvin_continuity": {
+            "tracker_id": 219568,
+            "tracker_source": "marvin_continuity_botsort",
+            "tracker_generation": "b2df570884774b11bc80f4e1d93d55b6"
+          }
+        },
+        {
+          "label": "handbag",
+          "confidence": 0.065,
+          "x1": 131,
+          "y1": 223,
+          "x2": 167,
+          "y2": 283,
+          "width": 35,
+          "height": 59,
+          "center_x": 149,
+          "center_y": 253,
+          "area": 2065,
+          "image_width": 640,
+          "image_height": 480,
+          "marvin_continuity": {
+            "tracker_id": 228478,
+            "tracker_source": "marvin_continuity_botsort",
+            "tracker_generation": "b2df570884774b11bc80f4e1d93d55b6"
+          }
+        },
+        {
+          "label": "person",
+          "confidence": 0.061,
+          "x1": 108,
+          "y1": 98,
+          "x2": 169,
+          "y2": 276,
+          "width": 60,
+          "height": 177,
+          "center_x": 139,
+          "center_y": 187,
+          "area": 10620,
+          "image_width": 640,
+          "image_height": 480
+        },
+        {
+          "label": "suitcase",
+          "confidence": 0.061,
+          "x1": 478,
+          "y1": 111,
+          "x2": 626,
+          "y2": 196,
+          "width": 147,
+          "height": 85,
+          "center_x": 552,
+          "center_y": 153,
+          "area": 12495,
+          "image_width": 640,
+          "image_height": 480,
+          "marvin_continuity": {
+            "tracker_id": 228534,
+            "tracker_source": "marvin_continuity_botsort",
+            "tracker_generation": "b2df570884774b11bc80f4e1d93d55b6"
+          }
+        },
+        {
+          "label": "person",
+          "confidence": 0.059,
+          "x1": 111,
+          "y1": 28,
+          "x2": 151,
+          "y2": 78,
+          "width": 39,
+          "height": 49,
+          "center_x": 131,
+          "center_y": 53,
+          "area": 1911,
+          "image_width": 640,
+          "image_height": 480,
+          "marvin_continuity": {
+            "tracker_id": 215457,
+            "tracker_source": "marvin_continuity_botsort",
+            "tracker_generation": "b2df570884774b11bc80f4e1d93d55b6"
+          }
+        },
+        {
+          "label": "refrigerator",
+          "confidence": 0.056,
+          "x1": 266,
+          "y1": 0,
+          "x2": 321,
+          "y2": 125,
+          "width": 55,
+          "height": 124,
+          "center_x": 294,
+          "center_y": 62,
+          "area": 6820,
+          "image_width": 640,
+          "image_height": 480,
+          "marvin_continuity": {
+            "tracker_id": 217248,
+            "tracker_source": "marvin_continuity_botsort",
+            "tracker_generation": "b2df570884774b11bc80f4e1d93d55b6"
+          }
+        },
+        {
+          "label": "backpack",
+          "confidence": 0.055,
+          "x1": 131,
+          "y1": 216,
+          "x2": 167,
+          "y2": 283,
+          "width": 36,
+          "height": 66,
+          "center_x": 149,
+          "center_y": 249,
+          "area": 2376,
+          "image_width": 640,
+          "image_height": 480
+        },
+        {
+          "label": "book",
+          "confidence": 0.051,
+          "x1": 533,
+          "y1": 85,
+          "x2": 623,
+          "y2": 116,
+          "width": 90,
+          "height": 30,
+          "center_x": 578,
+          "center_y": 101,
+          "area": 2700,
+          "image_width": 640,
+          "image_height": 480,
+          "marvin_continuity": {
+            "tracker_id": 228383,
+            "tracker_source": "marvin_continuity_botsort",
+            "tracker_generation": "b2df570884774b11bc80f4e1d93d55b6"
+          }
+        },
+        {
+          "label": "refrigerator",
+          "confidence": 0.05,
+          "x1": 168,
+          "y1": 0,
+          "x2": 321,
+          "y2": 284,
+          "width": 152,
+          "height": 284,
+          "center_x": 245,
+          "center_y": 142,
+          "area": 43168,
+          "image_width": 640,
+          "image_height": 480,
+          "marvin_continuity": {
+            "tracker_id": 219649,
+            "tracker_source": "marvin_continuity_botsort",
+            "tracker_generation": "b2df570884774b11bc80f4e1d93d55b6"
+          }
+        },
+        {
+          "label": "suitcase",
+          "confidence": 0.043,
+          "x1": 456,
+          "y1": 187,
+          "x2": 532,
+          "y2": 301,
+          "width": 75,
+          "height": 114,
+          "center_x": 494,
+          "center_y": 244,
+          "area": 8550,
+          "image_width": 640,
+          "image_height": 480,
+          "marvin_continuity": {
+            "tracker_id": 228344,
+            "tracker_source": "marvin_continuity_botsort",
+            "tracker_generation": "b2df570884774b11bc80f4e1d93d55b6"
+          }
+        },
+        {
+          "label": "suitcase",
+          "confidence": 0.042,
+          "x1": 414,
+          "y1": 221,
+          "x2": 473,
+          "y2": 291,
+          "width": 59,
+          "height": 69,
+          "center_x": 443,
+          "center_y": 256,
+          "area": 4071,
+          "image_width": 640,
+          "image_height": 480,
+          "marvin_continuity": {
+            "tracker_id": 226432,
+            "tracker_source": "marvin_continuity_botsort",
+            "tracker_generation": "b2df570884774b11bc80f4e1d93d55b6"
+          }
+        },
+        {
+          "label": "chair",
+          "confidence": 0.035,
+          "x1": 503,
+          "y1": 103,
+          "x2": 638,
+          "y2": 338,
+          "width": 135,
+          "height": 234,
+          "center_x": 571,
+          "center_y": 221,
+          "area": 31590,
+          "image_width": 640,
+          "image_height": 480,
+          "marvin_continuity": {
+            "tracker_id": 224847,
+            "tracker_source": "marvin_continuity_botsort",
+            "tracker_generation": "b2df570884774b11bc80f4e1d93d55b6"
+          }
+        },
+        {
+          "label": "chair",
+          "confidence": 0.035,
+          "x1": 526,
+          "y1": 107,
+          "x2": 638,
+          "y2": 392,
+          "width": 112,
+          "height": 285,
+          "center_x": 582,
+          "center_y": 249,
+          "area": 31920,
+          "image_width": 640,
+          "image_height": 480,
+          "marvin_continuity": {
+            "tracker_id": 228535,
+            "tracker_source": "marvin_continuity_botsort",
+            "tracker_generation": "b2df570884774b11bc80f4e1d93d55b6"
+          }
+        },
+        {
+          "label": "person",
+          "confidence": 0.034,
+          "x1": 77,
+          "y1": 124,
+          "x2": 105,
+          "y2": 208,
+          "width": 27,
+          "height": 84,
+          "center_x": 91,
+          "center_y": 166,
+          "area": 2268,
+          "image_width": 640,
+          "image_height": 480,
+          "marvin_continuity": {
+            "tracker_id": 227950,
+            "tracker_source": "marvin_continuity_botsort",
+            "tracker_generation": "b2df570884774b11bc80f4e1d93d55b6"
+          }
+        },
+        {
+          "label": "person",
+          "confidence": 0.033,
+          "x1": 111,
+          "y1": 29,
+          "x2": 137,
+          "y2": 77,
+          "width": 25,
+          "height": 48,
+          "center_x": 124,
+          "center_y": 53,
+          "area": 1200,
+          "image_width": 640,
+          "image_height": 480
+        },
+        {
+          "label": "laptop",
+          "confidence": 0.032,
+          "x1": 475,
+          "y1": 43,
+          "x2": 625,
+          "y2": 118,
+          "width": 149,
+          "height": 74,
+          "center_x": 550,
+          "center_y": 80,
+          "area": 11026,
+          "image_width": 640,
+          "image_height": 480,
+          "marvin_continuity": {
+            "tracker_id": 228434,
+            "tracker_source": "marvin_continuity_botsort",
+            "tracker_generation": "b2df570884774b11bc80f4e1d93d55b6"
+          }
+        },
+        {
+          "label": "microwave",
+          "confidence": 0.03,
+          "x1": 526,
+          "y1": 179,
+          "x2": 636,
+          "y2": 390,
+          "width": 110,
+          "height": 211,
+          "center_x": 581,
+          "center_y": 285,
+          "area": 23210,
+          "image_width": 640,
+          "image_height": 480,
+          "marvin_continuity": {
+            "tracker_id": 211652,
+            "tracker_source": "marvin_continuity_botsort",
+            "tracker_generation": "b2df570884774b11bc80f4e1d93d55b6"
+          }
+        },
+        {
+          "label": "handbag",
+          "confidence": 0.03,
+          "x1": 559,
+          "y1": 104,
+          "x2": 639,
+          "y2": 184,
+          "width": 79,
+          "height": 80,
+          "center_x": 599,
+          "center_y": 144,
+          "area": 6320,
+          "image_width": 640,
+          "image_height": 480,
+          "marvin_continuity": {
+            "tracker_id": 228546,
+            "tracker_source": "marvin_continuity_botsort",
+            "tracker_generation": "b2df570884774b11bc80f4e1d93d55b6"
+          }
+        },
+        {
+          "label": "backpack",
+          "confidence": 0.03,
+          "x1": 559,
+          "y1": 104,
+          "x2": 639,
+          "y2": 184,
+          "width": 79,
+          "height": 79,
+          "center_x": 599,
+          "center_y": 144,
+          "area": 6241,
+          "image_width": 640,
+          "image_height": 480,
+          "marvin_continuity": {
+            "tracker_id": 228577,
+            "tracker_source": "marvin_continuity_botsort",
+            "tracker_generation": "b2df570884774b11bc80f4e1d93d55b6"
+          }
+        },
+        {
+          "label": "tv",
+          "confidence": 0.028,
+          "x1": 0,
+          "y1": 0,
+          "x2": 149,
+          "y2": 136,
+          "width": 149,
+          "height": 135,
+          "center_x": 74,
+          "center_y": 68,
+          "area": 20115,
+          "image_width": 640,
+          "image_height": 480,
+          "marvin_continuity": {
+            "tracker_id": 221289,
+            "tracker_source": "marvin_continuity_botsort",
+            "tracker_generation": "b2df570884774b11bc80f4e1d93d55b6"
+          }
+        },
+        {
+          "label": "cell phone",
+          "confidence": 0.026,
+          "x1": 529,
+          "y1": 88,
+          "x2": 542,
+          "y2": 110,
+          "width": 12,
+          "height": 21,
+          "center_x": 536,
+          "center_y": 99,
+          "area": 252,
+          "image_width": 640,
+          "image_height": 480,
+          "marvin_continuity": {
+            "tracker_id": 228554,
+            "tracker_source": "marvin_continuity_botsort",
+            "tracker_generation": "b2df570884774b11bc80f4e1d93d55b6"
+          }
+        },
+        {
+          "label": "chair",
+          "confidence": 0.024,
+          "x1": 560,
+          "y1": 104,
+          "x2": 639,
+          "y2": 184,
+          "width": 79,
+          "height": 79,
+          "center_x": 600,
+          "center_y": 144,
+          "area": 6241,
+          "image_width": 640,
+          "image_height": 480
+        },
+        {
+          "label": "person",
+          "confidence": 0.024,
+          "x1": 73,
+          "y1": 123,
+          "x2": 120,
+          "y2": 285,
+          "width": 47,
+          "height": 161,
+          "center_x": 96,
+          "center_y": 204,
+          "area": 7567,
+          "image_width": 640,
+          "image_height": 480,
+          "marvin_continuity": {
+            "tracker_id": 228536,
+            "tracker_source": "marvin_continuity_botsort",
+            "tracker_generation": "b2df570884774b11bc80f4e1d93d55b6"
+          }
+        },
+        {
+          "label": "person",
+          "confidence": 0.024,
+          "x1": 82,
+          "y1": 121,
+          "x2": 167,
+          "y2": 276,
+          "width": 85,
+          "height": 155,
+          "center_x": 124,
+          "center_y": 199,
+          "area": 13175,
+          "image_width": 640,
+          "image_height": 480
+        },
+        {
+          "label": "person",
+          "confidence": 0.022,
+          "x1": 73,
+          "y1": 124,
+          "x2": 111,
+          "y2": 214,
+          "width": 37,
+          "height": 90,
+          "center_x": 92,
+          "center_y": 169,
+          "area": 3330,
+          "image_width": 640,
+          "image_height": 480
+        },
+        {
+          "label": "person",
+          "confidence": 0.022,
+          "x1": 73,
+          "y1": 124,
+          "x2": 113,
+          "y2": 247,
+          "width": 40,
+          "height": 123,
+          "center_x": 93,
+          "center_y": 185,
+          "area": 4920,
+          "image_width": 640,
+          "image_height": 480,
+          "marvin_continuity": {
+            "tracker_id": 228569,
+            "tracker_source": "marvin_continuity_botsort",
+            "tracker_generation": "b2df570884774b11bc80f4e1d93d55b6"
+          }
+        },
+        {
+          "label": "chair",
+          "confidence": 0.022,
+          "x1": 456,
+          "y1": 103,
+          "x2": 638,
+          "y2": 302,
+          "width": 182,
+          "height": 198,
+          "center_x": 547,
+          "center_y": 203,
+          "area": 36036,
+          "image_width": 640,
+          "image_height": 480,
+          "marvin_continuity": {
+            "tracker_id": 228553,
+            "tracker_source": "marvin_continuity_botsort",
+            "tracker_generation": "b2df570884774b11bc80f4e1d93d55b6"
+          }
+        },
+        {
+          "label": "refrigerator",
+          "confidence": 0.02,
+          "x1": 265,
+          "y1": 0,
+          "x2": 321,
+          "y2": 207,
+          "width": 55,
+          "height": 207,
+          "center_x": 293,
+          "center_y": 104,
+          "area": 11385,
+          "image_width": 640,
+          "image_height": 480
+        }
+      ],
+      "camera_running": true,
+      "camera_url": "http://192.168.68.142:8091/camera/latest.jpg",
+      "last_error": null,
+      "image_width": 640,
+      "image_height": 480
+    }
+  ],
+  "manual_annotation": {
+    "provenance": "New manual audit annotation made by visually inspecting the exact retained forensic JPEG; not historical production evidence, not identity or motion authority.",
+    "jpeg_sha256": "b2d1dc59d818193cd8ad727781692e61a82e1ebbabd5518671a02cc556660c34",
+    "bbox": {
+      "x1": 328,
+      "y1": 204,
+      "x2": 401,
+      "y2": 312
+    },
+    "uncertainty": "Approximate image-space envelope of the visible white humanoid robot; sufficient for distinguishing the submitted distant crops from the target region.",
+    "image_width": 640,
+    "image_height": 480
+  },
+  "television_bbox": {
+    "x1": 475,
+    "y1": 44,
+    "x2": 546,
+    "y2": 118
+  },
+  "normal_response": {
+    "parsed": {
+      "target": "marvin",
+      "confirmed": false,
+      "candidate_index": -1
+    },
+    "text": "{\n  \"target\": \"marvin\",\n  \"confirmed\": false,\n  \"candidate_index\": -1\n}"
+  },
+  "coverage_response": {
+    "text": "{\"target\": \"marvin\", \"confirmed\": true, \"candidate_index\": 10}",
+    "parsed": {
+      "target": "marvin",
+      "confirmed": true,
+      "candidate_index": 10
+    },
+    "model_version": "gemini-2.5-flash",
+    "usage_metadata": {
+      "candidates_token_count": 21,
+      "prompt_token_count": 391,
+      "prompt_tokens_details": [
+        {
+          "modality": "TEXT",
+          "token_count": 133
+        },
+        {
+          "modality": "IMAGE",
+          "token_count": 258
+        }
+      ],
+      "thoughts_token_count": 625,
+      "total_token_count": 1037
+    }
+  },
+  "expected_coverage_selection": {
+    "index": 10,
+    "bbox": {
+      "x1": 334,
+      "y1": 168,
+      "x2": 434,
+      "y2": 312
+    },
+    "image_width": 640,
+    "image_height": 480,
+    "source_frame_stamp_ns": 1791650915398546697,
+    "geometry_source": "deterministic_coverage",
+    "marvin": {
+      "coverage": 0.9178082191780822,
+      "iou": 0.48086124401913877,
+      "candidate_area_to_target_area": 1.82648401826484,
+      "intersection_pixels": 7236,
+      "candidate_nonannotation_fraction": 0.49750000000000005
+    },
+    "television": {
+      "coverage": 0.0,
+      "iou": 0.0,
+      "candidate_area_to_target_area": 2.7407689379520366,
+      "intersection_pixels": 0,
+      "candidate_nonannotation_fraction": 1.0
+    },
+    "expanded_seed": {
+      "x1": 314,
+      "y1": 161,
+      "x2": 454,
+      "y2": 319
+    },
+    "seed_validation": true,
+    "seed_to_candidate_area_ratio": 1.5361111111111112
+  },
+  "contact_sheet_sha256": "939b1e43501e839c9e0a733bcdb282f5081929e4b674321c364e77beab710ce2",
+  "normal_contact_sheet_sha256": "2287af23e7da343249d69824e0b3c199d7a12a5070a99dfd98d0e6127b322db5",
+  "navigation_hashes": {
+    "marvin_obstacle_phases.py": "d4acd9a16665346cf97ae6d1bf44d5eb6799b84de65cdabff2a6b6dd987e9896",
+    "marvin_detour_watchdog.py": "56383c5fac5a17655e85ee8778fb055f95de2bc3cee3a9c235adfa656e4adff0"
+  }
+}

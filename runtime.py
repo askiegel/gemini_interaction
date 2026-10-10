@@ -623,6 +623,8 @@ class CognitiveRuntime:
             session_continuity_used=(identity_source == "marvin_session_continuity"),
             marvin_tracking_episode=preview.get("marvin_tracking_episode"),
             post_action_tracker_diagnostics=preview.get("post_action_tracker_diagnostics"),
+            identity_selection=(dict(preview["identity_selection"])
+                if isinstance(preview.get("identity_selection"), dict) else None),
         )
         post_action_continuity = (
             preview.get("post_action_tracker_continuity") is True

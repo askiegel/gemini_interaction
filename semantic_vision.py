@@ -283,13 +283,19 @@ class SemanticVisionClient:
             "source": "gemini_marvin_identity",
         }
 
-    def select_marvin_candidate(self, frame, candidates):
+    def select_marvin_coverage_candidate(self, frame, candidates):
+        """Select a fixed coverage crop; never ask the model for coordinates."""
+        return self.select_marvin_candidate(
+            frame, candidates, coverage_recovery=True,
+        )
+
+    def select_marvin_candidate(self, frame, candidates, *, coverage_recovery=False):
         """Select one locally observed YOLO proposal as Marvin by identity."""
         if (
             type(frame.width) is not int or type(frame.height) is not int
             or frame.width <= 0 or frame.height <= 0
             or not isinstance(candidates, list)
-            or not candidates or len(candidates) > 8
+            or not candidates or len(candidates) > (16 if coverage_recovery else 8)
         ):
             raise ValueError("marvin_candidate_selection_input_invalid")
         try:
@@ -368,6 +374,13 @@ class SemanticVisionClient:
             "confirmed=false and candidate_index=-1. Do not return bounding "
             "boxes, directions, navigation, or motion data."
         )
+        if coverage_recovery:
+            prompt = prompt.replace("YOLO proposal crops", "fixed camera coverage crops")
+            prompt += (
+                " Prefer the smallest crop containing Marvin's head and body "
+                "without unrelated objects; do not select a television, screen, "
+                "or another robot as Marvin."
+            )
         response = self.client.models.generate_content(
             model=self.model,
             contents=[
@@ -399,6 +412,11 @@ class SemanticVisionClient:
         ):
             raise ValueError("marvin_candidate_selection_response_invalid")
         index = parsed.get("candidate_index")
+        if coverage_recovery and (
+            type(index) is not int
+            or (not parsed["confirmed"] and index != -1)
+        ):
+            raise ValueError("marvin_candidate_selection_index_invalid")
         if parsed["confirmed"]:
             if type(index) is not int or not 0 <= index < len(candidates):
                 raise ValueError("marvin_candidate_selection_index_invalid")
