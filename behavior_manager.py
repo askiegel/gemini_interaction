@@ -1463,6 +1463,17 @@ class BehaviorManager:
             except Exception:
                 pass
 
+    def _capture_marvin_shadow_lidar_reference(self, snapshot):
+        """Diagnostic owned reference only, never an authority or extra read.
+
+        Copying/logging/issuance is deferred until runtime confirms STOP.
+        """
+        if getattr(self, "_marvin_shadow_capture_enabled", False) is True:
+            try:
+                self._marvin_shadow_lidar_reference = snapshot
+            except Exception:
+                pass
+
     def _emit_marvin_semantic_frame_diagnostic(self, frame, candidate=None):
         try:
             box = self._target_bbox(candidate) if candidate is not None else None
@@ -1523,6 +1534,8 @@ class BehaviorManager:
             safety_mode=safety_mode,
         )
         result = dict(validation)
+        if getattr(self, "_marvin_shadow_capture_enabled", False) is True:
+            self._capture_marvin_shadow_lidar_reference(state)
         # Preserve the snapshot that authorized this turn, rather than a later
         # monitor or post-STOP acquisition. Marvin's next cycle must exceed it.
         if isinstance(state, dict):
@@ -4431,6 +4444,8 @@ class BehaviorManager:
         base["forward_safety"] = safety
         if not self._marvin_pursuit_lidar_is_trusted(lidar, safety, expected_lidar_session):
             return dict(base, reason="marvin_single_approach_lidar_not_trusted")
+        if getattr(self, "_marvin_shadow_capture_enabled", False) is True:
+            self._capture_marvin_shadow_lidar_reference(lidar)
         if safety.get("permitted") is not True:
             return dict(base, reason="marvin_single_approach_translation_vetoed")
         bypass_sample = None
@@ -4440,6 +4455,8 @@ class BehaviorManager:
                 return False
             sample = self.world_model.get_lidar_obstacles(expected_session=expected_lidar_session)
             bypass_sample = sample
+            if getattr(self, "_marvin_shadow_capture_enabled", False) is True:
+                self._capture_marvin_shadow_lidar_reference(sample)
             selection = local_selection_validator(sample)
             safe = evaluate_local_motion_safety(sample, expected_session=expected_lidar_session,
                 linear_x=linear_speed, duration=duration)
@@ -4520,6 +4537,8 @@ class BehaviorManager:
             try:
                 lidar = self.world_model.get_lidar_obstacles(expected_session=expected_lidar_session)
                 veto_sample = lidar
+                if getattr(self, "_marvin_shadow_capture_enabled", False) is True:
+                    self._capture_marvin_shadow_lidar_reference(lidar)
                 safe = evaluate_local_motion_safety(lidar, expected_session=expected_lidar_session,
                     linear_y=linear_y, duration=duration, lateral_swept_footprint=True)
                 selection = selection_validator(lidar)

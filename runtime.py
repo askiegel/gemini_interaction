@@ -218,6 +218,12 @@ class CognitiveRuntime:
         marvin_camera_model=None,
     ):
         self.config = None
+        # Default-off diagnostics never control motion or change constructor API.
+        self._marvin_navigation_shadow = None
+        self._marvin_navigation_shadow_service = None
+        self._marvin_navigation_shadow_startup_error = None
+        self._marvin_navigation_shadow_mission_id = None
+        self._marvin_navigation_shadow_geometry = None
 
         if provider is None:
             self.config = load_config()
@@ -247,6 +253,9 @@ class CognitiveRuntime:
             world_model=self.world_model,
             semantic_vision=semantic_vision,
         )
+        if (self._marvin_navigation_shadow is None
+                and os.getenv("MARVIN_NAVIGATION_SHADOW_ENABLED", "").strip().lower() == "true"):
+            self._initialize_marvin_navigation_shadow()
         # Measured camera intrinsics/extrinsics only; absence blocks V2 approach.
         # See marvin_lidar_standoff.py for the calibration JSON fields.
         if marvin_camera_model is None:
@@ -359,6 +368,55 @@ class CognitiveRuntime:
             return getattr(self.marvin_progress_diagnostics, method)(*args, **kwargs)
         except Exception:
             return None
+
+    def _emit_marvin_navigation_shadow(self, kind, **payload):
+        """Capture only. STOP/safety results and return values are untouched."""
+        if getattr(self, "_marvin_navigation_shadow", None) is None:
+            return
+        try:
+            from marvin_navigation_instrumentation import passive_capture
+            passive_capture(self._marvin_navigation_shadow, kind,
+                mission_id=payload.pop("mission_id", self._marvin_navigation_shadow_mission_id),
+                event_time=time.monotonic(), provenance="CURRENT_RUNTIME_PRODUCER_BOUNDARY",
+                payload=payload)
+        except Exception:
+            pass  # Diagnostic failure has no path into control.
+
+    def _initialize_marvin_navigation_shadow(self):
+        """Opt-in startup is diagnostic only; even initialization failure is local."""
+        try:
+            from marvin_navigation_shadow_runtime import from_environment
+            self._marvin_navigation_shadow_service = from_environment()
+            if self._marvin_navigation_shadow_service is not None:
+                self._marvin_navigation_shadow = self._marvin_navigation_shadow_service.buffer
+                self.behavior_manager._marvin_shadow_capture_enabled = True
+            else:
+                self._marvin_navigation_shadow_startup_error = "INVALID_SHADOW_CONFIGURATION"
+        except Exception as exc:
+            self._marvin_navigation_shadow = None
+            self._stop_marvin_navigation_shadow()  # Request only; startup failure is diagnostic.
+            self._marvin_navigation_shadow_service = None
+            self._marvin_navigation_shadow_startup_error = type(exc).__name__
+
+    def _marvin_navigation_shadow_health(self):
+        try:
+            service = getattr(self, "_marvin_navigation_shadow_service", None)
+            if service is not None:
+                return service.status()
+        except Exception:
+            return {"enabled": False}
+        return {"enabled": False}
+
+    def _stop_marvin_navigation_shadow(self, *, join=False):
+        try:
+            service = getattr(self, "_marvin_navigation_shadow_service", None)
+            if service is not None:
+                if join:
+                    service.shutdown()
+                else:
+                    service.request_shutdown()
+        except Exception:
+            pass
 
     def _start_lidar(self):
         with self._lidar_lifecycle_lock:
@@ -697,6 +755,13 @@ class CognitiveRuntime:
             association["local_bypass_candidates"] = {side: plan_local_bypass(
                 lidar, association, route, expected_session=session, side=side)
                 for side in ("LEFT", "RIGHT")}
+        if getattr(self, "_marvin_navigation_shadow", None) is not None:
+            # Existing owned snapshot reference only; no copying/processing in
+            # a JIT callback. Bounded capture happens at stationary boundaries.
+            try:
+                self._marvin_navigation_shadow_geometry = (lidar, association)
+            except Exception:
+                pass
         return association
 
     MARVIN_ALIGNMENT_GEOMETRY_HISTORY_WINDOW = 3
@@ -1575,6 +1640,14 @@ class CognitiveRuntime:
         if (not isinstance(interlock, dict) or interlock.get("active_forward") is not False
                 or interlock.get("pending_forward") is not False):
             return None
+        if getattr(self, "_marvin_navigation_shadow", None) is not None:
+            self._emit_marvin_navigation_shadow("JIT_VETO_RECORDED", result=result,
+                source_frame_stamp_ns=stamp,
+                source_stamp_consumed=stamp in self._marvin_alignment_consumed_source_frame_stamps,
+                planning_sequence=planning_sequence, producer_session=expected_session,
+                producer_running=worker.running, mission_owned=True, stop_result=stop,
+                bridge=bridge, interlock=interlock,
+                planning_selection=result.get("local_detour"))
         return {"snapshot": snapshot, "association": dict(association, route=route)}
 
     def _wait_for_marvin_blocked_route(self, *, expected_session, lidar, association,
@@ -1586,6 +1659,7 @@ class CognitiveRuntime:
         Counters/time are cumulative across every blocked episode in a mission.
         """
         started = time.monotonic()
+        _marvin_navigation_shadow_wait_stationary = False
         prior_total = diagnostics["blocked_wait_total_seconds"]
         entry_route = association.get("route") or {}
         sequence = lidar.get("acquisition_sequence")
@@ -1602,6 +1676,9 @@ class CognitiveRuntime:
             diagnostics["blocked_wait_total_seconds"] = prior_total + max(0.0, time.monotonic() - started)
             self._publish_behavior_tracking({"behavior": "FIND_OBJECT", "target": "marvin",
                 "state": "BLOCKED_WAIT", **diagnostics})
+            if getattr(self, "_marvin_navigation_shadow", None) is not None and _marvin_navigation_shadow_wait_stationary:
+                self._emit_marvin_navigation_shadow("BLOCKED_WAIT", diagnostics=diagnostics,
+                    producer_session=expected_session, acquisition_sequence=sequence)
 
         def done(reason, *, ok=False, route=None):
             publish()
@@ -1623,6 +1700,7 @@ class CognitiveRuntime:
                 or bridge.get("ok") is not True or bridge.get("status") != "READY"):
             return done("find_marvin_blocked_wait_stop_failed")
         command_at = (bridge.get("motion") or {}).get("last_command_at")
+        _marvin_navigation_shadow_wait_stationary = True
         publish()
         while execution_guard():
             remaining = self.MARVIN_BLOCKED_WAIT_MAX_SECONDS - (prior_total + time.monotonic() - started)
@@ -1818,6 +1896,10 @@ class CognitiveRuntime:
         retain("begin", mission.mission_id,
                expected_session=getattr(self.lidar_worker, "session", None),
                camera_model=self.marvin_camera_model)
+        if getattr(self, "_marvin_navigation_shadow", None) is not None:
+            self._marvin_navigation_shadow_mission_id = mission.mission_id
+            self._marvin_navigation_shadow_geometry = None
+            self._emit_marvin_navigation_shadow("MISSION_BEGIN", mission_id=mission.mission_id)
         self._reset_marvin_alignment_consensus()
         clear_episode = getattr(behavior, "_clear_marvin_v2_tracker_episode", None)
         if proof_continuation is None and callable(clear_episode):
@@ -1878,6 +1960,11 @@ class CognitiveRuntime:
                 meaningful_progress=improved, meaningful_progress_reason=progress["meaningful_progress_reason"],
                 actual_route_progress=progress)
             retain("avoidance_reassessment", route, association, improved, progress)
+            if getattr(self, "_marvin_navigation_shadow", None) is not None:
+                self._emit_marvin_navigation_shadow("ROUTE_REASSESSED",
+                    source_frame_stamp_ns=previous_stamp, route=route, association=association,
+                    meaningful_progress=improved,
+                    meaningful_progress_reason=progress["meaningful_progress_reason"], progress=progress)
 
         def finish(state, reason):
             if (previous_selection and previous_selection.get("bypass_episode")
@@ -1912,6 +1999,11 @@ class CognitiveRuntime:
                 clear_episode()
             retain("mission_stop", stop, zero, stop_completed_monotonic_seconds)
             retain("terminal", state, reason)
+            if getattr(self, "_marvin_navigation_shadow", None) is not None:
+                self._emit_marvin_navigation_shadow("TERMINAL", state=state, reason=reason,
+                    avoidance_count=avoidance["local_avoidance_actions"], blocked_wait=blocked_wait,
+                    stop_result=stop, bridge=zero, stopped_monotonic_seconds=stop_completed_monotonic_seconds,
+                    last_action=history[-1] if history else None)
             result = {
                 "ok": safe, "completed": True, "behavior": "FIND_OBJECT",
                 "target": "marvin", "mission_id": mission.mission_id,
@@ -2055,6 +2147,8 @@ class CognitiveRuntime:
                 lidar_wait_history.append(wait)
                 if isinstance(wait.get("snapshot"), dict):
                     retain("record_lidar", wait["snapshot"])
+                    if getattr(self, "_marvin_navigation_shadow", None) is not None:
+                        self._emit_marvin_navigation_shadow("STOPPED_LIDAR_RECEIVED", wait=wait)
                 if wait["ok"] is not True:
                     return finish("STOPPED" if not current() else "BLOCKED", wait["reason"])
             # No camera/semantic decision is made before the stopped LiDAR wait.
@@ -2258,6 +2352,20 @@ class CognitiveRuntime:
                 new_association = observation.get("arrival") or {}
                 new_route = new_association.get("route") or {}
                 record_avoidance_reassessment(new_route, new_association)
+            if getattr(self, "_marvin_navigation_shadow", None) is not None:
+                strict_reference = self._marvin_alignment_observation
+                accepted = (isinstance(strict_reference, dict)
+                    and strict_reference.get("source_frame_stamp_ns") == stamp)
+                self._emit_marvin_navigation_shadow(
+                    "STRICT_OBSERVATION_ACCEPTED" if accepted else "OBSERVATION_RECORDED",
+                    observation=observation, source_frame_stamp_ns=stamp,
+                    camera_floor_stamp_ns=camera_floor_stamp, previous_source_frame_stamp_ns=previous_stamp,
+                    producer_session=session, producer_running=self.lidar_worker.running,
+                    mission_owned=True, geometry_pair=self._marvin_navigation_shadow_geometry,
+                    bridge=bridge, delivery_resolved=True,
+                    reacquisition_attempts=reacquisition_attempts,
+                    fresh_semantic_wait_recheck=bool(resumed_blocked_wait),
+                    avoidance_count=avoidance["local_avoidance_actions"])
             if proof_max_physical_actions is not None and proof_dispatches >= 1:
                 # The ordinary stopped LiDAR wait, strict tracker/reacquisition,
                 # fresh frame, exact stamp and session checks above run first.
@@ -2535,6 +2643,18 @@ class CognitiveRuntime:
                     observation = dict(observation, local_avoidance_action=detour["action_type"],
                         local_avoidance_selection=detour)
                 retain("prepare_action", state, observation)
+                if getattr(self, "_marvin_navigation_shadow", None) is not None:
+                    pair = self._marvin_navigation_shadow_geometry
+                    self._emit_marvin_navigation_shadow("GEOMETRY_EVALUATED",
+                        source_frame_stamp_ns=stamp, observation=observation,
+                        lidar=pair[0] if pair else None, association=pair[1] if pair else None,
+                        selection=detour if state == "AVOIDING" else None,
+                        old_outcome={"action_type": detour["action_type"] if state == "AVOIDING" else decision,
+                            "state": state, "reason": detour["reason"] if state == "AVOIDING" else observation.get("reason")},
+                        producer_session=session, producer_running=self.lidar_worker.running,
+                        mission_owned=True, bridge=bridge, delivery_resolved=True,
+                        reacquisition_attempts=reacquisition_attempts,
+                        avoidance_count=avoidance["local_avoidance_actions"], blocked_wait=blocked_wait)
                 result = action()
             except Exception as exc:
                 if proof_max_physical_actions is not None:
@@ -2706,6 +2826,22 @@ class CognitiveRuntime:
                     result, bridge, self._marvin_last_action_lidar_evidence)
             action_finished_monotonic_seconds = time.monotonic()
             retain("action_result", result, action_finished_monotonic_seconds)
+            if getattr(self, "_marvin_navigation_shadow", None) is not None:
+                raw = getattr(behavior, "_marvin_shadow_lidar_reference", None)
+                evidence = self._marvin_last_action_lidar_evidence
+                pair = self._marvin_navigation_shadow_geometry
+                if (not isinstance(raw, dict) or evidence is None
+                        or (raw.get("producer_session"), raw.get("acquisition_sequence")) != evidence):
+                    raw = pair[0] if pair and evidence is not None and (
+                        pair[0].get("producer_session"), pair[0].get("acquisition_sequence")) == evidence else None
+                self._emit_marvin_navigation_shadow("ACTION_STOPPED", result=result,
+                    primitive=detour["action_type"] if state == "AVOIDING" else decision,
+                    source_frame_stamp_ns=stamp,
+                    source_stamp_consumed=stamp in self._marvin_alignment_consumed_source_frame_stamps,
+                    bridge=bridge, stopped_monotonic_seconds=action_finished_monotonic_seconds,
+                    jit_pair=(raw, None) if raw else None,
+                    jit_sequence=evidence[1] if evidence else None,
+                    avoidance_count=avoidance["local_avoidance_actions"])
             previous_stamp = stamp
             mark_stopped = getattr(behavior, "mark_strict_v2_action_stopped", None)
             if callable(mark_stopped):
@@ -5076,6 +5212,9 @@ class CognitiveRuntime:
 
             print()
             print("Cognitive runtime stopped.")
+            if getattr(self, "_marvin_navigation_shadow_service", None) is not None:
+                # Safety/STOP cleanup above remains first; bounded daemon join.
+                self._stop_marvin_navigation_shadow(join=True)
 
     def stop(self):
         """
@@ -5087,6 +5226,9 @@ class CognitiveRuntime:
         self._stop_lidar()
         if self.forward_interlock is not None:
             self.forward_interlock.stop()
+
+        if getattr(self, "_marvin_navigation_shadow_service", None) is not None:
+            self._stop_marvin_navigation_shadow()  # Request only, never join a STOP path.
 
     def get_status_summary(self):
         """Dashboard view without copying retained history or diagnostics.
@@ -5112,6 +5254,7 @@ class CognitiveRuntime:
                 "last_result": self.last_result,
                 "tracking": self.tracking_state,
                 "last_error": self.last_error,
+                "navigation_shadow": self._marvin_navigation_shadow_health(),
                 "lidar_perception": self._lidar_status(),
                 "forward_interlock": self.forward_interlock.status() if self.forward_interlock is not None else {
                     "configured": False, "reason": "not_configured"},
@@ -5155,6 +5298,7 @@ class CognitiveRuntime:
                 "marvin_odometry_diagnostics": self._retain_marvin_diagnostic("odometry_snapshot"),
                 "tracking": dict(self.tracking_state),
                 "last_error": self.last_error,
+                "navigation_shadow": self._marvin_navigation_shadow_health(),
                 "lidar_perception": self._lidar_status(),
                 "forward_interlock": (
                     self.forward_interlock.status()
