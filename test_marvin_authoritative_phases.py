@@ -65,11 +65,11 @@ def test_initial_side_establishment_then_immediate_pass_without_handoff_credit(t
 
 
 def test_neutral_route_does_not_blacklist_pass_or_claim_progress(tmp_path, monkeypatch):
-    bundle, _, _ = strafe_runtime(tmp_path, monkeypatch, [(0,1.1)]*9, [OPEN_LEFT])
+    bundle, _, _ = strafe_runtime(tmp_path, monkeypatch, [(0,1.1)]*30, [OPEN_LEFT])
     result = run(bundle[0])
-    assert result['local_bypass_actions'] == 5
-    assert result['local_avoidance_actions'] == len(motions(bundle[3])) == 6
-    assert result['reason'] == 'find_marvin_local_avoidance_exhausted'
+    assert result['local_bypass_actions'] == 12
+    assert result['local_avoidance_actions'] == len(motions(bundle[3])) == 13
+    assert result['reason'] == 'find_marvin_pass_stagnation_exhausted'
     for row in result['local_avoidance_history'][2:]:
         assert row['selection']['phase'] == 'PASS_OBSTACLE'
         assert row['selection']['meaningful_progress'] is False
@@ -116,7 +116,7 @@ def test_protected_capsule_045_unchanged(point):
 
 
 @pytest.mark.parametrize('remaining', [0,-1,True])
-def test_cap_external_to_phase_rejects_seventh_action(remaining):
+def test_explicit_legacy_proof_budget_remains_bounded(remaining):
     _, result = plan(OPEN_LEFT, remaining_avoidance_actions=remaining)
     assert result['action_type'] is None
     assert result['reason'] == 'find_marvin_local_avoidance_exhausted'
