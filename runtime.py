@@ -1769,6 +1769,61 @@ class CognitiveRuntime:
                 stack.extend((item, depth+1) for item in value)
         return certificate
 
+    def _marvin_initial_approach_stale_lidar(self, result, *, stamp, expected_session):
+        """Admit sensing recovery, never motion, at the initial approach boundary.
+
+        This refusal precedes stamp consumption and all primitive/client calls.
+        It is not a selection veto: no current selection or JIT is certified.
+        STOP, ownership, sequence floors and a new strict observation are still
+        independently required by the normal stationary recovery path.
+        """
+        if not isinstance(result, dict):
+            return None
+        certificate = result.get("initial_currentness_refusal")
+        if (not isinstance(certificate, dict)
+                or certificate.get("stage") != "INITIAL_APPROACH_CURRENTNESS"
+                or result.get("action") != "single_marvin_approach_step"
+                or result.get("reason") != "marvin_approach_lidar_not_current"
+                or type(stamp) is not int or stamp <= 0
+                or type(result.get("source_frame_stamp_ns")) is not int
+                or result["source_frame_stamp_ns"] != stamp
+                or type(certificate.get("source_frame_stamp_ns")) is not int
+                or certificate["source_frame_stamp_ns"] != stamp
+                or stamp in self._marvin_alignment_consumed_source_frame_stamps
+                or any(result.get(k) is not False for k in (
+                    "ok", "motion_executed", "execution_authorized", "transport_attempted", "source_stamp_consumed"))
+                or type(result.get("actions_executed")) is not int or result["actions_executed"] != 0
+                or result.get("delivery_resolved") is not True
+                or certificate.get("transport_attempted") is not False
+                or certificate.get("source_stamp_consumed") is not False
+                or certificate.get("delivery_resolved") is not True
+                or result.get("delivery_uncertain") not in (None, False)
+                or any(result.get(k) is not None for k in (
+                    "approach_result", "lateral_step", "turn_result", "transport_result"))
+                or result.get("stop_result") is not None):
+            return None
+        snapshot = result.get("lidar")
+        if (not isinstance(snapshot, dict) or not isinstance(expected_session, str) or not expected_session
+                or any(v != expected_session for v in (
+                    snapshot.get("producer_session"), certificate.get("producer_session"),
+                    result.get("producer_session")))
+                or self.lidar_worker.running is not True or self.lidar_worker.session != expected_session
+                or type(snapshot.get("acquisition_sequence")) is not int or snapshot["acquisition_sequence"] <= 0
+                or type(certificate.get("acquisition_sequence")) is not int
+                or certificate["acquisition_sequence"] != snapshot["acquisition_sequence"]
+                or certificate.get("lidar_reason") != "stale" or snapshot.get("reason") != "stale"):
+            return None
+        receipt, receipt_age = snapshot.get("received_monotonic_seconds"), snapshot.get("age_at_receipt_seconds")
+        now = time.monotonic()
+        if (any(type(v) not in (int, float) or not math.isfinite(v) for v in (receipt, receipt_age, now))
+                or receipt_age < 0 or now < receipt):
+            return None
+        age = receipt_age + (now - receipt)
+        sample = read_lidar_state(snapshot, expected_session=expected_session, now=now)
+        if not math.isfinite(age) or sample.get("reason") != "stale" or age <= MAXIMUM_EFFECTIVE_AGE_SECONDS:
+            return None  # A stale label alone cannot turn an unknown fault into recovery.
+        return dict(sample, effective_age_seconds=age)
+
     def _marvin_pre_transport_stale_lidar(self, result, *, stamp, expected_session,
                                            planning_sequence):
         """Negative dispatch evidence for LiDAR aging inside bypass selection.
@@ -3264,6 +3319,19 @@ class CognitiveRuntime:
                     or (transport.get("transport_result") or {}).get("delivery_uncertain") is True):
                 return finish("BLOCKED", "find_marvin_action_delivery_uncertain")
             if result.get("ok") is not True or result.get("motion_executed") is not True:
+                if proof_max_physical_actions is None and state in {"ADVANCING", "AVOIDING"}:
+                    stale = self._marvin_initial_approach_stale_lidar(
+                        result, stamp=stamp, expected_session=session)
+                    if stale is not None:
+                        result["lidar_currentness_failure"] = "STALE_AT_INITIAL_APPROACH"
+                        floors = [("route_planning_scan", session, lidar.get("acquisition_sequence"))]
+                        prior = self._marvin_last_action_lidar_evidence
+                        if prior:
+                            floors.append(("last_action_jit", prior[0], prior[1]))
+                        reason = recover_stationary(stale, "initial_approach_currentness", floors)
+                        if reason is None:
+                            continue  # Retired, not consumed; fresh identity and ordinary JIT next.
+                        return finish("STOPPED" if not current() else "BLOCKED", reason)
                 if proof_max_physical_actions is None and state == "AVOIDING":
                     stale = self._marvin_pre_transport_stale_lidar(result, stamp=stamp,
                         expected_session=session, planning_sequence=detour.get("acquisition_sequence"))
@@ -5068,7 +5136,20 @@ class CognitiveRuntime:
         except Exception as exc:
             return dict(base, reason="marvin_approach_lidar_read_failed", error=str(exc))
         if not _marvin_alignment_lidar_is_current(lidar, session):
-            return dict(base, reason="marvin_approach_lidar_not_current", lidar=lidar)
+            # Negative provenance only: this boundary has not called the
+            # primitive/client, nor consumed this observation. The recovery
+            # caller must separately prove stopped state and retire authority.
+            sample = lidar if isinstance(lidar, dict) else {}
+            with self._state_lock:
+                consumed = source_frame_stamp_ns in self._marvin_alignment_consumed_source_frame_stamps
+            return dict(base, reason="marvin_approach_lidar_not_current", lidar=lidar,
+                transport_attempted=False, delivery_resolved=True, source_stamp_consumed=consumed,
+                initial_currentness_refusal={"stage": "INITIAL_APPROACH_CURRENTNESS",
+                    "source_frame_stamp_ns": source_frame_stamp_ns,
+                    "source_stamp_consumed": consumed, "transport_attempted": False,
+                    "delivery_resolved": True, "producer_session": session,
+                    "acquisition_sequence": sample.get("acquisition_sequence") if type(sample.get("acquisition_sequence")) is int else None,
+                    "lidar_reason": sample.get("reason")[:128] if isinstance(sample.get("reason"), str) else None})
         with self._state_lock:
             consumed = self._marvin_alignment_consumed_source_frame_stamps
             if source_frame_stamp_ns in consumed:
