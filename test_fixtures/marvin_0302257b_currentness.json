@@ -1,0 +1,627 @@
+{
+  "mission_id": "mission-0302257b",
+  "source_sha": "49b7d30fc91ee5d70e0bee26434d330ddd1812a7",
+  "provenance": "/tmp/mayday-autonomous-marvin-strafe-retry-20261010T234706Z",
+  "missing_evidence": [
+    "raw LaserScan ranges/angle metadata",
+    "complete filtered base-frame point arrays",
+    "exact nested predicate evaluation timestamps",
+    "camera JPEG and physical return identities"
+  ],
+  "initial_route": {
+    "valid": true,
+    "route_to_marvin_obstructed": true,
+    "blocking_obstacle_distance_m": 0.606577604954661,
+    "blocking_obstacle_bearing_deg": -15.047679683484494,
+    "blocking_obstacle_x_m": 0.5857781262549555,
+    "blocking_obstacle_y_m": -0.15748135646407843,
+    "route_occupancy": 20,
+    "corridor_overlap_m": 0.24915470062536588,
+    "blocking_obstacle_overlap_m": 0.22859862347125637,
+    "route_width_m": 0.9,
+    "reason": "marvin_route_obstructed",
+    "blocking_obstacle_longitudinal_extent_m": 0.635394561416484,
+    "blocking_obstacle_minimum_side_separation_m": 0.1314008101051631,
+    "route_lookahead_m": 0.9042476843095288,
+    "route_depth_source": "verified_range_history",
+    "marvin_bearing_deg": 6.3599588949469155,
+    "heading_error_after_deg": 6.3599588949469155,
+    "blocking_obstacle_centerline_clearance_m": 0.22140137652874364
+  },
+  "initial_target_range": 1.4042476843095288,
+  "initial_tracker": {
+    "active": true,
+    "matched": true,
+    "quality": 0.9845408201217651,
+    "threshold": 0.8,
+    "bbox": {
+      "x1": 202,
+      "y1": 196,
+      "x2": 308,
+      "y2": 316
+    },
+    "center_x": 255.0,
+    "center_y": 256.0,
+    "horizontal_error": -65.0,
+    "image_width": 640,
+    "image_height": 480,
+    "source_frame_stamp_ns": "1791676138452946446",
+    "reason": "matched",
+    "received_monotonic_seconds": 330791.185740619,
+    "received_monotonic_clock": "local_process_relative"
+  },
+  "planning_selection": {
+    "action_type": "BYPASS_FORWARD",
+    "phase": "PASS_OBSTACLE",
+    "acquisition_sequence": 5986,
+    "route": {
+      "valid": true,
+      "route_to_marvin_obstructed": true,
+      "blocking_obstacle_distance_m": 0.5938677124413919,
+      "blocking_obstacle_bearing_deg": -25.41341129292125,
+      "blocking_obstacle_x_m": 0.536402024113146,
+      "blocking_obstacle_y_m": -0.25485628971577623,
+      "route_occupancy": 20,
+      "corridor_overlap_m": 0.20301129410923655,
+      "blocking_obstacle_overlap_m": 0.17812973858505915,
+      "route_width_m": 0.9,
+      "reason": "marvin_route_obstructed",
+      "blocking_obstacle_longitudinal_extent_m": 0.5881380667712764,
+      "blocking_obstacle_minimum_side_separation_m": 0.22830761251939316,
+      "route_lookahead_m": 0.8384794621970166,
+      "route_depth_source": "verified_range_history",
+      "marvin_bearing_deg": 1.8315671087249237,
+      "heading_error_after_deg": 1.8315671087249237,
+      "blocking_obstacle_centerline_clearance_m": 0.27187026141494086
+    },
+    "local_bypass": {
+      "local_bypass_active": true,
+      "local_bypass_side": "LEFT",
+      "local_bypass_target_x_m": 0.15,
+      "local_bypass_target_y_m": 0.0,
+      "bypass_target_x_m": 0.15,
+      "bypass_target_y_m": 0.0,
+      "bypass_distance_m": 0.15,
+      "bypass_bearing_deg": 0.0,
+      "route_to_bypass_obstructed": false,
+      "bypass_corridor_occupancy": 0,
+      "bypass_corridor_overlap_m": 0.0,
+      "bypass_forward_permitted": true,
+      "local_bypass_reason": "local_bypass_corridor_clear",
+      "producer_session": "d47445e88fb142e6a3ad09637fc8c84e",
+      "acquisition_sequence": 5986,
+      "blocking_obstacle_x_m": 0.536402024113146,
+      "blocking_obstacle_y_m": -0.25485628971577623,
+      "forward_safety": {
+        "permitted": true,
+        "reason": "protected_region_clear",
+        "operational_footprint_radius_m": 0.22,
+        "total_protected_radius_m": 0.45,
+        "protected_radius_m": 0.45,
+        "required_sectors": [
+          "front",
+          "front_left",
+          "front_right"
+        ]
+      },
+      "protected_radius_m": 0.45
+    }
+  },
+  "jit_selection": {
+    "action_type": "STRAFE_LEFT",
+    "phase": "CLEAR_SIDE",
+    "acquisition_sequence": 5987,
+    "route": {
+      "valid": true,
+      "route_to_marvin_obstructed": true,
+      "blocking_obstacle_distance_m": 0.5938677124413919,
+      "blocking_obstacle_bearing_deg": -25.41341129292125,
+      "blocking_obstacle_x_m": 0.536402024113146,
+      "blocking_obstacle_y_m": -0.25485628971577623,
+      "route_occupancy": 20,
+      "corridor_overlap_m": 0.20301129410923655,
+      "blocking_obstacle_overlap_m": 0.17812973858505915,
+      "route_width_m": 0.9,
+      "reason": "marvin_route_obstructed",
+      "blocking_obstacle_longitudinal_extent_m": 0.5881380667712764,
+      "blocking_obstacle_minimum_side_separation_m": 0.22830761251939316,
+      "route_lookahead_m": 0.8384794621970166,
+      "route_depth_source": "verified_range_history",
+      "marvin_bearing_deg": 1.8315671087249237,
+      "heading_error_after_deg": 1.8315671087249237,
+      "blocking_obstacle_centerline_clearance_m": 0.27187026141494086
+    },
+    "local_bypass": {
+      "local_bypass_active": false,
+      "local_bypass_side": "LEFT",
+      "local_bypass_target_x_m": null,
+      "local_bypass_target_y_m": null,
+      "bypass_target_x_m": null,
+      "bypass_target_y_m": null,
+      "bypass_distance_m": null,
+      "bypass_bearing_deg": null,
+      "route_to_bypass_obstructed": true,
+      "bypass_corridor_occupancy": null,
+      "bypass_corridor_overlap_m": null,
+      "bypass_forward_permitted": false,
+      "local_bypass_reason": "stale",
+      "producer_session": "d47445e88fb142e6a3ad09637fc8c84e",
+      "acquisition_sequence": 5987,
+      "blocking_obstacle_x_m": 0.536402024113146,
+      "blocking_obstacle_y_m": -0.25485628971577623
+    },
+    "accepted": false
+  },
+  "jit_snapshot_metadata": {
+    "available": true,
+    "valid": true,
+    "reason": "fresh",
+    "sectors": {
+      "front": {
+        "valid_sample_count": 45,
+        "minimum_clearance_m": 0.6909999847412109,
+        "robust_clearance_m": 1.4544000148773193,
+        "available": true,
+        "state": "CLEAR",
+        "classification_reason": "clear_of_provisional_thresholds"
+      },
+      "front_left": {
+        "valid_sample_count": 43,
+        "minimum_clearance_m": 1.8600000143051147,
+        "robust_clearance_m": 1.8885999917984009,
+        "available": true,
+        "state": "CLEAR",
+        "classification_reason": "clear_of_provisional_thresholds"
+      },
+      "front_right": {
+        "valid_sample_count": 46,
+        "minimum_clearance_m": 0.6660000085830688,
+        "robust_clearance_m": 0.6739999949932098,
+        "available": true,
+        "state": "CAUTION",
+        "classification_reason": "robust_at_or_below_caution_threshold"
+      },
+      "left": {
+        "valid_sample_count": 72,
+        "minimum_clearance_m": 1.4539999961853027,
+        "robust_clearance_m": 1.457100009918213,
+        "available": true,
+        "state": "CLEAR",
+        "classification_reason": "clear_of_provisional_thresholds"
+      },
+      "right": {
+        "valid_sample_count": 79,
+        "minimum_clearance_m": 0.7720000147819519,
+        "robust_clearance_m": 0.7883999824523926,
+        "available": true,
+        "state": "CLEAR",
+        "classification_reason": "clear_of_provisional_thresholds"
+      }
+    },
+    "classification_thresholds": {
+      "provisional": true,
+      "read_only": true,
+      "distance_reference": "sensor_origin",
+      "units": "meters",
+      "clear_authorizes_motion": false,
+      "clearance_note": "Not guaranteed body or foot clearances.",
+      "unknown_when": "unavailable or either distance metric missing/non-finite",
+      "precedence": "first matching rule; otherwise CLEAR",
+      "rules": [
+        {
+          "state": "BLOCKED",
+          "metric": "robust_clearance_m",
+          "operator": "<=",
+          "threshold_m": 0.45,
+          "classification_reason": "robust_at_or_below_blocked_threshold"
+        },
+        {
+          "state": "BLOCKED",
+          "metric": "minimum_clearance_m",
+          "operator": "<=",
+          "threshold_m": 0.3,
+          "classification_reason": "minimum_at_or_below_blocked_threshold"
+        },
+        {
+          "state": "CAUTION",
+          "metric": "robust_clearance_m",
+          "operator": "<=",
+          "threshold_m": 0.75,
+          "classification_reason": "robust_at_or_below_caution_threshold"
+        },
+        {
+          "state": "CAUTION",
+          "metric": "minimum_clearance_m",
+          "operator": "<=",
+          "threshold_m": 0.6,
+          "classification_reason": "minimum_at_or_below_caution_threshold"
+        }
+      ]
+    },
+    "source": {
+      "frame_id": "lidar_link",
+      "stamp_seconds": 1791676153.854196,
+      "received_at": "2026-10-10T23:49:13.871622+00:00",
+      "age_seconds": 0.08563725196290761,
+      "rotation_to_robot_radians": 1.5707963267948966
+    },
+    "read_only": true,
+    "distance_reference": "sensor_origin",
+    "producer_session": "d47445e88fb142e6a3ad09637fc8c84e",
+    "acquisition_sequence": 5987,
+    "request_latency_seconds": 0.04403678700327873,
+    "acquisition_started_at": 1791676153.8463418,
+    "completed_at": 1791676153.8919446,
+    "received_monotonic_seconds": 330806.542676163,
+    "age_at_receipt_seconds": 0.13456344400765374,
+    "effective_age_seconds": 0.22868231701431796,
+    "maximum_effective_age_seconds": 0.3,
+    "freshness_threshold_provisional": true,
+    "freshness_note": "Measurement-based; not a physical stopping guarantee.",
+    "local_motion_geometry": {
+      "valid": true,
+      "reason": "fresh_geometry",
+      "frame_id": "lidar_link",
+      "lidar_to_base": {
+        "x_m": -0.078701,
+        "y_m": 0.000495,
+        "z_m": 0.068457,
+        "yaw_radians": 1.5707963267948966
+      },
+      "self_return_filtered_count": 0,
+      "sectors": {
+        "front": {
+          "available": true,
+          "valid_sample_count": 48,
+          "minimum_distance_from_base_m": 0.6172682404821113
+        },
+        "front_left": {
+          "available": true,
+          "valid_sample_count": 47,
+          "minimum_distance_from_base_m": 1.7213568383957367
+        },
+        "left": {
+          "available": true,
+          "valid_sample_count": 53,
+          "minimum_distance_from_base_m": 1.4694918193448911
+        },
+        "rear_left": {
+          "available": true,
+          "valid_sample_count": 53,
+          "minimum_distance_from_base_m": 1.420429978237213
+        },
+        "rear": {
+          "available": true,
+          "valid_sample_count": 52,
+          "minimum_distance_from_base_m": 1.0127687190367742
+        },
+        "rear_right": {
+          "available": true,
+          "valid_sample_count": 58,
+          "minimum_distance_from_base_m": 1.0927844018355735
+        },
+        "right": {
+          "available": true,
+          "valid_sample_count": 55,
+          "minimum_distance_from_base_m": 0.7740277917528228
+        },
+        "front_right": {
+          "available": true,
+          "valid_sample_count": 55,
+          "minimum_distance_from_base_m": 0.5938677124413919
+        }
+      }
+    }
+  },
+  "terminal_monotonic_seconds": 330806.855189967,
+  "historical_result": {
+    "state": "BLOCKED",
+    "reason": "marvin_local_bypass_jit_veto",
+    "mission_outcome": "safe_incomplete",
+    "actions_executed": 10,
+    "local_avoidance_actions": 7,
+    "local_bypass_actions": 5
+  },
+  "strafe_outcomes": [
+    {
+      "action_number": 2,
+      "before_selection": {
+        "producer_session": "d47445e88fb142e6a3ad09637fc8c84e",
+        "acquisition_sequence": 5809,
+        "committed_side": "LEFT",
+        "route": {
+          "valid": true,
+          "route_to_marvin_obstructed": true,
+          "blocking_obstacle_distance_m": 0.6108342422998327,
+          "blocking_obstacle_bearing_deg": -15.849555359365644,
+          "blocking_obstacle_x_m": 0.5876116299656325,
+          "blocking_obstacle_y_m": -0.16682638848558487,
+          "route_occupancy": 21,
+          "corridor_overlap_m": 0.24899297104262771,
+          "blocking_obstacle_overlap_m": 0.23513272238536734,
+          "route_width_m": 0.9,
+          "reason": "marvin_route_obstructed",
+          "blocking_obstacle_longitudinal_extent_m": 0.6306456698941121,
+          "blocking_obstacle_minimum_side_separation_m": 0.1493460373723704,
+          "route_lookahead_m": 0.9636205661791444,
+          "route_depth_source": "verified_range_history",
+          "marvin_bearing_deg": 4.745469560693223,
+          "heading_error_after_deg": 4.745469560693223,
+          "blocking_obstacle_centerline_clearance_m": 0.21486727761463267
+        },
+        "local_bypass": {
+          "local_bypass_active": true,
+          "local_bypass_side": "LEFT",
+          "local_bypass_target_x_m": 0.15,
+          "local_bypass_target_y_m": 0.0,
+          "bypass_target_x_m": 0.15,
+          "bypass_target_y_m": 0.0,
+          "bypass_distance_m": 0.15,
+          "bypass_bearing_deg": 0.0,
+          "route_to_bypass_obstructed": false,
+          "bypass_corridor_occupancy": 0,
+          "bypass_corridor_overlap_m": 0.0,
+          "bypass_forward_permitted": true,
+          "local_bypass_reason": "local_bypass_corridor_clear",
+          "producer_session": "d47445e88fb142e6a3ad09637fc8c84e",
+          "acquisition_sequence": 5809,
+          "blocking_obstacle_x_m": 0.5876116299656325,
+          "blocking_obstacle_y_m": -0.16682638848558487,
+          "forward_safety": {
+            "permitted": true,
+            "reason": "protected_region_clear",
+            "operational_footprint_radius_m": 0.22,
+            "total_protected_radius_m": 0.45,
+            "protected_radius_m": 0.45,
+            "required_sectors": [
+              "front",
+              "front_left",
+              "front_right"
+            ]
+          },
+          "protected_radius_m": 0.45
+        }
+      },
+      "after_association": {
+        "producer_session": "d47445e88fb142e6a3ad09637fc8c84e",
+        "acquisition_sequence": 5825,
+        "route": {
+          "valid": true,
+          "route_to_marvin_obstructed": true,
+          "blocking_obstacle_distance_m": 0.6256820698712788,
+          "blocking_obstacle_bearing_deg": -18.240450299479456,
+          "blocking_obstacle_x_m": 0.5942423649943313,
+          "blocking_obstacle_y_m": -0.19584193678666448,
+          "route_occupancy": 21,
+          "corridor_overlap_m": 0.2313956140809766,
+          "blocking_obstacle_overlap_m": 0.21722045129245812,
+          "route_width_m": 0.9,
+          "reason": "marvin_route_obstructed",
+          "blocking_obstacle_longitudinal_extent_m": 0.6389233923109032,
+          "blocking_obstacle_minimum_side_separation_m": 0.17900407655463518,
+          "route_lookahead_m": 0.964430014124039,
+          "route_depth_source": "verified_range_history",
+          "marvin_bearing_deg": 3.6011122756182097,
+          "heading_error_after_deg": 3.6011122756182097,
+          "blocking_obstacle_centerline_clearance_m": 0.2327795487075419
+        },
+        "local_bypass_candidates": {
+          "LEFT": {
+            "local_bypass_active": true,
+            "local_bypass_side": "LEFT",
+            "local_bypass_target_x_m": 0.15,
+            "local_bypass_target_y_m": 0.0,
+            "bypass_target_x_m": 0.15,
+            "bypass_target_y_m": 0.0,
+            "bypass_distance_m": 0.15,
+            "bypass_bearing_deg": 0.0,
+            "route_to_bypass_obstructed": false,
+            "bypass_corridor_occupancy": 0,
+            "bypass_corridor_overlap_m": 0.0,
+            "bypass_forward_permitted": true,
+            "local_bypass_reason": "local_bypass_corridor_clear",
+            "producer_session": "d47445e88fb142e6a3ad09637fc8c84e",
+            "acquisition_sequence": 5825,
+            "blocking_obstacle_x_m": 0.5942423649943313,
+            "blocking_obstacle_y_m": -0.19584193678666448,
+            "forward_safety": {
+              "permitted": true,
+              "reason": "protected_region_clear",
+              "operational_footprint_radius_m": 0.22,
+              "total_protected_radius_m": 0.45,
+              "protected_radius_m": 0.45,
+              "required_sectors": [
+                "front",
+                "front_left",
+                "front_right"
+              ]
+            },
+            "protected_radius_m": 0.45
+          },
+          "RIGHT": {
+            "local_bypass_active": false,
+            "local_bypass_side": "RIGHT",
+            "local_bypass_target_x_m": null,
+            "local_bypass_target_y_m": null,
+            "bypass_target_x_m": null,
+            "bypass_target_y_m": null,
+            "bypass_distance_m": null,
+            "bypass_bearing_deg": null,
+            "route_to_bypass_obstructed": true,
+            "bypass_corridor_occupancy": null,
+            "bypass_corridor_overlap_m": null,
+            "bypass_forward_permitted": false,
+            "local_bypass_reason": "bypass_lateral_clearance_not_established",
+            "producer_session": "d47445e88fb142e6a3ad09637fc8c84e",
+            "acquisition_sequence": 5825,
+            "blocking_obstacle_x_m": 0.5942423649943313,
+            "blocking_obstacle_y_m": -0.19584193678666448
+          }
+        }
+      },
+      "reported_progress": {
+        "progress": {
+          "meaningful_progress": true,
+          "meaningful_progress_reason": "corridor_overlap_improved",
+          "corridor_overlap_reduction_m": 0.0175973569616511,
+          "centerline_clearance_improvement_m": 0.017912271092909215,
+          "route_occupancy_reduction": 0,
+          "blocker_distance_change_m": 0.014847827571446093
+        },
+        "producer_session": "d47445e88fb142e6a3ad09637fc8c84e",
+        "action_acquisition_sequence": 5809,
+        "acquisition_sequence": 5825
+      }
+    },
+    {
+      "action_number": 6,
+      "before_selection": {
+        "producer_session": "d47445e88fb142e6a3ad09637fc8c84e",
+        "acquisition_sequence": 5919,
+        "committed_side": "LEFT",
+        "route": {
+          "valid": true,
+          "route_to_marvin_obstructed": true,
+          "blocking_obstacle_distance_m": 0.5834134208556169,
+          "blocking_obstacle_bearing_deg": -22.462883711295742,
+          "blocking_obstacle_x_m": 0.5391482352825278,
+          "blocking_obstacle_y_m": -0.22291343617240583,
+          "route_occupancy": 22,
+          "corridor_overlap_m": 0.2244550542292702,
+          "blocking_obstacle_overlap_m": 0.19148193338336683,
+          "route_width_m": 0.9,
+          "reason": "marvin_route_obstructed",
+          "blocking_obstacle_longitudinal_extent_m": 0.5928122057010413,
+          "blocking_obstacle_minimum_side_separation_m": 0.1862643419160808,
+          "route_lookahead_m": 0.9002974156905461,
+          "route_depth_source": "verified_range_history",
+          "marvin_bearing_deg": 3.839787908792373,
+          "heading_error_after_deg": 3.839787908792373,
+          "blocking_obstacle_centerline_clearance_m": 0.2585180666166332
+        },
+        "local_bypass": {
+          "local_bypass_active": false,
+          "local_bypass_side": "LEFT",
+          "local_bypass_target_x_m": 0.15,
+          "local_bypass_target_y_m": 0.0,
+          "bypass_target_x_m": 0.15,
+          "bypass_target_y_m": 0.0,
+          "bypass_distance_m": 0.15,
+          "bypass_bearing_deg": 0.0,
+          "route_to_bypass_obstructed": true,
+          "bypass_corridor_occupancy": 3,
+          "bypass_corridor_overlap_m": 0.0019483081697141968,
+          "bypass_forward_permitted": false,
+          "local_bypass_reason": "local_bypass_corridor_blocked",
+          "producer_session": "d47445e88fb142e6a3ad09637fc8c84e",
+          "acquisition_sequence": 5919,
+          "blocking_obstacle_x_m": 0.5391482352825278,
+          "blocking_obstacle_y_m": -0.22291343617240583,
+          "forward_safety": {
+            "permitted": true,
+            "reason": "protected_region_clear",
+            "operational_footprint_radius_m": 0.22,
+            "total_protected_radius_m": 0.45,
+            "protected_radius_m": 0.45,
+            "required_sectors": [
+              "front",
+              "front_left",
+              "front_right"
+            ]
+          },
+          "protected_radius_m": 0.45
+        }
+      },
+      "after_association": {
+        "producer_session": "d47445e88fb142e6a3ad09637fc8c84e",
+        "acquisition_sequence": 5935,
+        "route": {
+          "valid": true,
+          "route_to_marvin_obstructed": true,
+          "blocking_obstacle_distance_m": 0.6024439768882268,
+          "blocking_obstacle_bearing_deg": -24.56350567925426,
+          "blocking_obstacle_x_m": 0.5479234434016268,
+          "blocking_obstacle_y_m": -0.2504369091404193,
+          "route_occupancy": 19,
+          "corridor_overlap_m": 0.20400829010856192,
+          "blocking_obstacle_overlap_m": 0.17767900361633143,
+          "route_width_m": 0.9,
+          "reason": "marvin_route_obstructed",
+          "blocking_obstacle_longitudinal_extent_m": 0.5976153137714789,
+          "blocking_obstacle_minimum_side_separation_m": 0.2220814169470288,
+          "route_lookahead_m": 0.8639896007828658,
+          "route_depth_source": "verified_range_history",
+          "marvin_bearing_deg": 2.3103086788635565,
+          "heading_error_after_deg": 2.3103086788635565,
+          "blocking_obstacle_centerline_clearance_m": 0.2723209963836686
+        },
+        "local_bypass_candidates": {
+          "LEFT": {
+            "local_bypass_active": true,
+            "local_bypass_side": "LEFT",
+            "local_bypass_target_x_m": 0.15,
+            "local_bypass_target_y_m": 0.0,
+            "bypass_target_x_m": 0.15,
+            "bypass_target_y_m": 0.0,
+            "bypass_distance_m": 0.15,
+            "bypass_bearing_deg": 0.0,
+            "route_to_bypass_obstructed": false,
+            "bypass_corridor_occupancy": 0,
+            "bypass_corridor_overlap_m": 0.0,
+            "bypass_forward_permitted": true,
+            "local_bypass_reason": "local_bypass_corridor_clear",
+            "producer_session": "d47445e88fb142e6a3ad09637fc8c84e",
+            "acquisition_sequence": 5935,
+            "blocking_obstacle_x_m": 0.5479234434016268,
+            "blocking_obstacle_y_m": -0.2504369091404193,
+            "forward_safety": {
+              "permitted": true,
+              "reason": "protected_region_clear",
+              "operational_footprint_radius_m": 0.22,
+              "total_protected_radius_m": 0.45,
+              "protected_radius_m": 0.45,
+              "required_sectors": [
+                "front",
+                "front_left",
+                "front_right"
+              ]
+            },
+            "protected_radius_m": 0.45
+          },
+          "RIGHT": {
+            "local_bypass_active": false,
+            "local_bypass_side": "RIGHT",
+            "local_bypass_target_x_m": null,
+            "local_bypass_target_y_m": null,
+            "bypass_target_x_m": null,
+            "bypass_target_y_m": null,
+            "bypass_distance_m": null,
+            "bypass_bearing_deg": null,
+            "route_to_bypass_obstructed": true,
+            "bypass_corridor_occupancy": null,
+            "bypass_corridor_overlap_m": null,
+            "bypass_forward_permitted": false,
+            "local_bypass_reason": "bypass_lateral_clearance_not_established",
+            "producer_session": "d47445e88fb142e6a3ad09637fc8c84e",
+            "acquisition_sequence": 5935,
+            "blocking_obstacle_x_m": 0.5479234434016268,
+            "blocking_obstacle_y_m": -0.2504369091404193
+          }
+        }
+      },
+      "reported_progress": {
+        "progress": {
+          "meaningful_progress": true,
+          "meaningful_progress_reason": "corridor_overlap_improved",
+          "corridor_overlap_reduction_m": 0.020446764120708283,
+          "centerline_clearance_improvement_m": 0.013802929767035399,
+          "route_occupancy_reduction": 3,
+          "blocker_distance_change_m": 0.019030556032609947
+        },
+        "producer_session": "d47445e88fb142e6a3ad09637fc8c84e",
+        "action_acquisition_sequence": 5919,
+        "acquisition_sequence": 5935
+      }
+    }
+  ]
+}

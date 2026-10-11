@@ -1769,6 +1769,61 @@ class CognitiveRuntime:
                 stack.extend((item, depth+1) for item in value)
         return certificate
 
+    def _marvin_pre_transport_stale_lidar(self, result, *, stamp, expected_session,
+                                           planning_sequence):
+        """Negative dispatch evidence for LiDAR aging inside bypass selection.
+
+        A stale bypass admission is not evidence that lateral repair is safe.
+        The ordinary geometric-veto path needs a current scan and cannot admit
+        this case. Only the existing stopped, bounded currentness recovery may
+        use the returned snapshot; it never authorizes a replacement primitive.
+        """
+        if not explicit_pre_transport_jit_veto(result):
+            return None
+        selection = result.get("local_detour")
+        bypass = selection.get("local_bypass") if isinstance(selection, dict) else None
+        if not isinstance(bypass, dict) or bypass.get("local_bypass_reason") != "stale":
+            return None
+        if (type(stamp) is not int or stamp <= 0
+                or type(result.get("source_frame_stamp_ns")) is not int
+                or result["source_frame_stamp_ns"] != stamp
+                or result.get("source_stamp_consumed", stamp in self._marvin_alignment_consumed_source_frame_stamps)
+                    is not (stamp in self._marvin_alignment_consumed_source_frame_stamps)):
+            return None
+        stop = result.get("stop_result")
+        if stop is not None and (not isinstance(stop, dict) or stop.get("ok") is not True):
+            return None
+        evidence = result["pre_transport_jit_veto"]
+        snapshot, association = evidence.get("lidar_snapshot"), evidence.get("target_association")
+        if not isinstance(snapshot, dict) or not isinstance(association, dict):
+            return None
+        sequence = snapshot.get("acquisition_sequence")
+        if (snapshot.get("producer_session") != expected_session
+                or type(sequence) is not int or sequence <= 0
+                or type(planning_sequence) is not int or planning_sequence <= 0 or sequence < planning_sequence
+                or association.get("ok") is not True
+                or association.get("producer_session") != expected_session
+                or type(association.get("acquisition_sequence")) is not int
+                or association["acquisition_sequence"] != sequence):
+            return None
+        geometry = snapshot.get("local_motion_geometry")
+        points = geometry.get("points") if isinstance(geometry, dict) else None
+        if (not isinstance(geometry, dict) or geometry.get("valid") is not True
+                or not isinstance(points, list) or not points
+                or any(not isinstance(p, dict) or any(type(p.get(k)) not in (int, float)
+                    or not math.isfinite(p[k]) for k in ("x_m", "y_m")) for p in points)):
+            return None
+        receipt, age_at_receipt = snapshot.get("received_monotonic_seconds"), snapshot.get("age_at_receipt_seconds")
+        now = time.monotonic()
+        if (any(type(v) not in (int, float) or not math.isfinite(v) for v in (receipt, age_at_receipt, now))
+                or age_at_receipt < 0 or now < receipt):
+            return None
+        age = age_at_receipt + (now - receipt)
+        sample = read_lidar_state(snapshot, expected_session=expected_session, now=now)
+        if sample.get("reason") != "stale" or age <= MAXIMUM_EFFECTIVE_AGE_SECONDS:
+            return None
+        return dict(sample, effective_age_seconds=age)
+
     def _marvin_jit_veto_wait_evidence(self, result, *, stamp, expected_session,
                                      planning_sequence, execution_guard):
         """Fail-closed admission for a certified pre-transport production veto."""
@@ -3209,6 +3264,19 @@ class CognitiveRuntime:
                     or (transport.get("transport_result") or {}).get("delivery_uncertain") is True):
                 return finish("BLOCKED", "find_marvin_action_delivery_uncertain")
             if result.get("ok") is not True or result.get("motion_executed") is not True:
+                if proof_max_physical_actions is None and state == "AVOIDING":
+                    stale = self._marvin_pre_transport_stale_lidar(result, stamp=stamp,
+                        expected_session=session, planning_sequence=detour.get("acquisition_sequence"))
+                    if stale is not None:
+                        result["lidar_currentness_failure"] = "STALE_DURING_PRE_TRANSPORT_JIT"
+                        floors = [("route_planning_scan", session, detour["acquisition_sequence"])]
+                        prior = self._marvin_last_action_lidar_evidence
+                        if prior:
+                            floors.append(("last_action_jit", prior[0], prior[1]))
+                        reason = recover_stationary(stale, "pre_transport_jit_currentness", floors)
+                        if reason is None:
+                            continue  # New scan AND strict visual authority; never substitute this action.
+                        return finish("STOPPED" if not current() else "BLOCKED", reason)
                 rejection = self._marvin_certified_dispatch_rejection(result, stamp)
                 rejection_reason = rejection.get("reason") if rejection else None
                 stale_interlock = (rejection_reason == "FORWARD_INTERLOCK_REJECTED"
