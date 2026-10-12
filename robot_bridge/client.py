@@ -3,6 +3,11 @@ import math
 import time
 import urllib.request
 import urllib.error
+import http.client
+
+from robot_bridge.http_response import (
+    MAX_ERROR_BODY_BYTES, decode_error_body, server_error, transport_error, completed_response,
+)
 
 LOCAL_FORWARD_TIMEOUT_SECONDS = 120.0
 
@@ -100,22 +105,40 @@ class RobotBridgeClient:
 
         try:
             with urllib.request.urlopen(request, timeout=self.timeout if timeout is None else timeout) as response:
-                body = response.read().decode("utf-8")
-                return json.loads(body)
+                try:
+                    if method == "POST" and path == "/motion":
+                        result = decode_error_body(response.read(MAX_ERROR_BODY_BYTES + 1))
+                        if isinstance(result, dict) and any(k in result for k in ("state", "completed_progress_credit", "controller_session", "generation")):
+                            return completed_response(response.status, result, payload)
+                        if not isinstance(result, dict) or type(result.get("ok")) is not bool:
+                            return server_error(response.status)
+                        return result  # Existing legacy bounded success contract.
+                    return json.loads(response.read().decode("utf-8"))
+                except (ValueError, UnicodeError, RecursionError):
+                    result = server_error(response.status)
+                    result.update(error="bridge_response_invalid", response_origin="server_protocol_error")
+                    return result
+                except (OSError, http.client.HTTPException) as exc:
+                    result = transport_error(exc)
+                    result.update(http_status=response.status, http_response_received=True,
+                                  transport_attempted=None, delivery_uncertain=True,
+                                  response_origin="transport_uncertain")
+                    return result
 
         except urllib.error.HTTPError as exc:
-            return {
-                "ok": False,
-                "error": f"HTTP {exc.code}",
-                "url": url,
-            }
+            try:
+                body = decode_error_body(exc.read(MAX_ERROR_BODY_BYTES + 1))
+            except (ValueError, UnicodeError, OSError, http.client.HTTPException, RecursionError):
+                body = None
+            finally:
+                try:
+                    exc.close()
+                except OSError:
+                    pass  # Closing an unreadable error stream grants no authority.
+            return server_error(exc.code, body, endpoint=path)
 
-        except urllib.error.URLError as exc:
-            return {
-                "ok": False,
-                "error": str(exc),
-                "url": url,
-            }
+        except (urllib.error.URLError, OSError, http.client.HTTPException, ValueError, UnicodeError, RecursionError) as exc:
+            return transport_error(exc)
 
     def local_forward(self):
         return self._request("POST", "/local-motion/forward", {}, timeout=LOCAL_FORWARD_TIMEOUT_SECONDS)
