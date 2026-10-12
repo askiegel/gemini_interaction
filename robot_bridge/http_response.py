@@ -18,6 +18,105 @@ _INT_FIELDS = {"generation": 2**64 - 1, "sequence": 2**64 - 1,
                "start_ns": 2**63 - 1, "deadline_ns": 2**63 - 1}
 
 
+RECOVERABLE_ACTIVE_LIDAR_REASONS = frozenset({
+    "active_lidar_intrusion", "active_lidar_stale", "active_lidar_unavailable",
+    "active_lidar_cache_busy", "active_lidar_coverage_missing",
+})
+
+
+def _scan_identity(value):
+    if not isinstance(value, dict):
+        raise ValueError("missing scan identity")
+    session = value.get("producer_session")
+    seq, stamp = value.get("acquisition_sequence"), value.get("source_stamp_ns")
+    if (type(session) is not str or not _ID.fullmatch(session)
+            or type(seq) is not int or not 0 < seq < 2**64
+            or type(stamp) is not int or not 0 <= stamp < 2**64):
+        raise ValueError("invalid native scan identity")
+    return dict(producer_session=session, acquisition_sequence=seq, source_stamp_ns=stamp)
+
+
+def _controller_fields(value, *, stopped=False):
+    if not isinstance(value, dict):
+        raise ValueError("invalid controller certificate")
+    out = {}
+    for k in ("controller_session", "bridge_epoch"):
+        if type(value.get(k)) is not str or not _ID.fullmatch(value[k]):
+            raise ValueError("invalid controller identity")
+        out[k] = value[k]
+    for k in ("evaluated_ns", "last_operation", "last_request_generation",
+              "last_request_sequence", "last_request_issued_ns") + (("generation", "sequence") if stopped else ()):
+        if type(value.get(k)) is not int or not 0 <= value[k] < 2**64:
+            raise ValueError("invalid controller integer")
+        out[k] = value[k]
+    if value.get("last_request_accepted") is not True:
+        raise ValueError("request not acknowledged")
+    out["last_request_accepted"] = True
+    if stopped:
+        if value.get("active") is not False or value.get("gait_zero") is not True:
+            raise ValueError("controller not inactive and zero")
+        out.update(active=False, gait_zero=True)
+        for k in ("linear_x", "linear_y", "angular_z"):
+            if type(value.get(k)) not in (int, float) or value[k] != 0:
+                raise ValueError("nonzero command")
+            out[k] = 0.0
+    return out
+
+
+def certified_active_lidar_interruption(body):
+    """Resolved transported interruption, never permission to replay a command."""
+    if not isinstance(body, dict) or body.get("evidence_valid") is not True:
+        return None
+    try:
+        if (body.get("state") != "interrupted" or body.get("transport_attempted") is not True
+                or body.get("delivery_uncertain") is not False or body.get("ok") is not False
+                or body.get("completed_progress_credit") is not False
+                or body.get("controller_gait_zero") is not True or body.get("automatic_stop") is not True
+                or body.get("physical_stop_verified") is not False
+                or body.get("reason") not in RECOVERABLE_ACTIVE_LIDAR_REASONS):
+            return None
+        stop = _controller_fields(body.get("stop_certificate"), stopped=True)
+        accepted = _controller_fields(body.get("controller_acceptance"))
+        for cert in (stop, accepted):
+            if any(cert[k] != body.get(k) for k in ("controller_session", "bridge_epoch")):
+                return None
+            if cert["last_request_generation"] != body.get("generation"):
+                return None
+        if (stop["last_operation"] != 3 or accepted["last_operation"] not in (1, 2)
+                or stop["generation"] != body.get("generation")
+                or stop["sequence"] != stop["last_request_sequence"]
+                or stop["sequence"] <= accepted["last_request_sequence"]
+                or not body["start_ns"] <= accepted["last_request_issued_ns"] < body["deadline_ns"]
+                or not accepted["last_request_issued_ns"] <= stop["last_request_issued_ns"] <= stop["evaluated_ns"]):
+            return None
+        gate = body.get("lidar_safety")
+        if not isinstance(gate, dict) or gate.get("permitted") is not False or gate.get("reason") != body["reason"]:
+            return None
+        floor = _scan_identity(body.get("last_verified_lidar"))
+        if "producer_session" in gate:
+            current = _scan_identity(gate)
+            if (current["producer_session"] != floor["producer_session"]
+                    or current["acquisition_sequence"] < floor["acquisition_sequence"]
+                    or current["source_stamp_ns"] < floor["source_stamp_ns"]
+                    or (current["acquisition_sequence"] == floor["acquisition_sequence"]) !=
+                       (current["source_stamp_ns"] == floor["source_stamp_ns"])):
+                return None
+            floor = current
+        elif body["reason"] not in {"active_lidar_unavailable", "active_lidar_cache_busy"}:
+            return None
+        if gate.get("source_fault") is not None:
+            return None
+        return dict(scan_floor=floor,
+                    sequence_floor_source="interrupting_scan" if "producer_session" in gate else "last_verified_lidar",
+                    stop_certificate=stop, controller_acceptance=accepted,
+                    reason=body["reason"], generation=body["generation"],
+                    controller_session=body["controller_session"], bridge_epoch=body["bridge_epoch"],
+                    axes=tuple(body[k] for k in ("linear_x", "linear_y", "angular_z")),
+                    duration=body["duration"])
+    except (KeyError, ValueError, TypeError):
+        return None
+
+
 def _pairs(items):
     out = {}
     for key, value in items:
@@ -80,6 +179,39 @@ def _bounded_fields(body):
         out["stop_result"]["ok"] = stop["ok"]
         if not stop["ok"] and stop.get("controller_gait_zero") is True:
             raise ValueError("contradictory STOP evidence")
+    if body.get("lidar_safety") is not None:
+        gate = body["lidar_safety"]
+        if (not isinstance(gate, dict) or type(gate.get("permitted")) is not bool
+                or type(gate.get("reason")) is not str or not _TOKEN.fullmatch(gate["reason"])):
+            raise ValueError("invalid LiDAR certificate")
+        bounded = {"permitted": gate["permitted"], "reason": gate["reason"]}
+        if "producer_session" in gate:
+            bounded.update(_scan_identity(gate))
+        for k in ("effective_age_seconds", "received_monotonic_seconds", "protected_radius_m"):
+            if k in gate:
+                if type(gate[k]) not in (int, float) or not math.isfinite(gate[k]) or gate[k] < 0:
+                    raise ValueError("invalid LiDAR scalar")
+                if k == "protected_radius_m" and gate[k] != .45:
+                    raise ValueError("incompatible protected radius")
+                bounded[k] = gate[k]
+        if "source_fault" in gate:
+            if type(gate["source_fault"]) is not str or not _TOKEN.fullmatch(gate["source_fault"]):
+                raise ValueError("invalid source fault")
+            bounded["source_fault"] = gate["source_fault"]
+        out["lidar_safety"] = bounded
+    for k, parser in (("last_verified_lidar", _scan_identity),
+                      ("controller_acceptance", _controller_fields)):
+        if body.get(k) is not None:
+            out[k] = parser(body[k])
+    if body.get("stop_certificate") is not None:
+        stop = _controller_fields(body["stop_certificate"], stopped=True)
+        if (any(stop[k] != body.get(k) for k in ("controller_session", "bridge_epoch", "generation"))
+                or stop["last_operation"] != 3
+                or stop["generation"] != stop["last_request_generation"]
+                or stop["sequence"] != stop["last_request_sequence"]
+                or stop["last_request_issued_ns"] > stop["evaluated_ns"]):
+            raise ValueError("contradictory scoped STOP")
+        out["stop_certificate"] = stop
     return out
 
 

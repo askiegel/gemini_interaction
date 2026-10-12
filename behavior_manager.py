@@ -10,6 +10,7 @@ from guarded_turn_policy import (
 )
 from lidar_perception import MAXIMUM_EFFECTIVE_AGE_SECONDS
 from marvin_blocked_wait import pre_transport_jit_veto_evidence
+from robot_bridge.http_response import certified_active_lidar_interruption
 from local_obstacle_policy import (
     plan_local_obstacle_avoidance,
     recommend_local_avoidance,
@@ -1745,6 +1746,13 @@ class BehaviorManager:
                 "error": fallback_error,
                 "error_type": fallback_error_type,
             }]
+        if (not transport_ok and not invalidated and not forced_post
+                and certified_active_lidar_interruption(transport_result) is not None
+                and isinstance(result.get("stop_fallback_result"), dict)
+                and result["stop_fallback_result"].get("ok") is True
+                and result.get("stop_fallback_error") is None):
+            result["delivery_uncertain"] = False
+            result["reason"] = transport_result["reason"]
         result.update(
             ok=transport_ok and not invalidated and not forced_post,
             forwarded=transport_ok,
@@ -1757,6 +1765,9 @@ class BehaviorManager:
                 else (
                     validation.get("reason")
                     if transport_ok
+                    else transport_result["reason"]
+                    if certified_active_lidar_interruption(transport_result) is not None
+                        and result["delivery_uncertain"] is False
                     else "transport_failed"
                 )
             )),

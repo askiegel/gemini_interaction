@@ -133,6 +133,17 @@ class LidarPerceptionWorker:
                         conservative_age, self._age + (received - self._receipt)
                     )
                 self._stamp, self._receipt, self._age = stamp, received, conservative_age
+                # Native Bridge intake identity is distinct from this worker's
+                # GET acquisition sequence. Retain only exact bounded scalars.
+                native = raw.get("telemetry", {})
+                if (isinstance(native, dict) and type(native.get("producer_session")) is str
+                        and 1 <= len(native["producer_session"]) <= 64
+                        and type(native.get("acquisition_sequence")) is int
+                        and 0 < native["acquisition_sequence"] < 2**64
+                        and type(native.get("source_stamp_ns")) is int
+                        and 0 <= native["source_stamp_ns"] < 2**64):
+                    state["bridge_scan_identity"] = {k: native[k] for k in (
+                        "producer_session", "acquisition_sequence", "source_stamp_ns")}
                 state.update(
                     available=True, valid=True, reason="fresh",
                     sectors=payload["sectors"], source=source,
