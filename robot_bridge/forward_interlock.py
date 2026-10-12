@@ -1,6 +1,6 @@
 """Fail-closed LiDAR health watchdog for guarded translation.
 
-Legacy forward method/state names also cover bounded lateral dispatch. Collision
+Legacy forward method/state names cover all configured bounded dispatches. Collision
 geometry is deliberately not decided here. Guarded forward and lateral motion
 perform their just-in-time base-frame swept-path checks before reaching
 the Robot Bridge client.  This interlock independently watches whether the
@@ -75,6 +75,7 @@ class ForwardMotionInterlock:
         self._dispatch_details = {}
         self._bounded_authorization_consumed = False
         self._last_stop_error = None
+        self._stops_inflight = 0
         self._stopped = False
 
     @property
@@ -108,9 +109,13 @@ class ForwardMotionInterlock:
                 self._bounded_authorization_consumed = False
                 self._inhibited = self._stopped or any(
                     generation != self._generation for generation in self._pending_dispatches
-                )
-                self._reason = reason
+                ) or self._stops_inflight > 0 or self._last_stop_error is not None
+                self._reason = ("forward_interlock_stop_unverified"
+                                if self._last_stop_error is not None else reason)
             if should_stop:
+                # Reserve before releasing the lock: completion cannot admit a
+                # successor while this old command's STOP callback is delayed.
+                self._stops_inflight += 1
                 pending = list(self._dispatch_epochs)
                 for dispatch in pending:
                     details = self._dispatch_details[dispatch]
@@ -123,7 +128,7 @@ class ForwardMotionInterlock:
                             "acquisition_started_at", "completed_at")}))
                     details["stop_pending"] += 1
         if should_stop:
-            event = self._dispatch_stop()
+            event = self._dispatch_stop(reserved=True)
             with self._lock:
                 for dispatch in pending:
                     if dispatch in self._dispatch_details:
@@ -132,8 +137,18 @@ class ForwardMotionInterlock:
                         details["stop_pending"] -= 1
         return permitted, reason
 
-    def _dispatch_stop(self):
+    def _dispatch_stop(self, *, reserved=False):
         """STOP is ungated and always called outside the interlock lock."""
+        if not reserved:
+            with self._lock:
+                self._stops_inflight += 1
+        try:
+            return self._dispatch_stop_reserved()
+        finally:
+            with self._lock:
+                self._stops_inflight -= 1
+
+    def _dispatch_stop_reserved(self):
         error = None
         started = self.monotonic()
         result = None
@@ -146,6 +161,7 @@ class ForwardMotionInterlock:
         if error is not None:
             with self._lock:
                 self._last_stop_error = error
+                self._inhibited = True
         return {"started_monotonic_seconds": started,
                 "completed_monotonic_seconds": self.monotonic(),
                 "result": copy.deepcopy(result), "error": error}
@@ -154,6 +170,12 @@ class ForwardMotionInterlock:
         with self._lock:
             if not self._configured:
                 raise PermissionError("forward_interlock_not_configured")
+            if self._stops_inflight:
+                raise PermissionError("forward_interlock_stop_pending")
+            if self._last_stop_error is not None:
+                # A callback timeout/failure can still leave a late STOP in
+                # flight. Fresh scans cannot certify resolved motion delivery.
+                raise PermissionError("forward_interlock_stop_unverified")
             if not self._permitted or self._inhibited:
                 raise PermissionError(self._reason)
             if (
@@ -293,4 +315,5 @@ class ForwardMotionInterlock:
                 "active_forward": self._active_forward,
                 "pending_forward": bool(self._pending_dispatches),
                 "last_stop_error": self._last_stop_error,
+                "stop_pending": self._stops_inflight > 0,
             }

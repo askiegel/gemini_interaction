@@ -538,7 +538,7 @@ def test_reader_failure_stops_and_does_not_rearm():
     interlock.stop()
 
 
-def test_stop_failure_leaves_inhibited_and_new_clear_needs_new_request():
+def test_stop_failure_remains_quarantined_after_new_clear():
     current = state()
     stop = Mock(side_effect=OSError("stop failed"))
     interlock = ForwardMotionInterlock(lambda **_: current, expected_session="s", stop_callback=stop)
@@ -550,7 +550,9 @@ def test_stop_failure_leaves_inhibited_and_new_clear_needs_new_request():
     assert interlock.status()["inhibited"] and interlock.status()["last_stop_error"]
     current["sectors"]["front"]["state"] = "CLEAR"
     interlock.refresh()
-    assert interlock.status()["forward_permitted"]
+    assert not interlock.status()["forward_permitted"]
+    with pytest.raises(PermissionError, match="stop_unverified"):
+        interlock.begin_positive_dispatch(streaming=False)
     interlock.stop()
 
 
@@ -661,13 +663,20 @@ def test_cross_thread_invalidated_transport_has_two_stop_phases(outcome, stop_fa
     assert client.streaming_motion(linear_x=0.1)["forwarded"] is False
     current["sectors"]["front"]["state"] = "CLEAR"
     interlock.refresh()
-    assert interlock.status()["forward_permitted"]
+    assert interlock.status()["forward_permitted"] is (not stop_failure)
     assert not interlock.status()["active_forward"]
     assert events.count("motion_enter") == 1  # CLEAR never replays.
     client._request = Mock(return_value={"ok": True})
-    assert client.streaming_motion(linear_x=0.1)["ok"]
-    client._request.assert_called_once()
-    assert interlock.status()["active_forward"]
+    new_request = client.streaming_motion(linear_x=0.1)
+    if stop_failure:
+        assert new_request["forwarded"] is False
+        assert new_request["error"] == "forward_interlock_stop_unverified"
+        client._request.assert_not_called()
+        assert not interlock.status()["active_forward"]
+    else:
+        assert new_request["ok"]
+        client._request.assert_called_once()
+        assert interlock.status()["active_forward"]
     interlock.stop()
 
 

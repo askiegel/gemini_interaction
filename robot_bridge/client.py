@@ -209,9 +209,14 @@ class RobotBridgeClient:
                 }
             )
 
-        if linear_x > 0 or linear_y != 0:
+        translation_guard = linear_x > 0 or linear_y != 0
+        # Share the existing STOP/completion fence for every bounded command.
+        # Reverse/rotation cannot bypass an old translation's unresolved STOP.
+        bounded_owner_guard = (not streaming and self.forward_interlock is not None
+                               and (linear_x != 0 or linear_y != 0 or angular_z != 0))
+        if translation_guard or bounded_owner_guard:
             if not streaming:
-                if not math.isfinite(angular_z) or angular_z != 0.0:
+                if not math.isfinite(angular_z) or (translation_guard and angular_z != 0.0):
                     return {
                         "ok": False,
                         "forwarded": False,
@@ -273,13 +278,16 @@ class RobotBridgeClient:
                             ),
                             "confirmed_forwarded": False,
                             "transport_attempted": True,
-                            "bounded_forward_invalidated": linear_y == 0,
+                            "bounded_forward_invalidated": linear_x > 0 and linear_y == 0,
                             "bounded_lateral_invalidated": linear_y != 0,
+                            "bounded_command_invalidated": bounded_owner_guard,
                             "interlock_stop_succeeded": (
                                 isinstance(outcome, dict) and outcome.get("stop_succeeded") is True),
                             "interlock_dispatch_outcome": outcome,
                             "transport_result": transport_result,
-                            "error": ("bounded_lateral_invalidated" if linear_y else "bounded_forward_invalidated"),
+                            "error": ("bounded_lateral_invalidated" if linear_y else
+                                      "bounded_forward_invalidated" if linear_x > 0 else
+                                      "bounded_command_invalidated"),
                             "reason": (
                                 outcome.get("reason")
                                 if isinstance(outcome, dict)
