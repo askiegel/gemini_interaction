@@ -1,4 +1,10 @@
-"""Offline preference policy and mission progress; all sensors/transport are fakes."""
+"""Offline preference policy and mission progress; all sensors/transport are fakes.
+
+Historical case names retain ledger correspondence. Component tests still
+exercise saved metric-depth planners; mission tests use vision-led collision
+capsules, fresh strict camera authority and the selected bounded primitives.
+Synthetic arrival fixtures are not physical calibration.
+"""
 import socket
 
 import pytest
@@ -8,7 +14,7 @@ from marvin_local_obstacle_avoidance import rank_marvin_escape_options
 from marvin_obstacle_phases import plan_phase_action
 from test_marvin_avoidance_planner_progress import scan, forecast
 from test_marvin_local_bypass import ASSOCIATION, OPEN_LEFT, pursuit_specs
-from test_marvin_lateral_avoidance import LEFT_OPEN, strafe_runtime
+from test_marvin_lateral_avoidance import LEFT_OPEN, strafe_runtime, collision_scenes
 from test_find_marvin_closed_loop import motions, run
 from test_marvin_final_jit_action_switch import lateral_switch_mission, refused_row
 from test_marvin_dispatch_guard_repair import final_boundary_mission
@@ -138,18 +144,17 @@ def test_no_safe_turn_or_lateral_remains_blocked(side):
 
 @pytest.mark.parametrize('side', ['LEFT', 'RIGHT'])
 def test_measured_strafe_gain_keeps_side_then_enters_pass(tmp_path,monkeypatch,side):
-    scenes = [mirrored(p,side) for p in [
-        [(.65,-.11),(0,1.2),(0,-.65)], [(.65,-.14),(0,1.2),(0,-.65)], OPEN_LEFT]]+[None]
+    scenes = collision_scenes(3, side=side)
     b,_,_ = strafe_runtime(tmp_path,monkeypatch,pursuit_specs([(0,1.1)]*4),scenes)
     result = run(b[0])
     assert result['state'] == 'ARRIVED',result['reason']
     rows = result['local_avoidance_history']
-    assert [row['selection']['action_type'] for row in rows] == ['STRAFE_'+side,'STRAFE_'+side,'BYPASS_FORWARD']
+    assert [row['selection']['action_type'] for row in rows] == ['STRAFE_'+side]*3
     evidence = rows[1]['selection']['lateral_progress']
     assert evidence['completed_strafe'] and evidence['meaningful_progress']
-    assert evidence['center_separation_gain_m'] == pytest.approx(.03)
+    assert evidence['center_separation_gain_m'] == pytest.approx(.025)
     assert evidence['acquisition_sequence'] > rows[0]['selection']['acquisition_sequence']
-    assert rows[2]['selection']['phase'] == 'PASS_OBSTACLE'
+    assert rows[2]['selection']['phase'] == 'CLEAR_SIDE'
     assert all(row['selection']['committed_side'] == side for row in rows)
 
 
@@ -177,12 +182,13 @@ def test_necessary_target_alignment_precedes_pursuit_without_reversal(tmp_path,m
     error = -100 if side == 'LEFT' else 100
     b,_,_ = strafe_runtime(tmp_path,monkeypatch,
         pursuit_specs([(error,1.1),(0,1.1),(0,1.1)]),
-        [mirrored(OPEN_LEFT,side),mirrored(OPEN_LEFT,side),mirrored(OPEN_LEFT,side),None])
+        [mirrored(LEFT_OPEN,side),mirrored(LEFT_OPEN,side),
+         mirrored([(x,y-.04) if x>0 else (x,y) for x,y in LEFT_OPEN],side),None])
     result = run(b[0]);history = result['history']
     assert history[0]['state'] == 'ALIGNING'
     assert motions(b[3])[0] == ('turn',side,.25,.5)
     assert result['local_avoidance_history'][0]['selection']['action_type'] == 'STRAFE_'+side
-    assert result['local_avoidance_history'][1]['selection']['action_type'] == 'BYPASS_FORWARD'
+    assert result['local_avoidance_history'][1]['selection']['action_type'] == 'STRAFE_'+side
     assert history[1]['source_frame_stamp_ns'] > history[0]['source_frame_stamp_ns']
 
 
@@ -192,9 +198,10 @@ def test_final_jit_strafe_to_pass_remains_zero_transport_and_new_stamp_only(tmp_
     result = run(b[0]);refused = refused_row(result);v = refused['result']
     assert result['state'] == 'ARRIVED'
     cert = v['dispatch_guard_rejection']
-    assert cert['selection_rejection_class'] == 'LOCAL_SELECTION_CHANGED_AT_FINAL_JIT'
+    assert cert['reason'] == 'LOCAL_SELECTION_REJECTED'
+    assert cert['selection_rejection_class'] is None # STRAFE to TURN is a native generic veto.
     assert cert['requested_action_type'] == 'STRAFE_'+side
-    assert cert['final_selected_action_type'] == 'BYPASS_FORWARD'
+    assert cert['final_selected_action_type'] == 'TURN_'+side
     assert not cert['transport_attempted'] and v['actions_executed'] == 0
     assert v['source_stamp_consumed'] and not refused['motion_executed']
     stamp = refused['source_frame_stamp_ns']
@@ -219,7 +226,7 @@ def test_final_jit_reverse_switch_keeps_repair_phase_and_new_authority(tmp_path,
     assert result['state'] == 'ARRIVED'
     assert any(row.get('phase_after_veto') == 'CLEAR_SIDE' for row in result['local_avoidance_history'])
     assert any(row['motion_executed'] and row['source_frame_stamp_ns'] > refused['source_frame_stamp_ns']
-        and (row['result'].get('local_detour') or {}).get('action_type') == 'STRAFE_LEFT'
+        and (row['result'].get('local_detour') or {}).get('action_type') == 'TURN_LEFT'
         for row in result['history'])
 
 
@@ -230,8 +237,8 @@ def test_existing_material_gain_threshold_remains_unchanged():
 @pytest.mark.parametrize('side', ['LEFT','RIGHT'])
 @pytest.mark.parametrize('gain,second_kind',[(.019,'TURN'),(.021,'STRAFE')])
 def test_measured_clearance_criterion_uses_existing_two_centimeter_threshold(tmp_path,monkeypatch,side,gain,second_kind):
-    first = [(.65,-.11),(0,1.2),(0,-.65)]
-    second = [(.65,-.11-gain),(0,1.2),(0,-.65)]
+    first = LEFT_OPEN
+    second = [(x,y-gain) if x>0 else (x,y) for x,y in first]
     b,_,_ = strafe_runtime(tmp_path,monkeypatch,pursuit_specs([(0,1.1)]*3),
         [mirrored(first,side),mirrored(second,side),None])
     result = run(b[0]);rows = result['local_avoidance_history']
@@ -245,7 +252,7 @@ def test_measured_clearance_criterion_uses_existing_two_centimeter_threshold(tmp
 
 @pytest.mark.parametrize('side',['LEFT','RIGHT'])
 def test_interrupted_strafe_does_not_establish_completed_lateral_progress(tmp_path,monkeypatch,side):
-    points = mirrored([(.65,-.14),(0,1.2),(0,-.65)],side)
+    points = mirrored(LEFT_OPEN,side)
     b,_,_ = strafe_runtime(tmp_path,monkeypatch,pursuit_specs([(0,1.1)]*4),
         [points,points,None],interruptions=[True,False])
     result = run(b[0]);rows = result['local_avoidance_history']

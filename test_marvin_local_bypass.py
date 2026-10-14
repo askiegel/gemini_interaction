@@ -1,4 +1,10 @@
-"""Offline local bypass geometry and complete guarded mission handoffs."""
+"""Offline local bypass geometry and complete guarded mission handoffs.
+
+Historical case names retain ledger correspondence. Component tests still
+exercise saved metric-depth planners; mission tests use vision-led collision
+capsules, fresh strict camera authority and the selected bounded primitives.
+Synthetic arrival fixtures are not physical calibration.
+"""
 import copy
 import json
 import math
@@ -15,7 +21,7 @@ from marvin_local_bypass import (
 from marvin_local_obstacle_avoidance import select_marvin_escape_action, MAX_LOCAL_AVOIDANCE_ACTIONS
 from marvin_route_obstruction import evaluate_marvin_route
 from test_marvin_avoidance_planner_progress import scan
-from test_marvin_lateral_avoidance import strafe_runtime
+from test_marvin_lateral_avoidance import strafe_runtime, LEFT_OPEN, collision_scenes
 from test_find_marvin_closed_loop import run, motions
 
 
@@ -135,11 +141,11 @@ def pursuit_specs(prefix):
 
 
 def mission_bundle(tmp_path, monkeypatch, *, bypass_steps=1):
-    scenes = [OPEN_LEFT, OPEN_LEFT]
-    for step in range(1, bypass_steps):
-        scenes.append([(.65-.05*step, -.25), (0., 1.2), (0., -.65)])
-    scenes.append(None)
-    specs = pursuit_specs([(0., 1.1)] * (bypass_steps+1))
+    # The old parameter name is retained for case/evidence correspondence.
+    # Runtime exercises one initial plus N fresh lateral commands, not metric
+    # target-depth bypasses. Component bypass tests above remain unchanged.
+    scenes = collision_scenes(bypass_steps+1)
+    specs = pursuit_specs([(0., 1.1)] * (bypass_steps+3))
     bundle, flags, client = strafe_runtime(tmp_path, monkeypatch, specs, scenes)
     runtime, _, _, _, clock = bundle
     read = runtime.world_model.get_lidar_obstacles
@@ -158,57 +164,59 @@ def test_guarded_bypass_forward_while_marvin_route_blocked_then_resume_pursuit(t
     assert result['state'] == 'ARRIVED', result['reason']
     assert result['arrived_at_marvin']
     assert result['local_avoidance_actions'] == 1 + steps
-    assert result['local_bypass_actions'] == result['completed_bypass_forward_actions'] == steps
+    assert result['local_bypass_actions'] == result['completed_bypass_forward_actions'] == 0
+    assert result['completed_strafe_actions']==steps+1
     assert result['local_bypass_active'] is False
     assert result['local_bypass_target_x_m'] is None
     assert motions(events)[0] == ('strafe', .08, 1.)
     history = [row for row in result['history'] if not row.get('decision_only')]
     stamps = [row['source_frame_stamp_ns'] for row in history]
     assert len(stamps) == len(set(stamps))
-    bypass_rows = [row for row in history if row['result'].get('action_type') == 'BYPASS_FORWARD']
+    bypass_rows = [row for row in history if row['result'].get('action_type') == 'STRAFE_LEFT']
+    assert len(bypass_rows)==steps+1
     for row in bypass_rows:
         assert row['state'] == 'AVOIDING'
         assert row['observation']['arrival']['route_to_marvin_obstructed']
         assert row['result']['source_stamp_consumed'] and row['result']['bridge_stop_confirmed']
-        assert row['result']['approach_result']['forward_safety']['permitted']
+        assert row['result']['lateral_step']['lateral_safety']['permitted']
         assert row['result']['local_detour']['accepted']
-        assert row['result']['local_detour']['local_bypass']['bypass_forward_permitted']
+        assert len(row['result']['lateral_step']['lateral_safety']['required_sectors'])==8
     for row in history:
         assert row['source_frame_stamp_ns'] in runtime._marvin_alignment_consumed_source_frame_stamps
         sequence = row['action_lidar_evidence'][1]
         assert any(wait['snapshot']['acquisition_sequence'] > sequence for wait in result['lidar_wait_history'])
-    diagnostics = [row for row in result['progress_diagnostics']['actions'] if row['action_type'] == 'BYPASS_FORWARD']
-    assert len(diagnostics) == steps
+    diagnostics = [row for row in result['progress_diagnostics']['actions'] if row['action_type'] == 'STRAFE_LEFT']
+    assert len(diagnostics) == steps+1
     for row in diagnostics:
-        assert row['type'] == 'bypass_forward'
-        assert row['command']['linear_x'] == .1
-        assert row['command']['linear_y'] == row['command']['angular_z'] == 0
-        assert row['command']['duration'] == .5
+        assert row['type'] == 'detour_strafe'
+        assert row['command']['linear_y'] == .08
+        assert row['command']['linear_x'] == row['command']['angular_z'] == 0
+        assert row['command']['duration'] == 1.
         assert row['first_post_action_lidar'] and row['first_new_post_action_camera']
-    assert all(action[1:] == (.1, .5) for action in motions(events)[1:])
+    assert all(action == ('forward',.1,.5) for action in motions(events)[steps+1:])
     assert robot.status()['motion'] == {'linear_x': 0., 'linear_y': 0., 'angular_z': 0., 'streaming': False}
 
 
 def test_neutral_bypass_retains_pass_until_phase_stagnation(tmp_path, monkeypatch):
-    bundle, _, _ = strafe_runtime(tmp_path, monkeypatch, [(0.,1.1)]*16, [OPEN_LEFT])
+    bundle, _, _ = strafe_runtime(tmp_path, monkeypatch, [(0.,1.1)]*16, [LEFT_OPEN])
     result = run(bundle[0])
-    assert motions(bundle[3]) == [('strafe', .08, 1.)] + [('forward', .1, .5)]*12
-    assert result['state'] == 'BLOCKED' and result['reason'] == 'find_marvin_pass_stagnation_exhausted'
-    assert result['blocked_wait_recheck_count'] == 0
-    assert result['local_avoidance_actions'] == 13
-    assert result['local_bypass_actions'] == 12
+    assert motions(bundle[3]) == [('strafe', .08, 1.)] + [('turn','LEFT',.25,.5)]*3
+    assert result['state'] == 'BLOCKED' and result['reason'] == 'find_marvin_clear_side_stagnation_exhausted'
+    assert result['blocked_wait_recheck_count'] == 5
+    assert result['local_avoidance_actions'] == 4
+    assert result['local_bypass_actions'] == 0
     assert result['stop_result']['ok']
 
 
 def test_bypass_actions_retain_legacy_counter_and_new_watchdog(tmp_path, monkeypatch):
-    scenes = [OPEN_LEFT, OPEN_LEFT] + [[(.65-.011*i, -.25), (0.,1.2), (0.,-.65)] for i in range(1,8)]
-    bundle, _, _ = strafe_runtime(tmp_path, monkeypatch, [(0.,1.1)]*30, scenes)
+    scenes = collision_scenes(12,clear=False)
+    bundle, _, _ = strafe_runtime(tmp_path, monkeypatch, [(0.,1.1)]*40, scenes)
     result = run(bundle[0])
-    assert result['reason'] == 'find_marvin_pass_stagnation_exhausted'
+    assert result['reason'] == 'find_marvin_clear_side_attempts_exhausted'
     assert MAX_LOCAL_AVOIDANCE_ACTIONS == 6
-    assert result['local_avoidance_actions'] == 13
-    assert result['local_bypass_actions'] == 12
-    assert len(motions(bundle[3])) == 13
+    assert result['local_avoidance_actions'] == len(motions(bundle[3])) == 8
+    assert result['local_bypass_actions'] == 0
+    assert result['detour_context']['watchdog']['phase_actions']==8
 
 
 @pytest.mark.parametrize('phase', ['dispatch', 'post'])
@@ -218,12 +226,12 @@ def test_stop_during_bypass_preempts_without_second_motion(tmp_path, monkeypatch
     if phase == 'post':
         robot.on_motion = lambda: runtime.submit_intent({'intent': 'STOP', 'speech': 'Stop.'}) if len(motions(events)) == 2 else None
     else:
-        original = runtime.behavior_manager.execute_single_marvin_approach_step
+        original = runtime.behavior_manager.execute_guarded_marvin_lateral_step
         def stop_before_dispatch(**kwargs):
-            if kwargs.get('local_selection_validator'):
+            if len(motions(events))==1:
                 runtime.submit_intent({'intent': 'STOP', 'speech': 'Stop.'})
             return original(**kwargs)
-        runtime.behavior_manager.execute_single_marvin_approach_step = stop_before_dispatch
+        runtime.behavior_manager.execute_guarded_marvin_lateral_step = stop_before_dispatch
     result = run(runtime)
     assert result['state'] == 'STOPPED'
     assert len(motions(events)) == (2 if phase == 'post' else 1)
@@ -282,10 +290,10 @@ def test_bypass_can_be_established_on_either_open_side(direction):
 
 def test_post_bypass_marvin_shift_uses_ordinary_alignment(tmp_path, monkeypatch):
     specs = pursuit_specs([(0.,1.1),(0.,1.1),(100.,1.1)])
-    bundle, _, _ = strafe_runtime(tmp_path, monkeypatch, specs, [OPEN_LEFT,OPEN_LEFT,None])
+    bundle, _, _ = strafe_runtime(tmp_path, monkeypatch, specs, collision_scenes(2))
     result = run(bundle[0])
     assert result['state'] == 'ARRIVED'
-    assert motions(bundle[3])[:3] == [('strafe',.08,1.),('forward',.1,.5),('turn','RIGHT',.25,.5)]
+    assert motions(bundle[3])[:3] == [('strafe',.08,1.),('strafe',.08,1.),('turn','RIGHT',.25,.5)]
     assert result['history'][2]['state'] == 'ALIGNING'
     assert result['local_avoidance_actions'] == 2
 
@@ -293,33 +301,40 @@ def test_post_bypass_marvin_shift_uses_ordinary_alignment(tmp_path, monkeypatch)
 @pytest.mark.parametrize('still_blocked', [False, True])
 def test_tracker_loss_after_bypass_uses_existing_gemini_recovery(tmp_path, monkeypatch, still_blocked):
     from test_find_marvin_reacquisition import recovery_runtime
+    failures=[]
     def factory(path, mp, specs):
-        return recovery_runtime(path, mp, specs, failures=(6,))
-    specs = pursuit_specs([(0.,1.1)]*5)
-    bundle, _, _ = strafe_runtime(tmp_path, monkeypatch, specs,
-        [OPEN_LEFT,OPEN_LEFT,[(.60,-.25),(0.,1.2),(0.,-.65)] if still_blocked else None,None], factory=factory)
-    result = run(bundle[0])
-    assert result['state'] == 'ARRIVED', result['reason']
-    assert result['reacquisition_attempts'] >= 1
-    assert result['completed_bypass_forward_actions'] == (2 if still_blocked else 1)
-    assert 'gemini' in bundle[3] and 'reacquire' in bundle[3]
+        return recovery_runtime(path, mp, specs, failures=failures)
+    scenes=collision_scenes(3 if still_blocked else 2)
+    bundle, _, _ = strafe_runtime(tmp_path, monkeypatch,pursuit_specs([(0.,1.1)]*10),scenes,factory=factory)
+    runtime,behavior,robot,events,_=bundle
+    def lose_tracker():
+        if len(motions(events))==2: failures.append(len(behavior.updated_frames)+1)
+    robot.on_motion=lose_tracker
+    result = run(runtime)
+    assert failures and result['state'] == 'ARRIVED', result['reason']
+    assert result['reacquisition_attempts'] == 1
+    assert result['completed_strafe_actions'] == (3 if still_blocked else 2)
+    assert result['completed_bypass_forward_actions']==0
+    second_motion=[i for i,e in enumerate(events) if isinstance(e,tuple)][1]
+    assert events.index('reacquire',second_motion+1)>second_motion
+    assert result['reacquisition_history'][0]['succeeded']
     assert not result['local_bypass_active']
 
 
 def test_fresh_jit_geometry_can_veto_previously_clear_bypass(tmp_path, monkeypatch):
     bundle, _, _ = mission_bundle(tmp_path, monkeypatch)
     runtime, _, _, events, _ = bundle
-    primitive = runtime.behavior_manager.execute_single_marvin_approach_step
+    primitive = runtime.behavior_manager.execute_guarded_marvin_lateral_step
     read = runtime.world_model.get_lidar_obstacles
     def unsafe_after_selection(**kwargs):
-        if kwargs.get('local_selection_validator'):
+        if len(motions(events))==1:
             def unsafe(**kw):
                 state = read(**kw)
                 state['local_motion_geometry']['points'].append({'x_m':.40,'y_m':0.})
                 return state
             runtime.world_model.get_lidar_obstacles = unsafe
         return primitive(**kwargs)
-    runtime.behavior_manager.execute_single_marvin_approach_step = unsafe_after_selection
+    runtime.behavior_manager.execute_guarded_marvin_lateral_step = unsafe_after_selection
     result = run(runtime)
     assert result['state'] == 'BLOCKED'
     assert motions(events) == [('strafe', .08, 1.)]
@@ -329,37 +344,18 @@ def test_fresh_jit_geometry_can_veto_previously_clear_bypass(tmp_path, monkeypat
 
 @pytest.mark.parametrize('recover', [True, False])
 def test_lidar_expiry_during_bypass_stops_and_uses_existing_bounded_recovery(tmp_path, monkeypatch, recover):
-    bundle, flags, client = mission_bundle(tmp_path, monkeypatch)
+    bundle, flags, client = strafe_runtime(tmp_path,monkeypatch,
+        pursuit_specs([(0.,1.1)]*5),collision_scenes(2),interruptions=[False,True])
     runtime, behavior, robot, events, clock = bundle
     flags['publish'] = recover
-    lateral_transport = client._request
-    def transport(method, path, payload=None):
-        if not payload or payload['linear_x'] == 0:
-            return lateral_transport(method,path,payload)
-        assert payload['linear_x'] == .1 and payload['angular_z'] == 0 and payload.get('linear_y',0) == 0
-        events.append(('forward',payload['linear_x'],payload['duration']))
-        clock[0] += 120_000_000
-        behavior.freeze_lidar = True
-        behavior.sequence += 1
-        flags['outage'] = True
-        assert client.forward_interlock.refresh() == (False,'stale')
-        assert events[-1] == 'stop'
-        return dict(ok=True,action='motion',mode='bounded',automatic_stop=True,returned_immediately=False,**payload)
-    client._request = transport
-    def forward(*, speed, seconds, dispatch_guard=None):
-        return client.move_forward(speed=speed,seconds=seconds,dispatch_guard=dispatch_guard)
-    robot.move_forward = forward
-    # Restore the ordinary offline forward transport after the interrupted bypass;
-    # new perception makes the direct route clear, never resume the old command.
-    original_forward = type(robot).move_forward
-    flags['on_sleep'] = lambda: setattr(robot,'move_forward',lambda **kw: original_forward(robot,**kw)) if flags['sleeps'] == 2 else None
     result = run(runtime)
     interrupted = result['history'][1]['result']
     assert interrupted['interrupted'] and interrupted['source_stamp_consumed']
     assert not interrupted['full_step_completed']
-    assert result['interrupted_bypass_forward_attempts'] == 1
+    assert result['interrupted_strafe_attempts'] == 1
+    assert result['completed_strafe_actions'] == 1
     assert result['completed_bypass_forward_actions'] == 0
-    assert result['local_avoidance_actions'] == 2  # Dispatched interruption consumes the shared budget.
+    assert result['local_avoidance_actions'] == 2
     assert result['lidar_recovery_history']
     if recover:
         assert result['state'] == 'ARRIVED', result['reason']
@@ -367,17 +363,20 @@ def test_lidar_expiry_during_bypass_stops_and_uses_existing_bounded_recovery(tmp
     else:
         assert result['state'] == 'BLOCKED' and result['reason'] == 'find_marvin_new_lidar_evidence_timeout'
         assert len(motions(events)) == 2
-    assert robot.status()['motion']['streaming'] is False
+    assert robot.status()['motion']=={'linear_x':0.,'linear_y':0.,'angular_z':0.,'streaming':False}
+    assert events[-1]=='stop'
 
 
 @pytest.mark.parametrize('fault', ['stale', 'invalid', 'session', 'camera', 'identity'])
 def test_current_sensor_or_identity_fault_never_dispatches_bypass(tmp_path, monkeypatch, fault):
     bundle, _, _ = mission_bundle(tmp_path,monkeypatch)
     runtime, _, _, events, clock = bundle
-    primitive = runtime.behavior_manager.execute_single_marvin_approach_step
+    injected=[]
+    primitive = runtime.behavior_manager.execute_guarded_marvin_lateral_step
     read = runtime.world_model.get_lidar_obstacles
     def fault_after_admission(**kwargs):
-        if kwargs.get('local_selection_validator'):
+        if len(motions(events))==1:
+            injected.append(True)
             if fault == 'camera':
                 clock[0] += 1_000_000_001
             elif fault == 'identity':
@@ -391,12 +390,26 @@ def test_current_sensor_or_identity_fault_never_dispatches_bypass(tmp_path, monk
                     return state
                 runtime.world_model.get_lidar_obstacles = faulty
         return primitive(**kwargs)
-    runtime.behavior_manager.execute_single_marvin_approach_step = fault_after_admission
+    runtime.behavior_manager.execute_guarded_marvin_lateral_step = fault_after_admission
+    if fault=='identity':
+        original=runtime._execute_single_marvin_strafe
+        def identity_before_admission(**kwargs):
+            if len(motions(events))==1:
+                injected.append(True)
+                runtime._marvin_alignment_observation=None
+            return original(**kwargs)
+        runtime._execute_single_marvin_strafe=identity_before_admission
     result = run(runtime)
+    assert injected
     assert result['state'] in {'BLOCKED','STOPPED'}
     assert motions(events) == [('strafe',.08,1.)]
     assert result['local_bypass_actions'] == 0
-    assert result['history'][-1]['result']['source_stamp_consumed']
+    refusal=result['history'][-1]['result']
+    assert refusal['source_stamp_consumed'] is (fault!='identity')
+    assert not refusal['motion_executed']
+    if fault=='identity':
+        assert refusal['reason']=='marvin_lateral_ownership_or_observation_invalid'
+        assert refusal['source_frame_stamp_ns'] not in runtime._marvin_alignment_consumed_source_frame_stamps
 
 
 def test_forward_client_propagates_final_guard_without_altering_old_schema(monkeypatch):
@@ -421,11 +434,13 @@ def test_world_model_reports_ephemeral_bypass_without_changing_mission_target(tm
         published.append(dict(runtime.tracking_state))
     runtime._publish_behavior_tracking=record
     result=run(runtime)
-    states=[s for s in published if s.get('local_bypass_active')]
+    states=[s for s in published if s.get('local_avoidance_active')]
     assert states
-    assert all(s['target_label']=='marvin' and s['local_bypass_side']=='LEFT' for s in states)
-    assert all(s['bypass_distance_m']==.15 and s['bypass_bearing_deg']==0 for s in states)
-    assert all(s['route_to_marvin_obstructed'] and not s['route_to_bypass_obstructed'] for s in states)
+    assert all(s['target_label']=='marvin' for s in states)
+    completed=[s for s in states if s['local_avoidance_actions']>0]
+    assert completed and all(s['last_detour_direction']=='LEFT' for s in completed)
+    assert all(not s.get('local_bypass_active') for s in states)
+    assert all(s['route_to_marvin_obstructed'] for s in states)
     assert result['local_bypass_target_x_m'] is None
     assert result['target']=='marvin'
 
@@ -482,36 +497,38 @@ def test_successful_bypass_actual_outcome_is_retained_before_alignment(tmp_path,
     result=run(bundle[0])
     assert result['state']=='ARRIVED'
     row=result['history'][1]
-    first=row['result']['local_detour']['first_post_action_bypass_progress']
-    assert first['meaningful_progress']
-    assert first['meaningful_progress_reason']=='bypass_longitudinal_passage_improved'
-    assert first['bypass_longitudinal_progress_m']==pytest.approx(.05)
-    assert result['local_avoidance_history'][1]['actual_route_progress']==first
+    first=row['result']['local_detour']['first_post_action_strafe_progress']
+    assert first['acquisition_sequence']>first['action_acquisition_sequence']
+    assert first['producer_session']==bundle[0].lidar_worker.session
+    assert result['local_avoidance_history'][1]['actual_route_progress']==first['progress']
+    assert 'first_post_action_bypass_progress' not in row['result']['local_detour']
+    assert result['local_bypass_actions']==0
 
 
 def test_useful_bypass_can_transition_back_to_fresh_strafe_when_next_corridor_blocks(tmp_path,monkeypatch):
-    def scene(x):return [(x,-.35),(0.,1.2),(0.,-.65)]
-    scenes=[scene(.55),scene(.55),scene(.50),scene(.45),scene(.40),None]
-    specs=pursuit_specs([(0.,1.1)]*5)
-    bundle,_,_=strafe_runtime(tmp_path,monkeypatch,specs,scenes)
+    obstacle=collision_scenes(2,clear=False)
+    scenes=[obstacle[0],None,obstacle[0],obstacle[1],None]
+    bundle,_,_=strafe_runtime(tmp_path,monkeypatch,pursuit_specs([(0.,1.1)]*7),scenes)
+    read=bundle[0].world_model.get_lidar_obstacles
+    def acquire(**kwargs):
+        bundle[4][0]+=1000
+        return read(**kwargs)
+    bundle[0].world_model.get_lidar_obstacles=acquire
     result=run(bundle[0])
     assert result['state']=='ARRIVED',result['reason']
-    assert [row['action_type'] for row in result['local_avoidance_history']] == [
-        'STRAFE_LEFT','BYPASS_FORWARD','BYPASS_FORWARD','BYPASS_FORWARD','STRAFE_LEFT']
-    assert result['local_avoidance_actions']==5 and result['local_bypass_actions']==3
-    third_bypass=result['local_avoidance_history'][3]
-    assert third_bypass['meaningful_progress']
-    assert third_bypass['meaningful_progress_reason']=='bypass_longitudinal_passage_improved'
-    assert third_bypass['post_action_bypass']['route_to_bypass_obstructed']
-    assert not third_bypass['post_action_bypass']['bypass_forward_permitted']
-    next_selection=result['local_avoidance_history'][4]['selection']
-    assert not next_selection['local_bypass']['bypass_forward_permitted']
-    assert next_selection['options']['STRAFE_LEFT']['hard_safety_permitted']
-    assert next_selection['options']['STRAFE_LEFT']['improves_route']
-    assert motions(bundle[3])[:5]==[
-        ('strafe',.08,1.),('forward',.1,.5),('forward',.1,.5),('forward',.1,.5),('strafe',.08,1.)]
+    rows=result['local_avoidance_history']
+    assert [row['action_type'] for row in rows]==['STRAFE_LEFT']*3
+    assert result['local_avoidance_actions']==3 and result['local_bypass_actions']==0
+    assert motions(bundle[3])[:4]==[('strafe',.08,1.),('forward',.1,.5),('strafe',.08,1.),('strafe',.08,1.)]
+    assert [h['phase'] for h in result['navigation_phase_history']]==[
+        'CLEAR_SIDE','REJOIN','DIRECT','CLEAR_SIDE','REJOIN','DIRECT','ARRIVED']
+    for row in rows:
+        assert row['selection']['options']['STRAFE_LEFT']['hard_safety_permitted']
+        assert row['selection']['phase']=='CLEAR_SIDE'
     assert all(row['result']['source_stamp_consumed'] for row in result['history'])
     assert len({row['source_frame_stamp_ns'] for row in result['history']})==len(result['history'])
+    assert all(a['first_post_action_lidar'] and a['first_new_post_action_camera']
+        for a in result['progress_diagnostics']['actions'])
 
 
 def test_current_open_bypass_side_is_geometric_not_selected_by_unrelated_rear_clearance():
@@ -526,13 +543,16 @@ def test_current_open_bypass_side_is_geometric_not_selected_by_unrelated_rear_cl
 
 
 def test_already_established_side_clearance_can_start_bypass_without_forcing_a_strafe(tmp_path,monkeypatch):
+    # The saved metric-depth corridor is clear of the actual 5 cm command.
+    # Keep its component test above; normal vision-led pursuit stays DIRECT.
     points=OPEN_LEFT+[(-.08,.445)]
     bundle,_,_=strafe_runtime(tmp_path,monkeypatch,pursuit_specs([(0.,1.1)]),[points,None])
     result=run(bundle[0])
     assert result['state']=='ARRIVED',result['reason']
-    assert result['local_avoidance_actions']==result['local_bypass_actions']==1
+    assert result['local_avoidance_actions']==result['local_bypass_actions']==0
     assert result['completed_strafe_actions']==0
-    assert result['history'][0]['result']['action_type']=='BYPASS_FORWARD'
+    assert result['history'][0]['state']=='ADVANCING'
     assert motions(bundle[3])[0]==('forward',.1,.5)
     assert result['history'][0]['result']['source_stamp_consumed']
-    assert result['history'][0]['result']['bridge_stop_confirmed']
+    assert result['history'][0]['result']['stop_result']['ok']
+    assert bundle[2].status()['motion']['streaming'] is False

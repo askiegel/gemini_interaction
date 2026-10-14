@@ -6,7 +6,7 @@ import pytest
 from lidar_perception import MAXIMUM_EFFECTIVE_AGE_SECONDS
 from marvin_local_obstacle_avoidance import select_marvin_detour
 from marvin_obstacle_phases import plan_phase_action
-from test_marvin_lateral_avoidance import strafe_runtime
+from test_marvin_lateral_avoidance import strafe_runtime, LEFT_OPEN
 from test_find_marvin_closed_loop import make_runtime, motions, run, Worker
 from test_find_marvin_reacquisition import recovery_runtime
 
@@ -56,7 +56,7 @@ def obstacle_geometry(runtime, behavior, events, modes):
 
 
 def avoidance_runtime(tmp_path, monkeypatch, specs, modes):
-    scenes = [None if mode is None else [(0.485,0.),(0.,mode[0]),(0.,-mode[1])] for mode in modes]
+    scenes = [None if mode is None else LEFT_OPEN[:3]+[(0.,mode[0]),(0.,-mode[1])] for mode in modes]
     bundle, _, _ = strafe_runtime(tmp_path,monkeypatch,specs,scenes)
     return bundle
 
@@ -87,7 +87,7 @@ def test_one_safe_bounded_strafe_then_new_evidence_and_ordinary_approach(
     assert [row["state"] for row in result["history"]] == ["AVOIDING", "ADVANCING"]
     assert result["local_avoidance_actions"] == 1 and not result["local_avoidance_active"]
     assert result["last_detour_improved_direct_path"] is True
-    assert len(set(behavior.stamps)) == 3
+    assert len(set(behavior.stamps)) == 4 # Includes stopped obstacle reacquisition.
     assert len(runtime._marvin_alignment_consumed_source_frame_stamps) == 2
     for row, wait in zip(result["history"], result["lidar_wait_history"]):
         assert wait["snapshot"]["acquisition_sequence"] > row["action_lidar_evidence"][1]
@@ -97,7 +97,8 @@ def test_one_safe_bounded_strafe_then_new_evidence_and_ordinary_approach(
     assert detour["action"] == "single_marvin_local_strafe"
     assert detour["local_detour"]["direction"] == direction
     assert result["progress_diagnostics"]["actions"][0]["type"] == "detour_strafe"
-    assert result["final_observation"]["arrival"]["target_distance_m"] <= .50
+    assert result["final_observation"]["arrival"]["authority"] == "visual_tracking"
+    assert result["final_observation"]["arrival"]["visual_arrival"]["calibration_verified"]
     assert robot.status()["motion"] == {"linear_x": 0, "linear_y":0, "angular_z": 0, "streaming": False}
 
 
@@ -126,17 +127,26 @@ def test_off_center_after_detour_uses_existing_alignment(tmp_path, monkeypatch):
 
 
 def test_tracker_loss_after_detour_uses_real_semantic_recovery(tmp_path, monkeypatch):
+    failures=[]
+    def factory(path,mp,specs):
+        return recovery_runtime(path,mp,specs,failures=failures)
     bundle, _, _ = strafe_runtime(tmp_path,monkeypatch,
-        [(0,.60),(0,.59),(0,.58),(0,.5)], [[(.485,0.),(0,1.2),(0,-.48)],None],factory=recovery_runtime)
-    runtime, behavior, _, events, _ = bundle
+        [(0,.60)]*5+[(0,.5)], [LEFT_OPEN,None],factory=factory)
+    runtime, behavior, robot, events, _ = bundle
+    baseline=[]
+    def lost_after_motion():
+        if len(motions(events))==1:
+            baseline.append(behavior.semantic_calls)
+            failures.append(len(behavior.updated_frames)+1)
+    robot.on_motion=lost_after_motion
     result = run(runtime)
-    assert result["state"] == "ARRIVED" and result["reacquisition_attempts"] == 1
+    assert baseline and result["state"] == "ARRIVED" and result["reacquisition_attempts"] == 1
     assert result["reacquisition_history"][0]["succeeded"]
     assert result["history"][0]["state"] == "AVOIDING"
     assert result["local_avoidance_actions"] == 1
-    assert behavior.semantic_calls == 2
-    assert len(behavior.created_trackers) == 2
-    assert events.index("reacquire") > events.index(("strafe", .08, 1.))
+    assert behavior.semantic_calls == baseline[0]+1
+    assert len(behavior.created_trackers) == behavior.semantic_calls
+    assert events.index("reacquire",events.index(("strafe", .08, 1.))) > events.index(("strafe", .08, 1.))
 
 
 @pytest.mark.parametrize("fault", ["stale", "invalid", "session", "coverage"])

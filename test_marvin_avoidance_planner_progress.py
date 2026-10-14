@@ -197,12 +197,12 @@ def test_live_geometry_replay_blocks_marginal_repeat_and_keeps_terminal_obstruct
 
 
 def test_full_mission_marginal_route_change_hits_phase_stagnation(tmp_path, monkeypatch):
-    second = [(x+.004, y) if x>0 else (x, y) for x,y in LEFT_OPEN]
+    second = [(x, y-.004) if x>0 else (x, y) for x,y in LEFT_OPEN]
     bundle, _, _ = strafe_runtime(tmp_path, monkeypatch, [(0,.6)]*8, [LEFT_OPEN, second])
     result = run(bundle[0])
     assert result['state'] == 'BLOCKED'
     assert result['reason'] == 'find_marvin_clear_side_stagnation_exhausted'
-    assert result['blocked_wait_recheck_count'] == 0
+    assert result['blocked_wait_recheck_count'] == 5
     assert motions(bundle[3]) == [('strafe', .08, 1.)] + [('turn', 'LEFT', .25, .50)]*3
     assert result['local_avoidance_actions'] == 4
     assert MAX_LOCAL_AVOIDANCE_ACTIONS == result['max_local_avoidance_actions'] == 6

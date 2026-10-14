@@ -70,7 +70,10 @@ def test_obstructed_route_one_strafe(tmp_path, monkeypatch, scene, expected):
 
 
 def test_obstructed_route_one_existing_guarded_turn(tmp_path,monkeypatch):
-    r,_,_,events,_=avoidance_runtime(tmp_path,monkeypatch,[(0,.8),(0,.8),(0,.8)],[(1.2,.48),None])
+    # Preserve the original asymmetric short-sweep geometry independently of
+    # the shared full-strafe fixture. Selection and duration remain native.
+    (r,_,_,events,_),_,_=strafe_runtime(tmp_path,monkeypatch,[(0,.8)]*3,
+        [[(.485,0.),(0.,1.2),(0.,-.48)],None])
     result=proof(r)
     command,=motions(events)
     assert command[:2]==('strafe',-.08)

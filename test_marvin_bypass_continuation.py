@@ -1,4 +1,10 @@
-"""Offline bounded episodes: recorded production geometry and independent fakes."""
+"""Offline bounded episodes: recorded production geometry and independent fakes.
+
+Historical case names retain ledger correspondence. Component tests still
+exercise saved metric-depth planners; mission tests use vision-led collision
+capsules, fresh strict camera authority and the selected bounded primitives.
+Synthetic arrival fixtures are not physical calibration.
+"""
 import copy
 import json
 from pathlib import Path
@@ -264,12 +270,13 @@ def test_global_six_action_bound_precedes_episode_credit(remaining):
 
 
 def episode_bundle(tmp_path,monkeypatch,*,clear_after=None,unsafe=False,three_strafes=False):
-    initial_scenes=[[(.65,-.09)],[(.65,-.115)],[(.65,-.14)],[(.65,-.18)]] if three_strafes else [[(.65,-.10)],[(.65,-.18)]]
-    scenes=initial_scenes+[[(.65,-.18)]]*3
+    from test_marvin_lateral_avoidance import collision_scenes, LEFT_OPEN
     initial_strafes=3 if three_strafes else 1
-    if clear_after is not None:
-        scenes=initial_scenes+[[(.65,-.18)]]*(clear_after-1)+[None]
-    if unsafe:scenes=initial_scenes+[[(.65,-.18),(.17,.40)]]
+    if clear_after is not None:scenes=collision_scenes(initial_strafes+clear_after)
+    elif three_strafes:
+        scenes=collision_scenes(3,clear=False);scenes += [scenes[-1]]*4
+    else:scenes=[LEFT_OPEN]
+    if unsafe:scenes=collision_scenes(2,clear=False)+[LEFT_OPEN+[(.17,.40)]]
     count=initial_strafes+(clear_after or 4)
     specs=([(0,1.1)]*count+[(0,round(x/100,2)) for x in range(105,49,-5)]
         if clear_after else [(0,1.1)]*40)
@@ -287,10 +294,11 @@ def test_production_continuation_then_route_clear_resumes_ordinary_forward(tmp_p
     bundle,_,_=episode_bundle(tmp_path,monkeypatch,clear_after=bypasses)
     result=run(bundle[0])
     assert result['state']=='ARRIVED',result['reason']
-    assert result['local_avoidance_actions']==1+bypasses and result['local_bypass_actions']==bypasses
+    assert result['local_avoidance_actions']==1+bypasses and result['local_bypass_actions']==0
     assert result['completed_forward_actions']>0 and not result['local_bypass_active']
-    rows=[h for h in result['history'] if h['result'].get('action_type')=='BYPASS_FORWARD']
-    assert all(h['result']['local_detour']['phase']=='PASS_OBSTACLE' for h in rows)
+    rows=[h for h in result['history'] if h['result'].get('action_type')=='STRAFE_LEFT']
+    assert len(rows)==1+bypasses
+    assert all(h['result']['local_detour']['phase']=='CLEAR_SIDE' for h in rows)
     assert all('bypass_episode_step' not in h['result']['local_detour'] for h in rows)
     assert result['local_avoidance_history'][2]['selection']['meaningful_progress'] is False
     ordinary=[h for h in result['history'] if h['state']=='ADVANCING']
@@ -302,28 +310,28 @@ def test_production_continuation_then_route_clear_resumes_ordinary_forward(tmp_p
 def test_production_neutral_pass_remains_safe_until_phase_stagnation(tmp_path,monkeypatch):
     bundle,_,_=episode_bundle(tmp_path,monkeypatch)
     result=run(bundle[0])
-    assert result['reason']=='find_marvin_pass_stagnation_exhausted'
-    assert result['local_bypass_actions']==12 and result['local_avoidance_actions']==13
-    assert motions(bundle[3])==[('strafe',.08,1.)]+[('forward',.1,.5)]*12
-    assert result['blocked_wait_recheck_count']==0
-    assert all(r['selection']['phase']=='PASS_OBSTACLE' for r in result['local_avoidance_history'][1:])
+    assert result['reason']=='find_marvin_clear_side_stagnation_exhausted'
+    assert result['local_bypass_actions']==0 and result['local_avoidance_actions']==4
+    assert motions(bundle[3])==[('strafe',.08,1.)]+[('turn','LEFT',.25,.5)]*3
+    assert result['blocked_wait_recheck_count']==5
+    assert all(r['selection']['phase']=='CLEAR_SIDE' for r in result['local_avoidance_history'][1:])
     assert_sensor_contracts(result,bundle[0])
 
 
 def test_production_unsafe_corridor_dispatches_no_second_bypass(tmp_path,monkeypatch):
     bundle,_,_=episode_bundle(tmp_path,monkeypatch,unsafe=True)
     result=run(bundle[0])
-    assert result['local_bypass_actions']==1 and result['local_avoidance_actions']==2
-    assert motions(bundle[3])==[('strafe',.08,1.),('forward',.1,.5)]
+    assert result['local_bypass_actions']==0 and result['local_avoidance_actions']==2
+    assert motions(bundle[3])==[('strafe',.08,1.)]*2
     assert result['state']=='BLOCKED' and result['stop_result']['ok']
 
 
 def test_production_three_strafes_then_pass_is_bounded_by_phase_stagnation(tmp_path,monkeypatch):
     bundle,_,_=episode_bundle(tmp_path,monkeypatch,three_strafes=True)
     result=run(bundle[0])
-    assert result['reason']=='find_marvin_pass_stagnation_exhausted'
-    assert result['local_avoidance_actions']==15 and result['local_bypass_actions']==12
-    assert motions(bundle[3])==[('strafe',.08,1.)]*3+[('forward',.1,.5)]*12
+    assert result['reason']=='find_marvin_clear_side_stagnation_exhausted'
+    assert result['local_avoidance_actions']==6 and result['local_bypass_actions']==0
+    assert motions(bundle[3])==[('strafe',.08,1.)]*3+[('turn','LEFT',.25,.5)]*3
     assert_sensor_contracts(result,bundle[0])
 
 
@@ -332,10 +340,10 @@ def test_proof_checkpoints_preserve_episode_and_alignment_never_resets_credit(tm
     complete(bundle,initial(bundle),0)
     assert arm(r)['ok'];complete(bundle,step(r),1)
     prior=copy.deepcopy(r._marvin_live_proof_continuation.previous_selection)
-    assert r._marvin_live_proof_continuation.detour_context.phase.value=='PASS_OBSTACLE'
-    assert r._marvin_live_proof_continuation.detour_context.phase_action_count==1
+    assert r._marvin_live_proof_continuation.detour_context.phase.value=='CLEAR_SIDE'
+    assert r._marvin_live_proof_continuation.detour_context.phase_action_count==2
     assert r._marvin_live_proof_continuation.detour_context.committed_side=='LEFT'
-    assert prior['first_post_action_bypass_progress']['meaningful_progress'] is False
+    assert prior['first_post_action_strafe_progress']['progress']['meaningful_progress'] is False
     assert not {'options','local_bypass','bypass_handoff'} & prior.keys()
     behavior.specs=iter([(100,1.1),(0,1.1)])
     assert arm(r)['ok'];aligned=step(r);complete(bundle,aligned,2)
@@ -345,31 +353,31 @@ def test_proof_checkpoints_preserve_episode_and_alignment_never_resets_credit(tm
     behavior.specs=iter([(0,1.1)]*12)
     assert arm(r)['ok'];second=step(r);complete(bundle,second,3)
     chosen=second['controller_result']['history'][0]['result']['local_detour']
-    assert chosen['action_type']=='BYPASS_FORWARD' and chosen['phase']=='PASS_OBSTACLE'
-    assert r._marvin_live_proof_continuation.detour_context.phase_action_count==2
+    assert chosen['action_type']=='STRAFE_LEFT' and chosen['phase']=='CLEAR_SIDE'
+    assert r._marvin_live_proof_continuation.detour_context.phase_action_count==3
     assert r._marvin_live_proof_continuation.avoidance['local_avoidance_actions']==3
     assert arm(r)['ok'];third=step(r);complete(bundle,third,4)
-    assert r._marvin_live_proof_continuation.detour_context.phase_action_count==3
+    assert r._marvin_live_proof_continuation.detour_context.phase_action_count==4
     assert r._marvin_live_proof_continuation.avoidance['local_avoidance_actions']==4
 
 
 def test_second_step_final_JIT_veto_waits_without_transport_or_extra_budget(tmp_path,monkeypatch):
-    bundle,_,_=episode_bundle(tmp_path,monkeypatch);runtime,behavior=bundle[:2]
-    original=behavior.execute_single_marvin_approach_step;read=runtime.world_model.get_lidar_obstacles;hazard=[False];attempt=[0]
+    bundle,_,_=episode_bundle(tmp_path,monkeypatch,clear_after=3);runtime,behavior=bundle[:2]
+    original=behavior.execute_guarded_marvin_lateral_step;read=runtime.world_model.get_lidar_obstacles;hazard=[False];attempt=[0]
     def scan(**kwargs):
         state=read(**kwargs)
         if hazard[0]:state['local_motion_geometry']['points'].append({'x_m':.17,'y_m':.40})
         return state
     def approach(**kwargs):
         attempt[0]+=1
-        if attempt[0]==2:hazard[0]=True
+        if attempt[0]==3:hazard[0]=True
         return original(**kwargs)
-    runtime.world_model.get_lidar_obstacles=scan;behavior.execute_single_marvin_approach_step=approach
+    runtime.world_model.get_lidar_obstacles=scan;behavior.execute_guarded_marvin_lateral_step=approach
     result=run(runtime)
     assert result['reason']=='find_marvin_blocked_wait_exhausted'
-    assert result['blocked_wait_reason']=='marvin_local_bypass_jit_veto'
-    assert result['local_avoidance_actions']==2 and result['local_bypass_actions']==1
-    assert motions(bundle[3])==[('strafe',.08,1.),('forward',.1,.5)]
+    assert result['blocked_wait_reason']=='marvin_local_detour_jit_veto'
+    assert result['local_avoidance_actions']==2 and result['local_bypass_actions']==0
+    assert motions(bundle[3])==[('strafe',.08,1.)]*2
     veto=result['history'][2]['result']
     assert veto['source_stamp_consumed'] and not veto['motion_executed']
     assert veto['pre_transport_jit_veto']['transport_attempted'] is False

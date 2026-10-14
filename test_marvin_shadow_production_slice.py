@@ -135,8 +135,8 @@ def test_worker_failure_does_not_mutate_native_return_or_consumed_stamp(tmp_path
     (r, _, _, events, _), _, _ = mission_bundle(tmp_path, monkeypatch, bypass_steps=2)
     result = run(r)
     assert result['state'] == 'ARRIVED'
-    assert result['local_avoidance_actions'] == 3 and result['local_bypass_actions'] == 2
-    assert motions(events)[:3] == [('strafe', .08, 1.), ('forward', .1, .5), ('forward', .1, .5)]
+    assert result['local_avoidance_actions'] == 3 and result['local_bypass_actions'] == 0
+    assert motions(events)[:3] == [('strafe', .08, 1.)]*3
     assert len(r._marvin_alignment_consumed_source_frame_stamps) == len(motions(events))
     for service in services:
         service.shutdown()

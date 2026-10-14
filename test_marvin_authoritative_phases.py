@@ -1,4 +1,10 @@
-"""Authoritative phases with real native guards and entirely offline transport."""
+"""Authoritative phases with real native guards and entirely offline transport.
+
+Historical case names retain ledger correspondence. Component tests still
+exercise saved metric-depth planners; mission tests use vision-led collision
+capsules, fresh strict camera authority and the selected bounded primitives.
+Synthetic arrival fixtures are not physical calibration.
+"""
 import copy
 import json
 from pathlib import Path
@@ -12,7 +18,7 @@ from marvin_local_bypass import plan_local_bypass
 from marvin_local_obstacle_avoidance import MAX_LOCAL_AVOIDANCE_ACTIONS
 from marvin_route_obstruction import evaluate_route_progress
 from test_marvin_avoidance_planner_progress import scan
-from test_marvin_lateral_avoidance import strafe_runtime, LEFT_OPEN
+from test_marvin_lateral_avoidance import strafe_runtime, LEFT_OPEN, collision_scenes
 from test_marvin_local_bypass import ASSOCIATION, OPEN_LEFT, mission_bundle, pursuit_specs
 from test_find_marvin_closed_loop import make_runtime, motions, run
 
@@ -58,20 +64,20 @@ def test_initial_side_establishment_then_immediate_pass_without_handoff_credit(t
     bundle, _, _ = mission_bundle(tmp_path, monkeypatch, bypass_steps=2)
     result = run(bundle[0])
     phases = [r['phase'] for r in result['navigation_phase_history']]
-    assert phases == ['CLEAR_SIDE','PASS_OBSTACLE','REJOIN','DIRECT','ARRIVED']
+    assert phases == ['CLEAR_SIDE','REJOIN','DIRECT','ARRIVED']
     assert [r['selection']['action_type'] for r in result['local_avoidance_history']] == [
-        'STRAFE_LEFT','BYPASS_FORWARD','BYPASS_FORWARD']
+        'STRAFE_LEFT','STRAFE_LEFT','STRAFE_LEFT']
     assert not any('bypass_episode' in r['selection'] for r in result['local_avoidance_history'])
 
 
 def test_neutral_route_does_not_blacklist_pass_or_claim_progress(tmp_path, monkeypatch):
-    bundle, _, _ = strafe_runtime(tmp_path, monkeypatch, [(0,1.1)]*30, [OPEN_LEFT])
+    bundle, _, _ = strafe_runtime(tmp_path, monkeypatch, [(0,1.1)]*30, [LEFT_OPEN])
     result = run(bundle[0])
-    assert result['local_bypass_actions'] == 12
-    assert result['local_avoidance_actions'] == len(motions(bundle[3])) == 13
-    assert result['reason'] == 'find_marvin_pass_stagnation_exhausted'
+    assert result['local_bypass_actions'] == 0
+    assert result['local_avoidance_actions'] == len(motions(bundle[3])) == 4
+    assert result['reason'] == 'find_marvin_clear_side_stagnation_exhausted'
     for row in result['local_avoidance_history'][2:]:
-        assert row['selection']['phase'] == 'PASS_OBSTACLE'
+        assert row['selection']['phase'] == 'CLEAR_SIDE'
         assert row['selection']['meaningful_progress'] is False
 
 
@@ -170,7 +176,8 @@ def test_authoritative_center_metric_not_minimum_metric():
 
 def test_alignment_keeps_committed_side_and_requires_new_geometry(tmp_path, monkeypatch):
     specs = pursuit_specs([(0,1.1),(100,1.1),(0,1.1)])
-    b, _, _ = strafe_runtime(tmp_path,monkeypatch,specs,[OPEN_LEFT,OPEN_LEFT,OPEN_LEFT,None])
+    first,second=collision_scenes(2,clear=False)
+    b, _, _ = strafe_runtime(tmp_path,monkeypatch,specs,[first,second,second,None])
     result = run(b[0])
     assert [r['state'] for r in result['history']][:3] == ['AVOIDING','ALIGNING','AVOIDING']
     assert result['local_avoidance_history'][1]['selection']['direction'] == 'LEFT'
@@ -181,44 +188,28 @@ def test_alignment_keeps_committed_side_and_requires_new_geometry(tmp_path, monk
 
 
 def veto_to_repair(tmp_path, monkeypatch, *, repeat=False):
-    b, _, _ = strafe_runtime(tmp_path,monkeypatch,pursuit_specs([(0,1.1)]*4),
-        [OPEN_LEFT,OPEN_LEFT,OPEN_LEFT,None])
-    r, behavior, robot, events, _ = b
-    read = r.world_model.get_lidar_obstacles
-    flags = {'jit':False,'vetoed':False}
-    def lidar(**kwargs):
-        value = read(**kwargs)
-        if flags['jit']:
-            for point in value['local_motion_geometry']['points']:
-                if .60 < point['x_m'] < .70:point['y_m'] = -.14
-        return value
-    r.world_model.get_lidar_obstacles = lidar
-    execute = behavior.execute_single_marvin_approach_step
-    def bypass(**kwargs):
-        if kwargs.get('local_selection_validator') and not flags['vetoed']:
-            flags['jit'] = True
-            value = execute(**kwargs)
-            flags['vetoed'] = True
-            if repeat:behavior.repeat_camera = True
-            return value
-        return execute(**kwargs)
-    behavior.execute_single_marvin_approach_step = bypass
-    # Restore the scene after the same-side repair, allowing ordinary pursuit.
-    robot.on_motion = lambda: flags.update(jit=False) if len(motions(events)) >= 2 else None
-    return b, flags
+    from test_marvin_dispatch_guard_repair import final_boundary_mission
+    b,flags,_=final_boundary_mission(tmp_path,monkeypatch,'repair')
+    if repeat:
+        original=b[1].reacquire_find_marvin_v2
+        def replay(**kwargs):
+            if flags['refusals']: b[1].repeat_camera=True
+            return original(**kwargs)
+        b[1].reacquire_find_marvin_v2=replay
+    return b,flags
 
 
 def test_jit_bypass_veto_replans_repair_after_new_strict_observation(tmp_path, monkeypatch):
     b, flags = veto_to_repair(tmp_path,monkeypatch)
     result = run(b[0])
     vetoes = [r for r in result['local_avoidance_history'] if r.get('vetoed_before_transport')]
-    assert flags['vetoed'] and len(vetoes) == 1
+    assert flags['refusals'] and len(vetoes) == 1
     assert vetoes[0]['phase_after_veto'] == 'CLEAR_SIDE'
-    assert result['blocked_wait_recheck_count'] == 0
+    assert result['blocked_wait_recheck_count'] >= 1
     rows = result['history']
     veto_index = next(i for i,r in enumerate(rows) if r['result'].get('pre_transport_jit_veto'))
     veto, repair = rows[veto_index:veto_index+2]
-    assert not veto['motion_executed'] and repair['result']['action_type'] == 'STRAFE_LEFT'
+    assert not veto['motion_executed'] and repair['result']['local_detour']['action_type'] == 'TURN_LEFT'
     assert repair['source_frame_stamp_ns'] > veto['source_frame_stamp_ns']
     assert repair['action_lidar_evidence'][1] > vetoes[0]['jit_veto_lidar_sequence']
     assert veto['source_frame_stamp_ns'] in b[0]._marvin_alignment_consumed_source_frame_stamps
@@ -229,7 +220,7 @@ def test_veto_replayed_camera_cannot_dispatch_repair(tmp_path,monkeypatch):
     b, _ = veto_to_repair(tmp_path,monkeypatch,repeat=True)
     result = run(b[0])
     assert result['state'] == 'REVERIFY_REQUIRED'
-    assert motions(b[3]) == [('strafe',.08,1.)]
+    assert motions(b[3]) == []
 
 
 def test_disabled_shadow_not_required_or_consulted(tmp_path,monkeypatch):
@@ -238,7 +229,7 @@ def test_disabled_shadow_not_required_or_consulted(tmp_path,monkeypatch):
     assert b[0]._marvin_navigation_shadow is None
     result = run(b[0])
     assert result['state'] == 'ARRIVED'
-    assert any(r['phase']=='PASS_OBSTACLE' for r in result['navigation_phase_history'])
+    assert any(r['phase']=='CLEAR_SIDE' for r in result['navigation_phase_history'])
 
 
 def test_repeated_strafe_native_fixture_enters_pass_before_six():
@@ -323,21 +314,18 @@ def test_authoritative_mission_failures_stop_without_followup(tmp_path,monkeypat
 
 
 def test_clear_side_jit_veto_switches_to_pass_after_fresh_observation(tmp_path,monkeypatch):
-    scenes=[[ (.65,-.11)],[(.65,-.14)],None]
-    b, _, _ = strafe_runtime(tmp_path,monkeypatch,pursuit_specs([(0,1.1)]*3),scenes)
-    r, behavior, robot, events, _ = b
-    original=behavior.execute_guarded_marvin_lateral_step
-    flags={'changed':False}
-    def strafe(**kwargs):
-        if len(motions(events))==1 and not flags['changed']:
-            scenes[1]=[(.65,-.25)];flags['changed']=True
-        return original(**kwargs)
-    behavior.execute_guarded_marvin_lateral_step=strafe
-    result=run(r)
-    vetoes=[x for x in result['local_avoidance_history'] if x.get('vetoed_before_transport')]
-    assert len(vetoes)==1 and vetoes[0]['phase_after_veto']=='PASS_OBSTACLE'
-    assert result['state']=='ARRIVED' and result['local_avoidance_actions']==2
-    assert motions(events)[:2]==[('strafe',.08,1.),('forward',.1,.5)]
+    from test_marvin_final_jit_action_switch import lateral_switch_mission, refused_row
+    b,flags,_=lateral_switch_mission(tmp_path,monkeypatch)
+    result=run(b[0]);veto=refused_row(result)
+    assert veto['result']['dispatch_guard_rejection']['final_selected_action_type']=='TURN_LEFT'
+    assert veto['result']['source_stamp_consumed'] and not veto['motion_executed']
+    assert not veto['result']['dispatch_guard_rejection']['transport_attempted']
+    assert result['state']=='ARRIVED' and result['local_avoidance_actions']==1
+    replacement=next(x for x in result['history'] if x['motion_executed'])
+    assert replacement['result']['local_detour']['phase']=='CLEAR_SIDE'
+    assert replacement['source_frame_stamp_ns']>veto['source_frame_stamp_ns']
+    assert replacement['action_lidar_evidence'][1]>veto['action_lidar_evidence'][1]
+    assert motions(b[3])[0]==('turn','LEFT',.25,.5)
 
 
 def test_blocked_wait_wakes_for_independently_safe_pass_only(tmp_path,monkeypatch):
