@@ -21,7 +21,7 @@ from behavior_manager import (
 from guarded_turn_policy import ROTATIONAL_SWEPT_FOOTPRINT
 from marvin_arrival_policy import evaluate_marvin_visual_arrival
 from marvin_lidar_standoff import TARGET_STANDOFF_M, evaluate_marvin_lidar_standoff
-from marvin_target_range_association import MarvinTargetRangeAssociation
+from marvin_target_range_association import MarvinTargetRangeAssociation, SPARSE_MINIMUM_RAYS
 from marvin_route_obstruction import route_progress, evaluate_route_progress, evaluate_marvin_route
 from marvin_blocked_wait import (
     BLOCKED_WAIT_REASONS, INITIAL_RECHECK_SECONDS, MAX_RECHECK_SECONDS,
@@ -563,7 +563,7 @@ class CognitiveRuntime:
             if lock is not None:
                 lock.release()
 
-    def _observe_find_marvin_v2(self, *, reacquisition_source_floor=None):
+    def _observe_find_marvin_v2(self, *, reacquisition_source_floor=None, stopped_sparse_range=False):
         """Return one strict V2 decision without controller or motion side effects."""
         base = {
             "ok": False,
@@ -683,7 +683,8 @@ class CognitiveRuntime:
             error = pursuit.get("horizontal_error")
             decision = "TURN_LEFT" if error < 0 else "TURN_RIGHT" if error > 0 else "BLOCKED"
         elif state == VISUAL_READY_TO_APPROACH:
-            arrival = self._marvin_v2_lidar_arrival(tracker, commit_range=True)
+            arrival = self._marvin_v2_lidar_arrival(tracker, commit_range=True,
+                                                 corroborate_sparse=stopped_sparse_range)
             reason = arrival["reason"]
             if arrival.get("ok") is not True:
                 state, decision = "BLOCKED", "BLOCKED"
@@ -743,7 +744,14 @@ class CognitiveRuntime:
             self._marvin_alignment_observation = action_observation
         return result
 
-    def _marvin_v2_lidar_arrival(self, tracker, lidar=None, *, commit_range=False, current_action_jit=False):
+    def _marvin_range_identity(self):
+        episode = getattr(self.behavior_manager, "_marvin_v2_tracker_episode", None)
+        if isinstance(episode, dict) and episode.get("marvin_tracker") is not None:
+            return episode.get("episode_id")
+        return None
+
+    def _marvin_v2_lidar_arrival(self, tracker, lidar=None, *, commit_range=False,
+                               current_action_jit=False, corroborate_sparse=False):
         worker = getattr(self, "lidar_worker", None)
         session = getattr(worker, "session", None)
         if lidar is None and getattr(worker, "running", False) is True:
@@ -765,8 +773,13 @@ class CognitiveRuntime:
         with self._state_lock:
             if not hasattr(self, "_marvin_target_range_association"):
                 self._marvin_target_range_association = MarvinTargetRangeAssociation()
+            identity = self._marvin_range_identity()
+            if corroborate_sparse and result.get("candidate_surface_point_count", 0) < MINIMUM_VALID_SAMPLES_PER_REQUIRED_SECTOR:
+                self._marvin_target_range_association.corroborate_sparse(
+                    result, lidar, tracker, identity=identity)
             association = self._marvin_target_range_association.evaluate(
                 result, lidar, tracker, expected_session=session,
+                identity=identity,
                 commit=(commit_range and self._marvin_motion_stamp_is_fresh(
                     tracker.get("source_frame_stamp_ns"),
                     tracker.get("received_monotonic_seconds"))))
@@ -785,6 +798,100 @@ class CognitiveRuntime:
             except Exception:
                 pass
         return association
+
+    def _recover_marvin_sparse_range(self, *, observation, lidar, expected_session, execution_guard):
+        """Bounded stopped target corroboration; no planning or motion dispatch."""
+        gate = self._marvin_target_range_association
+        evidence = {"ok": False, "reason": "marvin_sparse_range_recovery_failed",
+                    "motion_executed": False, "observations": []}
+        started = time.monotonic()
+        episode = getattr(self.behavior_manager, "_marvin_v2_tracker_episode", None) or {}
+        locked_tracker = episode.get("marvin_tracker")
+        identity = self._marvin_range_identity()
+        tracker = observation.get("opencv_tracker") or {}
+        floor = tracker.get("source_frame_stamp_ns")
+        candidate = evaluate_marvin_lidar_standoff(tracker, lidar, self.marvin_camera_model,
+                                                  expected_session=expected_session)
+
+        def done(reason, *, ok=False, latest=None):
+            evidence.update(ok=ok, reason=reason, elapsed_seconds=time.monotonic()-started)
+            if not ok:
+                self._marvin_alignment_observation = None
+                gate.clear_sparse()
+            return evidence, latest
+
+        if (observation.get("identity_confirmed") is not True or locked_tracker is None
+                or not gate.begin_sparse_recovery(candidate, lidar, tracker, identity=identity)):
+            return done("marvin_sparse_range_evidence_invalid")
+        if not execution_guard() or not self._marvin_motion_owner_is_current():
+            return done("find_marvin_mission_preempted")
+        self._reset_marvin_alignment_consensus()
+        try:
+            stop = self.robot_client.stop()
+        except Exception:
+            return done("marvin_sparse_range_stop_failed")
+        bridge = self._marvin_bridge_ready_and_stopped()
+        controller = bridge.get("guarded_controller") or {}
+        if (not isinstance(stop, dict) or stop.get("ok") is not True
+                or not self._marvin_interruption_stationary(bridge, controller)):
+            return done("marvin_sparse_range_stop_unverified")
+        boundary = time.monotonic()
+        evidence.update(stop_result=stop, bridge_after_stop=bridge)
+        revision_fields = ("sequence", "last_operation", "last_request_generation",
+                           "last_request_sequence", "last_request_issued_ns")
+        revision = tuple(controller.get(k) for k in revision_fields)
+        command_at = (bridge.get("motion") or {}).get("last_command_at")
+
+        def stopped():
+            current_episode = getattr(self.behavior_manager, "_marvin_v2_tracker_episode", None) or {}
+            state = self._marvin_bridge_ready_and_stopped()
+            return (execution_guard() and self._marvin_motion_owner_is_current()
+                and self.lidar_worker.session == expected_session
+                and self._marvin_range_identity() == identity
+                and current_episode.get("marvin_tracker") is locked_tracker
+                and self._marvin_interruption_stationary(state, controller)
+                and tuple((state.get("guarded_controller") or {}).get(k) for k in revision_fields) == revision
+                and (state.get("motion") or {}).get("last_command_at") == command_at)
+
+        sequence = lidar.get("acquisition_sequence")
+        for _ in range(self.MAX_CONSECUTIVE_MARVIN_REACQUISITION_FAILURES):
+            if not stopped():
+                return done("marvin_sparse_range_stationary_owner_lost")
+            remaining = self.MARVIN_BLOCKED_WAIT_MAX_SECONDS - (time.monotonic()-started)
+            if remaining <= 0:
+                return done("marvin_sparse_range_evidence_timeout")
+            self._publish_behavior_tracking({"behavior": "FIND_OBJECT", "target": "marvin",
+                "state": "BLOCKED", "reason": "marvin_sparse_range_corroboration_pending"})
+            wait = self._wait_for_new_marvin_lidar_evidence(expected_session=expected_session,
+                previous_sequence=sequence, execution_guard=stopped,
+                timeout_seconds=min(self.MARVIN_NEW_LIDAR_TIMEOUT_SECONDS, remaining))
+            if not wait["ok"]:
+                return done(wait["reason"])
+            # The ordinary observer preserves the confirmed tracker; its fresh
+            # semantic path may reconfirm identity but must not replace the tracker.
+            latest = self._observe_find_marvin_v2(stopped_sparse_range=True)
+            self._retain_marvin_diagnostic("observe", latest)
+            current_tracker = latest.get("opencv_tracker") or {}
+            stamp = current_tracker.get("source_frame_stamp_ns")
+            receipt = current_tracker.get("received_monotonic_seconds")
+            arrival = latest.get("arrival") or {}
+            evidence["observations"].append({"source_frame_stamp_ns": stamp,
+                "acquisition_sequence": arrival.get("acquisition_sequence"),
+                "reason": arrival.get("target_range_association_reason"),
+                "candidate_surface_point_count": arrival.get("candidate_surface_point_count"),
+                "measured_distance_m": arrival.get("measured_distance_m")})
+            if (not stopped() or latest.get("identity_confirmed") is not True
+                    or not self._marvin_motion_stamp_is_fresh(stamp, receipt)
+                    or type(stamp) is not int or stamp <= floor
+                    or type(receipt) not in (int, float) or receipt <= boundary
+                    or time.monotonic()-started >= self.MARVIN_BLOCKED_WAIT_MAX_SECONDS):
+                return done("marvin_sparse_range_fresh_identity_required")
+            if latest.get("controller", {}).get("decision") in {"FORWARD", "ARRIVED"}:
+                return done("marvin_sparse_range_recovered", ok=True, latest=latest)
+            if gate.sparse_recovery is None:
+                return done(arrival.get("reason") or "marvin_sparse_range_evidence_invalid")
+            floor, sequence = stamp, arrival.get("acquisition_sequence")
+        return done("marvin_sparse_range_evidence_timeout")
 
     MARVIN_ALIGNMENT_GEOMETRY_HISTORY_WINDOW = 3
     MARVIN_ALIGNMENT_MAX_SEED_CENTER_DELTA_PIXELS = 30.0
@@ -2307,6 +2414,7 @@ class CognitiveRuntime:
         lidar_wait_history = []
         lidar_recovery_history = []
         stationary_lidar_recovery_history = []
+        sparse_range_recovery_history = []
         stationary_lidar_reobserve_floor = None
         stationary_lidar_scan_pending = False
         avoidance_history = []
@@ -2570,6 +2678,7 @@ class CognitiveRuntime:
                 "max_lidar_recovery_episodes": self.MAX_MARVIN_REACQUISITION_EPISODES,
                 "lidar_recovery_history": lidar_recovery_history,
                 "stationary_lidar_recovery_history": stationary_lidar_recovery_history,
+                "sparse_range_recovery_history": sparse_range_recovery_history,
                 **avoidance, "max_local_avoidance_actions": self.MAX_LOCAL_AVOIDANCE_ACTIONS,
                 "local_avoidance_history": avoidance_history,
                 "avoidance_lidar_refresh_history": avoidance_lidar_refresh_history,
@@ -3003,6 +3112,28 @@ class CognitiveRuntime:
                 return finish("BLOCKED", "marvin_live_proof_lidar_discontinuity")
             if observation.get("identity_confirmed") is True:
                 expected_identity_stamp = observation.get("identity_source_frame_stamp_ns")
+            if (proof_max_physical_actions is None and proof_continuation is None
+                    and (observation.get("arrival") or {}).get("reason")
+                        == "marvin_target_range_returns_ambiguous"
+                    and self._marvin_target_range_association.anchor is not None
+                    and (observation.get("arrival") or {}).get("candidate_at_standoff") is False
+                    and SPARSE_MINIMUM_RAYS <= (observation.get("arrival") or {}).get("candidate_surface_point_count", 0)
+                        < MINIMUM_VALID_SAMPLES_PER_REQUIRED_SECTOR):
+                if len(sparse_range_recovery_history) >= self.MAX_MARVIN_REACQUISITION_EPISODES:
+                    return finish("BLOCKED", "marvin_sparse_range_recovery_budget_exhausted")
+                recovery, latest = self._recover_marvin_sparse_range(observation=observation,
+                    lidar=lidar, expected_session=session, execution_guard=current)
+                sparse_range_recovery_history.append(recovery)
+                if not recovery["ok"]:
+                    return finish("STOPPED" if not current() else "BLOCKED", recovery["reason"])
+                observation = latest
+                tracker = observation["opencv_tracker"]
+                stamp = observation["source_frame_stamp_ns"]
+                expected_identity_stamp = observation.get("identity_source_frame_stamp_ns")
+                session, lidar = self._active_localization_lidar_is_current()
+                if not _marvin_complete_lidar_is_current(lidar, session):
+                    return finish("BLOCKED", "find_marvin_lidar_not_current")
+                sequence = lidar["acquisition_sequence"]
             # One native post-action observation resolves watchdog progress before
             # any alignment can change the frame. Missing geometry is UNPROVEN.
             detour_context = replace(detour_context, watchdog=detour_context.watchdog.reassess(

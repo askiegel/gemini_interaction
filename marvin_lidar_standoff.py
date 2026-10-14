@@ -7,6 +7,7 @@ bound range/calibration error; deployment must supply measured values.
 """
 
 import math
+import statistics
 
 from lidar_perception import MAXIMUM_EFFECTIVE_AGE_SECONDS
 from local_motion_safety_envelope import (
@@ -102,6 +103,7 @@ def evaluate_marvin_lidar_standoff(tracker, lidar, camera_model, *, expected_ses
     ]
     distances = []
     projected_points = []
+    projected_returns = []
     selected_points = {}
     for point in geometry["points"]:
         if (not isinstance(point, dict) or not _number(point.get("x_m"))
@@ -114,6 +116,8 @@ def evaluate_marvin_lidar_standoff(tracker, lidar, camera_model, *, expected_ses
             continue
         pixel = cx - fx * lateral / forward
         projected_points.append((pixel, math.hypot(point["x_m"], point["y_m"])))
+        projected_returns.append(dict(point, pixel_x=pixel,
+            base_range_m=math.hypot(point["x_m"], point["y_m"])))
         if left <= pixel <= right:
             distance_and_bearing = (math.hypot(point["x_m"], point["y_m"]),
                                     math.degrees(math.atan2(point["y_m"], point["x_m"])))
@@ -145,6 +149,25 @@ def evaluate_marvin_lidar_standoff(tracker, lidar, camera_model, *, expected_ses
     result["candidate_surface_edges_supported"] = bool(near_pixels
         and min(near_pixels) <= box["x1"] + edge_margin
         and max(near_pixels) >= box["x2"] - edge_margin)
+    if 0 < len(near_pixels) < MINIMUM_VALID_SAMPLES_PER_REQUIRED_SECTOR:
+        # Target-only evidence, not a change to sector coverage or collision
+        # policy. Preserve the scan's ray directions rather than manufacturing
+        # extra support from repeated camera frames or acquisitions.
+        angles = sorted({p["robot_bearing_deg"] for p in geometry["points"]
+                         if _number(p.get("robot_bearing_deg"))})
+        steps = [b - a for a, b in zip(angles, angles[1:]) if b - a > 1e-6]
+        result["sparse_surface"] = {
+            "returns": [p for p in projected_returns
+                if box["x1"] - TARGET_RANGE_EDGE_PIXEL_MARGIN <= p["pixel_x"]
+                    <= box["x2"] + TARGET_RANGE_EDGE_PIXEL_MARGIN
+                and abs(p["base_range_m"] - measured) <= TARGET_RANGE_CLUSTER_TOLERANCE_M],
+            "ray_step_degrees": statistics.median(steps) if steps else None,
+            "competing_ranges_m": [depth for pixel, depth in projected_points if
+                box["x1"] - TARGET_RANGE_EDGE_PIXEL_MARGIN <= pixel
+                    <= box["x2"] + TARGET_RANGE_EDGE_PIXEL_MARGIN
+                and abs(depth - measured) > TARGET_RANGE_CLUSTER_TOLERANCE_M],
+            "pixel_interval": [left, right],
+        }
     result["selected_return"] = selected_points[(measured, measured_bearing)]
     result["measured_bearing_degrees"] = measured_bearing
     _, front_lower, front_upper = OCTANT_SECTORS[0]
