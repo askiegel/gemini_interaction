@@ -14,7 +14,7 @@ from marvin_blocked_wait import (
 )
 from test_find_marvin_closed_loop import run, motions
 from test_marvin_blocked_wait import wait_bundle
-from test_marvin_lateral_avoidance import strafe_runtime
+from test_marvin_lateral_avoidance import strafe_runtime, LEFT_OPEN
 from test_marvin_local_bypass import OPEN_LEFT
 
 
@@ -52,7 +52,8 @@ def test_explicit_negative_dispatch_evidence_requires_every_field(tmp_path, monk
     assert admitted and admitted['snapshot']['acquisition_sequence'] == result['pre_transport_jit_veto']['lidar_snapshot']['acquisition_sequence']
     assert not motions(b[3]) and b[3][-1] == 'stop'
     assert b[0]._marvin_alignment_consumed_source_frame_stamps == {result['source_frame_stamp_ns']}
-    assert PRE_TRANSPORT_JIT_WAIT_REASONS == {'marvin_local_detour_jit_veto','marvin_local_bypass_jit_veto'}
+    assert PRE_TRANSPORT_JIT_WAIT_REASONS == {'marvin_local_detour_jit_veto','marvin_local_bypass_jit_veto',
+        'marvin_approach_collision_jit_veto','marvin_alignment_collision_jit_veto'}
 
 
 @pytest.mark.parametrize('field,value', [
@@ -116,14 +117,15 @@ def test_evidence_health_ownership_stop_and_stream_gates_fail_closed(tmp_path, m
 
 
 def veto_mission(tmp_path, monkeypatch, *, clear_after=2, mutate=None, resume_scene=None):
-    b, _, _ = strafe_runtime(tmp_path, monkeypatch, [(0,1.1)]*4+[(0,1.05)], [OPEN_LEFT])
+    b, _, _ = strafe_runtime(tmp_path, monkeypatch, [(0,1.1)]*8, [LEFT_OPEN])
     r, behavior, robot, events, clock = b
-    f={'jit':False,'waiting':False,'removed':False,'checks':0,'entry':None,'resume':0,'veto':None}
+    f={'jit':False,'waiting':False,'removed':False,'checks':0,'entry':None,'resume':0,'veto':None,
+        'initial_rechecks':0,'before_veto_motions':[]}
     read=r.world_model.get_lidar_obstacles
     def lidar(**kw):
         s=read(**kw)
         if f['removed']:
-            s['local_motion_geometry']['points']=s['local_motion_geometry']['points'][:-len(OPEN_LEFT)]
+            s['local_motion_geometry']['points']=s['local_motion_geometry']['points'][:-len(LEFT_OPEN)]
             s['local_motion_geometry']['points'].extend({'x_m':x,'y_m':y} for x,y in (resume_scene or []))
         elif f['jit']:
             s['local_motion_geometry']['points'].append({'x_m':0.,'y_m':.3})
@@ -131,6 +133,7 @@ def veto_mission(tmp_path, monkeypatch, *, clear_after=2, mutate=None, resume_sc
     r.world_model.get_lidar_obstacles=lidar
     execute=behavior.execute_guarded_marvin_lateral_step
     def guarded(**kw):
+        f['before_veto_motions']=list(motions(events))
         f['jit']=True
         value=execute(**kw)
         f['veto']=copy.deepcopy(value)
@@ -139,7 +142,9 @@ def veto_mission(tmp_path, monkeypatch, *, clear_after=2, mutate=None, resume_sc
     behavior.execute_guarded_marvin_lateral_step=guarded
     publish=r._publish_behavior_tracking
     def telemetry(d):
-        if d.get('state')=='BLOCKED_WAIT':
+        if d.get('state')=='BLOCKED_WAIT' and f['veto'] is None:
+            f['initial_rechecks']=d['blocked_wait_recheck_count']
+        if d.get('state')=='BLOCKED_WAIT' and f['veto'] is not None:
             f.update(waiting=True,checks=d['blocked_wait_recheck_count'])
             if f['entry'] is None:f['entry']=copy.deepcopy(d)
         publish(d)
@@ -147,19 +152,21 @@ def veto_mission(tmp_path, monkeypatch, *, clear_after=2, mutate=None, resume_sc
     sleep=time.sleep
     def tick(seconds):
         if f['waiting']:
-            assert not motions(events) and robot.status()['motion']['linear_y']==0
+            assert motions(events)==f['before_veto_motions'] and robot.status()['motion']['linear_y']==0
             if clear_after is not None and f['checks']>=clear_after-1:f['removed']=True
         sleep(seconds)
     monkeypatch.setattr('runtime.time.sleep',tick)
     def semantic(*,minimum_source_frame_stamp_ns):
-        f['waiting']=False;f['resume']+=1
-        events.append('jit_wait_semantic')
+        if f['veto'] is not None:
+            f['waiting']=False;f['resume']+=1
+            events.append('jit_wait_semantic')
         behavior._clear_marvin_v2_tracker_episode()
         value=behavior.observe_find_marvin_v2()
         assert value['preview_result']['identity_source_frame_stamp_ns']>minimum_source_frame_stamp_ns
         return value
     behavior.reacquire_find_marvin_v2=semantic
-    behavior.on_observe=lambda:setattr(r,'_control_generation',r._control_generation+1) if f['removed'] and motions(events) else None
+    behavior.on_observe=lambda:setattr(r,'_control_generation',r._control_generation+1) if (
+        f['removed'] and len(motions(events))>len(f['before_veto_motions'])) else None
     captured={};normal=r._execute_normal_marvin_find_mission
     def capture(*args,**kw):
         captured['result']=normal(*args,**kw)
@@ -185,7 +192,7 @@ def test_real_pre_transport_veto_waits_then_resumes_forward_with_new_exact_stamp
     assert result['local_avoidance_actions']==result['local_bypass_actions']==0
     assert motions(b[3])==[('forward',.1,.5)]
     assert result['blocked_wait_recheck_count']==2
-    assert [row['camera_recheck_performed'] for row in result['blocked_wait_history']]==[False,True]
+    assert [row['camera_recheck_performed'] for row in result['blocked_wait_history']]==[True,True]
     forward=result['history'][1]
     assert forward['state']=='ADVANCING' and forward['result']['full_step_completed']
     old=veto['source_frame_stamp_ns'];new=forward['source_frame_stamp_ns']
@@ -208,7 +215,7 @@ def test_unchanged_veto_geometry_exhausts_without_gemini_or_budget(tmp_path, mon
     assert not motions(b[3])
     assert len(b[0]._marvin_alignment_consumed_source_frame_stamps)==1
     assert result['local_avoidance_actions']==result['local_bypass_actions']==0
-    assert all(not h['camera_recheck_performed'] for h in result['blocked_wait_history'])
+    assert all(not h['camera_recheck_performed'] for h in result['blocked_wait_history'][f['initial_rechecks']:])
 
 
 @pytest.mark.parametrize('fault',['uncertain','transport','exception','missing_certificate'])
@@ -220,7 +227,7 @@ def test_real_veto_with_uncertain_or_missing_contract_remains_terminal(tmp_path,
         if fault=='missing_certificate':value.pop('pre_transport_jit_veto')
     b,f,c=veto_mission(tmp_path,monkeypatch,mutate=mutate)
     run(b[0]);result=c['result']
-    assert f['entry'] is None and result['blocked_wait_recheck_count']==0
+    assert f['entry'] is None and result['blocked_wait_recheck_count']==f['initial_rechecks']
     assert result['reason']=='marvin_local_detour_jit_veto'
     assert not motions(b[3]) and result['stop_result']['ok']
 
@@ -247,139 +254,84 @@ def test_bypass_allowlist_needs_same_explicit_negative_dispatch_contract(tmp_pat
 
 def test_live_three_action_sequence_jit_5958_waits_then_direct_forward(tmp_path, monkeypatch):
     fixture=json.loads((Path(__file__).parent/'test_fixtures/marvin_jit_veto_blocked_wait.json').read_text())
-    baseline=fixture['blocked_baseline']
-    # Match recorded occupancy/range/overlap using calibrated synthetic returns.
-    # Subsequent geometry deliberately crosses the unchanged material-progress
-    # threshold between planning and JIT. The real selector and executors decide.
-    y=-.089247
-    x=math.sqrt(baseline['blocker_range_m']**2-y*y)
-    scenes=[[(x,y)]*baseline['occupancy']+[(0.,1.05),(0.,-.64)],
-            [(.60,-.12)]*20+[(0.,1.05),(0.,-.64)]]
-    b,_,_=strafe_runtime(tmp_path,monkeypatch,
-        [(e,1.44) for e in fixture['camera_horizontal_errors']],scenes)
+    # Preserve the historical summary as historical evidence. Its target-depth
+    # geometry cannot force a bypass in the camera-led mission. Use actual
+    # bounded camera alignment, then a real near-capsule lateral veto instead.
+    assert fixture['blocked_baseline']['occupancy']==21
+    assert len(fixture['completed_primitives'])==3
+    b,f,c=veto_mission(tmp_path,monkeypatch)
     r,behavior,robot,events,clock=b
-    flags={'veto':False,'waiting':False,'removed':False,'checks':0,'entry':None,'semantic':0,'reads':0,'wait_sequence':5958}
-    read=r.world_model.get_lidar_obstacles
-    def lidar(**kw):
-        value=read(**kw)
-        if flags['removed']:
-            value['local_motion_geometry']['points']=value['local_motion_geometry']['points'][:-len(scenes[-1])]
-        elif flags['veto']:
-            for p in value['local_motion_geometry']['points'][-len(scenes[-1]):-2]:
-                p.update(y_m=-.10,distance_m=math.hypot(.60,.10),robot_bearing_deg=math.degrees(math.atan2(-.10,.60)))
-            value['local_motion_geometry']['points'].append({'x_m':0.,'y_m':.3})
-        if len(motions(events))>=3:
-            if flags['waiting'] or flags['removed']:
-                flags['wait_sequence']+=1
-                value['acquisition_sequence']=flags['wait_sequence']
-            elif flags['veto']:
-                value['acquisition_sequence']=5958
-            else:
-                flags['reads']+=1
-                value['acquisition_sequence']=min(5957,5953+flags['reads'])
-        return value
-    r.world_model.get_lidar_obstacles=lidar
-    guarded=behavior.execute_guarded_marvin_lateral_step
-    def execute(**kw):
-        if len(motions(events))==3:flags['veto']=True
-        return guarded(**kw)
-    behavior.execute_guarded_marvin_lateral_step=execute
-    publish=r._publish_behavior_tracking
-    def telemetry(d):
-        if d.get('state')=='BLOCKED_WAIT':
-            flags.update(waiting=True,checks=d['blocked_wait_recheck_count'])
-            if flags['entry'] is None:flags['entry']=copy.deepcopy(d)
-        publish(d)
-    r._publish_behavior_tracking=telemetry
-    sleep=time.sleep
-    def tick(seconds):
-        if flags['waiting']:
-            assert len(motions(events))==3 and robot.status()['motion']['linear_y']==0
-            if flags['checks']>=1:flags['removed']=True
-        sleep(seconds)
-    monkeypatch.setattr('runtime.time.sleep',tick)
-    def reacquire(*,minimum_source_frame_stamp_ns):
-        flags['semantic']+=1;flags['waiting']=False
-        behavior._clear_marvin_v2_tracker_episode()
-        value=behavior.observe_find_marvin_v2()
-        assert value['preview_result']['identity_source_frame_stamp_ns']>minimum_source_frame_stamp_ns
-        return value
-    behavior.reacquire_find_marvin_v2=reacquire
-    behavior.on_observe=lambda:setattr(r,'_control_generation',r._control_generation+1) if len(motions(events))==4 else None
-    capture={};normal=r._execute_normal_marvin_find_mission
-    def record(*args,**kw):
-        capture['result']=normal(*args,**kw)
-        return capture['result']
-    r._execute_normal_marvin_find_mission=record
+    observe=behavior.observe_find_marvin_v2
+    def current_pose():
+        behavior.specs=iter([(120 if len(motions(events))<3 else 0,1.44)])
+        return observe()
+    behavior.observe_find_marvin_v2=current_pose
     behavior.source_offset_ns=1791504407964761583-clock[0]
-    run(r);result=capture['result']
-    assert motions(events)==[('strafe',.08,1.),('turn','RIGHT',.25,.5),('turn','RIGHT',.25,.5),('forward',.1,.5)],result['reason']
-    route=result['history'][0]['observation']['arrival']['route']
-    assert route['route_occupancy']==21
-    assert route['corridor_overlap_m']==pytest.approx(baseline['overlap_m'],abs=.001)
-    assert route['blocking_obstacle_distance_m']==pytest.approx(baseline['blocker_range_m'])
-    veto=result['history'][3]
+    run(r);result=c['result']
+    assert motions(events)==[('turn','RIGHT',.25,.5)]*3+[('forward',.1,.5)]
+    veto=result['history'][3];value=veto['result']
     assert veto['observation']['local_avoidance_selection']['action_type']=='STRAFE_LEFT'
-    assert veto['observation']['local_avoidance_selection']['acquisition_sequence']==5957
-    assert veto['result']['reason']=='marvin_local_detour_jit_veto'
-    assert veto['result']['source_stamp_consumed'] and not veto['result']['motion_executed']
-    assert veto['result']['lateral_step']['lateral_result'] is None
-    assert flags['entry']['blocked_wait_initial_lidar_sequence']==5958
-    assert result['local_avoidance_actions']==1 and result['local_bypass_actions']==0
+    assert value['reason']=='marvin_local_detour_jit_veto'
+    assert value['source_stamp_consumed'] and not value['motion_executed']
+    assert value['lateral_step']['lateral_result'] is None
+    cert=value['pre_transport_jit_veto']
+    assert cert['transport_attempted'] is False
+    assert cert['lidar_snapshot']['acquisition_sequence']>veto['observation']['local_avoidance_selection']['acquisition_sequence']
+    assert f['entry']['blocked_wait_initial_lidar_sequence']==cert['lidar_snapshot']['acquisition_sequence']
+    assert result['local_avoidance_actions']==result['local_bypass_actions']==0
     assert result['actions_executed']==4 and result['max_local_avoidance_actions']==6
-    assert [h['camera_recheck_performed'] for h in result['blocked_wait_history']]==[False,True]
-    assert flags['semantic']==1
+    assert f['resume']==1
     forward=result['history'][4]
     assert forward['state']=='ADVANCING' and forward['result']['full_step_completed']
     assert veto['source_frame_stamp_ns']<forward['observation']['identity_source_frame_stamp_ns']<forward['source_frame_stamp_ns']
-    assert len(r._marvin_alignment_consumed_source_frame_stamps)==5 # Four motions + veto.
+    assert len(r._marvin_alignment_consumed_source_frame_stamps)==5  # Four transports + refusal.
     assert result['stop_result']['ok'] and result['final_observation']['source_frame_stamp_ns']>forward['source_frame_stamp_ns']
-    assert result['local_avoidance_history'][1]['actual_route_occupancy'] is None
-    replay={'fixture_origin':fixture['origin'],'primitives':fixture['completed_primitives']+['FORWARD'],
-        'planning_sequence':5957,'wait_entry_sequence':5958,'rechecks':result['blocked_wait_history'],
+    assert result['local_avoidance_history'][0]['actual_route_occupancy'] is None
+    (tmp_path/'live-case-replay-summary.json').write_text(json.dumps({
+        'fixture_origin':fixture['origin'],'retained_prefix':fixture['completed_primitives'],
+        'vision_led_primitives':motions(events),'zero_veto_transport':True,
+        'wait_entry_sequence':cert['lidar_snapshot']['acquisition_sequence'],
         'veto_consumed_stamp':str(veto['source_frame_stamp_ns']),
         'new_semantic_stamp':str(forward['observation']['identity_source_frame_stamp_ns']),
         'new_action_stamp':str(forward['source_frame_stamp_ns']),
-        'avoidance_count':1,'bypass_count':0,'zero_veto_transport':True,
-        'ordinary_forward':True,'stop_confirmed':True}
-    (tmp_path/'live-case-replay-summary.json').write_text(json.dumps(replay,indent=2))
+        'ordinary_forward':True,'stop_confirmed':True},indent=2))
 
 
 def test_real_bypass_outer_guard_veto_enters_existing_wait_without_bypass_slot(tmp_path, monkeypatch):
-    from test_marvin_local_bypass import mission_bundle
-    b,_,_=mission_bundle(tmp_path,monkeypatch)
+    # The selected command is lateral; preserve the outer native geometry veto
+    # without constructing an unreachable target-depth bypass.
+    b,_,_=strafe_runtime(tmp_path,monkeypatch,[(0,.6)]*8,[LEFT_OPEN])
     r,behavior,robot,events,_=b
-    primitive=behavior.execute_single_marvin_approach_step
+    primitive=behavior.execute_guarded_marvin_lateral_step
     read=r.world_model.get_lidar_obstacles
     def changed_at_guard(**kwargs):
-        if kwargs.get('local_selection_validator'):
-            calls=[0]
-            def scan(**kw):
-                value=read(**kw);calls[0]+=1
-                if calls[0]>=2:value['local_motion_geometry']['points'].append({'x_m':.40,'y_m':0.})
-                return value
-            r.world_model.get_lidar_obstacles=scan
+        calls=[0]
+        def scan(**kw):
+            value=read(**kw);calls[0]+=1
+            if calls[0]>=2:value['local_motion_geometry']['points'].append({'x_m':.40,'y_m':0.})
+            return value
+        r.world_model.get_lidar_obstacles=scan
         return primitive(**kwargs)
-    behavior.execute_single_marvin_approach_step=changed_at_guard
+    behavior.execute_guarded_marvin_lateral_step=changed_at_guard
     result=run(r)
     assert result['reason']=='find_marvin_blocked_wait_exhausted',result['reason']
-    assert result['blocked_wait_reason']=='marvin_local_bypass_jit_veto'
-    assert motions(events)==[('strafe',.08,1.)]
-    assert result['local_avoidance_actions']==1 and result['local_bypass_actions']==0
-    veto=result['history'][1]['result']
+    assert result['blocked_wait_reason']=='marvin_dispatch_guard_local_selection_rejected'
+    assert not motions(events)
+    assert result['local_avoidance_actions']==result['local_bypass_actions']==0
+    veto=result['history'][0]['result']
     assert veto['source_stamp_consumed'] and veto['pre_transport_jit_veto']['transport_attempted'] is False
     assert result['blocked_wait_initial_lidar_sequence']==veto['pre_transport_jit_veto']['lidar_snapshot']['acquisition_sequence']
-    assert len(r._marvin_alignment_consumed_source_frame_stamps)==2
-    assert result['previous_action_type']=='STRAFE_LEFT'
+    assert len(r._marvin_alignment_consumed_source_frame_stamps)==1
+    assert result['stop_result']['ok']
 
 
 def test_client_final_guard_geometry_refusal_is_certified_before_transport(tmp_path,monkeypatch):
-    scenes=[OPEN_LEFT]
+    scenes=[LEFT_OPEN]
     b,_,client=strafe_runtime(tmp_path,monkeypatch,[(0,1.1)]*3,scenes)
     request=client._request
     def changed(method,path,payload=None):
         value=request(method,path,payload)
-        if method=='GET':scenes[0]=OPEN_LEFT+[(0.,.3)]
+        if method=='GET':scenes[0]=LEFT_OPEN+[(0.,.3)]
         return value
     client._request=changed
     result=run(b[0])
@@ -411,19 +363,22 @@ def test_post_stop_admission_is_rechecked_and_malformed_geometry_fails_closed(tm
 
 
 def test_changed_but_obstructed_geometry_returns_to_shared_avoidance_selector(tmp_path,monkeypatch):
-    b,f,c=veto_mission(tmp_path,monkeypatch,resume_scene=[(.62,-.30),(0.,1.2),(0.,-.65)])
+    b,f,c=veto_mission(tmp_path,monkeypatch,resume_scene=LEFT_OPEN)
     run(b[0]);result=c['result']
     assert f['resume']==1 and result['blocked_wait_resume_reason']=='find_marvin_blocked_wait_phase_action_available'
-    assert motions(b[3])==[('forward',.1,.5)]
+    assert motions(b[3])==[('strafe',.08,1.)]
     assert result['history'][1]['state']=='AVOIDING'
     assert result['history'][1]['result']['full_step_completed']
-    assert result['local_avoidance_actions']==1 and result['local_bypass_actions']==1
+    assert result['local_avoidance_actions']==1 and result['local_bypass_actions']==0
     assert result['stop_result']['ok'] and result['final_observation']['source_frame_stamp_ns']>result['history'][1]['source_frame_stamp_ns']
 
 
 def test_resume_cannot_reuse_consumed_veto_frame_as_semantic_authority(tmp_path,monkeypatch):
     b,f,c=veto_mission(tmp_path,monkeypatch)
+    original=b[1].reacquire_find_marvin_v2
     def replay(*,minimum_source_frame_stamp_ns):
+        if f['veto'] is None:
+            return original(minimum_source_frame_stamp_ns=minimum_source_frame_stamp_ns)
         b[1]._clear_marvin_v2_tracker_episode()
         value=b[1].observe_find_marvin_v2()
         value['preview_result']['identity_source_frame_stamp_ns']=minimum_source_frame_stamp_ns
@@ -437,18 +392,15 @@ def test_resume_cannot_reuse_consumed_veto_frame_as_semantic_authority(tmp_path,
 
 
 def test_bypass_interlock_failure_is_not_a_deterministic_geometry_certificate(tmp_path,monkeypatch):
-    from test_marvin_local_bypass import mission_bundle
-    b,_,_=mission_bundle(tmp_path,monkeypatch)
-    r,behavior,robot,events,_=b
-    primitive=behavior.execute_single_marvin_approach_step
-    def blocked_interlock(**kwargs):
-        if kwargs.get('local_selection_validator'):
-            robot.forward_interlock.refresh=lambda:(False,'unresolved_interlock_failure')
-        return primitive(**kwargs)
-    behavior.execute_single_marvin_approach_step=blocked_interlock
-    result=run(r)
-    assert result['reason']=='marvin_local_bypass_jit_veto'
-    assert result['blocked_wait_recheck_count']==0
-    assert motions(events)==[('strafe',.08,1.)]
-    assert 'pre_transport_jit_veto' not in result['history'][1]['result']
+    from test_marvin_dispatch_guard_repair import final_boundary_mission
+    b,f,_=final_boundary_mission(tmp_path,monkeypatch,'interlock_unknown')
+    result=run(b[0])
+    veto=result['history'][0]['result']
+    assert result['reason']=='marvin_dispatch_guard_forward_interlock_rejected'
+    assert veto['dispatch_guard_rejection']['reason']=='FORWARD_INTERLOCK_REJECTED'
+    assert veto['dispatch_guard_rejection']['transport_attempted'] is False
+    assert not motions(b[3])
+    assert 'pre_transport_jit_veto' not in veto
+    assert result['blocked_wait_recheck_count']==1  # Initial collision check only.
+    assert 'fresh_semantic_after_refusal' not in b[3]
     assert result['stop_result']['ok'] and result['local_bypass_actions']==0

@@ -148,29 +148,36 @@ def test_uncertified_refusal_cannot_enter_currentness_recovery(tmp_path, monkeyp
 
 
 def aging_mission(tmp_path, monkeypatch, fault=None):
-    b, _, _ = mission_bundle(tmp_path, monkeypatch, bypass_steps=1)
+    from test_marvin_lateral_avoidance import strafe_runtime, LEFT_OPEN
+    b, _, _ = strafe_runtime(tmp_path, monkeypatch, [(0, .6)] * 8 + [(0, .5)], [LEFT_OPEN])
     rt, behavior, robot, events, clock = b
-    import marvin_obstacle_phases as phases
-    native_bypass = phases.plan_local_bypass
-    native_action = rt._execute_single_marvin_approach
+    native_select = rt._select_marvin_detour_for_context
+    native_action = behavior.execute_guarded_marvin_lateral_step
     state = {'inside_jit': False, 'expired': False, 'waiting': False,
              'source_stamp': None, 'motions_at_recovery': None}
     def action(**kwargs):
         state['inside_jit'] = True
         try:
             result = native_action(**kwargs)
-            if result['reason'] == 'marvin_local_bypass_jit_veto':
-                state['source_stamp'] = kwargs['source_frame_stamp_ns']
+            if result.get('pre_transport_jit_veto'):
+                state['source_stamp'] = behavior._marvin_v2_tracker_episode['last_tracker_source_frame_stamp_ns']
             return result
         finally:
             state['inside_jit'] = False
-    rt._execute_single_marvin_approach = action
+    behavior.execute_guarded_marvin_lateral_step = action
     def expire(*args, **kwargs):
         if state['inside_jit'] and not state['expired']:
             state['expired'] = True
             clock[0] += 301_000_000
-        return native_bypass(*args, **kwargs)
-    monkeypatch.setattr(phases, 'plan_local_bypass', expire)
+            state['fault_applied'] = fault
+            if fault == 'timeout': behavior.freeze_lidar = True
+            if fault == 'session': rt.lidar_worker.session = 'changed'
+            if fault == 'owner': rt._marvin_motion_owner_is_current = lambda: False
+            if fault == 'worker': rt.lidar_worker.running = False
+            if fault == 'deadline': clock[0] += 120_000_000_000
+            if fault == 'stop': robot.stop = lambda: {'ok': False}
+        return native_select(*args, **kwargs)
+    monkeypatch.setattr(rt, '_select_marvin_detour_for_context', expire)
     recovery = rt._recover_marvin_stationary_lidar
     def recover(**kwargs):
         state['waiting'] = True
@@ -200,31 +207,21 @@ def aging_mission(tmp_path, monkeypatch, fault=None):
 def test_stale_preliminary_bypass_retires_stamp_then_reacquires_and_replans(tmp_path, monkeypatch):
     b, state = aging_mission(tmp_path, monkeypatch)
     result = run(b[0])
-    assert result['state'] == 'ARRIVED', result['reason']
-    recovery = result['stationary_lidar_recovery_history'][0]
-    assert recovery['entry_point'] == 'pre_transport_jit_currentness'
-    assert recovery['phase'] == 'PASS_OBSTACLE' and recovery['committed_side'] == 'LEFT'
-    assert recovery['avoidance_count'] == 1 and recovery['bypass_count'] == 0
-    assert recovery['watchdog']['total_detour_actions'] == 1
-    assert recovery['selected_sequence_floor'] < recovery['new_sequence']
-    assert recovery['stop_ok'] and recovery['bridge_zero']
-    assert recovery['retired_source_stamp_ns'] == state['source_stamp']
-    assert not recovery['source_stamp_transport_consumed']
-    assert state['source_stamp'] not in b[0]._marvin_alignment_consumed_source_frame_stamps
-    refused = next(h for h in result['history'] if h['source_frame_stamp_ns'] == state['source_stamp'])
+    # The metric-bypass stale certificate remains covered above. The actual
+    # selected lateral primitive has no such bypass certificate: aging here
+    # must stop conservatively rather than fabricate a recovery authorization.
+    assert result['state'] == 'BLOCKED' and result['reason'] == 'marvin_local_detour_jit_veto'
+    assert state['expired'] and not state['waiting']
+    assert not result['stationary_lidar_recovery_history'] and not motions(b[3])
+    refused = result['history'][0]
     assert not refused['motion_executed'] and refused['result']['actions_executed'] == 0
-    assert refused['result']['lidar_currentness_failure'] == 'STALE_DURING_PRE_TRANSPORT_JIT'
-    replacement = next(h for h in result['history'] if h['motion_executed'] and h['source_frame_stamp_ns'] > state['source_stamp'])
-    assert replacement['observation']['identity_source_frame_stamp_ns'] > state['source_stamp']
-    assert replacement['observation']['opencv_tracker']['quality'] >= .8
-    assert replacement['result']['local_detour']['accepted']
-    assert replacement['result']['source_stamp_consumed']
-    assert result['local_avoidance_actions'] == 2 and result['local_bypass_actions'] == 1
-    assert result['consecutive_lidar_currentness_failures'] == 0
-    assert result['local_avoidance_history'][1]['actual_route_occupancy'] is None
+    assert refused['result']['pre_transport_jit_veto']['transport_attempted'] is False
+    assert refused['result']['lateral_step']['lateral_result'] is None
+    assert result['local_avoidance_actions'] == result['local_bypass_actions'] == 0
+    assert result['stop_result']['ok']
     before = list(b[3])
     replay = b[0]._execute_single_marvin_approach(linear_speed=.1, duration=.5,
-        source_frame_stamp_ns=state['source_stamp'], dispatch_guard=lambda: True)
+        source_frame_stamp_ns=refused['source_frame_stamp_ns'], dispatch_guard=lambda: True)
     assert not replay['motion_executed'] and list(b[3]) == before
 
 
@@ -235,10 +232,14 @@ def test_stale_preliminary_bypass_retires_stamp_then_reacquires_and_replans(tmp_
     ('worker', 'find_marvin_lidar_worker_stopped'),
     ('deadline', 'find_marvin_detour_watchdog_exhausted')])
 def test_nonrecoverable_preliminary_aging_remains_terminal(tmp_path, monkeypatch, fault, reason):
-    b, _ = aging_mission(tmp_path, monkeypatch, fault)
+    b, state = aging_mission(tmp_path, monkeypatch, fault)
     result = run(b[0])
-    assert result['reason'] == reason
-    assert result['local_avoidance_actions'] == 1 and result['local_bypass_actions'] == 0
-    assert motions(b[3]) == [('strafe', .08, 1.)]
+    assert state['expired'] and state['fault_applied'] == fault
+    expected = reason if fault in {'stop', 'deadline'} else 'marvin_local_detour_jit_veto'
+    assert result['reason'] == expected
+    assert result['local_avoidance_actions'] == result['local_bypass_actions'] == 0
+    assert not motions(b[3]) and not result['stationary_lidar_recovery_history']
     if fault == 'stop':
-        assert result['stationary_lidar_recovery_history'][0]['final_recovery_result'] == 'find_marvin_lidar_recovery_stop_unconfirmed'
+        assert not result['stop_result']['ok']
+    else:
+        assert result['stop_result']['ok']

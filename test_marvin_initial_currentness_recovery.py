@@ -136,11 +136,13 @@ def initial_mission(tmp_path, monkeypatch, *, side='LEFT', direct=False, fault=N
         b[2].status = lambda: dict(status(), motion=dict(status()['motion'], linear_y=0.))
         b[0].forward_interlock = SimpleNamespace(status=lambda: {'active_forward': False, 'pending_forward': False})
     elif side == 'LEFT':
-        b, _, _ = mission_bundle(tmp_path, monkeypatch, bypass_steps=1)
+        from test_marvin_lateral_avoidance import LEFT_OPEN
+        b, _, _ = strafe_runtime(tmp_path, monkeypatch,
+            [(0, .6)] * 8 + [(0, .5)], [LEFT_OPEN, None])
     else:
-        from test_marvin_local_bypass import OPEN_LEFT, pursuit_specs
-        scenes = [[(x, -y) for x, y in OPEN_LEFT]] * 2 + [None]
-        b, _, _ = strafe_runtime(tmp_path, monkeypatch, pursuit_specs([(0, 1.1)] * 2), scenes)
+        from test_marvin_lateral_avoidance import RIGHT_OPEN
+        b, _, _ = strafe_runtime(tmp_path, monkeypatch,
+            [(0, .6)] * 8 + [(0, .5)], [RIGHT_OPEN, None])
         reader = b[0].world_model.get_lidar_obstacles
         def timestamped(**kwargs):
             b[4][0] += 1000
@@ -208,6 +210,10 @@ def initial_mission(tmp_path, monkeypatch, *, side='LEFT', direct=False, fault=N
     rt._recover_marvin_stationary_lidar = wait
     def reacquire(**kwargs):
         value = behavior.observe_find_marvin_v2()
+        # The first collision STOP also reacquires. Inject identity faults only
+        # at the recovery this test selects, after the actual forward refusal.
+        if not state['refusals']:
+            return value
         preview = value['preview_result']; tracker = preview['opencv_tracker']
         if fault == 'identity': preview['identity_confirmed'] = False
         if fault == 'quality': tracker['quality'] = .799999
@@ -229,8 +235,9 @@ def test_initial_stale_pause_retires_authority_and_requires_independent_replacem
     r, = result['stationary_lidar_recovery_history']
     stamp = state['refusals'][0]['source_frame_stamp_ns']
     assert r['entry_point'] == 'initial_approach_currentness'
-    assert r['phase'] == ('DIRECT' if mode == 'DIRECT' else 'PASS_OBSTACLE')
-    assert r['committed_side'] == (None if mode == 'DIRECT' else mode)
+    # The stopped strafe clears the bounded capsule; the refusal belongs to
+    # the actual ordinary forward replacement, with no metric bypass phase.
+    assert r['phase'] == 'DIRECT' and r['committed_side'] is None
     assert r['stop_ok'] and r['bridge_zero'] and r['new_sequence'] > r['selected_sequence_floor']
     assert r['retired_source_stamp_ns'] == stamp and not r['source_stamp_transport_consumed']
     assert stamp not in b[0]._marvin_alignment_consumed_source_frame_stamps
@@ -247,9 +254,8 @@ def test_initial_stale_pause_retires_authority_and_requires_independent_replacem
     assert replacement['action_lidar_evidence'][1] > r['selected_sequence_floor']
     assert replacement['result']['source_stamp_consumed']
     if mode != 'DIRECT':
-        assert replacement['result']['local_detour']['accepted']
-        assert result['local_avoidance_actions'] == 2 and result['local_bypass_actions'] == 1
-        assert result['local_avoidance_history'][1]['actual_route_occupancy'] is None
+        assert replacement['result']['approach_result']['forward_safety']['permitted']
+        assert result['local_avoidance_actions'] == 1 and result['local_bypass_actions'] == 0
     assert result['consecutive_lidar_currentness_failures'] == 0
     before = list(events := b[3])
     replay = b[0]._execute_single_marvin_approach(linear_speed=.1, duration=.5,
@@ -267,6 +273,25 @@ def test_initial_stale_pause_retires_authority_and_requires_independent_replacem
     ('stop', 'stop_or_bridge_failed'), ('identity', 'fresh_identity_required'), ('quality', 'fresh_identity_required'),
     ('unmatched', 'fresh_identity_required'), ('duplicate', 'fresh_identity_required'), ('older', 'fresh_identity_required')])
 def test_initial_recovery_failure_cannot_authorize_replacement(tmp_path, monkeypatch, fault, reason):
+    if fault == 'deadline':
+        # Direct pursuit has rejoined and owns no detour deadline. Preserve the
+        # expired-detour recovery gate as component coverage, without faking a
+        # PASS phase in the camera-led mission.
+        from marvin_obstacle_phases import DetourContext, Phase, Frontier
+        b, state, _, _ = initial_refusal(tmp_path, monkeypatch)
+        now = time.monotonic()
+        ctx = DetourContext().enter(Phase.CLEAR_SIDE,
+            Frontier(b[0].lidar_worker.session, state['sample']['acquisition_sequence'],
+                FIXTURE['source_frame_stamp_ns']), side='LEFT', now=now)
+        b[4][0] += 120_000_000_000
+        assert ctx.watchdog.exhaustion(time.monotonic()).endswith(reason)
+        outcome = b[0]._recover_marvin_stationary_lidar(snapshot=state['sample'],
+            expected_session=b[0].lidar_worker.session, sequence_floors=[],
+            execution_guard=lambda: ctx.watchdog.exhaustion(time.monotonic()) is None,
+            entry_point='initial_approach_currentness', delivery_resolved=True)
+        assert not outcome['ok'] and outcome['final_recovery_result'] == 'find_marvin_mission_preempted'
+        assert state['sleeps'] == 0 and not motions(b[3])
+        return
     b, state = initial_mission(tmp_path, monkeypatch, fault=fault)
     result = run(b[0])
     assert result['reason'].endswith(reason), result['reason']
@@ -385,4 +410,4 @@ def test_retired_stamp_is_rejected_during_replacement_before_fresh_motion(tmp_pa
     b[0]._execute_single_marvin_approach = replacement
     result = run(b[0])
     assert result['state'] == 'ARRIVED'
-    assert attempted_old and result['local_avoidance_actions'] == 2
+    assert attempted_old and result['local_avoidance_actions'] == 1

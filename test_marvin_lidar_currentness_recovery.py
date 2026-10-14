@@ -248,21 +248,23 @@ def test_planning_recovery_retires_visual_authority_then_new_strict_cycle_dispat
 
 
 def test_pass_side_watchdog_and_counts_preserved_across_stationary_wait(tmp_path, monkeypatch):
-    bundle, _, _ = mission_bundle(tmp_path, monkeypatch, bypass_steps=3)
-    bundle[1].specs = iter(pursuit_specs([(0., 1.1)] * 5))
+    from test_marvin_lateral_avoidance import strafe_runtime, LEFT_OPEN
+    second = [(x, y-.04) if x > 0 else (x,y) for x,y in LEFT_OPEN]
+    bundle, _, _ = strafe_runtime(tmp_path, monkeypatch,
+        [(0., .6)] * 8 + [(0., .5)], [LEFT_OPEN, second, None])
     state = inject_planning_outage(bundle, monkeypatch, after_actions=2)
     result = run(bundle[0])
     assert result['state'] == 'ARRIVED', result['reason']
     recovery, = result['stationary_lidar_recovery_history']
     assert recovery['new_camera_source_stamp_ns'] > state['retired'][0]
-    assert recovery['phase'] == 'PASS_OBSTACLE' and recovery['committed_side'] == 'LEFT'
-    assert recovery['avoidance_count'] == 2 and recovery['phase_action_count'] == 1
+    assert recovery['phase'] == 'CLEAR_SIDE' and recovery['committed_side'] == 'LEFT'
+    assert recovery['avoidance_count'] == 2 and recovery['phase_action_count'] == 2
     assert recovery['watchdog']['total_detour_actions'] == 2
     assert recovery['watchdog']['detour_started_monotonic'] is not None
-    assert result['local_avoidance_actions'] == 4
-    assert result['completed_strafe_actions'] == 1 and result['completed_bypass_forward_actions'] == 3
+    assert result['local_avoidance_actions'] == 2
+    assert result['completed_strafe_actions'] == 2 and result['completed_bypass_forward_actions'] == 0
     assert state['retired'][0] not in bundle[0]._marvin_alignment_consumed_source_frame_stamps
-    assert [r['phase'] for r in result['navigation_phase_history']] == ['CLEAR_SIDE','PASS_OBSTACLE','REJOIN','DIRECT','ARRIVED']
+    assert [r['phase'] for r in result['navigation_phase_history']] == ['CLEAR_SIDE','REJOIN','DIRECT','ARRIVED']
     assert len(motions(bundle[3])) == result['actions_executed']
 
 
@@ -322,7 +324,10 @@ def test_reacquisition_cannot_reuse_stamp_or_relax_tracker(tmp_path, monkeypatch
 
 
 def test_watchdog_time_includes_stationary_wait_and_does_not_restart(tmp_path, monkeypatch):
-    bundle, _, _ = mission_bundle(tmp_path, monkeypatch, bypass_steps=3)
+    from test_marvin_lateral_avoidance import strafe_runtime, LEFT_OPEN
+    second = [(x, y-.04) if x > 0 else (x,y) for x,y in LEFT_OPEN]
+    bundle, _, _ = strafe_runtime(tmp_path, monkeypatch,
+        [(0., .6)] * 8 + [(0., .5)], [LEFT_OPEN, second, None])
     state = inject_planning_outage(bundle, monkeypatch, after_actions=2)
     sleep = time.sleep
     def late(seconds):
@@ -334,7 +339,7 @@ def test_watchdog_time_includes_stationary_wait_and_does_not_restart(tmp_path, m
     assert result['reason'] == 'find_marvin_detour_watchdog_exhausted'
     assert len(motions(bundle[3])) == result['local_avoidance_actions'] == 2
     assert result['detour_context']['committed_side'] == 'LEFT'
-    assert result['detour_context']['phase'] == 'PASS_OBSTACLE'
+    assert result['detour_context']['phase'] == 'CLEAR_SIDE'
     assert time.monotonic() - result['detour_context']['watchdog']['detour_started_monotonic'] >= 120
 
 

@@ -249,7 +249,7 @@ def test_failed_stop_cannot_enter_wait(tmp_path, monkeypatch):
 @pytest.mark.parametrize("side", ["LEFT","RIGHT"])
 def test_transported_strafe_counts_once_preserves_side_without_progress(tmp_path,monkeypatch,side):
     from test_marvin_lateral_avoidance import strafe_runtime, LEFT_OPEN, RIGHT_OPEN
-    bundle,_,_=strafe_runtime(tmp_path,monkeypatch,[(0,.6),(0,.6),(0,.5)],
+    bundle,_,_=strafe_runtime(tmp_path,monkeypatch,[(0,.6)]*3+[(0,.5)],
         [LEFT_OPEN if side=="LEFT" else RIGHT_OPEN,None,None])
     r,b,robot,events,clock=bundle
     flags=prepare(bundle,monkeypatch)

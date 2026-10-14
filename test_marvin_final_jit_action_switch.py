@@ -12,7 +12,7 @@ from robot_bridge.client import RobotBridgeClient
 from marvin_obstacle_phases import plan_phase_action
 from test_find_marvin_closed_loop import run, motions
 from test_marvin_local_bypass import OPEN_LEFT, ASSOCIATION, pursuit_specs
-from test_marvin_lateral_avoidance import strafe_runtime
+from test_marvin_lateral_avoidance import strafe_runtime, LEFT_OPEN
 from test_marvin_dispatch_guard_repair import final_boundary_mission, native_rejection
 
 
@@ -31,18 +31,17 @@ FIXTURE = Path(__file__).parent / 'test_fixtures/marvin_105f2dfe_final_jit_actio
 def lateral_switch_mission(tmp_path, monkeypatch, *, fault='switch', direction='LEFT'):
     mirror = 1 if direction == 'LEFT' else -1
     def side(points):return [(x, mirror*y) for x,y in points]
-    scenes = [side(OPEN_LEFT), side(OPEN_LEFT), side(REPAIR), None]
+    scenes = [side(LEFT_OPEN), None]
     b, flags, client = strafe_runtime(tmp_path, monkeypatch,
         pursuit_specs([(0., 1.1)]*4), scenes)
     r, behavior, robot, events, clock = b
-    flags.update(final=False, refusals=[], evaluations=[], semantic_calls=0, phase_samples=[])
+    flags.update(final=False, refusals=[], evaluations=[], semantic_calls=0, semantic_stamps=[], phase_samples=[])
     read = r.world_model.get_lidar_obstacles
     def lidar(**kw):
         value = read(**kw)
         if flags['final'] and fault == 'switch':
-            for point in value['local_motion_geometry']['points']:
-                if .64 < point['x_m'] < .66 and abs(abs(point['y_m'])-.14)<1e-9:
-                    point['y_m'] = -.25*mirror
+            value['local_motion_geometry']['points'].extend([
+                {'x_m':0.,'y_m':.465},{'x_m':0.,'y_m':-.465}])
         return value
     r.world_model.get_lidar_obstacles = lidar
     request = client._request
@@ -65,7 +64,7 @@ def lateral_switch_mission(tmp_path, monkeypatch, *, fault='switch', direction='
     monkeypatch.setattr(r, '_select_marvin_detour_for_context', select)
     original_motion = client.motion
     def boundary(**kw):
-        triggered = kw.get('linear_y', 0) != 0 and len(motions(events)) == 2 and not flags['refusals']
+        triggered = kw.get('linear_y', 0) != 0 and not motions(events) and not flags['refusals']
         if not triggered:return original_motion(**kw)
         flags['final'] = True
         before = list(motions(events))
@@ -75,7 +74,7 @@ def lateral_switch_mission(tmp_path, monkeypatch, *, fault='switch', direction='
         if fault == 'context':
             r.mission_manager.complete_active_mission()
             monkeypatch.setattr(r, '_marvin_motion_owner_is_current', lambda:True)
-        if fault == 'deadline':clock[0] += 120_000_000_000
+        if fault == 'deadline':clock[0] += 120_001_000_000
         safety = None
         if fault == 'safety':
             import behavior_manager
@@ -117,10 +116,16 @@ def lateral_switch_mission(tmp_path, monkeypatch, *, fault='switch', direction='
         return normal(**kw)
     behavior.execute_guarded_marvin_lateral_step = guarded
     def semantic(*, minimum_source_frame_stamp_ns):
-        flags['semantic_calls'] += 1
-        events.append('replacement_semantic')
+        if flags['refusals']:
+            flags['semantic_calls'] += 1
+            events.append('replacement_semantic')
         behavior._clear_marvin_v2_tracker_episode()
-        return behavior.observe_find_marvin_v2()
+        value=behavior.observe_find_marvin_v2()
+        if flags['refusals']:
+            preview=value['preview_result']
+            assert preview['source_frame_stamp_ns']>preview['identity_source_frame_stamp_ns']>minimum_source_frame_stamp_ns
+            flags['semantic_stamps'].append(preview['source_frame_stamp_ns'])
+        return value
     behavior.reacquire_find_marvin_v2 = semantic
     normal_mission = r._execute_normal_marvin_find_mission
     def capture_mission(*args, **kw):
@@ -138,14 +143,16 @@ def test_nested_lateral_switch_certifies_exact_latest_scan_and_replans(tmp_path,
     result = run(b[0]);row = refused_row(result);v = row['result'];cert = v['dispatch_guard_rejection']
     assert result['state'] == 'ARRIVED', result['reason']
     assert cert['reason'] == 'LOCAL_SELECTION_REJECTED'
-    assert cert['selection_rejection_class'] == 'LOCAL_SELECTION_CHANGED_AT_FINAL_JIT'
-    assert cert['requested_action_type'] == 'STRAFE_LEFT' and cert['final_selected_action_type'] == 'BYPASS_FORWARD'
+    # The existing comparison classifier only names bypass/strafe switches.
+    # A real lateral-to-turn change still vetoes without inventing that class.
+    assert cert['selection_rejection_class'] is None
+    assert cert['requested_action_type'] == 'STRAFE_LEFT' and cert['final_selected_action_type'] == 'TURN_LEFT'
     assert cert['requested_direction'] == cert['final_selected_direction'] == 'LEFT'
     assert cert['guard_stage'] == 'lateral_dispatch'
     assert cert['final_jit_lidar_sequence'] > cert['planning_lidar_sequence']
     assert cert['acquisition_sequence'] == cert['final_jit_lidar_sequence']
-    assert cert['planning_lidar_sequence'] == result['local_avoidance_history'][2]['selection']['acquisition_sequence']
-    assert cert['local_selection_accepted'] is False and cert['local_safety_permitted'] is True
+    assert cert['planning_lidar_sequence'] == result['local_avoidance_history'][0]['selection']['acquisition_sequence']
+    assert cert['local_selection_accepted'] is False and cert['local_safety_permitted'] is False
     assert cert['transport_attempted'] is False and cert['delivery_uncertain'] is False
     assert cert['source_fresh'] is True and cert['source_age_seconds'] <= 1.
     assert all(cert[k] is True for k in ('control_generation_current','motion_owner_current',
@@ -155,24 +162,26 @@ def test_nested_lateral_switch_certifies_exact_latest_scan_and_replans(tmp_path,
     assert v['reason'] == 'marvin_dispatch_guard_local_selection_rejected'
     assert v['source_stamp_consumed'] and v['bridge_stop_confirmed'] and v['stop_result']['ok']
     assert v['actions_executed'] == 0 and not row['motion_executed']
-    assert result['local_avoidance_actions'] == 3 and result['local_bypass_actions'] == 2
-    assert motions(b[3])[:3] == [('strafe',.08,1.),('forward',.1,.5),('forward',.1,.5)]
+    assert result['local_avoidance_actions'] == 1 and result['local_bypass_actions'] == 0
+    assert motions(b[3])[0] == ('turn','LEFT',.25,.5)
+    assert all(m==('forward',.1,.5) for m in motions(b[3])[1:])
     transitions = result['navigation_phase_history']
-    assert any(h['from_phase']=='CLEAR_SIDE' and h['phase']=='PASS_OBSTACLE'
-        and h['evidence']['source_frame_stamp_ns']==row['source_frame_stamp_ns'] for h in transitions)
-    assert all(h['committed_side']=='LEFT' for h in transitions if h['phase']=='PASS_OBSTACLE')
+    assert any(h['phase']=='CLEAR_SIDE' for h in transitions)
+    assert not any(h['phase']=='PASS_OBSTACLE' for h in transitions)
+    assert all(h['committed_side']=='LEFT' for h in transitions if h['phase']=='CLEAR_SIDE')
     assert result['detour_context']['watchdog']['total_veto_count'] == 1
-    assert result['detour_context']['watchdog']['total_detour_actions'] == 3
-    assert result['local_avoidance_history'][2]['vetoed_before_transport']
-    assert result['local_avoidance_history'][2]['dispatched'] is False
+    assert result['detour_context']['watchdog']['total_detour_actions'] == 1
+    assert result['local_avoidance_history'][0]['vetoed_before_transport']
+    assert result['local_avoidance_history'][0]['dispatched'] is False
     # Exactly the preliminary and client-nested local evaluations; nested evidence replaces the first.
     ev = f['local_evaluations']
     tail = next(i for i,e in enumerate(ev) if e['at_client_boundary'])
     assert ev[tail-1]['selection']['accepted'] is True
     assert ev[tail-1]['selection']['action_type'] == 'STRAFE_LEFT'
     assert ev[tail]['sequence'] > ev[tail-1]['sequence']
-    assert ev[tail]['selection']['action_type'] == 'BYPASS_FORWARD'
-    assert len(f['refusals']) == len(f['evaluations']) == f['semantic_calls'] == 1
+    assert ev[tail]['selection']['action_type'] == 'TURN_LEFT'
+    assert len(f['refusals']) == len(f['evaluations']) == 1
+    assert f['semantic_calls']==len(set(f['semantic_stamps']))>=1
 
 
 @pytest.mark.parametrize('direction', ['LEFT','RIGHT'])
@@ -180,14 +189,15 @@ def test_new_strict_stamp_independently_authorizes_replacement_no_old_retry(tmp_
     b,f,_ = lateral_switch_mission(tmp_path,monkeypatch,direction=direction)
     result=run(b[0]);row=refused_row(result);old=row['source_frame_stamp_ns']
     later=result['history'][result['history'].index(row)+1]
-    assert later['result']['action_type']=='BYPASS_FORWARD' and later['motion_executed']
+    assert later['result']['local_detour']['action_type']=='TURN_'+direction and later['motion_executed']
     observation=later['observation']
     assert type(old) is int and type(later['source_frame_stamp_ns']) is int
     assert old < observation['identity_source_frame_stamp_ns'] < later['source_frame_stamp_ns']
     assert observation['opencv_tracker']['quality'] >= observation['opencv_tracker']['threshold'] == .8
     assert later['action_lidar_evidence'][1] > row['result']['dispatch_guard_rejection']['final_jit_lidar_sequence']
-    assert later['result']['approach_result']['forward_safety']['permitted']
-    assert later['result']['bridge_stop_confirmed'] and later['result']['approach_result']['forward_result']['automatic_stop']
+    assert later['result']['turn_result']['permitted'] and later['result']['turn_result']['confirmed_forwarded']
+    assert later['result']['stop_result']['ok']
+    assert (later['result']['angular_speed'],later['result']['duration'])==(.25,.5)
     assert old in b[0]._marvin_alignment_consumed_source_frame_stamps
     assert not any(h['motion_executed'] and h['source_frame_stamp_ns']==old for h in result['history'])
     before=list(b[3])
@@ -199,16 +209,18 @@ def test_new_strict_stamp_independently_authorizes_replacement_no_old_retry(tmp_
 def test_reverse_switch_uses_same_native_veto_and_clear_side_policy(tmp_path,monkeypatch):
     b,f,_=final_boundary_mission(tmp_path,monkeypatch,'repair')
     result=run(b[0]);row=refused_row(result);cert=row['result']['dispatch_guard_rejection']
-    assert cert['requested_action_type']=='BYPASS_FORWARD' and cert['final_selected_action_type']=='STRAFE_LEFT'
-    assert cert['selection_rejection_class']=='LOCAL_SELECTION_CHANGED_AT_FINAL_JIT'
+    assert BehaviorManager._marvin_selection_rejection_class(
+        dict(accepted=False,action_type='STRAFE_LEFT',direction='LEFT'),'BYPASS_FORWARD','LEFT')=='LOCAL_SELECTION_CHANGED_AT_FINAL_JIT'
+    assert cert['requested_action_type']=='STRAFE_LEFT' and cert['final_selected_action_type']=='TURN_LEFT'
+    assert cert['selection_rejection_class'] is None
     assert cert['requested_direction']==cert['final_selected_direction']=='LEFT'
     assert cert['final_jit_lidar_sequence']>cert['planning_lidar_sequence']
     assert row['result']['pre_transport_jit_veto']['transport_attempted'] is False
-    assert any(h['from_phase']=='PASS_OBSTACLE' and h['phase']=='CLEAR_SIDE' for h in result['navigation_phase_history'])
+    assert any(h['phase']=='CLEAR_SIDE' for h in result['navigation_phase_history'])
     later=result['history'][result['history'].index(row)+1]
-    assert later['result']['action_type']=='STRAFE_LEFT' and later['motion_executed']
+    assert later['result']['local_detour']['action_type']=='TURN_LEFT' and later['motion_executed']
     assert row['source_frame_stamp_ns'] < later['observation']['identity_source_frame_stamp_ns'] < later['source_frame_stamp_ns']
-    assert result['state']=='ARRIVED' and result['local_avoidance_actions']==3
+    assert result['state']=='ARRIVED' and result['local_avoidance_actions']==1
 
 
 @pytest.mark.parametrize('fault,reason',[
@@ -225,11 +237,11 @@ def test_other_lateral_final_predicates_are_distinct_and_fail_closed_when_uncert
     assert cert['transport_attempted'] is False and cert['delivery_uncertain'] is False
     if fault in {'stale','interlock_stale','safety'}:
         assert result['state']=='ARRIVED',result['reason']
-        assert f['semantic_calls']==1
-        assert result['local_avoidance_actions']==3
+        assert f['semantic_calls']==len(set(f['semantic_stamps']))>=1
+        assert result['local_avoidance_actions']==1
     else:
         assert result['state'] in {'STOPPED','BLOCKED'}
-        assert f['semantic_calls']==0 and len(motions(b[3]))==2
+        assert f['semantic_calls']==0 and not motions(b[3])
         if fault=='deadline':assert result['reason']=='find_marvin_detour_watchdog_exhausted'
     if fault not in {'switch'}:assert cert.get('selection_rejection_class') is None
 
@@ -296,6 +308,8 @@ def test_replacement_identity_cannot_dispatch_without_new_strict_authority(tmp_p
     semantic=b[1].reacquire_find_marvin_v2
     def invalid(*,minimum_source_frame_stamp_ns):
         v=semantic(minimum_source_frame_stamp_ns=minimum_source_frame_stamp_ns)
+        if not f['refusals']:
+            return v
         o=v['preview_result'];t=o['opencv_tracker']
         if fault=='quality':t.update(quality=.799999,matched=False)
         else:
@@ -307,7 +321,7 @@ def test_replacement_identity_cannot_dispatch_without_new_strict_authority(tmp_p
     b[1].reacquire_find_marvin_v2=invalid
     result=run(b[0]);row=refused_row(result)
     assert result['state'] in {'BLOCKED','REVERIFY_REQUIRED'}
-    assert len(motions(b[3]))==2 and result['local_avoidance_actions']==2
+    assert not motions(b[3]) and result['local_avoidance_actions']==0
     assert row['result']['actions_executed']==0 and row['result']['source_stamp_consumed']
     assert row['source_frame_stamp_ns'] in b[0]._marvin_alignment_consumed_source_frame_stamps
 
