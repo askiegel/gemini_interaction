@@ -318,52 +318,42 @@ def test_saved_a6c4d675_replay_survives_miss_reaches_bypass_direct_and_arrival(t
         b.sequence+=1;clock[0]+=1000
         state.update(producer_session=r.lidar_worker.session,acquisition_sequence=b.sequence,
             received_monotonic_seconds=time.monotonic(),age_at_receipt_seconds=0.,effective_age_seconds=0.,reason='fresh')
-        if count>=7:
-            for point in state['local_motion_geometry']['points']:
-                point['x_m']-=.05
-                point['distance_m']=math.hypot(point['x_m'],point['y_m'])
-                point['robot_bearing_deg']=math.degrees(math.atan2(point['y_m'],point['x_m']))
         return state
     r.world_model.get_lidar_obstacles=scan
     results=[begin(bundle)]; miss_summary=None
     for count in range(1,7):
         if count==2:
             c=r._marvin_live_proof_continuation
-            assert c.previous_selection['action_type']=='STRAFE_LEFT'
+            assert c.previous_selection is None and len(c.action_history)==2
             saved=asdict(c); negative=miss(bundle)
             assert asdict(r._marvin_live_proof_continuation)==saved
             miss_summary={'terminal':negative['controller_result']['state'],
                 'proof_state':negative['proof_state'],'floor':negative['reverify_camera_floor_source_frame_stamp_ns'],
-                'previous_selection':c.previous_selection,'progress':c.avoidance_history[-1]['actual_route_progress']}
+                'previous_selection':c.previous_selection,'last_action':c.action_history[-1]}
             b.confirm_identity=True
         assert arm(r)['ok']; b.visual_shift=110*(count%2)
         result=step(r); complete(bundle,result,count); results.append(result)
-        if result['controller_result']['history'][0]['result'].get('action_type') == 'BYPASS_FORWARD':
-            break  # Handoff now precedes the old five-strafe prefix.
     selected=[x['controller_result']['history'][0]['result'].get('action_type') or
         x['controller_result']['history'][0]['state'] for x in results]
-    assert selected==['ADVANCING','STRAFE_LEFT','STRAFE_LEFT','BYPASS_FORWARD']
+    assert selected==['ADVANCING']*7  # Retained snapshots clear the bounded collision capsule.
     c=r._marvin_live_proof_continuation
-    assert c.avoidance['local_avoidance_actions']==3 and c.avoidance['local_bypass_actions']==1
-    bypass=results[-1]['controller_result']['history'][0]['result']
-    target=bypass['local_detour']['local_bypass']
-    assert bypass['direction']=='LEFT' and target['bypass_target_x_m']<=.15 and target['protected_radius_m']==.45
-    assert target['bypass_corridor_occupancy']==0 and target['bypass_corridor_overlap_m']==0
-    assert bypass['approach_result']['forward_safety']['permitted']
-    assert bypass['local_detour']['acquisition_sequence']>results[-1]['controller_result']['avoidance_planning_lidar_sequence']
-    assert motions(events)[-1]==('forward',.1,.5)
-    assert not step(r)['execution_authorized'] and len(motions(events))==4
+    assert c.avoidance['local_avoidance_actions']==c.avoidance['local_bypass_actions']==0
+    last=results[-1]['controller_result']['history'][0]['result']
+    assert last['approach_result']['forward_safety']['protected_radius_m']==.45
+    assert last['approach_result']['forward_safety']['permitted']
+    assert motions(events)==[('forward',.1,.5)]*7
+    assert not step(r)['execution_authorized'] and len(motions(events))==7
     clear[0]=True; b.specs=iter([(0,1.38),(0,1.33)])
-    assert arm(r)['ok']; direct=step(r); complete(bundle,direct,4)
+    assert arm(r)['ok']; direct=step(r); complete(bundle,direct,7)
     assert direct['controller_result']['history'][0]['state']=='ADVANCING'
     assert r._marvin_live_proof_continuation.previous_selection is None
     assert r._marvin_live_proof_continuation.avoidance['local_bypass_target_x_m'] is None
-    direct_count=5
+    direct_count=8
     for cm in range(128,57,-5):
         b.specs=iter([(0,cm/100),(0,(cm-5)/100)])
         assert arm(r)['ok']; result=step(r); complete(bundle,result,direct_count)
         assert result['controller_result']['history'][0]['state']=='ADVANCING'
-        assert result['controller_result']['local_avoidance_actions']==3
+        assert result['controller_result']['local_avoidance_actions']==0
         direct_count+=1
     b.specs=iter([(0,.5)])
     assert arm(r)['ok']; arrival=step(r)
@@ -371,20 +361,20 @@ def test_saved_a6c4d675_replay_survives_miss_reaches_bypass_direct_and_arrival(t
     assert arrival['proof_state']=='ARRIVED_DISARMED' and not arrival['continuation_available']
     assert len(motions(events))==direct_count and not arm(r)['ok']
     print('Semantic-miss replay:',json.dumps({'actions':selected+['ADVANCING','ARRIVED'],
-        'semantic_miss':miss_summary,'avoidance_budget':6,'bypass_count':1,
+        'semantic_miss':miss_summary,'avoidance_budget':6,'bypass_count':0,
         'speed':.1,'duration':.5,'protected_radius':.45,'motion_count':direct_count,
         'selection_injected':False,'new_tracker_per_successful_authorization':True},sort_keys=True))
 
 
 def test_semantic_miss_preserves_nonzero_bypass_count_and_frozen_bypass_progress(tmp_path,monkeypatch):
-    from test_marvin_local_bypass import OPEN_LEFT
-    bundle,_,_=strafe_runtime(tmp_path,monkeypatch,[(0,1.1)]*14,[OPEN_LEFT],factory=proof_runtime)
+    from test_marvin_lateral_avoidance import collision_scenes
+    bundle,_,_=strafe_runtime(tmp_path,monkeypatch,[(0,1.1)]*14,collision_scenes(3),factory=proof_runtime)
     r=bundle[0];begin(bundle);assert arm(r)['ok'];complete(bundle,step(r),1)
     c=r._marvin_live_proof_continuation
-    assert c.previous_selection['action_type']=='BYPASS_FORWARD'
-    assert c.avoidance['local_bypass_actions']==1 and c.avoidance['local_avoidance_actions']==2
-    frozen=copy.deepcopy(c.previous_selection['first_post_action_bypass_progress'])
+    assert c.previous_selection['action_type']=='STRAFE_LEFT'
+    assert c.avoidance['local_bypass_actions']==0 and c.avoidance['local_avoidance_actions']==2
+    frozen=copy.deepcopy(c.previous_selection['first_post_action_strafe_progress'])
     miss(bundle)
     assert r._marvin_live_proof_continuation is c
-    assert c.previous_selection['first_post_action_bypass_progress']==frozen
-    assert c.avoidance['local_bypass_actions']==1 and c.avoidance['local_avoidance_actions']==2
+    assert c.previous_selection['first_post_action_strafe_progress']==frozen
+    assert c.avoidance['local_bypass_actions']==0 and c.avoidance['local_avoidance_actions']==2

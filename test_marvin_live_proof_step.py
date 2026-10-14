@@ -72,7 +72,10 @@ def test_obstructed_route_one_strafe(tmp_path, monkeypatch, scene, expected):
 def test_obstructed_route_one_existing_guarded_turn(tmp_path,monkeypatch):
     r,_,_,events,_=avoidance_runtime(tmp_path,monkeypatch,[(0,.8),(0,.8),(0,.8)],[(1.2,.48),None])
     result=proof(r)
-    assert_complete(r,result,events,("strafe",.08,1.))
+    command,=motions(events)
+    assert command[:2]==('strafe',-.08)
+    assert .25 <= command[2] <= (.48-.45)/.08
+    assert_complete(r,result,events,command)
     assert result["controller_result"]["history"][0]["result"]["action"] == "single_marvin_local_strafe"
 
 
@@ -91,13 +94,14 @@ def test_established_left_bypass_uses_existing_guarded_forward(tmp_path,monkeypa
     result=proof(r)
     assert_complete(r,result,events,("forward",.1,.5))
     c=result["controller_result"]; row=c["history"][0]
-    assert row["result"]["action_type"] == "BYPASS_FORWARD"
-    assert c["local_avoidance_actions"] == c["completed_bypass_forward_actions"] == 1
+    assert row['state']=='ADVANCING'
+    assert c["local_avoidance_actions"] == c["completed_bypass_forward_actions"] == 0
     r.behavior_manager.execute_single_marvin_approach_step.assert_called_once()
     kw=r.behavior_manager.execute_single_marvin_approach_step.call_args.kwargs
     assert kw["linear_speed"]==.1 and kw["duration"]==.5
-    assert callable(kw["local_selection_validator"])
-    assert row["result"]["local_detour"]["local_bypass"]["protected_radius_m"] == .45
+    assert 'local_selection_validator' not in kw
+    assert row['observation']['arrival']['route']['route_depth_source']=='bounded_command_envelope'
+    assert row['result']['approach_result']['forward_safety']['protected_radius_m']==.45
 
 
 @pytest.mark.parametrize("fault",["stale","session","coverage","capsule"])
@@ -111,7 +115,7 @@ def test_jit_bypass_fault_zero_motion_consumed_stamp_not_reusable(tmp_path,monke
             scan=read(**opts)
             if fault=="stale": scan["received_monotonic_seconds"]-=.301
             if fault=="session": scan["producer_session"]="wrong"
-            if fault=="coverage": scan["local_motion_geometry"]["sectors"]["rear"]["valid_sample_count"]=0
+            if fault=="coverage": scan["local_motion_geometry"]["sectors"]["front"]["valid_sample_count"]=0
             if fault=="capsule": scan["local_motion_geometry"]["points"].append({"x_m":.4,"y_m":.2})
             return scan
         r.world_model.get_lidar_obstacles=faulty

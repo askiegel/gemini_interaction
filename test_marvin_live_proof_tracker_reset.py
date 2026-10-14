@@ -12,7 +12,7 @@ import pytest
 
 from behavior_manager import BehaviorManager
 from test_find_marvin_closed_loop import delayed_runtime, motions, run
-from test_marvin_lateral_avoidance import strafe_runtime, LEFT_OPEN
+from test_marvin_lateral_avoidance import strafe_runtime, LEFT_OPEN, collision_scenes
 from test_marvin_local_bypass import OPEN_LEFT
 from test_marvin_live_proof_continuation import arm, complete, step
 
@@ -50,7 +50,12 @@ def proof_runtime(tmp_path, monkeypatch, specs):
         if b.current_spec != "absent":
             b.distance = b.current_spec[1]
         events.append("observe")
-        return reacquire(**kwargs)
+        observation=reacquire(**kwargs)
+        # Match DelayedSemanticPerception.observe_find_marvin_v2's existing
+        # synthetic camera-scene oracle; this hook bypasses that wrapper.
+        # This is test truth, never a physical box-size calibration.
+        observation['preview_result']['simulated_visual_arrival']=b.distance <= .50
+        return observation
 
     b.reacquire_find_marvin_v2 = fresh_semantic
     return bundle
@@ -302,51 +307,51 @@ def test_progress_and_oscillation_gates_still_apply_after_new_semantics(tmp_path
 
 
 def test_frozen_first_bypass_outcome_survives_visual_reset_and_alignment(tmp_path, monkeypatch):
-    shifted = [(.60,-.25),(0.,1.2),(0.,-.65)]
+    shifted = [(x,y-.04) if x>0 else (x,y) for x,y in LEFT_OPEN]
     bundle,_,_ = strafe_runtime(tmp_path,monkeypatch,
         [(0,1.1)]*4+[(100,1.1)]+[(0,1.1)]*6,
-        [OPEN_LEFT,OPEN_LEFT,OPEN_LEFT,shifted],factory=proof_runtime)
+        [LEFT_OPEN,shifted,shifted,shifted],factory=proof_runtime)
     r,b,_,events,_=bundle;begin(bundle)
     assert arm(r)["ok"];complete(bundle,step(r),1)
     c=r._marvin_live_proof_continuation
-    frozen=copy.deepcopy(c.previous_selection["first_post_action_bypass_progress"])
+    frozen=copy.deepcopy(c.previous_selection["first_post_action_strafe_progress"]['progress'])
     assert not frozen["meaningful_progress"]
-    assert c.avoidance["local_bypass_actions"]==1
+    assert c.avoidance["local_bypass_actions"]==0 and c.avoidance['local_avoidance_actions']==2
     assert arm(r)["ok"] and b._marvin_v2_tracker_episode is None
-    assert c.previous_selection["first_post_action_bypass_progress"]==frozen
+    assert c.previous_selection["first_post_action_strafe_progress"]['progress']==frozen
     b.visual_shift=110;complete(bundle,step(r),2)
     assert motions(events)[-1][0]=="turn"
-    assert r._marvin_live_proof_continuation.previous_selection["first_post_action_bypass_progress"]==frozen
+    assert r._marvin_live_proof_continuation.previous_selection["first_post_action_strafe_progress"]['progress']==frozen
     assert arm(r)["ok"];result=step(r)
     complete(bundle,result,3)
     continuation=result["controller_result"]["history"][0]["result"]
-    assert continuation["action_type"]=="BYPASS_FORWARD"
+    assert continuation["action_type"]=="STRAFE_LEFT"
     assert continuation["local_detour"]["actual_route_progress"]==frozen
     assert 'ineffective_action_types' not in continuation['local_detour']
     assert r._marvin_live_proof_continuation.avoidance["local_avoidance_actions"]==3
-    assert continuation['local_detour']['phase']=='PASS_OBSTACLE'
-    assert r._marvin_live_proof_continuation.detour_context.phase_action_count==2
+    assert continuation['local_detour']['phase']=='CLEAR_SIDE'
+    assert r._marvin_live_proof_continuation.detour_context.phase_action_count==3
     assert not continuation["local_detour"]["actual_route_progress"]["meaningful_progress"]
 
 
 def test_bypass_direct_forward_arrival_with_fresh_semantics_per_arm(tmp_path, monkeypatch):
     specs=[(0,1.1)]*4+[(0,round((x-delta)/100,2)) for x in range(105,54,-5) for delta in (0,5)]+[(0,.5)]
-    bundle,_,_=strafe_runtime(tmp_path,monkeypatch,specs,[OPEN_LEFT,OPEN_LEFT,None],factory=proof_runtime)
+    bundle,_,_=strafe_runtime(tmp_path,monkeypatch,specs,collision_scenes(2),factory=proof_runtime)
     r,b,_,events,_=bundle;begin(bundle)
     assert motions(events)==[("strafe",.08,1.)]
     assert arm(r)["ok"];b.visual_shift=110;bypass=step(r);complete(bundle,bypass,1)
     action=bypass["controller_result"]["history"][0]["result"]
-    assert action["action_type"]=="BYPASS_FORWARD" and action["direction"]=="LEFT"
-    target=action["local_detour"]["local_bypass"]
-    assert target["bypass_target_x_m"]<=.15 and target["protected_radius_m"]==.45
-    assert motions(events)[-1]==("forward",.1,.5)
+    assert action["action_type"]=="STRAFE_LEFT" and action["direction"]=="LEFT"
+    assert action['lateral_step']['lateral_safety']['protected_radius_m']==.45
+    assert action['lateral_step']['lateral_safety']['permitted']
+    assert motions(events)[-1]==("strafe",.08,1.)
     for count in range(2,13):
         assert arm(r)["ok"];b.visual_shift=110*(count%2)
         result=step(r);complete(bundle,result,count)
         assert result["controller_result"]["history"][0]["state"]=="ADVANCING"
         c=r._marvin_live_proof_continuation
         assert c.previous_selection is None and c.avoidance["local_bypass_target_x_m"] is None
-        assert c.avoidance["local_avoidance_actions"]==2 and c.avoidance["local_bypass_actions"]==1
+        assert c.avoidance["local_avoidance_actions"]==2 and c.avoidance["local_bypass_actions"]==0
     assert arm(r)["ok"];arrived=step(r)
     assert arrived["controller_result"]["state"]=="ARRIVED" and not arrived["motion_executed"]
     assert arrived["proof_state"]=="ARRIVED_DISARMED" and not arrived["continuation_available"]
@@ -366,11 +371,6 @@ def test_a6c4d675_replay_resets_trackers_and_keeps_cumulative_six_action_budget(
         b.sequence+=1;clock[0]+=1000
         state.update(producer_session=r.lidar_worker.session,acquisition_sequence=b.sequence,
                      received_monotonic_seconds=time.monotonic(),age_at_receipt_seconds=0.,effective_age_seconds=0.,reason='fresh')
-        if count>=7:
-            for point in state['local_motion_geometry']['points']:
-                point['x_m']-=.05
-                point['distance_m']=math.hypot(point['x_m'],point['y_m'])
-                point['robot_bearing_deg']=math.degrees(math.atan2(point['y_m'],point['x_m']))
         return state
     r.world_model.get_lidar_obstacles=scan
     results=[begin(bundle)]
@@ -384,22 +384,20 @@ def test_a6c4d675_replay_resets_trackers_and_keeps_cumulative_six_action_budget(
         assert b._target_bbox_iou({'bbox':old['tracker_bbox']},obs['opencv_tracker'])<.70
     selected=[x['controller_result']['history'][0]['result'].get('action_type') or
               x['controller_result']['history'][0]['state'] for x in results]
-    # Mixed counterfactual sensor progression spends exactly the original six
-    # slots: early handoff, measured passage, then bounded continuation.
-    assert selected==['ADVANCING','STRAFE_LEFT','STRAFE_LEFT']+['BYPASS_FORWARD']*4
+    # Historical target corridors cannot spend avoidance budget when the
+    # actual bounded capsule is clear. Every direct command still needs its
+    # own operator arm, fresh semantic identity, tracker reset, JIT and STOP.
+    assert selected==['ADVANCING']*7
     c=r._marvin_live_proof_continuation
-    assert c.avoidance['local_avoidance_actions']==6 and c.avoidance['local_bypass_actions']==4
-    bypass=results[5]['controller_result']['history'][0]['result']
-    target=bypass['local_detour']['local_bypass']
-    assert bypass['direction']=='LEFT' and target['bypass_target_x_m']<=.15 and target['protected_radius_m']==.45
-    assert bypass['approach_result']['forward_safety']['permitted']
-    assert bypass['local_detour']['acquisition_sequence']>results[5]['controller_result']['avoidance_planning_lidar_sequence']
-    assert motions(events)[5]==('forward',.1,.5)
+    assert c.avoidance['local_avoidance_actions']==c.avoidance['local_bypass_actions']==0
+    assert len(c.action_history)==7
+    assert results[5]['controller_result']['history'][0]['result']['approach_result']['forward_safety']['protected_radius_m']==.45
+    assert motions(events)==[('forward',.1,.5)]*7
     assert not step(r)['execution_authorized'] and len(motions(events))==7
     clear[0]=True;b.specs=iter([(0,1.38),(0,1.33)])
     assert arm(r)['ok'];direct=step(r);complete(bundle,direct,7)
     assert direct['controller_result']['history'][0]['state']=='ADVANCING'
-    assert direct['controller_result']['local_avoidance_actions']==6
+    assert direct['controller_result']['local_avoidance_actions']==0
     assert r._marvin_live_proof_continuation.previous_selection is None
     assert b.semantic_calls==8 and len(b.created_trackers)==8
     print('Fresh-episode a6c4d675 replay:',selected+['ADVANCING'])

@@ -107,6 +107,23 @@ LEFT_OPEN = [(.498,0.),(.499,.003),(.499,-.003),(0.,1.2),(0.,-.48)]
 RIGHT_OPEN = [(.498,0.),(.499,.003),(.499,-.003),(0.,.48),(0.,-1.2)]
 
 
+def collision_scenes(steps, *, clear=True, progress=True, side='LEFT'):
+    """Synthetic independent obstacle observations, never target depth/travel.
+
+    Every foreground surface starts outside the 0.45 m body circle but inside
+    the actual 5 cm forward capsule. Its measured side separation advances for
+    CLEAR_SIDE tests; no command distance or visual box size creates progress.
+    """
+    sign = 1 if side == 'LEFT' else -1
+    scenes = []
+    for index in range(steps):
+        y = -.025 * (min(index,8)+1) if progress else -.025
+        x = math.sqrt(.46 ** 2 - y ** 2)
+        scenes.append([(x, sign*y), (x+.001, sign*(y+.001)),
+                       (x+.001, sign*(y-.001)), (0., sign*1.2), (0., -sign*.65)])
+    return scenes + ([None] if clear else [])
+
+
 @pytest.mark.parametrize('scene,y',[(LEFT_OPEN,.08),(RIGHT_OPEN,-.08)])
 def test_swept_collision_routes_to_one_guarded_strafe_then_forward(tmp_path,monkeypatch,scene,y):
     bundle,_,_ = strafe_runtime(tmp_path,monkeypatch,[(0,.60),(0,.60),(0,.5)],[scene,None])

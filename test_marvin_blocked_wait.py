@@ -96,7 +96,8 @@ def mission_bundle(tmp_path, monkeypatch, *, clear_on_check=3, specs=None):
     r, behavior, robot, events, clock = bundle
     flags = {"waiting": False, "cleared": False, "publishes": [], "checks": 0,
              "on_wait": None, "on_resume": None, "resume_count": 0, "geometry_shift": 0.,
-             "waiting_motion_count": None}
+             "waiting_motion_count": None,"initial_rechecks":0,"initial_reacquired":False,
+             "camera_floor":None}
     read = r.world_model.get_lidar_obstacles
     def lidar(**kwargs):
         scan = read(**kwargs)
@@ -116,9 +117,11 @@ def mission_bundle(tmp_path, monkeypatch, *, clear_on_check=3, specs=None):
     publish = r._publish_behavior_tracking
     def telemetry(d):
         flags["publishes"].append(copy.deepcopy(d))
-        if d.get("state") == "BLOCKED_WAIT":
+        if d.get("state") == "BLOCKED_WAIT" and not motions(events):
+            flags['initial_rechecks']=d['blocked_wait_recheck_count']
+        if d.get("state") == "BLOCKED_WAIT" and motions(events):
             flags["waiting"] = True
-            flags["checks"] = d["blocked_wait_recheck_count"]
+            flags["checks"] = d["blocked_wait_recheck_count"]-flags['initial_rechecks']
             if flags["waiting_motion_count"] is None:
                 flags["waiting_motion_count"] = len(motions(events))
         publish(d)
@@ -134,8 +137,14 @@ def mission_bundle(tmp_path, monkeypatch, *, clear_on_check=3, specs=None):
                 flags["cleared"] = True
         sleep(seconds)
     monkeypatch.setattr("runtime.time.sleep", tick)
+    initial_camera = behavior.reacquire_find_marvin_v2
     def reacquire(*, minimum_source_frame_stamp_ns):
+        if not flags['waiting']:
+            value=initial_camera(minimum_source_frame_stamp_ns=minimum_source_frame_stamp_ns)
+            flags['initial_reacquired']=True
+            return value
         flags["waiting"] = False
+        flags['camera_floor']=minimum_source_frame_stamp_ns
         flags["resume_count"] += 1
         events.append("blocked_semantic_reacquire")
         if flags["on_resume"]:
@@ -169,10 +178,10 @@ def test_normal_mission_avoid_wait_forward_then_arrives(tmp_path, monkeypatch):
     assert result["state"] == "ARRIVED"
     assert motions(bundle[3]) == [("strafe",.08,1.),("forward",.1,.5)]
     assert result["local_avoidance_actions"] == 1 and result["local_bypass_actions"] == 0
-    assert result["blocked_wait_recheck_count"] == 3
-    assert len([e for e in bundle[3] if e == "observe"]) == 4
+    assert result["blocked_wait_recheck_count"] == f['initial_rechecks']+3
+    assert len([e for e in bundle[3] if e == "observe"]) == 5
     assert f["resume_count"] == 1
-    assert [h["camera_recheck_performed"] for h in result["blocked_wait_history"]] == [False,False,True]
+    assert [h["camera_recheck_performed"] for h in result["blocked_wait_history"]] == [True,False,False,True]
     assert any(d["state"] == "BLOCKED_WAIT" for d in f["publishes"])
     assert all(not row["motion_executed"] and not row["source_stamp_consumed"] for row in result["blocked_wait_history"])
     assert len(bundle[0]._marvin_alignment_consumed_source_frame_stamps) == 2
@@ -180,7 +189,8 @@ def test_normal_mission_avoid_wait_forward_then_arrives(tmp_path, monkeypatch):
     assert result["blocked_wait_resume_reason"] == "find_marvin_blocked_wait_route_cleared"
     forward = [row for row in result["history"] if row["motion_executed"]][-1]
     assert forward["state"] == "ADVANCING" and forward["result"]["full_step_completed"]
-    assert forward["observation"]["arrival"]["target_range_association_trusted"]
+    assert forward["observation"]["arrival"]["authority"]=='visual_tracking'
+    assert 'target_distance_m' not in forward["observation"]["arrival"]
     assert forward["result"]["stop_result"]["ok"]
     assert any(h["snapshot"]["acquisition_sequence"] > forward["action_lidar_evidence"][1]
                for h in result["lidar_wait_history"])
@@ -327,8 +337,8 @@ def test_changed_obstacle_resumes_real_selector_on_established_side(tmp_path,mon
     assert result["state"]=="ARRIVED"
     assert motions(bundle[3])==[("strafe",.08,1.),("turn","LEFT",.25,.5)]
     assert result["local_avoidance_actions"]==2 and result["local_bypass_actions"]==0
-    assert result["blocked_wait_history"][0]["geometry_changed"]
-    assert result["blocked_wait_history"][0]["route"]["route_to_marvin_obstructed"]
+    assert result["blocked_wait_history"][f['initial_rechecks']]["geometry_changed"]
+    assert result["blocked_wait_history"][f['initial_rechecks']]["route"]["route_to_marvin_obstructed"]
     assert result["local_avoidance_history"][-1]["selection"]["phase"] == "CLEAR_SIDE"
     assert result["last_detour_direction"]=="LEFT"
 
@@ -360,6 +370,8 @@ def test_only_safe_pre_dispatch_dead_ends_enter_wait(tmp_path,monkeypatch,reason
     def reject(*a,**kw):
         # A decision-only failure is never a primitive injection or dispatch.
         result=plan_phase_action(*a,**kw)
+        if not flags['initial_reacquired']:
+            return result
         return dict(result,direction=None,action_type=None,reason=reason)
     monkeypatch.setattr("runtime.plan_phase_action",reject)
     result=run(bundle[0])
@@ -368,27 +380,28 @@ def test_only_safe_pre_dispatch_dead_ends_enter_wait(tmp_path,monkeypatch,reason
         assert result["reason"]=="find_marvin_blocked_wait_exhausted"
         assert result["blocked_wait_reason"]==reason and result["blocked_wait_recheck_count"]==12
     else:
-        assert result["reason"]==reason and result["blocked_wait_recheck_count"]==0
+        assert result["reason"]==reason and result["blocked_wait_recheck_count"]==flags['initial_rechecks']
 
 
 def test_runtime_time_backstop_is_safe_incomplete_and_preserves_budget(tmp_path,monkeypatch):
     bundle,f=mission_bundle(tmp_path,monkeypatch,clear_on_check=None)
     bundle[0].MARVIN_BLOCKED_WAIT_MAX_SECONDS=1.1
     result=run(bundle[0])
-    assert result["reason"]=="find_marvin_blocked_wait_exhausted"
+    # At the cumulative deadline either the backoff or its final scan poll can
+    # expire first. Both are bounded stopped exits, never new action authority.
+    assert result["reason"] in {"find_marvin_blocked_wait_exhausted","find_marvin_new_lidar_evidence_timeout"}
     assert result["mission_outcome"]=="safe_incomplete"
     assert result["blocked_wait_total_seconds"]==pytest.approx(1.1)
     assert result["actions_executed"]==result["local_avoidance_actions"]==1
     assert len(bundle[0]._marvin_alignment_consumed_source_frame_stamps)==1
-    assert f["resume_count"]==0 and bundle[3].count("observe")==2
+    assert f["resume_count"]==0 and bundle[3].count("observe")==3
 
 
 def test_new_exact_camera_stamp_and_new_lidar_required_after_wait(tmp_path,monkeypatch):
     bundle,f=mission_bundle(tmp_path,monkeypatch,clear_on_check=1)
     bundle[1].source_offset_ns=1791501698626664209-bundle[4][0]
     result=run(bundle[0]);moving=[row for row in result["history"] if row["motion_executed"]]
-    decision_only=[row for row in result["history"] if row.get("decision_only")]
-    old_stamp=decision_only[-1]["source_frame_stamp_ns"];new=moving[-1]["source_frame_stamp_ns"]
+    old_stamp=f['camera_floor'];new=moving[-1]["source_frame_stamp_ns"]
     assert type(old_stamp) is type(new) is int and new>old_stamp>moving[0]["source_frame_stamp_ns"]
     assert old_stamp not in bundle[0]._marvin_alignment_consumed_source_frame_stamps
     assert moving[-1]["action_lidar_evidence"][1]>result["blocked_wait_history"][-1]["lidar_sequence"]
@@ -421,10 +434,6 @@ def test_retained_route_with_explicit_unsafe_corridor_waits_then_forward(tmp_pat
     read=r.world_model.get_lidar_obstacles
     def lidar(**kw):
         state=read(**kw)
-        # Calibrate the synthetic Marvin surface to the live +48 px bearing;
-        # the generic Perception fixture centers its returns at y=0.
-        for point in state['local_motion_geometry']['points'][-33:-20]:
-            point['y_m'] -= (point['x_m'] - .081299) * (368.-321.6103934690693) / 597.6149561338204
         if flags["removed"]:
             state['local_motion_geometry']['points']=state['local_motion_geometry']['points'][:-20]
         elif motions(events):
@@ -471,9 +480,10 @@ def test_retained_route_with_explicit_unsafe_corridor_waits_then_forward(tmp_pat
     assert result.get('state')=='STOPPED', (result.get('reason'),motions(events))
     assert result['blocked_wait_recheck_count']==2
     first=result['blocked_wait_history'][0]['route'];last=result['blocked_wait_history'][-1]['semantic_route']
-    assert first['route_occupancy']==fixture['blocked']['arrival']['route']['route_occupancy']==20
-    assert first['corridor_overlap_m']==pytest.approx(.338641,abs=.001)
-    assert first['blocking_obstacle_distance_m']==pytest.approx(.612025,abs=.001)
+    assert fixture['blocked']['arrival']['route']['route_occupancy']==20  # Historical metric corridor.
+    assert first['route_occupancy']==1  # The explicit synthetic rear intrusion.
+    assert first['route_depth_source']=='bounded_command_envelope' and first['route_lookahead_m']==.05
+    assert first['blocking_obstacle_distance_m']==pytest.approx(math.hypot(-.1,.3))
     assert not last['route_to_marvin_obstructed'] and last['route_occupancy']==0
     assert len(motions(events))==flags['wait_motion_count']+1
     assert motions(events)[-1]==('forward',.1,.5)
@@ -514,9 +524,9 @@ def test_live_status_projection_exposes_stationary_wait_diagnostics(tmp_path,mon
     seen=[]
     f['on_wait']=lambda:seen.append(bundle[0].get_status_summary()['tracking'])
     result=run(bundle[0])
-    assert result['reason']=='find_marvin_blocked_wait_exhausted'
+    assert result['reason']=='marvin_visual_arrival_unverified_at_lidar_safety_boundary'
     assert seen and all(d['state']=='BLOCKED_WAIT' and d['blocked_wait_active'] for d in seen)
-    assert all(d['blocked_wait_reason']=='find_marvin_no_safe_local_detour' for d in seen)
+    assert all(d['blocked_wait_reason']=='find_marvin_lidar_motion_obstructed' for d in seen)
     assert all(k in seen[-1] for k in blocked_wait_diagnostics())
 
 
@@ -529,4 +539,4 @@ def test_production_stop_failure_returns_safe_failure_without_waiting_or_retry(t
     bundle[2].stop=fail_after_action
     result=run(bundle[0])
     assert result['state']=='BLOCKED' and result['mission_outcome']=='safe_failure'
-    assert len(motions(bundle[3]))==1 and result['blocked_wait_recheck_count']==0
+    assert len(motions(bundle[3]))==1 and result['blocked_wait_recheck_count']==f['initial_rechecks']

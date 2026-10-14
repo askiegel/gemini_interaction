@@ -15,7 +15,7 @@ from marvin_detour_watchdog import (
 )
 from marvin_obstacle_phases import DetourContext, Frontier, Phase, plan_phase_action
 from test_marvin_local_bypass import mission_bundle, OPEN_LEFT, ASSOCIATION, pursuit_specs
-from test_marvin_lateral_avoidance import strafe_runtime, LEFT_OPEN
+from test_marvin_lateral_avoidance import strafe_runtime, LEFT_OPEN, collision_scenes
 from test_find_marvin_closed_loop import run, motions, make_runtime
 from test_marvin_authoritative_phases import veto_to_repair
 from test_marvin_avoidance_planner_progress import scan
@@ -52,7 +52,7 @@ def continued_bundle(tmp_path,monkeypatch,steps):
     # Synthetic continuation: independently safe corridor at every action;
     # route clear after the chosen number. No commanded-distance simulation.
     b,flags,client=strafe_runtime(tmp_path,monkeypatch,
-        pursuit_specs([(0,1.1)]*(steps+1)),[OPEN_LEFT]*(steps+1)+[None])
+        [(0,1.1)]*(2*steps+6)+[(0,.5)],collision_scenes(steps))
     read=b[0].world_model.get_lidar_obstacles
     def timestamped(**kwargs):
         b[4][0]+=1000
@@ -217,8 +217,13 @@ def test_native_d68ede76_six_boundary_proposes_pass_without_historical_authority
 def test_fresh_seventh_and_several_more_bypasses_rejoin_and_arrive(tmp_path,monkeypatch,steps):
     b,_,_=continued_bundle(tmp_path,monkeypatch,steps)
     result=run(b[0])
+    if steps >= CLEAR_SIDE_MAX_ACTIONS:
+        assert result['reason']=='find_marvin_clear_side_attempts_exhausted'
+        assert result['local_avoidance_actions']==CLEAR_SIDE_MAX_ACTIONS
+        assert len(motions(b[3]))==CLEAR_SIDE_MAX_ACTIONS and result['stop_result']['ok']
+        return
     assert result['state']=='ARRIVED',result['reason']
-    assert result['local_avoidance_actions']==1+steps and result['local_bypass_actions']==steps
+    assert result['local_avoidance_actions']==steps and result['local_bypass_actions']==0
     assert result['legacy_avoidance_counter_only']
     assert [x['phase'] for x in result['navigation_phase_history']][-3:]==['REJOIN','DIRECT','ARRIVED']
     assert result['completed_forward_actions']>0
@@ -229,7 +234,7 @@ def test_fresh_seventh_and_several_more_bypasses_rejoin_and_arrive(tmp_path,monk
         assert next_['action_lidar_evidence'][1]>prev['action_lidar_evidence'][1]
         assert next_['result']['source_stamp_consumed'] and next_['result']['bridge_stop_confirmed']
         assert next_['result']['local_detour']['accepted']
-    assert all(x['result']['approach_result']['forward_safety']['permitted'] for x in rows if x['result']['action_type']=='BYPASS_FORWARD')
+    assert all(x['result']['lateral_step']['lateral_safety']['permitted'] for x in rows)
     assert b[3][-1]=='stop'
 
 
@@ -243,12 +248,12 @@ def test_no_grandfathered_seventh_action_or_safety_bypass(tmp_path,monkeypatch,f
             elif fault=='unsafe':behavior.unsafe_forward=True
     robot.on_motion=after
     if fault=='delivery':
-        old=r._execute_single_marvin_approach
+        old=r._execute_single_marvin_strafe
         def uncertain(**kwargs):
             value=old(**kwargs)
             if len(motions(events))==6:value['delivery_uncertain']=True
             return value
-        r._execute_single_marvin_approach=uncertain
+        r._execute_single_marvin_strafe=uncertain
     result=run(r)
     assert len(motions(events))==6
     assert not result['arrived_at_marvin'] and result['stop_result']['ok']
@@ -257,11 +262,11 @@ def test_no_grandfathered_seventh_action_or_safety_bypass(tmp_path,monkeypatch,f
 
 
 def test_constant_safe_passage_stops_by_watchdog_and_bridge_zero(tmp_path,monkeypatch):
-    b,_,_=strafe_runtime(tmp_path,monkeypatch,[(0,1.1)]*40,[OPEN_LEFT])
+    b,_,_=strafe_runtime(tmp_path,monkeypatch,[(0,1.1)]*40,[LEFT_OPEN])
     result=run(b[0]);w=result['detour_context']['watchdog']
-    assert result['reason']=='find_marvin_pass_stagnation_exhausted'
-    assert result['local_avoidance_actions']==1+PASS_MAX_UNPROVEN_ACTIONS
-    assert w['phase_stagnation_count']==PASS_MAX_UNPROVEN_ACTIONS
+    assert result['reason']=='find_marvin_clear_side_stagnation_exhausted'
+    assert result['local_avoidance_actions']==CLEAR_SIDE_MAX_UNPROVEN_ACTIONS
+    assert w['phase_stagnation_count']==CLEAR_SIDE_MAX_UNPROVEN_ACTIONS
     assert result['mission_outcome']=='safe_incomplete' and result['bridge_after_stop']['status']=='READY'
     assert result['stop_result']['ok'] and b[3][-1]=='stop'
 
@@ -285,19 +290,20 @@ def test_deadline_in_camera_reacquisition_does_not_dispatch_stale_frame(tmp_path
 
 def test_deadline_during_jit_rejects_dispatch_and_stops(tmp_path,monkeypatch):
     b,_,_=continued_bundle(tmp_path,monkeypatch,7);r,behavior,robot,events,clock=b
-    old=behavior.execute_single_marvin_approach_step
+    old=behavior.execute_guarded_marvin_lateral_step
     def delayed(**kwargs):
-        if kwargs.get('local_selection_validator'):clock[0]+=121_000_000_000
+        clock[0]+=121_000_000_000
         return old(**kwargs)
-    behavior.execute_single_marvin_approach_step=delayed
+    behavior.execute_guarded_marvin_lateral_step=delayed
     result=run(r)
     assert result['reason']=='find_marvin_detour_watchdog_exhausted'
-    assert len(motions(events))==1 and result['stop_result']['ok']
+    assert not motions(events) and result['stop_result']['ok']
 
 
 def test_alignment_does_not_reset_phase_watchdog_side_or_time(tmp_path,monkeypatch):
     specs=pursuit_specs([(0,1.1),(100,1.1),(0,1.1)])
-    b,_,_=strafe_runtime(tmp_path,monkeypatch,specs,[OPEN_LEFT,OPEN_LEFT,OPEN_LEFT,None])
+    second=[(x,y-.04) if x>0 else (x,y) for x,y in LEFT_OPEN]
+    b,_,_=strafe_runtime(tmp_path,monkeypatch,specs,[LEFT_OPEN,second,second,None])
     result=run(b[0]);w=result['detour_context']['watchdog']
     assert result['state']=='ARRIVED'
     assert result['local_avoidance_actions']==2 and w['total_detour_actions']==3
@@ -306,29 +312,30 @@ def test_alignment_does_not_reset_phase_watchdog_side_or_time(tmp_path,monkeypat
 
 
 def test_jit_veto_returns_to_repair_without_action_slot_or_old_stamp(tmp_path,monkeypatch):
-    b,_=veto_to_repair(tmp_path,monkeypatch)
+    from test_marvin_dispatch_guard_repair import final_boundary_mission
+    b,_,_=final_boundary_mission(tmp_path,monkeypatch,'repair')
     result=run(b[0]);w=result['detour_context']['watchdog']
     assert result['state']=='ARRIVED'
     assert w['total_veto_count']==1 and w['total_detour_actions']==result['local_avoidance_actions']
     rows=result['history'];i=next(i for i,x in enumerate(rows) if x['result'].get('pre_transport_jit_veto'))
     assert not rows[i]['motion_executed'] and rows[i+1]['source_frame_stamp_ns']>rows[i]['source_frame_stamp_ns']
-    assert rows[i+1]['result']['action_type']=='STRAFE_LEFT'
+    assert rows[i+1]['result']['local_detour']['action_type']=='TURN_LEFT'
 
 
 def test_safe_pass_becomes_unsafe_and_repairs_then_rejoins(tmp_path,monkeypatch):
     specs=pursuit_specs([(0,1.1)]*9)
-    b,_,_=strafe_runtime(tmp_path,monkeypatch,specs,[OPEN_LEFT]*7+[[ (.65,-.14),(0,1.2),(0,-.65)],None])
+    b,_,_=strafe_runtime(tmp_path,monkeypatch,specs,[None,None]+collision_scenes(2))
     result=run(b[0])
     assert result['state']=='ARRIVED',result['reason']
     phases=[x['phase'] for x in result['navigation_phase_history']]
-    assert phases[:3]==['CLEAR_SIDE','PASS_OBSTACLE','CLEAR_SIDE']
-    assert result['local_avoidance_actions']==8
+    assert phases[:3]==['CLEAR_SIDE','REJOIN','DIRECT']
+    assert result['local_avoidance_actions']==2 and result['local_bypass_actions']==0
 
 
 def test_no_safe_action_still_uses_existing_blocked_wait(tmp_path,monkeypatch):
     b,_,_=strafe_runtime(tmp_path,monkeypatch,[(0,1.1)]*3,[OPEN_LEFT+[(0,.3)]])
     result=run(b[0])
-    assert result['reason']=='find_marvin_blocked_wait_exhausted' and result['blocked_wait_recheck_count']==12
+    assert result['reason']=='marvin_visual_arrival_unverified_at_lidar_safety_boundary' and result['blocked_wait_recheck_count']==12
     assert not motions(b[3])
 
 
@@ -350,35 +357,26 @@ def test_045_protected_capsule_and_015_center_admission_still_apply():
 
 
 def test_runtime_equivalent_zero_transport_veto_spin_is_bounded(tmp_path,monkeypatch):
-    b,_,_=continued_bundle(tmp_path,monkeypatch,20);r,behavior,robot,events,_=b
-    flags={'jit':False};read=r.world_model.get_lidar_obstacles
-    def lidar(**kwargs):
-        value=read(**kwargs)
-        if flags['jit']:
-            for p in value['local_motion_geometry']['points']:
-                if .60<p['x_m']<.70:p['y_m']=-.14
-        return value
-    r.world_model.get_lidar_obstacles=lidar
-    original=behavior.execute_single_marvin_approach_step
-    def veto(**kwargs):
-        if kwargs.get('local_selection_validator'):flags['jit']=True
-        return original(**kwargs)
-    behavior.execute_single_marvin_approach_step=veto
-    behavior.on_observe=lambda:flags.update(jit=False)
+    from test_marvin_dispatch_guard_repair import final_boundary_mission
+    b,f,_=final_boundary_mission(tmp_path,monkeypatch,'repair',repeat=True)
+    r,behavior,robot,events,_=b
+    behavior.specs=iter([(0,1.1)]*100)
+    behavior.on_observe=lambda:f.update(repair=False)
     result=run(r);w=result['detour_context']['watchdog']
     assert result['reason']=='find_marvin_equivalent_jit_veto_exhausted'
-    assert result['local_avoidance_actions']==w['total_detour_actions']==1
+    assert result['local_avoidance_actions']==w['total_detour_actions']==0
     assert w['total_veto_count']==MAX_EQUIVALENT_VETOES
-    assert motions(events)==[('strafe',.08,1.)] and result['stop_result']['ok']
+    assert not motions(events) and result['stop_result']['ok']
     vetoes=[x for x in result['history'] if x['result'].get('pre_transport_jit_veto')]
-    assert len(vetoes)==6 and len({x['source_frame_stamp_ns'] for x in vetoes})==6
+    assert len(vetoes)==MAX_EQUIVALENT_VETOES
+    assert len({x['source_frame_stamp_ns'] for x in vetoes})==MAX_EQUIVALENT_VETOES
     assert all(x['source_frame_stamp_ns'] in r._marvin_alignment_consumed_source_frame_stamps for x in vetoes)
 
 
 def test_runtime_fast_phase_cycles_hit_total_antispin_bound(tmp_path,monkeypatch):
     repair=[(.65,-.14),(0,1.2),(0,-.65)]
-    scenes=[OPEN_LEFT]+[OPEN_LEFT if i%2==0 else repair for i in range(40)]
-    b,_,_=strafe_runtime(tmp_path,monkeypatch,[(0,1.1)]*50,scenes)
+    scenes=[LEFT_OPEN,None]*30
+    b,_,_=strafe_runtime(tmp_path,monkeypatch,[(0,1.1)]*150,scenes)
     result=run(b[0]);w=result['detour_context']['watchdog']
     assert result['reason']=='find_marvin_detour_antispin_exhausted'
     assert w['phase_transitions']==MAX_PHASE_TRANSITIONS
@@ -387,19 +385,20 @@ def test_runtime_fast_phase_cycles_hit_total_antispin_bound(tmp_path,monkeypatch
 
 
 def test_runtime_emergency_backstop_includes_alignment(tmp_path,monkeypatch):
-    b,_,_=strafe_runtime(tmp_path,monkeypatch,[(0,1.1)]+[(100,1.1)]*100,[OPEN_LEFT])
+    b,_,_=strafe_runtime(tmp_path,monkeypatch,[(0,1.1)]+[(100,1.1)]*100,[LEFT_OPEN,None])
     result=run(b[0]);w=result['detour_context']['watchdog']
     assert result['reason']=='find_marvin_detour_emergency_action_ceiling_exhausted'
     assert w['total_detour_actions']==DETOUR_EMERGENCY_PHYSICAL_ACTIONS
     assert result['local_avoidance_actions']==1 and len(motions(b[3]))==64
-    assert w['phase_actions']==1 and result['stop_result']['ok']
+    assert w['phase_actions']==0 and result['detour_context']['phase']=='REJOIN'
+    assert result['completed_strafe_actions']==1 and result['stop_result']['ok']
 
 
 def test_blocked_wait_also_remains_inside_total_detour_deadline(tmp_path,monkeypatch):
-    b,_,_=strafe_runtime(tmp_path,monkeypatch,[(0,1.1)]*10,[OPEN_LEFT,OPEN_LEFT+[(0,.3)]])
+    b,_,_=strafe_runtime(tmp_path,monkeypatch,[(0,1.1)]*10,[LEFT_OPEN,LEFT_OPEN+[(0,.3)]])
     r,behavior,robot,events,clock=b;wait=r._wait_for_marvin_blocked_route
     def delayed(**kwargs):
-        clock[0]+=119_000_000_000
+        if motions(events):clock[0]+=119_000_000_000
         return wait(**kwargs)
     r._wait_for_marvin_blocked_route=delayed
     result=run(r)
@@ -428,11 +427,11 @@ def test_action_window_must_fit_deadline_without_granting_admission():
 
 def test_jit_cannot_start_action_that_would_cross_detour_deadline(tmp_path,monkeypatch):
     b,_,_=continued_bundle(tmp_path,monkeypatch,7);r,behavior,robot,events,clock=b
-    old=behavior.execute_single_marvin_approach_step
+    old=behavior.execute_guarded_marvin_lateral_step
     def delayed(**kwargs):
-        if kwargs.get('local_selection_validator'):clock[0]+=118_600_000_000
+        clock[0]+=119_500_000_000
         return old(**kwargs)
-    behavior.execute_single_marvin_approach_step=delayed
+    behavior.execute_guarded_marvin_lateral_step=delayed
     result=run(r)
     assert result['reason']=='find_marvin_detour_watchdog_exhausted'
-    assert motions(events)==[('strafe',.08,1.)] and result['stop_result']['ok']
+    assert not motions(events) and result['stop_result']['ok']

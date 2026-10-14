@@ -15,7 +15,7 @@ import pytest
 from runtime import _marvin_proof_checkpoint_digest
 from runtime_api import RuntimeAPIHandler, _precision_safe_source_frame_stamps
 from test_find_marvin_closed_loop import make_runtime, motions, run
-from test_marvin_lateral_avoidance import strafe_runtime, LEFT_OPEN, RIGHT_OPEN
+from test_marvin_lateral_avoidance import strafe_runtime, LEFT_OPEN, RIGHT_OPEN, collision_scenes
 from test_marvin_local_bypass import OPEN_LEFT
 
 
@@ -326,7 +326,7 @@ def test_unrelated_physical_owner_invalidates(tmp_path, monkeypatch):
 
 
 def test_checkpoint_does_not_retain_dispatch_authority_or_alias_response(tmp_path, monkeypatch):
-    bundle, _, _ = strafe_runtime(tmp_path, monkeypatch, [(0,1.1)]*6, [OPEN_LEFT])
+    bundle, _, _ = strafe_runtime(tmp_path, monkeypatch, [(0,1.1)]*6, [LEFT_OPEN])
     r = bundle[0]; first = initial(bundle); complete(bundle, first, 0)
     c = r._marvin_live_proof_continuation
     data = asdict(c)
@@ -389,9 +389,9 @@ def test_side_ranking_flicker_cannot_undo_measured_left_progress(tmp_path, monke
 
 @pytest.mark.parametrize('fault',['stale','session','coverage','capsule'])
 def test_every_rearmed_bypass_rechecks_jit_without_using_saved_permission(tmp_path,monkeypatch,fault):
-    bundle, _, _=strafe_runtime(tmp_path,monkeypatch,[(0,1.1)]*6,[OPEN_LEFT])
+    bundle, _, _=strafe_runtime(tmp_path,monkeypatch,[(0,1.1)]*6,collision_scenes(3))
     r=bundle[0];complete(bundle,initial(bundle),0);assert arm(r)['ok']
-    execute=r.behavior_manager.execute_single_marvin_approach_step
+    execute=r.behavior_manager.execute_guarded_marvin_lateral_step
     read=r.world_model.get_lidar_obstacles
     def guarded(**kw):
         def faulty(**opts):
@@ -403,10 +403,10 @@ def test_every_rearmed_bypass_rechecks_jit_without_using_saved_permission(tmp_pa
             return scan
         r.world_model.get_lidar_obstacles=faulty
         return execute(**kw)
-    r.behavior_manager.execute_single_marvin_approach_step=guarded
+    r.behavior_manager.execute_guarded_marvin_lateral_step=guarded
     result=step(r);c=result['controller_result']
     assert len(motions(bundle[3]))==1 and not result['motion_executed']
-    assert c['history'][0]['observation']['local_avoidance_action']=='BYPASS_FORWARD'
+    assert c['history'][0]['observation']['local_avoidance_action']=='STRAFE_LEFT'
     assert c['proof']['source_stamps'][0]['consumed']
     assert r._marvin_live_proof_state=='FAILED_LOCKED' and not arm(r)['ok']
 
@@ -414,22 +414,21 @@ def test_every_rearmed_bypass_rechecks_jit_without_using_saved_permission(tmp_pa
 def test_bypass_and_direct_forward_each_require_separate_arm_then_arrival(tmp_path, monkeypatch):
     specs = [(0,1.1)]*4 + [(0,round((x-delta)/100,2))
         for x in range(105,54,-5) for delta in (0,5)] + [(0,.5)]
-    bundle, _, _ = strafe_runtime(tmp_path, monkeypatch, specs, [OPEN_LEFT,OPEN_LEFT,None])
+    bundle, _, _ = strafe_runtime(tmp_path, monkeypatch, specs, collision_scenes(2))
     r = bundle[0]; complete(bundle, initial(bundle), 0)
     assert motions(bundle[3]) == [("strafe",.08,1.)]
     assert arm(r)["ok"]; bypass = step(r); complete(bundle, bypass, 1)
     row = bypass["controller_result"]["history"][0]; action = row["result"]
-    assert action["action_type"] == "BYPASS_FORWARD"
+    assert action["action_type"] == "STRAFE_LEFT"
     assert action["direction"] == "LEFT"
-    b = action["local_detour"]["local_bypass"]
-    assert b["bypass_target_x_m"] == .15 and b["bypass_target_y_m"] == 0
-    assert b["protected_radius_m"] == .45 and b["bypass_forward_permitted"]
-    assert action["approach_result"]["forward_safety"]["permitted"]
-    assert b['producer_session']==r.lidar_worker.session
+    safety=action['lateral_step']['lateral_safety']
+    assert safety['protected_radius_m']==.45 and safety['permitted']
+    assert len(safety['required_sectors'])==8
+    assert action['local_detour']['producer_session']==r.lidar_worker.session
     assert action['local_detour']['acquisition_sequence']>bypass['controller_result']['avoidance_planning_lidar_sequence']
     assert all(sector['valid_sample_count']>=3 for sector in
         bypass['controller_result']['proof']['post_action_evidence']['current_lidar']['local_motion_geometry']['sectors'].values())
-    assert motions(bundle[3]) == [("strafe",.08,1.),("forward",.1,.5)]
+    assert motions(bundle[3]) == [("strafe",.08,1.)]*2
     assert not step(r)["execution_authorized"]
     assert arm(r)["ok"]; direct = step(r); complete(bundle, direct, 2)
     assert direct["controller_result"]["history"][0]["state"] == "ADVANCING"
@@ -437,7 +436,7 @@ def test_bypass_and_direct_forward_each_require_separate_arm_then_arrival(tmp_pa
     c = r._marvin_live_proof_continuation
     assert c.previous_selection is None and not c.avoidance["local_bypass_active"]
     assert c.avoidance["local_bypass_target_x_m"] is None
-    assert c.avoidance["local_avoidance_actions"] == 2 and c.avoidance["local_bypass_actions"] == 1
+    assert c.avoidance["local_avoidance_actions"] == 2 and c.avoidance["local_bypass_actions"] == 0
     for count in range(3,13):
         assert arm(r)["ok"]; complete(bundle, step(r), count)
         assert motions(bundle[3])[-1] == ("forward",.1,.5)
@@ -449,27 +448,27 @@ def test_bypass_and_direct_forward_each_require_separate_arm_then_arrival(tmp_pa
 
 
 def test_first_bypass_reassessment_survives_later_alignment(tmp_path, monkeypatch):
-    shifted = [(.60,-.25),(0.,1.2),(0.,-.65)]
+    shifted = [(x,y-.04) if x>0 else (x,y) for x,y in LEFT_OPEN]
     bundle, _, _ = strafe_runtime(tmp_path, monkeypatch,
-        [(0,1.1)]*4+[(100,1.1)]+[(0,1.1)]*6, [OPEN_LEFT,OPEN_LEFT,OPEN_LEFT,shifted])
+        [(0,1.1)]*4+[(100,1.1)]+[(0,1.1)]*6, [LEFT_OPEN,shifted,shifted,shifted])
     r = bundle[0]; complete(bundle, initial(bundle), 0)
     assert arm(r)["ok"]; complete(bundle, step(r), 1)
-    frozen = copy.deepcopy(r._marvin_live_proof_continuation.previous_selection["first_post_action_bypass_progress"])
+    frozen = copy.deepcopy(r._marvin_live_proof_continuation.previous_selection["first_post_action_strafe_progress"]['progress'])
     assert not frozen["meaningful_progress"]
     assert arm(r)["ok"]; complete(bundle, step(r), 2)
     assert motions(bundle[3])[-1][0] == "turn"
-    assert r._marvin_live_proof_continuation.previous_selection["first_post_action_bypass_progress"] == frozen
+    assert r._marvin_live_proof_continuation.previous_selection["first_post_action_strafe_progress"]['progress'] == frozen
     assert arm(r)["ok"]; result = step(r)
     complete(bundle, result, 3)
     continuation = result["controller_result"]["history"][0]["result"]
-    assert continuation["action_type"] == "BYPASS_FORWARD"
+    assert continuation["local_detour"]["action_type"] == "STRAFE_LEFT"
     assert continuation["local_detour"]["actual_route_progress"] == frozen
     assert 'ineffective_action_types' not in continuation['local_detour']
     assert r._marvin_live_proof_continuation.avoidance["local_avoidance_actions"] == 3
 
 
 def test_six_action_avoidance_budget_is_cumulative(tmp_path, monkeypatch):
-    scenes = [OPEN_LEFT,OPEN_LEFT] + [[(.65-.011*i,-.25),(0.,1.2),(0.,-.65)] for i in range(1,8)]
+    scenes = collision_scenes(7)
     bundle, _, _ = strafe_runtime(tmp_path, monkeypatch, [(0,1.1)]*16, scenes)
     r = bundle[0]; complete(bundle, initial(bundle), 0)
     for count in range(1,6):
@@ -516,37 +515,30 @@ def test_retained_a6c4d675_replay_selects_bypass_without_injected_selection(tmp_
         b.sequence+=1;clock[0]+=1000
         state.update(producer_session=r.lidar_worker.session,acquisition_sequence=b.sequence,
             received_monotonic_seconds=time.monotonic(),age_at_receipt_seconds=0.,effective_age_seconds=0.,reason='fresh')
-        if count>=7:
-            # Fresh simulated longitudinal passage after the selected bypass.
-            for point in state['local_motion_geometry']['points']:
-                point['x_m']-=.05
-                point['distance_m']=math.hypot(point['x_m'],point['y_m'])
-                point['robot_bearing_deg']=math.degrees(math.atan2(point['y_m'],point['x_m']))
         return state
     r.world_model.get_lidar_obstacles=scan
     results=[initial(bundle)];complete(bundle,results[0],0)
     for count in range(1,7):
         assert arm(r)['ok']
         results.append(step(r));complete(bundle,results[-1],count)
-        if results[-1]['controller_result']['history'][0]['result'].get('action_type') == 'BYPASS_FORWARD':
-            break  # Recorded strafe scans cannot prove counterfactual bypass outcomes.
     selected=[result['controller_result']['history'][0]['result'].get('action_type') or
         result['controller_result']['history'][0]['state'] for result in results]
-    assert selected==['ADVANCING','STRAFE_LEFT','STRAFE_LEFT','BYPASS_FORWARD']
+    assert selected==['ADVANCING']*7  # Exact retained scans clear the real command capsule.
     assert fixture['mission_id']=='mission-a6c4d675'
     c=r._marvin_live_proof_continuation
-    assert c.avoidance['local_avoidance_actions']==3 and c.avoidance['local_bypass_actions']==1
-    bypass=results[-1]['controller_result']['history'][0]['result']
-    target=bypass['local_detour']['local_bypass']
-    assert bypass['direction']=='LEFT' and target['bypass_target_x_m']<=.15
-    assert target['protected_radius_m']==.45
-    assert motions(events)[-1]==('forward',.1,.5)
-    assert not step(r)['execution_authorized'] and len(motions(events))==4
+    assert c.avoidance['local_avoidance_actions']==c.avoidance['local_bypass_actions']==0
+    last=results[-1]['controller_result']['history'][0]
+    assert last['result']['approach_result']['forward_safety']['protected_radius_m']==.45
+    assert last['result']['approach_result']['forward_safety']['permitted']
+    assert last['observation']['arrival']['authority']=='visual_tracking'
+    assert 'target_distance_m' not in last['observation']['arrival']
+    assert motions(events)==[('forward',.1,.5)]*7
+    assert not step(r)['execution_authorized'] and len(motions(events))==7
     clear[0]=True;b.specs=iter([(0,1.38),(0,1.33)])
-    assert arm(r)['ok'];direct=step(r);complete(bundle,direct,4)
+    assert arm(r)['ok'];direct=step(r);complete(bundle,direct,7)
     assert direct['controller_result']['history'][0]['state']=='ADVANCING'
     assert r._marvin_live_proof_continuation.previous_selection is None
-    assert direct['controller_result']['local_avoidance_actions']==3
+    assert direct['controller_result']['local_avoidance_actions']==0
     assert motions(events)[-1]==('forward',.1,.5)
     print('a6c4d675 replay:',selected+['ADVANCING'])
 
