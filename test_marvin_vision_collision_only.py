@@ -178,6 +178,74 @@ def test_uncalibrated_arrival_stops_safely_at_collision_boundary(tmp_path,monkey
     assert result['stop_result']['ok'] and events[-1]=='stop'
 
 
+def test_blocked_wait_wakeup_plan_uses_same_new_scan_metadata(tmp_path,monkeypatch):
+    r,b,events,state=blocked_scene(tmp_path,monkeypatch,clear=False)
+    import runtime as module
+    planner=module.plan_phase_action
+    observed=[]
+    def checked(snapshot,collision,**kwargs):
+        observed.append((snapshot['acquisition_sequence'],collision['acquisition_sequence']))
+        assert collision['producer_session']==snapshot['producer_session']
+        assert collision['acquisition_sequence']==snapshot['acquisition_sequence']
+        assert collision['motion_safety_only'] is True
+        assert 'verified_marvin_distance_m' not in collision
+        return planner(snapshot,collision,**kwargs)
+    monkeypatch.setattr(module,'plan_phase_action',checked)
+    result=run(r)
+    assert observed and all(a==b for a,b in observed)
+    assert result['state']=='BLOCKED' and result['stop_result']['ok']
+    assert not motions(events)
+
+
+@pytest.mark.parametrize('fault',['exception','malformed'])
+def test_blocked_wait_planner_exception_stays_structured_and_stopped(tmp_path,monkeypatch,fault):
+    r,b,events,state=blocked_scene(tmp_path,monkeypatch,clear=False)
+    def broken(*args,**kwargs):
+        if fault=='exception':raise RuntimeError('offline deliberate planner failure')
+        return None
+    monkeypatch.setattr('runtime.plan_phase_action',broken)
+    result=run(r)
+    assert result['state']=='BLOCKED'
+    assert result['reason']=='find_marvin_blocked_wait_planning_failed'
+    assert result['stop_result']['ok'] and not motions(events)
+    assert result['blocked_wait_history'][-1]['planning_error_type']==('RuntimeError' if fault=='exception' else 'AttributeError')
+    assert r.running and r.get_status()['runtime_state']=='IDLE'
+    assert r.mission_manager.get_active_mission() is None and not r.mission_manager.get_queue()
+
+
+@pytest.mark.parametrize('fault',[None,'stale','regressed','session'])
+def test_clearing_scan_starts_fresh_camera_without_requiring_extra_generation(tmp_path,monkeypatch,fault):
+    from test_find_marvin_avoidance_lidar_refresh import handoff_runtime
+    # This existing fixture explicitly publishes N+1 after STOP and keeps it
+    # cached until an actual action. Its visual ARRIVED oracle is hypothetical.
+    bundle,state=handoff_runtime(tmp_path,monkeypatch,after=None)
+    r,b,robot,events,clock=bundle
+    observe=b.observe_find_marvin_v2
+    seen=[]
+    def camera():
+        if state['phase']=='planning' and not seen:
+            seen.append(b.sequence)
+            assert b.sequence==10926 and not motions(events)
+            if fault=='stale':clock[0]+=310_000_000
+            if fault=='regressed':b.sequence=10925
+            if fault=='session':r.lidar_worker.session='different-session'
+        return observe()
+    b.observe_find_marvin_v2=camera
+    result=run(r)
+    assert seen==[10926]
+    assert result['stop_result']['ok']
+    if fault is None:
+        assert result['state']=='ARRIVED'
+        assert motions(events)==[('forward',.1,.5)]
+        action=result['history'][0]
+        assert action['action_lidar_evidence'][1]==10926
+        assert result['lidar_wait_history'][-1]['snapshot']['acquisition_sequence']==10927
+        assert action['observation']['identity_source_frame_stamp_ns']>b.stamps[0]
+    else:
+        assert not result['arrived_at_marvin'] and not motions(events)
+        assert result['state'] in {'BLOCKED','REVERIFY_REQUIRED'}
+
+
 def test_stop_preempts_existing_collision_wait(tmp_path,monkeypatch):
     r,b,events,state=blocked_scene(tmp_path,monkeypatch,clear=False)
     publish=r._publish_behavior_tracking
@@ -257,4 +325,12 @@ def test_collision_appearing_at_final_jit_stops_waits_and_requires_new_frame(tmp
     assert len(set(b.stamps))==len(b.stamps)
     assert result['history'][0]['motion_executed'] is False
     assert result['history'][0]['result']['pre_transport_jit_veto']['transport_attempted'] is False
+    # The existing one-shot ledger also expires refused observations. It is
+    # not physical-dispatch evidence; replay must still be rejected.
+    old_stamp=result['history'][0]['source_frame_stamp_ns']
+    before=list(motions(events))
+    replay=(r.execute_single_marvin_alignment(direction='RIGHT',angular_speed=.25,duration=.5,
+        source_frame_stamp_ns=old_stamp) if alignment else r.execute_single_marvin_approach(
+        linear_speed=.1,duration=.5,source_frame_stamp_ns=old_stamp))
+    assert not replay['motion_executed'] and motions(events)==before
     assert not result['arrived_at_marvin']

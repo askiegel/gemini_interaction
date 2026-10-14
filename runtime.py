@@ -2243,13 +2243,23 @@ class CognitiveRuntime:
                     "interrupted_stamp_transport_consumed": True} if interruption is not None else {})})
             publish()
             phase_wake = None
-            if detour_context is not None and interruption is None and blocked_turn is None:
-                phase_plan = plan_phase_action(snapshot, association,
-                    expected_session=expected_session,
-                    allow_strafe=(bridge.get('motion_capabilities') or {}).get('linear_y') is True,
-                    committed_side=detour_context.committed_side)
-                if phase_plan.get('action_type') is not None:
-                    phase_wake = phase_plan['phase']
+            if (detour_context is not None and interruption is None
+                    and blocked_turn is None and not cleared):
+                # This is a stationary wakeup, not target/identity authority.
+                # Pair its metadata and route with the exact current scan;
+                # the old camera bearing is only a planning orientation cue.
+                collision = dict(association, producer_session=expected_session,
+                    acquisition_sequence=sequence, route=route)
+                try:
+                    phase_plan = plan_phase_action(snapshot, collision,
+                        expected_session=expected_session,
+                        allow_strafe=(bridge.get('motion_capabilities') or {}).get('linear_y') is True,
+                        committed_side=detour_context.committed_side)
+                    if phase_plan.get('action_type') is not None:
+                        phase_wake = phase_plan['phase']
+                except Exception as exc:
+                    history[-1]['planning_error_type'] = type(exc).__name__
+                    return done("find_marvin_blocked_wait_planning_failed")
             if envelope_clear or interruption is None and (cleared or phase_wake or (changed and detour_context is None)):
                 return done("find_marvin_protected_envelope_cleared" if envelope_clear else
                     "find_marvin_blocked_wait_route_cleared" if cleared else
@@ -2750,7 +2760,11 @@ class CognitiveRuntime:
             resumed_blocked_wait = blocked_resume_context
             prior = ((resumed_blocked_wait["session"], resumed_blocked_wait["lidar_sequence"])
                      if resumed_blocked_wait else self._marvin_last_action_lidar_evidence)
-            if prior is not None and not stationary_lidar_scan_pending:
+            # BLOCKED_WAIT already verified an advancing stopped scan. Start
+            # fresh camera acquisition without an arbitrary extra generation;
+            # observation, planning and JIT still recheck current sensing below.
+            if (prior is not None and not stationary_lidar_scan_pending
+                    and resumed_blocked_wait is None):
                 wait = self._wait_for_new_marvin_lidar_evidence(
                     expected_session=prior[0], previous_sequence=prior[1], execution_guard=current,
                 )
@@ -3017,6 +3031,9 @@ class CognitiveRuntime:
                 return finish("BLOCKED", "find_marvin_lidar_acquisition_sequence_invalid")
             if resumed_blocked_wait and session != resumed_blocked_wait["session"]:
                 return finish("BLOCKED", "find_marvin_lidar_producer_session_changed")
+            if (resumed_blocked_wait
+                    and sequence < resumed_blocked_wait["lidar_sequence"]):
+                return finish("BLOCKED", "find_marvin_lidar_acquisition_sequence_invalid")
             if (proof_continuation is not None
                     and sequence < proof_continuation.post_lidar_sequence):
                 return finish("BLOCKED", "marvin_live_proof_lidar_discontinuity")

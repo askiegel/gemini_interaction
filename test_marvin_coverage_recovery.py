@@ -292,7 +292,10 @@ def test_read_only_runtime_replay_reaches_normal_range_and_route_without_motion(
     result=runtime.observe_find_marvin_v2()
     assert result['read_only'] and result['executed'] is False
     assert result['identity_confirmed'] and result['target_found']
-    assert result['target_range_association_trusted'] is True
+    assert result['arrival']['authority'] == 'visual_tracking'
+    assert result['target_range_association_trusted'] is None
+    assert 'verified_marvin_distance_m' not in result['arrival']
+    assert not result['arrival']['arrived_at_marvin']
     assert result['arrival']['route']['valid'] is True
     assert runtime._marvin_alignment_consumed_source_frame_stamps==set()
     assert result['identity_selection']['identity_selection_path']=='COVERAGE_RECOVERY'

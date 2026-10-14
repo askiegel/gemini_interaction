@@ -1,0 +1,152 @@
+Stationary visual-arrival calibration procedure
+==============================================
+Prepared offline for mayday/vision-led-find-marvin, based on 2450a0b.
+This is a procedure for a separately authorized stationary capture session.
+No capture, robot access, deployment, restart, mission or physical movement
+was performed while preparing it. Runtime remains a persistent command-capable
+service; the observation endpoint below is a nonexecuting diagnostic only.
+
+What the actual pipeline supplies
+--------------------------------
+MarvinLocalTracker.preview_diagnostics supplies matched/active, normalized
+match quality and threshold, bbox x1/y1/x2/y2, center_x/center_y, signed
+horizontal_error, image width/height, reason and source_frame_stamp_ns.
+BehaviorManager also supplies source/local receipt stamps, identity source,
+identity_source_frame_stamp_ns, strict tracker episode continuity, episode_id,
+post-action diagnostics and confirmation-frame diagnostics. At a semantic
+acquisition, it exposes yolo_seed_bbox or coverage_candidate_bbox,
+tracker_seed_bbox, seed source, padding fractions and identity-selection data.
+An old seed/proposal is NOT a fresh measurement of the current target.
+
+The native JPEG source stamp comes from X-Mayday-Source-Stamp-Sec and
+X-Mayday-Source-Stamp-Nanosec, not from the time a logging client receives it.
+JpegFrame has data, dimensions, local wall/monotonic receipt and native stamp;
+it does not expose a camera producer/session ID. Record known restarts as
+separate capture epochs; do not invent a producer ID or merge discontinuities.
+Preserve full integer source stamps as decimal strings when exporting JSON/CSV.
+
+Critical observability constraint
+---------------------------------
+The actual tracker uses cv2.matchTemplate/TM_CCOEFF_NORMED at FIXED SCALE.
+Each matched bbox is (match_x, match_y, match_x+template_width,
+match_y+template_height). Width, height, area, and their image fractions are
+constant within an unchanged-resolution tracker episode. Quality is template
+similarity, NOT distance confidence. Scaling can cause tracking loss; a new
+semantic acquisition can then create a differently sized template.
+
+Therefore a sweep of independently seeded boxes at different distances is
+INSUFFICIENT to validate a box-height arrival threshold for continuous pursuit.
+The same episode must be tested across positions as well, and every loss and
+reacquisition must be recorded. Center/edge position can change, but it is not
+an absolute range measurement. Available horizontal camera calibration does
+not establish camera height, pitch, a vertical ground-plane model or a physical
+Marvin footpoint; do not invent those quantities.
+
+Historical padded proposals (including generic chair/motorcycle or coverage
+regions) can include background. Padding is currently 20% of proposal width
+on each horizontal side and 5% of height on each vertical side, clipped to the
+image. These are existing tracker parameters, not new arrival values. Strict
+semantic/tracker association IoU remains 0.70 and match quality remains 0.80.
+The prior height/area thresholds have no demonstrated physical calibration for
+these current boxes. They must stay diagnostic; ARRIVED remains unverified.
+
+Before capture (future session only)
+-----------------------------------
+1. Obtain operator readiness for STATIONARY calibration. Mayday must be stable;
+   the operator must observe it and have existing STOP/power-disconnect access.
+   Record Runtime IDLE, no active/queued mission, Bridge READY/streaming off,
+   zero commanded velocities and controller inactive/gait-zero with ownership
+   available. Keep Runtime, Bridge, camera and dashboard operating normally.
+2. Keep the existing camera mount, image resolution and software identities.
+   Record standing/camera pose, mount settings, lens/resolution and lighting.
+   No CHAMP/firmware/Bridge/dashboard changes or navigation commands are needed.
+3. Define the independently measured base-reference-to-nearest-Marvin-surface
+   separation and its measurement uncertainty. Use the actual base_link ground
+   reference represented by existing robot geometry. Retain the existing
+   intended stand-off requirement (the former policy's conservative 0.50 m),
+   rather than inventing a replacement arrival distance. The old 0.10 m scan
+   association uncertainty is NOT a visual uncertainty estimate.
+4. Assign arrival-positive and farther-negative classes from those physical
+   measurements and the intended stand-off, never from image size or scan
+   association. Positive labels require a demonstrated conservative margin
+   outside the unchanged 0.45 m envelope, considering the existing maximum
+   0.05 m forward step, stopping latency and measured uncertainty. If that
+   margin cannot yet be justified, keep the labels provisional and do not fit
+   or enable an arrival rule. No extra hardware requirement is introduced.
+
+Capture through the existing perception path
+--------------------------------------------
+5. Use GET http://127.0.0.1:8770/find-marvin/v2/observe for normal strict
+   YOLO/Gemini/OpenCV observations. It does not submit a mission or execute the
+   reported decision. Do not call intent, proof-step, alignment, approach,
+   lateral, autonomous-run or navigation endpoints. Ignore all old LiDAR target
+   range/arrival fields in the currently deployed Runtime response.
+6. Passively archive frames from the EXISTING configured VISION_CAMERA_URL and
+   its native source-stamp headers while observations are taken. Use existing
+   camera recording/logging if available. Match the actual tracker action-frame
+   stamp to the saved JPEG's native stamp; retain the seed/support frames too.
+   A later screenshot or JPEG with a different stamp is not that tracker frame.
+   If an exact frame was missed, mark the sample incomplete and repeat only the
+   stationary observation capture. Do not fabricate timestamps or infer frame
+   identity from matching image contents. Identical pixels with different real
+   advancing camera stamps can be legitimate stationary frames; repeated cached
+   stamps cannot be independent observations.
+7. For each physically measured placement, hold both Mayday and Marvin stable
+   throughout the observation window. Record multiple fresh observations at
+   arrival-positive placements and several independently measured farther-
+   negative placements. Include supported Marvin poses/orientations, lateral
+   offsets within the accepted bearing, representative partial occlusion,
+   clipping and background variation. Unsupported identity/pose is rejected,
+   not automatically added to the policy's supported operating region.
+8. Collect TWO distinct evidence types: independent semantic-seed episodes at
+   each placement, and continuity across placements in the SAME tracker episode.
+   In the latter, only the operator repositions Marvin between settled windows;
+   Mayday stays stationary. Keep the same tracker if identity remains accepted;
+   record fixed box dimensions and any tracking loss/reacquisition. For a new
+   seed trial, ordinary visual loss/reacquisition (e.g. Marvin outside view) can
+   clear the episode through the existing pipeline. Do not restart services,
+   weaken identity, or add a new tracker to obtain nicer boxes.
+9. Record a physically measured separation for EVERY settled observation window,
+   paired with its native frames and actual tracker output. Mark observations
+   during target placement/occlusion transitions as unsettled; do not label them
+   positive. Moving a target with a stationary camera does not reproduce all
+   robot-approach background optical flow; retain this limitation for the later
+   existing supervised mission validation.
+
+Record contents (ordinary files, not a new validation framework)
+----------------------------------------------------------------
+For each sample retain: sample/window ID; measured separation and uncertainty;
+reference points and measurer; pose/orientation/camera settings; positive/
+farther-negative/provisional label and physical justification; JPEG file/hash
+and native stamp; observation JSON and local receipt; identity selection/source
+and identity-frame stamp; episode ID and initialized/continued flags; actual
+bbox, seed/proposal box and its source frame; centers/edges/dimensions; quality,
+match threshold; source stamps of support frames; clipping/occlusion/background;
+tracking losses/reacquisitions; before/after zero-motion and mission-IDLE status.
+Archive old scan target-association fields only as excluded diagnostics.
+
+Offline evaluation and release decision
+---------------------------------------
+10. First test OBSERVABILITY: can any already available, current visual
+    measurement distinguish the independently measured arrival examples from
+    farther negatives across SAME-EPISODE continuity, new seeds and supported
+    poses? Width/height/area alone cannot vary within one fixed-scale episode.
+    A classifier based only on seeded-size differences cannot establish pursuit
+    arrival. Do not interpret a generic padded proposal as a physical footpoint.
+11. Only if evidence supports a separable current cue, derive a conservative
+    visual policy and its uncertainty/margin from a training portion. Reserve
+    independent placements/episodes/poses for held-out evaluation, including
+    farther negatives, ambiguous boundaries, lost identity, stale/duplicate
+    frames and producer discontinuities. Preserve strict identity, freshness,
+    arrival-distance intent and the full independent collision envelope.
+    No threshold or calibration coefficients are proposed by this procedure.
+12. If cues overlap, stay constant, or require unvalidated tracking resets,
+    report that limitation. The smallest possible follow-up is an arrival-only
+    policy using an already available fresh and strictly identified visual
+    measurement, IF independently validated. Do not change normal tracking or
+    invent physical range from the current template size to force completion.
+13. Until a validated policy and applicable regression migration are complete,
+    deployment/automatic Find Marvin arrival remains NO-GO. Reaching the
+    collision boundary still produces STOP/BLOCKED_WAIT and an accurate safe
+    incomplete result. Later live testing uses the existing supervised mission
+    workflow and separate fresh authorization; this document authorizes none.

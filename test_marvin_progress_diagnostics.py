@@ -192,14 +192,19 @@ def test_missing_or_broken_diagnostics_do_not_change_motion_or_standoff(tmp_path
     result = run(runtime)
     assert result["state"] == "ARRIVED"
     assert motions(events) == [("forward", .10, .5)] * 2
-    assert result["final_observation"]["arrival"]["target_standoff_m"] == .5
-    assert result["final_observation"]["arrival"]["hard_safety_envelope_m"] == .45
+    assert result["final_observation"]["arrival"]["authority"] == "visual_tracking"
+    assert "target_distance_m" not in result["final_observation"]["arrival"]
+    assert result["final_observation"]["arrival"]["visual_arrival"]["calibration_verified"]
+    assert all(row["result"]["approach_result"]["forward_safety"]["protected_radius_m"] == .45
+               for row in result["history"])
     if not break_diagnostics:
         summary = result["progress_diagnostics"]["action_summary"]
         assert [row["nominal_displacement_m"] for row in summary] == pytest.approx([.05, .05])
         assert all(row["odom_translation_m"] is None for row in summary)
-        assert summary[0]["target_range_delta_m"] == pytest.approx(-.05)
-        assert summary[0]["jit_selected_return"]["x_m"] == pytest.approx(.75)
+        assert summary[0]["target_range_delta_m"] is None
+        assert summary[0]["jit_selected_return"] is None
+        assert summary[0]["jit_lidar_sequence"] == result["history"][0]["action_lidar_evidence"][1]
+        assert result["lidar_wait_history"][0]["snapshot"]["acquisition_sequence"] > summary[0]["jit_lidar_sequence"]
 
 
 @pytest.mark.parametrize("terminal", ["ARRIVED", "BLOCKED", "REVERIFY_REQUIRED", "STOPPED"])

@@ -215,16 +215,30 @@ def test_new_valid_scan_with_unsafe_geometry_still_hits_forward_safety_veto(tmp_
         stopped = original_stop()
         if behavior.unsafe_forward:
             behavior.sequence += 1  # Persistent hazard in a new producer scan after STOP.
+            producer["published"].append(behavior.sequence)
         return stopped
     bundle[2].stop = stop_and_publish_unsafe_scan
+    sleep = time.sleep
+    def persistent_hazard_tick(seconds):
+        waiting_for_action_scan = producer["waiting"]
+        sleep(seconds)
+        if behavior.unsafe_forward and not waiting_for_action_scan:
+            # Keep supplying independent scans during the stationary collision
+            # wait, so this tests intrusion rather than a frozen producer.
+            behavior.sequence += 1
+            producer["published"].append(behavior.sequence)
+    monkeypatch.setattr("runtime.time.sleep", persistent_hazard_tick)
     result = run(runtime)
     assert result["lidar_wait_history"][0]["ok"] is True
     assert result["state"] == "BLOCKED"
     assert len(motions(events)) == 1
-    assert result["history"][-1]["result"]["motion_executed"] is False
-    assert result["history"][-1]["result"]["approach_result"]["forward_safety"]["permitted"] is False
-    refresh, = result["avoidance_lidar_refresh_history"]
-    assert refresh["avoidance_planning_lidar_sequence"] > refresh["blocked_forward_lidar_sequence"]
+    # Collision-only admission catches the persistent intrusion before another
+    # dispatch attempt. Do not require a rejected second command to exist.
+    assert result["reason"] == "marvin_visual_arrival_unverified_at_lidar_safety_boundary"
+    probe = result["final_observation"]["arrival"]["association_forward_probe"]
+    assert not probe["permitted"] and probe["protected_radius_m"] == .45
+    assert result["blocked_wait_history"] and not result["avoidance_lidar_refresh_history"]
+    assert result["stop_result"]["ok"] and events[-1] == "stop"
 
 
 def test_each_forward_step_consumes_distinct_generations_and_arrives_at_standoff(tmp_path, monkeypatch):
@@ -237,8 +251,11 @@ def test_each_forward_step_consumes_distinct_generations_and_arrives_at_standoff
     assert [row["snapshot"]["acquisition_sequence"] for row in result["lidar_wait_history"]] == [43, 44, 45]
     assert producer["published"] == [43, 44, 45]
     assert len(motions(events)) == 3
-    assert all(row["observation"]["arrival"]["hard_safety_envelope_m"] == .45 for row in result["history"])
-    assert all(row["observation"]["arrival"]["target_standoff_m"] == .50 for row in result["history"])
+    assert all(row["result"]["approach_result"]["forward_safety"]["protected_radius_m"] == .45
+               for row in result["history"])
+    assert all(row["observation"]["arrival"]["authority"] == "visual_tracking"
+               and "target_distance_m" not in row["observation"]["arrival"] for row in result["history"])
+    assert result["final_observation"]["arrival"]["visual_arrival"]["calibration_verified"]
 
 
 def test_tracker_recovery_alignment_wait_and_forward_continue_in_same_mission(tmp_path, monkeypatch):

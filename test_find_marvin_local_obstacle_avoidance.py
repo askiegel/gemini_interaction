@@ -268,8 +268,10 @@ def test_avoidance_diagnostics_exposed_without_becoming_motion_authority(tmp_pat
     result = run(runtime)
     assert seen[0]["local_avoidance_active"] and seen[0]["direct_path_blocked"]
     assert seen[0]["left_clearance_m"] > seen[0]["right_clearance_m"]
-    assert result["final_observation"]["arrival"]["hard_safety_envelope_m"] == .45
-    assert result["final_observation"]["arrival"]["target_standoff_m"] == .50
+    assert result["history"][0]["result"]["lateral_step"]["lateral_safety"]["protected_radius_m"] == .45
+    assert result["final_observation"]["arrival"]["authority"] == "visual_tracking"
+    assert "target_standoff_m" not in result["final_observation"]["arrival"]
+    assert result["final_observation"]["arrival"]["visual_arrival"]["calibration_verified"]
     assert MAXIMUM_EFFECTIVE_AGE_SECONDS == .30
     assert runtime.MARVIN_MOTION_OBSERVATION_MAX_AGE_SECONDS == 1.0
 

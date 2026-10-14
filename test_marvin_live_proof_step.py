@@ -18,7 +18,6 @@ from test_find_marvin_local_obstacle_avoidance import avoidance_runtime
 from test_marvin_lateral_avoidance import strafe_runtime, LEFT_OPEN
 from test_marvin_local_bypass import OPEN_LEFT
 from marvin_local_obstacle_avoidance import select_marvin_escape_action
-from marvin_target_range_association import MarvinTargetRangeAssociation
 
 
 @pytest.fixture(autouse=True)
@@ -210,22 +209,20 @@ def test_retained_a6c4d675_established_side_through_proof_loop(tmp_path,monkeypa
     assert row["cycle"]==6 and fixture["mission_id"]=="mission-a6c4d675"
     bundle,_,_=strafe_runtime(tmp_path,monkeypatch,[(40,1.38),(40,1.38),(40,1.38)],[None])
     r,b,robot,events,clock=bundle
-    # Replay the retained continuation's historical identity/range and prior
-    # selection, not five extra physical actions. The public API exposes none
-    # of these inputs. Current geometry, selector and every JIT guard remain real.
+    # Retain component coverage for the historic metric corridor, then replay
+    # the same points through the collision-only public proof path. Its clear
+    # bounded capsule must use direct visual pursuit without a range anchor.
     historical=copy.deepcopy(row["previous_selection"])
-    def selector(scan,association,**kw):
-        assert scan["producer_session"]==r.lidar_worker.session
-        return plan_phase_action(scan,association,**dict(kw,committed_side=historical['direction'],entering_detour=False))
-    monkeypatch.setattr("runtime.plan_phase_action",selector)
-    def association_state():
-        state=MarvinTargetRangeAssociation()
-        state.anchor={"measured_distance_m":row["association"]["verified_marvin_distance_m"],
-            "target_distance_m":row["association"]["verified_marvin_conservative_distance_m"],
-            "producer_session":r.lidar_worker.session,"translation_bound_m":0.}
-        state.initial_anchor=dict(state.anchor)
-        return state
-    monkeypatch.setattr("runtime.MarvinTargetRangeAssociation",association_state)
+    component_scan=copy.deepcopy(row['lidar'])
+    component_scan.update(received_monotonic_seconds=time.monotonic(),
+        age_at_receipt_seconds=0.,effective_age_seconds=0.)
+    component=plan_phase_action(component_scan,row['association'],
+        expected_session=row['lidar']['producer_session'],allow_strafe=True,
+        committed_side=historical['direction'],entering_detour=False)
+    assert component['action_type']=='BYPASS_FORWARD'
+    assert component['local_bypass']['bypass_corridor_occupancy']==0
+    monkeypatch.setattr("runtime.plan_phase_action",lambda *a,**kw:
+        pytest.fail('Clear bounded collision geometry cannot force historic target-depth bypass'))
     def scan(**kw):
         b.sequence+=1
         clock[0]+=1000
@@ -237,10 +234,13 @@ def test_retained_a6c4d675_established_side_through_proof_loop(tmp_path,monkeypa
     r.world_model.get_lidar_obstacles=scan
     result=proof(r)
     assert_complete(r,result,events,("forward",.1,.5))
-    selection=result["controller_result"]["history"][0]["result"]["local_detour"]
-    assert selection["action_type"]=="BYPASS_FORWARD" and selection["direction"]=="LEFT"
-    assert selection["route"]["route_to_marvin_obstructed"]
-    assert selection["local_bypass"]["bypass_corridor_occupancy"]==0
+    controller=result['controller_result']
+    assert controller['local_avoidance_actions']==0
+    action=controller['history'][0]
+    assert action['observation']['arrival']['authority']=='visual_tracking'
+    assert not action['observation']['arrival']['route_to_marvin_obstructed']
+    assert 'verified_marvin_distance_m' not in action['observation']['arrival']
+    assert action['result']['approach_result']['forward_safety']['protected_radius_m']==.45
 
 
 @pytest.mark.parametrize("kind",["forward","strafe","turn"])

@@ -105,7 +105,9 @@ def install_projected_target(runtime, behavior, specs):
 
 
 def test_live_foreground_after_alignment_selects_native_strafe_then_reobserves(tmp_path, monkeypatch):
-    specs = [(120, .7), (0, .444623), (0, .7), (0, .65), (0, .6), (0, .55), (0, .5)]
+    # Camera scene stays farther-negative while independent foreground points
+    # block the real command capsule. LiDAR range is no arrival oracle.
+    specs = [(120, .7), (0, .7), (0, .7), (0, .65), (0, .6), (0, .55), (0, .5)]
     bundle, _, _ = strafe_runtime(tmp_path,monkeypatch,specs,[None])
     runtime, behavior, robot, events, _ = bundle
     install_projected_target(runtime, behavior, specs)
@@ -115,9 +117,8 @@ def test_live_foreground_after_alignment_selects_native_strafe_then_reobserves(t
     assert [m[:2] for m in motions(events)[:2]] == [("turn", "RIGHT"), ("strafe", -.08)]
     assert [row["state"] for row in result["history"][:2]] == ["ALIGNING", "AVOIDING"]
     obstructed = result["history"][1]["observation"]["arrival"]
-    assert obstructed["candidate_target_return_distance_m"] == pytest.approx(.544623)
-    assert obstructed["verified_marvin_distance_m"] > .8
-    assert not obstructed["target_range_association_trusted"] and not obstructed["arrived_at_marvin"]
+    assert obstructed["authority"] == "visual_tracking"
+    assert "verified_marvin_distance_m" not in obstructed and not obstructed["arrived_at_marvin"]
     assert obstructed["direct_path_blocked"]
     assert result["local_avoidance_actions"] == 1
     choice = result["local_avoidance_history"][0]["selection"]
@@ -131,12 +132,12 @@ def test_live_foreground_after_alignment_selects_native_strafe_then_reobserves(t
     assert 0 < strafe[2] <= 1.
     index = events.index(strafe)
     assert events[index+1] == "stop"
-    assert result["history"][2]["observation"]["arrival"]["target_range_association_trusted"]
+    assert result["history"][2]["observation"]["arrival"]["authority"] == "visual_tracking"
     assert robot.status()["motion"]["streaming"] is False
 
 
 def test_initial_foreground_with_no_range_history_enters_only_guarded_avoidance(tmp_path, monkeypatch):
-    bundle, _, _ = strafe_runtime(tmp_path,monkeypatch,[(0,.444623)],[None])
+    bundle, _, _ = strafe_runtime(tmp_path,monkeypatch,[(0,.7)],[None])
     runtime, behavior, robot, events, _ = bundle
     obstacle_geometry(runtime, behavior, events, [(1.2, .48)])
     robot.on_motion = lambda: runtime.submit_intent({"intent": "STOP", "speech": "Stop."})
@@ -176,18 +177,21 @@ def test_behavior_jit_rejects_new_foreground_range_before_transport():
     gate = MarvinTargetRangeAssociation()
     evaluate(gate, .8, 1)
     scan = lidar_at(.544623, sequence=2)
+    # Target association is retired from dispatch. A new independent return
+    # inside the collision envelope must still veto before transport.
+    scan["local_motion_geometry"]["points"].append({"x_m": .4, "y_m": 0.})
     robot = Mock()
     world = Mock()
     world.get_lidar_obstacles.return_value = scan
     behavior = BehaviorManager(robot_client=robot, world_model=world)
     def validate(tracker, lidar):
-        candidate = evaluate_marvin_lidar_standoff(tracker, lidar, CAMERA, expected_session=SESSION)
-        return gate.evaluate(candidate, lidar, tracker, expected_session=SESSION)
+        pytest.fail("Retired target ranging must not be called by collision-only dispatch")
     result = behavior.execute_single_marvin_approach_step(expected_lidar_session=SESSION,
         linear_speed=.10, duration=.50, target_tracker=_v2_preview(0)["opencv_tracker"],
         camera_model=CAMERA, target_range_validator=validate)
     assert result["motion_executed"] is False
-    assert not result["target_standoff"]["target_range_association_trusted"]
+    assert not result["forward_safety"]["permitted"]
+    assert result["forward_safety"]["protected_radius_m"] == .45
     robot.move_forward.assert_not_called()
 
 
@@ -231,7 +235,10 @@ def test_saved_live_scan_d0da3104_cannot_declare_arrived(tmp_path, monkeypatch):
     assert not result['candidate_surface_bounded_by_bbox']
     assert gate.anchor is None
 
-    runtime, behavior, _, events, _ = make_runtime(tmp_path, monkeypatch, [(0, .444623)])
+    # Disable the hypothetical calibrated-camera oracle for this historical
+    # replay: a LiDAR surface cannot establish visual arrival.
+    runtime, behavior, _, events, _ = make_runtime(tmp_path, monkeypatch,
+        [(0, .7), "lost"], calibrated_arrival=False)
     # Use the exact scan/bbox with simulated current receipts/session and
     # independently advancing producer generations across the stopped handoff.
     sequence = [scan['acquisition_sequence']]
@@ -251,14 +258,14 @@ def test_saved_live_scan_d0da3104_cannot_declare_arrived(tmp_path, monkeypatch):
     behavior.observe_find_marvin_v2 = observe
     monkeypatch.setattr('runtime.select_marvin_detour', lambda *a, **k: pytest.fail('A clear motion probe cannot trigger detour'))
     mission = run(runtime)
-    assert mission['state'] == 'BLOCKED' and not mission['arrived_at_marvin']
-    assert mission['reason'] == 'find_marvin_blocked_wait_exhausted'
-    assert mission['blocked_wait_reason'] == 'find_marvin_no_safe_local_detour'
-    assert mission['final_observation']['route_to_marvin_obstructed']
-    assert len(mission['local_avoidance_history'][0]['selection']['options']) == 4
-    refresh, = mission['avoidance_lidar_refresh_history']
-    assert refresh['avoidance_planning_lidar_sequence'] > refresh['blocked_forward_lidar_sequence']
-    assert motions(events) == []
+    assert mission['state'] == 'REVERIFY_REQUIRED' and not mission['arrived_at_marvin']
+    assert mission['local_avoidance_actions'] == 0
+    assert not mission['avoidance_lidar_refresh_history']
+    assert motions(events) == [('forward', .1, .5)]
+    assert mission['history'][0]['result']['approach_result']['forward_safety']['protected_radius_m'] == .45
+    assert mission['history'][0]['result']['stop_result']['ok']
+    assert mission['lidar_wait_history'][0]['snapshot']['acquisition_sequence'] > mission['history'][0]['action_lidar_evidence'][1]
+    assert events[-1] == 'stop'
 
 
 @pytest.mark.parametrize('quality', [.786365, .79, float('nan')])
@@ -302,15 +309,16 @@ def test_close_trusted_range_still_requires_alignment_before_arrival(tmp_path, m
     assert result['state'] == 'ARRIVED', result
     assert motions(events) == [('turn', 'RIGHT', .25, .50)]
     first = result['history'][0]['observation']
-    assert first['arrival']['target_range_association_trusted']
+    assert first['arrival']['authority'] == 'visual_tracking'
     assert not first['arrival']['arrived_at_marvin']
     assert first['controller']['decision'] == 'TURN_RIGHT'
-    assert result['final_observation']['arrival']['target_range_association_trusted']
+    assert result['final_observation']['arrival']['visual_arrival']['calibration_verified']
+    assert 'target_distance_m' not in result['final_observation']['arrival']
 
 
 def test_semantic_reacquisition_cannot_reset_foreground_range_history(tmp_path, monkeypatch):
     from test_find_marvin_reacquisition import recovery_runtime
-    specs = [(0, .7), (0, .7), (0, .444623), (0, .7),
+    specs = [(0, .7), (0, .7), (0, .7), (0, .7),
              (0, .65), (0, .6), (0, .55), (0, .5)]
     bundle, _, _ = strafe_runtime(tmp_path,monkeypatch,specs,[None],factory=recovery_runtime)
     runtime, behavior, _, events, _ = bundle
@@ -321,9 +329,9 @@ def test_semantic_reacquisition_cannot_reset_foreground_range_history(tmp_path, 
     assert result['reacquisition_history'][0]['succeeded']
     regained = result['reacquisition_history'][0]['observation']
     assert regained['identity_source'] == 'gemini_marvin_candidate_selection'
-    assert not regained['target_range_association_trusted']
-    assert regained['verified_marvin_distance_m'] == pytest.approx(.8)
-    assert regained['candidate_target_return_distance_m'] == pytest.approx(.544623)
+    assert regained['arrival']['authority'] == 'visual_tracking'
+    assert regained['target_range_association_trusted'] is None
+    assert 'verified_marvin_distance_m' not in regained['arrival']
     assert regained['controller']['path_state'] == 'DIRECT_PATH_BLOCKED'
     assert not regained['arrival']['arrived_at_marvin']
     assert motions(events)[1][:2] == ('strafe', -.08)
