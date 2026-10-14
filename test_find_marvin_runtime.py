@@ -832,9 +832,11 @@ def test_two_turns_use_new_post_action_tracker_frames_without_runtime_restart(mo
     runtime._marvin_alignment_geometry_history = []
     runtime._marvin_alignment_consumed_source_frame_stamps = set()
     runtime.behavior_manager = manager
+    from test_marvin_lidar_standoff import lidar_at
     runtime.world_model = SimpleNamespace(get_lidar_obstacles=lambda **_kwargs: {
+        **lidar_at(2.),
         "available": True, "valid": True, "reason": "fresh",
-        "producer_session": "test-session", "local_motion_geometry": {"valid": True},
+        "producer_session": "test-session",
     })
     runtime.lidar_worker = SimpleNamespace(session="test-session", running=True)
 
@@ -878,17 +880,14 @@ def test_v2_centered_observations_authorize_only_current_guarded_forward():
 
 def test_v2_arrival_never_authorizes_another_pursuit_action(monkeypatch):
     runtime, behavior = _v2_runtime(_v2_preview(0.0, stamp=210))
-    from marvin_target_range_association import MarvinTargetRangeAssociation
-    runtime._marvin_target_range_association = MarvinTargetRangeAssociation()
-    runtime._marvin_target_range_association.anchor = {
-        "measured_distance_m": .5, "target_distance_m": .5, "translation_bound_m": 0.,
-        "producer_session": "v2-lidar", "acquisition_sequence": 0, "source_frame_stamp_ns": 0}
     runtime.world_model.get_lidar_obstacles.return_value["local_motion_geometry"]["points"] = [
         {"x_m": 0.5, "y_m": y / 1000.0} for y in range(-3, 4)
     ]
     monkeypatch.setattr(
-        runtime_module, "evaluate_marvin_visual_arrival",
-        lambda *_args, **_kwargs: {"ok": True, "arrived_at_marvin": True},
+        runtime_module, "evaluate_marvin_pursuit_arrival",
+        # Hypothetical independent visual certificate, never live calibration.
+        lambda *_args, **_kwargs: {"ok": True, "calibration_verified": True,
+                                  "arrived_at_marvin": True},
     )
     result = runtime.observe_find_marvin_v2()
     assert result["controller"]["decision"] == "ARRIVED"

@@ -116,6 +116,7 @@ class Perception(BehaviorManager):
             stamp = self.stamps[-1]
         self.stamps.append(stamp)
         spec = next(self.specs)
+        self.last_visual_spec = spec
         self.events.append("observe")
         now = datetime.now(timezone.utc).isoformat()
         if self.on_observe:
@@ -151,6 +152,9 @@ class Perception(BehaviorManager):
                    "received_monotonic_seconds": receipt,
                    "bbox": box, "image_width": 640, "image_height": 480,
                    "opencv_tracker": opencv}
+        # Synthetic camera-scene arrival label, used only by the offline
+        # calibrated-policy oracle below. It is never a live calibration.
+        preview["simulated_visual_arrival"] = self.distance <= .50
         if pending:
             preview.update(post_action_tracker_continuity=True,
                            post_action_source_frame_stamp_ns=episode["post_action_source_frame_stamp_ns"],
@@ -183,7 +187,15 @@ class Perception(BehaviorManager):
                                           "acquisition_sequence": lidar["acquisition_sequence"]}}
 
 
-def make_runtime(tmp_path, monkeypatch, specs):
+def make_runtime(tmp_path, monkeypatch, specs, *, calibrated_arrival=True):
+    if calibrated_arrival:
+        # Keep lifecycle/ownership/STOP regressions independent of the missing
+        # physical arrival calibration. Only fake visual observations are used;
+        # changing LiDAR returns cannot change this camera-only oracle.
+        monkeypatch.setattr("runtime.evaluate_marvin_pursuit_arrival", lambda preview, **_kwargs: {
+            "ok":True, "calibration_verified":True,
+            "arrived_at_marvin":preview.get("simulated_visual_arrival") is True,
+            "reason":"synthetic_calibrated_visual_arrival"})
     events, clock = [], [time.time_ns()]
     monkeypatch.setattr("runtime.time.time_ns", lambda: clock[0])
     origin = clock[0]
@@ -250,15 +262,13 @@ def test_search_is_exactly_one_bounded_full_sweep_with_observation_after_every_t
 
 
 @pytest.mark.parametrize("distance", [.5, .49, .45, .4])
-def test_standoff_or_hard_envelope_never_advances(tmp_path, monkeypatch, distance):
+def test_calibrated_camera_arrival_stops_without_using_lidar_range(tmp_path, monkeypatch, distance):
     runtime, _, _, events, _ = make_runtime(tmp_path, monkeypatch, [(0, distance)])
     result = run(runtime)
-    assert result["state"] == ("BLOCKED" if distance == .4 else "ARRIVED")
+    assert result["state"] == "ARRIVED"
     assert motions(events) == []
-    if distance == .4:
-        assert events[-1] == "stop"
-        assert not result["arrived_at_marvin"]
-        assert result["history"][0]["observation"]["arrival"]["target_range_association_trusted"] is False
+    assert events[-1] == "stop"
+    assert result["final_observation"]["arrival"]["authority"] == "visual_tracking"
 
 
 @pytest.mark.parametrize("specs,flag", [
@@ -364,14 +374,11 @@ def test_missing_calibration_blocks_approach_without_any_forward(tmp_path, monke
 
 
 @pytest.mark.parametrize("distance,max_duration", [(.53, .30), (.51, .10)])
-def test_near_standoff_shortens_single_forward_and_reobserves(
+def test_forward_bound_does_not_infer_distance_from_lidar_target_returns(
         tmp_path, monkeypatch, distance, max_duration):
     runtime, _, _, events, _ = make_runtime(tmp_path, monkeypatch, [(0, distance), (0, .5)])
     assert run(runtime)["state"] == "ARRIVED"
-    assert motions(events) == [("forward", .10, pytest.approx(max_duration))]
-    duration = motions(events)[0][2]
-    assert duration <= max_duration + 1e-12
-    assert distance - .10 * duration >= .50
+    assert motions(events) == [("forward", .10, .50)]
 
 
 def test_another_behavior_owning_motion_blocks_find_marvin(tmp_path, monkeypatch):
@@ -530,6 +537,7 @@ class DelayedSemanticPerception(Perception):
             self.distance = self.current_spec[1]
         self.events.append("observe")
         observation = BehaviorManager.observe_find_marvin_v2(self)
+        observation["preview_result"]["simulated_visual_arrival"] = self.distance <= .50
         self.observations.append(observation["preview_result"])
         return observation
 
@@ -544,11 +552,11 @@ def delayed_runtime(tmp_path, monkeypatch, specs):
     # source stamps deliberately have an independent offset in skew tests.
     import runtime as runtime_module
     pursuit = runtime_module.evaluate_marvin_pursuit_state
-    visual_arrival = runtime_module.evaluate_marvin_visual_arrival
+    visual_arrival = runtime_module.evaluate_marvin_pursuit_arrival
     monkeypatch.setattr(runtime_module, "evaluate_marvin_pursuit_state",
         lambda *args, **kwargs: pursuit(*args, **kwargs,
             now=datetime.fromtimestamp(clock[0] / 1e9, timezone.utc)))
-    monkeypatch.setattr(runtime_module, "evaluate_marvin_visual_arrival",
+    monkeypatch.setattr(runtime_module, "evaluate_marvin_pursuit_arrival",
         lambda *args, **kwargs: visual_arrival(*args, **kwargs,
             now=datetime.fromtimestamp(clock[0] / 1e9, timezone.utc)))
     return runtime, behavior, robot, events, clock

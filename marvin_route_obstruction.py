@@ -37,9 +37,14 @@ def evaluate_marvin_route(lidar, association, *, expected_session, translation_y
     bearing = association.get('target_bearing_degrees')
     if type(bearing) not in (int, float) or not math.isfinite(bearing):
         return dict(base, reason='marvin_route_bearing_unavailable')
-    distance = association.get('verified_marvin_distance_m')
+    safety_only = association.get('motion_safety_only') is True
+    # The vision-led mission checks its bounded 0.1 m/s x 0.5 s command.
+    # This is a local collision horizon, never an estimate of target distance.
+    distance = None if safety_only else association.get('verified_marvin_distance_m')
     trusted_history = type(distance) in (int, float) and math.isfinite(distance)
     horizon = min(LOCAL_ROUTE_LOOKAHEAD_M, max(0.0, distance - TARGET_STANDOFF_M)) if trusted_history else LOCAL_ROUTE_LOOKAHEAD_M
+    if safety_only:
+        horizon = .10 * .50
     # Transform the SAME target and all returns into the candidate robot frame.
     # Move the full target, then rebuild the standoff endpoint: translating an
     # already-truncated endpoint exaggerates the change in target bearing.
@@ -53,11 +58,19 @@ def evaluate_marvin_route(lidar, association, *, expected_session, translation_y
         return c * x + s * y, -s * x + c * y
 
     world_tx, world_ty = target_depth * math.cos(theta) - translation_x, target_depth * math.sin(theta) - translation_y
+    if safety_only:
+        # Collision geometry follows the actual body-forward command, not a
+        # target surface or image region. A turn rotates that command axis.
+        world_tx, world_ty = math.cos(heading_change), math.sin(heading_change)
     target_length = math.hypot(world_tx, world_ty)
     tx, ty = c * world_tx + s * world_ty, -s * world_tx + c * world_ty
     if trusted_history:
         horizon = min(LOCAL_ROUTE_LOOKAHEAD_M, max(0.0, target_length - TARGET_STANDOFF_M))
     predicted_bearing = math.degrees(math.atan2(ty, tx))
+    if safety_only:
+        # Pure rotation changes bearing; target parallax from translation is
+        # unknown without depth and must be reacquired from the next camera.
+        predicted_bearing = bearing - math.degrees(heading_change)
     target_x, target_y = ((horizon * world_tx / target_length, horizon * world_ty / target_length)
                           if target_length else (0.0, 0.0))
     length = math.hypot(target_x, target_y)
@@ -67,7 +80,9 @@ def evaluate_marvin_route(lidar, association, *, expected_session, translation_y
         if not all(type(v) in (int, float) and math.isfinite(v) for v in (x, y)):
             return dict(base, reason='invalid_lidar_geometry')
         translated_x, translated_y = x - translation_x, y - translation_y
-        if length == 0 or translated_x * target_x + translated_y * target_y <= 0:
+        # Command collision geometry includes the starting endcap, including
+        # rear/side intrusion. Historic target-corridor diagnostics excluded it.
+        if length == 0 or (not safety_only and translated_x * target_x + translated_y * target_y <= 0):
             continue
         # Distances are invariant under the common rotation. Compute before
         # rotation so an exact boundary return cannot flicker by roundoff and
@@ -85,7 +100,8 @@ def evaluate_marvin_route(lidar, association, *, expected_session, translation_y
         blocking_obstacle_longitudinal_extent_m=max((p[2] for p in blockers), default=None),
         blocking_obstacle_minimum_side_separation_m=min((abs(p[3]) for p in blockers), default=None),
         route_lookahead_m=horizon,
-        route_depth_source='verified_range_history' if trusted_history else 'bounded_local_lookahead',
+        route_depth_source='bounded_command_envelope' if safety_only else
+            'verified_range_history' if trusted_history else 'bounded_local_lookahead',
         marvin_bearing_deg=predicted_bearing,
         heading_error_after_deg=predicted_bearing,
         blocking_obstacle_centerline_clearance_m=nearest[0] if nearest else None,

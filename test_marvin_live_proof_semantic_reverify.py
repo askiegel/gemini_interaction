@@ -71,7 +71,7 @@ def test_two_misses_preserve_checkpoint_then_fresh_action_resumes_progress(tmp_p
     second=miss(bundle); floor2=second['reverify_camera_floor_source_frame_stamp_ns']
     assert floor2>floor1 and b.proof_source_floors[-1]==floor1
     assert asdict(r._marvin_live_proof_continuation)==saved
-    assert r._marvin_target_range_association.__dict__==c.range_association
+    assert c.range_association=={}  # Retired field cannot retain target range authority.
     assert c.avoidance['local_avoidance_actions']==1 and c.avoidance['local_bypass_actions']==0
     assert c.avoidance['last_detour_direction']=='LEFT' and c.previous_selection['action_type']=='STRAFE_LEFT'
     assert c.avoidance_history[0]['actual_route_progress']['meaningful_progress']

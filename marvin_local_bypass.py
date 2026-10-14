@@ -51,10 +51,11 @@ def plan_local_bypass(lidar, association, route, *, expected_session, side):
             or not route.get('route_to_marvin_obstructed') or side not in {'LEFT', 'RIGHT'}):
         return result
     distance = association.get('verified_marvin_distance_m')
-    if type(distance) not in (int, float) or not math.isfinite(distance) or distance <= TARGET_STANDOFF_M:
+    safety_only = association.get('motion_safety_only') is True
+    if not safety_only and (type(distance) not in (int, float) or not math.isfinite(distance) or distance <= TARGET_STANDOFF_M):
         return dict(result, local_bypass_reason='bypass_target_depth_unverified')
     conservative = association.get('verified_marvin_conservative_distance_m')
-    if (type(conservative) not in (int, float) or not math.isfinite(conservative)
+    if not safety_only and (type(conservative) not in (int, float) or not math.isfinite(conservative)
             or conservative - TARGET_STANDOFF_M < BYPASS_FORWARD_SPEED_MPS * BYPASS_FORWARD_SECONDS - 1e-12):
         return dict(result, local_bypass_reason='bypass_verified_standoff_margin_insufficient')
     x, y = route.get('blocking_obstacle_x_m'), route.get('blocking_obstacle_y_m')
@@ -66,7 +67,7 @@ def plan_local_bypass(lidar, association, route, *, expected_session, side):
     if any((sectors.get(name) or {}).get('valid_sample_count', 0)
            < MINIMUM_VALID_SAMPLES_PER_REQUIRED_SECTOR for name, _, _ in OCTANT_SECTORS):
         return dict(result, local_bypass_reason='insufficient_lidar_samples')
-    horizon = min(LOCAL_BYPASS_HORIZON_M, distance - TARGET_STANDOFF_M)
+    horizon = LOCAL_BYPASS_HORIZON_M if safety_only else min(LOCAL_BYPASS_HORIZON_M, distance - TARGET_STANDOFF_M)
     if horizon < BYPASS_FORWARD_SPEED_MPS * BYPASS_FORWARD_SECONDS:
         return dict(result, local_bypass_reason='bypass_horizon_too_short')
     points = geometry.get('points')

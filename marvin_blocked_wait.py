@@ -15,6 +15,7 @@ BLOCKED_WAIT_REASONS = frozenset({
 })
 PRE_TRANSPORT_JIT_WAIT_REASONS = frozenset({
     "marvin_local_detour_jit_veto", "marvin_local_bypass_jit_veto",
+    "marvin_approach_collision_jit_veto", "marvin_alignment_collision_jit_veto",
 })
 INITIAL_RECHECK_SECONDS = 0.5
 MAX_RECHECK_SECONDS = 2.0

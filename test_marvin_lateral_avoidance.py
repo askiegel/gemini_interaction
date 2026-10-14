@@ -2,8 +2,10 @@
 import math
 import socket
 import time
+import itertools
 import pytest
 from robot_bridge.client import RobotBridgeClient
+from behavior_manager import BehaviorManager
 from robot_bridge.forward_interlock import ForwardMotionInterlock
 from local_motion_safety_envelope import evaluate_local_motion_safety
 from marvin_local_obstacle_avoidance import select_marvin_escape_action
@@ -81,24 +83,41 @@ def strafe_runtime(tmp_path, monkeypatch, specs, scenes, factory=make_runtime, i
             if flags['publish'] and flags['sleeps'] == 2:
                 flags['outage'] = False;behavior.freeze_lidar = False;behavior.sequence += 1
     monkeypatch.setattr('runtime.time.sleep',sleep)
+    publish = runtime._publish_behavior_tracking
+    def tracking(value):
+        if value.get('state') == 'BLOCKED_WAIT':flags['wait_frame_pending']=True
+        return publish(value)
+    runtime._publish_behavior_tracking=tracking
+    reacquire = behavior.reacquire_find_marvin_v2
+    def stopped_camera(*, minimum_source_frame_stamp_ns):
+        # The new initial STOP/WAIT must obtain a distinct stationary frame,
+        # before consuming the fixture's first post-movement camera scene.
+        if flags.pop('wait_frame_pending',False) and isinstance(getattr(behavior,'last_visual_spec',None),tuple):
+            behavior.specs = itertools.chain([behavior.last_visual_spec],behavior.specs)
+            if getattr(reacquire,'__func__',None) is BehaviorManager.reacquire_find_marvin_v2:
+                behavior._clear_marvin_v2_tracker_episode()
+                return behavior.observe_find_marvin_v2()
+        return reacquire(minimum_source_frame_stamp_ns=minimum_source_frame_stamp_ns)
+    behavior.reacquire_find_marvin_v2 = stopped_camera
+    behavior._offline_stopped_camera_fixture = True
     return bundle, flags, client
 
 
-LEFT_OPEN = [(.55,0.),(.551,.003),(.551,-.003),(0.,1.2),(0.,-.48)]
-RIGHT_OPEN = [(.55,0.),(.551,.003),(.551,-.003),(0.,.48),(0.,-1.2)]
+LEFT_OPEN = [(.498,0.),(.499,.003),(.499,-.003),(0.,1.2),(0.,-.48)]
+RIGHT_OPEN = [(.498,0.),(.499,.003),(.499,-.003),(0.,.48),(0.,-1.2)]
 
 
 @pytest.mark.parametrize('scene,y',[(LEFT_OPEN,.08),(RIGHT_OPEN,-.08)])
-def test_live_055_foreground_routes_to_one_guarded_strafe_then_forward(tmp_path,monkeypatch,scene,y):
+def test_swept_collision_routes_to_one_guarded_strafe_then_forward(tmp_path,monkeypatch,scene,y):
     bundle,_,_ = strafe_runtime(tmp_path,monkeypatch,[(0,.60),(0,.60),(0,.5)],[scene,None])
     runtime,behavior,robot,events,_ = bundle
     result = run(runtime)
     assert result['state']=='ARRIVED' and result['arrived_at_marvin']
     first = result['history'][0]
     o = first['observation'];a = o['arrival']
-    assert a['candidate_target_return_distance_m']==pytest.approx(.55)
-    assert not a['target_range_association_trusted'] and not a['arrived_at_marvin']
-    assert not a['direct_path_blocked'] and a['route_to_marvin_obstructed']
+    assert 'candidate_target_return_distance_m' not in a
+    assert 'target_range_association_trusted' not in a and not a['arrived_at_marvin']
+    assert a['direct_path_blocked'] and a['route_to_marvin_obstructed']
     assert motions(events)==[('strafe',y,1.),('forward',.1,.5)]
     assert result['local_avoidance_actions']==1
     selection = result['local_avoidance_history'][0]['selection']
@@ -106,7 +125,8 @@ def test_live_055_foreground_routes_to_one_guarded_strafe_then_forward(tmp_path,
     assert selection['action_type']==('STRAFE_LEFT' if y>0 else 'STRAFE_RIGHT')
     assert first['result']['source_stamp_consumed'] and first['result']['full_step_completed']
     assert first['source_frame_stamp_ns']<result['history'][1]['source_frame_stamp_ns']
-    assert result['lidar_wait_history'][0]['snapshot']['acquisition_sequence']>first['action_lidar_evidence'][1]
+    assert any(wait['snapshot']['acquisition_sequence']>first['action_lidar_evidence'][1]
+               for wait in result['lidar_wait_history'])
     assert events[events.index(('strafe',y,1.))+1]=='stop'
     assert robot.status()['motion']=={'linear_x':0.,'linear_y':0.,'angular_z':0.,'streaming':False}
     diagnostic = result['progress_diagnostics']['actions'][0]
@@ -210,10 +230,13 @@ def test_duplicate_camera_cannot_authorize_second_strafe(tmp_path,monkeypatch):
 
 
 def test_tracker_loss_after_strafe_uses_gemini(tmp_path,monkeypatch):
-    bundle,_,_=strafe_runtime(tmp_path,monkeypatch,[(0,.60)]*3+[(0,.5)],[LEFT_OPEN,None],factory=recovery_runtime)
+    # Two initial support frames and two fresh stopped-recovery support
+    # frames precede movement; fail the first post-strafe update.
+    factory=lambda *a: recovery_runtime(*a,failures=(5,))
+    bundle,_,_=strafe_runtime(tmp_path,monkeypatch,[(0,.60)]*4+[(0,.5)],[LEFT_OPEN,None],factory=factory)
     result=run(bundle[0]);assert result['state']=='ARRIVED'
     assert result['reacquisition_history'][0]['succeeded']
-    assert bundle[1].semantic_calls==2 and result['local_avoidance_actions']==1
+    assert bundle[1].semantic_calls==3 and result['local_avoidance_actions']==1
 
 
 def test_clear_path_and_trusted_standoff_do_not_select_avoidance(tmp_path,monkeypatch):
@@ -222,7 +245,8 @@ def test_clear_path_and_trusted_standoff_do_not_select_avoidance(tmp_path,monkey
     monkeypatch.setattr('runtime.select_marvin_escape_action',forbidden)
     result=run(bundle[0]);assert result['state']=='ARRIVED'
     assert motions(bundle[3])==[('forward',.10,.50)]
-    assert result['final_observation']['arrival']['target_standoff_m']==.5
+    assert 'target_distance_m' not in result['final_observation']['arrival']
+    assert result['final_observation']['arrival']['visual_arrival']['calibration_verified']
 
 
 def test_safe_strafe_then_blocked_lateral_path_uses_bounded_safe_turn(tmp_path,monkeypatch):

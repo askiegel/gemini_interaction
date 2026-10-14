@@ -4425,27 +4425,12 @@ class BehaviorManager:
             return dict(base, reason="lidar_producer_session_unavailable")
         try:
             lidar = self.world_model.get_lidar_obstacles(expected_session=expected_lidar_session)
-            if target_tracker is not None:
-                from marvin_lidar_standoff import TARGET_STANDOFF_M, evaluate_marvin_lidar_standoff
-                standoff = evaluate_marvin_lidar_standoff(
-                    target_tracker, lidar, camera_model, expected_session=expected_lidar_session,
-                )
-                if target_range_validator is not None:
-                    standoff = target_range_validator(target_tracker, lidar)
-                base["target_standoff"] = standoff
-                base["action_lidar_evidence"] = {
-                    "producer_session": lidar.get("producer_session"),
-                    "acquisition_sequence": lidar.get("acquisition_sequence"),
-                    "source": lidar.get("source"),
-                    "received_monotonic_seconds": lidar.get("received_monotonic_seconds"),
-                    "effective_age_seconds": lidar.get("effective_age_seconds"),
-                }
-                if (standoff.get("ok") is not True or standoff.get("candidate_at_standoff") is True
-                        or standoff.get("arrived_at_marvin") is True
-                        or (target_range_validator is not None and
-                            standoff.get("target_range_association_trusted") is not True)):
-                    return dict(base, reason="marvin_single_approach_target_standoff_vetoed")
-                duration = min(duration, (standoff["target_distance_m"] - TARGET_STANDOFF_M) / linear_speed)
+            base["action_lidar_evidence"] = {key:lidar.get(key) for key in (
+                "producer_session", "acquisition_sequence", "source",
+                "received_monotonic_seconds", "effective_age_seconds")}
+            # Vision identity belongs to Runtime's current observation lease.
+            # Compatibility tracker/calibration parameters are not distance
+            # evidence and never change this bounded collision-only primitive.
             base["duration"] = duration
             safety = evaluate_local_motion_safety(
                 lidar, expected_session=expected_lidar_session,

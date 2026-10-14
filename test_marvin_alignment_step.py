@@ -28,10 +28,11 @@ def camera_clock(monkeypatch):
 
 class World:
     def __init__(self, lidar=None):
+        from test_marvin_lidar_standoff import lidar_at
         self.lidar = lidar if lidar is not None else {
+            **lidar_at(2.),
             "available": True, "valid": True, "reason": "fresh",
             "producer_session": SESSION,
-            "local_motion_geometry": {"valid": True},
         }
         self.calls = []
         self.update_entity = Mock(side_effect=AssertionError("World Model identity write forbidden"))
@@ -104,6 +105,19 @@ def strict_observation(stamp, decision):
         "controller_state": "VISUAL_READY_TO_ALIGN",
         "controller_decision": decision,
     }
+
+
+@pytest.mark.parametrize("field,value", [("quality", float("nan")),
+    ("quality", float("inf")), ("threshold", float("nan")),
+    ("threshold", float("-inf")), ("quality", .79), ("threshold", True)])
+def test_alignment_rejects_invalid_or_weak_tracker_quality(field, value):
+    value_runtime, robot = runtime()
+    value_runtime._marvin_alignment_observation["opencv_tracker"][field] = value
+    result = value_runtime.execute_single_marvin_alignment(
+        direction="RIGHT", angular_speed=.25, duration=.50, source_frame_stamp_ns=STAMP)
+    assert result["reason"] == "marvin_alignment_observation_not_authorized"
+    assert not result["motion_executed"] and value_runtime.behavior_manager.calls == []
+    assert not robot.motion.call_count and not value_runtime._marvin_alignment_consumed_source_frame_stamps
 
 
 def test_valid_right_uses_active_runtime_lidar_one_turn_and_explicit_stop():

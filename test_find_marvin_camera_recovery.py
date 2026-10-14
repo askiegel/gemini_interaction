@@ -191,8 +191,8 @@ def test_initial_semantic_tracker_still_requires_two_independent_support_frames(
     assert len(behavior.updated_frames) == behavior.MARVIN_LOCAL_TRACKER_MIN_SUPPORT == 2
     assert runtime.MARVIN_MOTION_OBSERVATION_MAX_AGE_SECONDS == 1.0
     assert runtime.MARVIN_NEW_LIDAR_TIMEOUT_SECONDS == .60
-    assert result["final_observation"]["arrival"]["hard_safety_envelope_m"] == .45
-    assert result["final_observation"]["arrival"]["target_standoff_m"] == .50
+    assert result["final_observation"]["arrival"]["association_forward_probe"]["protected_radius_m"] == .45
+    assert "target_standoff_m" not in result["final_observation"]["arrival"]
 
 
 def test_only_a_frame_independently_meeting_exact_threshold_can_release_refresh(tmp_path, monkeypatch):

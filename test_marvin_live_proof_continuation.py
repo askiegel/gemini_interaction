@@ -29,7 +29,8 @@ def offline_only(monkeypatch):
 
 def initial(bundle):
     behavior = bundle[1]
-    if "reacquire_find_marvin_v2" not in behavior.__dict__:
+    if ("reacquire_find_marvin_v2" not in behavior.__dict__
+            or getattr(behavior,"_offline_stopped_camera_fixture",False)):
         # The offline Perception fixture supplies controlled frames rather
         # than a camera client. Model the existing stopped recovery contract.
         def reacquire(*, minimum_source_frame_stamp_ns):

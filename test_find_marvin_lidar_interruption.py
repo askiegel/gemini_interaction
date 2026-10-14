@@ -97,7 +97,7 @@ def interrupted_runtime(tmp_path, monkeypatch, specs, *, interruptions=(True, Fa
 
 
 @pytest.mark.parametrize("fresh_distance,replanned_duration", [
-    (.60, .50), (.53, .30), (.51, .10),
+    (.60, .50), (.53, .50), (.51, .50),
 ])
 def test_interruption_stops_consumes_stamp_waits_reobserves_replans_and_arrives(
         tmp_path, monkeypatch, fresh_distance, replanned_duration):
@@ -144,7 +144,9 @@ def test_interruption_stops_consumes_stamp_waits_reobserves_replans_and_arrives(
     # The post-interruption command is recomputed from new range evidence,
     # including its standoff bound, rather than resuming the old 0.50 s step.
     assert motions(events)[1][2] <= replanned_duration + 1e-12
-    assert fresh_distance - .10 * motions(events)[1][2] >= .50
+    # Range no longer tapers a replacement command; the unchanged swept
+    # collision evaluator admitted this complete bounded step.
+    assert second["result"]["approach_result"]["forward_safety"]["permitted"]
 
 
 def test_fresh_lidar_never_returns_blocks_with_no_additional_motion(tmp_path, monkeypatch):
@@ -272,7 +274,8 @@ def test_recovery_keeps_all_existing_limits(tmp_path, monkeypatch):
     assert bundle[0].MARVIN_MOTION_OBSERVATION_MAX_AGE_SECONDS == 1.
     assert bundle[0].MARVIN_NEW_LIDAR_TIMEOUT_SECONDS == .60
     arrival = result["final_observation"]["arrival"]
-    assert arrival["target_standoff_m"] == .50 and arrival["hard_safety_envelope_m"] == .45
+    assert "target_standoff_m" not in arrival
+    assert arrival["association_forward_probe"]["protected_radius_m"] == .45
     assert result["final_observation"]["opencv_tracker"]["threshold"] == .80
 
 

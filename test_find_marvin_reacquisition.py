@@ -82,8 +82,8 @@ def test_tracker_loss_reacquires_new_episode_and_resumes_until_arrival(tmp_path,
     assert recovery["source_floor"] < fresh["identity_source_frame_stamp_ns"] < fresh["source_frame_stamp_ns"]
     assert fresh["received_monotonic_seconds"] > behavior.identity_receipts[1] + 2.5
     assert fresh["opencv_tracker"]["source_frame_stamp_ns"] == resumed["source_frame_stamp_ns"]
-    assert fresh["arrival"]["hard_safety_envelope_m"] == .45
-    assert fresh["arrival"]["target_standoff_m"] == .50
+    assert fresh["arrival"]["association_forward_probe"]["protected_radius_m"] == .45
+    assert "target_distance_m" not in fresh["arrival"]
     assert runtime.MARVIN_MOTION_OBSERVATION_MAX_AGE_SECONDS == 1.0
     diagnostic = recovery["loss_observation"]["post_action_tracker_diagnostics"]
     assert diagnostic["fresh_frames_attempted"] == diagnostic["frames_attempted"] == 3

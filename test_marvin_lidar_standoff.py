@@ -35,13 +35,6 @@ def runtime_at(distance):
     runtime, behavior = _v2_runtime(fresh_preview())
     runtime.running = True
     runtime.world_model.get_lidar_obstacles.return_value = lidar_at(distance)
-    from marvin_target_range_association import MarvinTargetRangeAssociation
-    runtime._marvin_target_range_association = MarvinTargetRangeAssociation()
-    if distance <= .50:
-        runtime._marvin_target_range_association.anchor = {
-            "measured_distance_m": distance, "target_distance_m": distance,
-            "producer_session": SESSION, "acquisition_sequence": 0,
-            "source_frame_stamp_ns": 0, "translation_bound_m": 0.0}
     behavior.robot = Mock()
     behavior.robot.stop.return_value = {"ok": True}
     behavior.mark_strict_v2_action_dispatched = Mock(return_value=True)
@@ -59,16 +52,17 @@ def fresh_preview(stamp=101):
 
 
 @pytest.mark.parametrize("distance,decision", [
-    (1.0, "FORWARD"), (0.75, "FORWARD"), (0.501, "FORWARD"),
-    (0.50, "ARRIVED"), (0.49, "ARRIVED"), (0.45, "ARRIVED"), (0.44, "ARRIVED"),
+    (1.0, "FORWARD"), (.75, "FORWARD"), (.501, "FORWARD"),
+    (.50, "AVOID"), (.49, "AVOID"), (.45, "AVOID"), (.44, "AVOID"),
 ])
-def test_centered_metric_arrival_controls_forward_authorization(distance, decision):
+def test_lidar_surface_can_only_change_collision_decision(distance, decision):
     runtime, _ = runtime_at(distance)
     result = runtime.observe_find_marvin_v2()
     assert result["controller"]["decision"] == decision
-    assert result["arrival"]["target_distance_m"] == pytest.approx(distance)
-    assert result["arrival"]["hard_safety_condition"] is (distance <= 0.45)
-    assert (runtime._marvin_alignment_observation is not None) is (decision == "FORWARD")
+    assert result["arrival"]["arrived_at_marvin"] is False
+    assert result["arrival"]["authority"] == "visual_tracking"
+    assert "target_distance_m" not in result["arrival"]
+    assert (runtime._marvin_alignment_observation is not None) is True
 
 
 def test_large_visual_arrival_is_diagnostic_only_at_one_meter():
@@ -77,7 +71,8 @@ def test_large_visual_arrival_is_diagnostic_only_at_one_meter():
         box.update(x1=100, y1=10, x2=540, y2=470)
     behavior.preview["opencv_tracker"]["center_y"] = 240
     result = runtime.observe_find_marvin_v2()
-    assert result["visual_arrival"]["arrived_at_marvin"] is True
+    assert result["visual_arrival"]["legacy_visual_threshold_met"] is True
+    assert not result["visual_arrival"]["calibration_verified"]
     assert result["arrival"]["arrived_at_marvin"] is False
     assert result["controller"]["decision"] == "FORWARD"
 
@@ -150,8 +145,8 @@ def test_projection_accounts_for_camera_translation_and_requires_forward_target(
     assert sideways["reason"] == "target_lidar_not_in_forward_sector"
 
 
-@pytest.mark.parametrize("distance,max_duration", [(0.53, 0.30), (0.51, 0.10)])
-def test_short_forward_bound_preserves_standoff_and_requires_new_camera_and_lidar(
+@pytest.mark.parametrize("distance,max_duration", [(0.53, 0.50), (0.51, 0.50)])
+def test_bounded_forward_requires_new_camera_and_lidar(
         monkeypatch, distance, max_duration):
     monkeypatch.setattr("runtime.time.time_ns", lambda: 1000)
     runtime, behavior = runtime_at(distance)
@@ -163,7 +158,6 @@ def test_short_forward_bound_preserves_standoff_and_requires_new_camera_and_lida
     duration = behavior.execute_single_marvin_approach_step.call_args.kwargs["duration"]
     assert duration == pytest.approx(max_duration)
     assert duration <= max_duration + 1e-12
-    assert distance - 0.10 * duration >= 0.50
     duplicate = runtime.execute_single_marvin_approach(linear_speed=0.10, duration=0.5,
                                                       source_frame_stamp_ns=stamp)
     assert duplicate["reason"] == "marvin_approach_observation_already_consumed"
@@ -176,8 +170,8 @@ def test_short_forward_bound_preserves_standoff_and_requires_new_camera_and_lida
     assert behavior.execute_single_marvin_approach_step.call_count == 1
 
 
-@pytest.mark.parametrize("distance", [0.50, 0.49, 0.45])
-def test_jit_distance_at_standoff_vetoes_cached_forward_authorization(monkeypatch, distance):
+@pytest.mark.parametrize("distance", [0.49, 0.45, 0.40])
+def test_jit_collision_vetoes_cached_forward_authorization(monkeypatch, distance):
     monkeypatch.setattr("runtime.time.time_ns", lambda: 1000)
     runtime, behavior = runtime_at(1.0)
     observation = runtime.observe_find_marvin_v2()
@@ -187,7 +181,8 @@ def test_jit_distance_at_standoff_vetoes_cached_forward_authorization(monkeypatc
         source_frame_stamp_ns=observation["opencv_tracker"]["source_frame_stamp_ns"],
     )
     assert result["motion_executed"] is False
-    assert result["target_standoff"]["hard_safety_condition"] is (distance <= 0.45)
+    assert result["reason"] == "marvin_approach_collision_jit_veto"
+    assert not result["source_stamp_consumed"]
     behavior.execute_single_marvin_approach_step.assert_not_called()
 
 
@@ -202,9 +197,9 @@ def test_turn_also_requires_new_lidar_evidence_before_later_approach(monkeypatch
     )
     assert result["motion_executed"] is True
     tracker = _v2_preview(0.0, stamp=102)["opencv_tracker"]
-    assert runtime._marvin_v2_lidar_arrival(tracker)["reason"] == "target_lidar_newer_observation_required"
+    assert runtime._marvin_v2_motion_clearance(tracker)["reason"] == "find_marvin_new_lidar_evidence_required"
     runtime.world_model.lidar["acquisition_sequence"] = 2
-    assert runtime._marvin_v2_lidar_arrival(tracker)["ok"] is True
+    assert runtime._marvin_v2_motion_clearance(tracker)["ok"] is True
 
 
 def test_other_sector_obstacle_still_vetoes_actual_guarded_forward():
@@ -229,8 +224,8 @@ def test_other_sector_obstacle_still_vetoes_actual_guarded_forward():
     robot.move_forward.assert_not_called()
 
 
-@pytest.mark.parametrize("distance,max_duration", [(0.53, 0.30), (0.51, 0.10)])
-def test_behavior_rechecks_standoff_and_shrinks_bound_on_same_jit_safety_snapshot(
+@pytest.mark.parametrize("distance,max_duration", [(0.53, 0.50), (0.51, 0.50)])
+def test_behavior_uses_full_bound_on_same_collision_safety_snapshot(
         monkeypatch, distance, max_duration):
     import behavior_manager as module
     world = Mock()
@@ -250,12 +245,11 @@ def test_behavior_rechecks_standoff_and_shrinks_bound_on_same_jit_safety_snapsho
     duration = robot.move_forward.call_args.kwargs["seconds"]
     assert calls[0]["duration"] == duration == pytest.approx(max_duration)
     assert duration <= max_duration + 1e-12
-    assert distance - 0.10 * duration >= 0.50
     assert world.get_lidar_obstacles.call_count == 1
 
 
-@pytest.mark.parametrize("distance", [0.50, 0.49, 0.45])
-def test_behavior_at_standoff_sends_no_forward_command(distance):
+@pytest.mark.parametrize("distance", [0.49, 0.45, 0.40])
+def test_behavior_collision_sends_no_forward_command(distance):
     world, robot = Mock(), Mock()
     world.get_lidar_obstacles.return_value = lidar_at(distance)
     manager = BehaviorManager(robot_client=robot, world_model=world)

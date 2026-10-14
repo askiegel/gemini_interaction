@@ -146,8 +146,7 @@ class RuntimeBehavior:
     def execute_single_marvin_approach_step(self, **kwargs):
         assert kwargs["dispatch_guard"]() is True
         kwargs.pop("dispatch_guard")
-        validator = kwargs.pop("target_range_validator")
-        assert validator(kwargs["target_tracker"], self.current_lidar)["target_range_association_trusted"]
+        assert kwargs["target_tracker"] is None  # Collision gate has no Marvin association.
         self.calls.append(kwargs)
         return {"ok": True, "motion_executed": True, "forward_safety": safety()}
 
@@ -179,9 +178,9 @@ def active_runtime(*, lidar_value=None):
         },
         "controller_state": "VISUAL_READY_TO_APPROACH",
         "controller_decision": "FORWARD",
-        "target_standoff": {"ok": True, "authority": "target_bearing_lidar",
-                            "arrived_at_marvin": False, "target_distance_m": 1.0,
-                            "target_range_association_trusted": True},
+        "target_standoff": {"ok": True, "authority": "visual_tracking",
+                            "arrived_at_marvin": False, "direct_path_blocked":False,
+                            "route_to_marvin_obstructed":False},
     }
     robot = Robot()
     runtime.behavior_manager = RuntimeBehavior(robot)
@@ -189,6 +188,19 @@ def active_runtime(*, lidar_value=None):
     runtime.lidar_worker = SimpleNamespace(session=SESSION, running=True)
     runtime.behavior_manager.current_lidar = runtime.world_model.value
     return runtime, robot
+
+
+@pytest.mark.parametrize("field,value", [("quality", float("nan")),
+    ("quality", float("inf")), ("threshold", float("nan")),
+    ("threshold", float("-inf")), ("quality", .79), ("threshold", True)])
+def test_runtime_rejects_invalid_or_weak_tracker_quality(field, value):
+    runtime, robot = active_runtime()
+    runtime._marvin_alignment_observation["opencv_tracker"][field] = value
+    result = runtime.execute_single_marvin_approach(
+        linear_speed=.10, duration=.50, source_frame_stamp_ns=STAMP)
+    assert result["reason"] == "marvin_approach_observation_not_authorized"
+    assert not result["motion_executed"] and runtime.behavior_manager.calls == []
+    assert not robot.forward_calls and not runtime._marvin_alignment_consumed_source_frame_stamps
 
 
 def test_runtime_uses_current_observation_once_then_explicitly_stops():
@@ -201,8 +213,7 @@ def test_runtime_uses_current_observation_once_then_explicitly_stops():
     assert runtime.world_model.calls == [SESSION]
     assert runtime.behavior_manager.calls == [{
         "expected_lidar_session": SESSION, "linear_speed": 0.10, "duration": 0.5,
-        "target_tracker": runtime._marvin_alignment_observation["opencv_tracker"],
-        "camera_model": runtime.marvin_camera_model,
+        "target_tracker": None,
     }]
     assert runtime.behavior_manager.post_action_marks == [(STAMP, "forward")]
     second = runtime.execute_single_marvin_approach(

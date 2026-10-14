@@ -11,6 +11,24 @@ MARVIN_ARRIVAL_HEIGHT_FRACTION = 0.545833
 MARVIN_ARRIVAL_AREA_FRACTION = 0.160339
 
 
+def evaluate_marvin_pursuit_arrival(preview_result, **kwargs):
+    """Conservative arrival for the current strict-tracker pursuit pipeline.
+
+    The historical height threshold is retained as a diagnostic only. Its
+    physical stand-off and current proposal/tracker-box definition have not
+    been independently validated: retained runs contradict using this threshold
+    for the current tracker boxes (see the offline evidence report). These are
+    not physical calibration measurements. Do not promote the threshold into
+    arrival authority.
+    No replacement measurement or calibration value is manufactured here.
+    """
+    result = evaluate_marvin_visual_arrival(preview_result, **kwargs)
+    return dict(result, arrived_at_marvin=False,
+                legacy_visual_threshold_met=result["arrived_at_marvin"],
+                calibration_verified=False,
+                reason="marvin_visual_arrival_calibration_unverified")
+
+
 def evaluate_marvin_arrival(
     target_lock_result,
     target_lock_snapshot,

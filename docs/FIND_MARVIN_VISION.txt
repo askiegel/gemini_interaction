@@ -1,0 +1,125 @@
+Find Marvin: vision pursuit, independent collision sensing (offline feature)
+Base Cognitive: 17ad5970e3c443ae801713def8d566e8788ef939
+Branch: mayday/vision-led-find-marvin
+
+This branch is NOT deployed. It is NOT ready for deployment or a successful
+visual-arrival demonstration. No service restart, robot access or physical
+movement is authorized by this offline change.
+
+Normal Runtime Find Marvin changes
+---------------------------------
+YOLO/Gemini confirmation, strict OpenCV identity continuity, source stamps,
+camera freshness and bearing alignment remain the perception authority.
+The normal Runtime observation, pursuit and final-JIT paths no longer call
+MarvinTargetRangeAssociation or evaluate_marvin_lidar_standoff. There is no
+five/sparse target-return admission, target-distance continuity, sparse
+corroboration episode or range-derived arrival/taper in that path.
+
+The existing forward bound remains 0.10 m/s for at most 0.50 seconds. Local
+route geometry for that command checks its actual 0.05 m swept segment with
+the unchanged 0.45 m radius. Camera bearing is an orientation cue; lateral
+translation cannot synthesize target parallax without a fresh camera view.
+Existing local bypass uses its existing bounded obstacle-only horizon, not
+Marvin depth. All local primitives still use ordinary planning, final-JIT,
+exclusive ownership and active Bridge/interlock safety.
+
+A sensed obstruction enters existing STOP/BLOCKED_WAIT. Recovery requires
+fresh producer-bound sensing and a new strict camera observation before
+ordinary replanning and dispatch. Certified pre-transport forward/turn
+collision refusals also enter that existing path. Rotation checks the existing
+Bridge-equivalent full 0.45 m footprint before dispatch and while waiting;
+this does not change Bridge code, thresholds or monitoring.
+
+No Runtime stop/disable/restart or startup-hold installer is part of this
+feature or its tests. Collision/freshness/coverage constants, Bridge client,
+interlock/STOP fence, OpenCV tracker and obstacle-phase ownership machinery
+remain unchanged. Historic pure range helpers and old diagnostic endpoints
+remain separate from the normal Runtime mission route. The old proof
+checkpoint range_association field is empty and confers no authority.
+
+Arrival calibration finding
+---------------------------
+The historical policy constants (height fraction 0.545833; area fraction
+0.160339) exist, but independent physical measurements validating them for
+the CURRENT padded proposal/tracker boxes were not found. Sept 26 commit
+976ad6e introduced the threshold. Oct 6 calibration-confirmation.json records
+camera/scan extrinsics and intrinsics, not a visual arrival calibration.
+
+Retained observations at 640 x 480:
+- mission-53532164, Oct 6 successful scan-derived arrival:
+  tracker box (273,108)-(421,223), height fraction 0.2395833333;
+  historical visual arrival FALSE; associated surface 0.5903512723 m,
+  conservative scan-derived value 0.4903512723 m.
+- mission-77decd45 after movement:
+  tracker box (224,17)-(446,290), height fraction 0.56875;
+  historical visual arrival TRUE; candidate associated surface 1.4023669558 m.
+
+Those scan associations are evidence of conflicting box behavior, NOT
+independently measured physical distances or a replacement visual calibration.
+Generic chair/motorcycle proposals can encompass Marvin plus background;
+padding, orientation and occlusion alter box fractions. The old threshold
+must not establish arrival or absolute range in the current normal mission.
+
+The new evaluate_marvin_pursuit_arrival reports calibration_verified=false
+and arrived_at_marvin=false. Legacy threshold results remain diagnostics.
+A valid camera bearing and tracker can authorize pursuit when collision
+clearance passes; uncertain target distance no longer ends the mission. In
+the retained mission-930a9281 four-return scan (sequence 7104), camera bearing
+is -3.7232552286 degrees and the bounded forward swept region is clear. The
+return count does not affect that decision and cannot establish arrival.
+At an uncleared collision boundary, the bounded stationary wait terminates
+safely with marvin_visual_arrival_unverified_at_lidar_safety_boundary.
+No replacement arrival values have been invented. This branch cannot claim
+successful arrival until a separately justified visual policy is implemented.
+
+Minimum measurements to finish visual arrival
+---------------------------------------------
+Using the existing camera/pipeline and stationary Mayday, record independent
+physical robot-reference-to-Marvin surface separations at the intended
+arrival stand-off and at farther negative positions. Pair each measurement
+with native camera frame/stamp, unpadded proposal and actual padded strict
+tracker box; record camera mount/standing pose and resolution. Cover the
+supported Marvin orientations and representative partial occlusions.
+
+First establish that the observed box consistently bounds Marvin, rather
+than changing background objects. Quantify the separation/pose variability
+and an uncertainty margin. Validate a conservative visual decision on
+independent held-out observations on BOTH sides of the arrival boundary,
+including clipped/incorrect/identity-lost boxes. Account for the existing
+maximum forward step, stop latency and unchanged 0.45 m collision envelope.
+Do not infer absolute distance from an uncalibrated image size and do not
+reuse scan-association uncertainty as visual calibration. No new hardware,
+mapping, tracking or navigation subsystem is required.
+
+Offline validation scope and limits
+-----------------------------------
+All tests use fake robot clients, controlled camera/scan evidence, temporary
+World Models and existing pytest suites. New mission tests forbid socket
+connections, subprocesses, old association calls and old standoff calls.
+Positive ARRIVED tests use an explicitly hypothetical visual oracle; they
+validate control flow only and provide NO live arrival calibration.
+
+Required component and updated normal-mission regression selection:
+893 selected component/updated normal-mission regressions passed in the
+final broad run, including 33 new vision/collision tests. The affected final
+collision/pursuit/alignment/avoidance selection independently passed 232
+cases. The full broad run passed 2286 cases and FAILED 240 cases. Complete
+commands and failure node IDs are retained in the accompanying offline run
+report. Standalone Runtime STOP preemption passed (queued/active cancellation
+and in-flight result cannot overwrite STOP).
+
+A broader historical suite was also run. Its results must not be described
+as fully passing: old range-arrival/taper/association assertions and detour,
+bypass and wait fixtures tied to the old target-depth corridor are still
+incompatible with the new command-swept geometry and initial STOP/WAIT.
+Failures and node IDs are retained in the run report. Those regression
+migrations require completion and review before deployment, in addition to
+independent visual-arrival calibration. No failing test is skipped/xfail'd,
+and no safety gate is relaxed to satisfy an old fixture.
+
+Evidence locations
+------------------
+/home/tkieg/mayday_acceptance_runs/mission-53532164/terminal-details.json
+/home/tkieg/mayday_acceptance_runs/find-marvin-20261013T233915Z/target-range-analysis.json
+/home/tkieg/mayday_acceptance_runs/find-marvin-sparse-20261014T010900Z/terminal-details.json
+/home/tkieg/mayday_backups/find-marvin-v2-live-validated-20261006-172253/calibration-confirmation.json
