@@ -102,7 +102,12 @@ def stationary_status():
 def prepare(bundle, monkeypatch, *, clear_after=1., frozen=False, fault=None):
     r, behavior, robot, events, clock = bundle
     flags = dict(waiting=False, began=None, checks=0, fault=fault, observed=[])
-    behavior.reacquire_find_marvin_v2 = lambda **kw: behavior.observe_find_marvin_v2()
+    def reacquire(**kw):
+        # Match production reacquisition: retire the interrupted tracker episode
+        # before the new Gemini identity, rather than reuse locked continuity.
+        behavior._clear_marvin_v2_tracker_episode()
+        return behavior.observe_find_marvin_v2()
+    behavior.reacquire_find_marvin_v2 = reacquire
     flags["generation"] = 4
     status = robot.status
     def current_status():
@@ -204,7 +209,9 @@ def test_worker_retains_native_identity_without_renaming_poll_identity(worker_se
 
 @pytest.mark.parametrize("reason", ["active_lidar_intrusion", "active_lidar_stale", "active_lidar_unavailable"])
 def test_normal_mission_reconfirms_new_identity_before_replacement(tmp_path, monkeypatch, reason):
-    bundle = make_runtime(tmp_path, monkeypatch, [(0,.60),(0,.60),(0,.50)])
+    # Interrupted approach, stationary boundary view, independent replacement
+    # view, then the existing synthetic calibrated-arrival oracle.
+    bundle = make_runtime(tmp_path, monkeypatch, [(0,.60),(0,.60),(0,.60),(0,.50)])
     r, b, robot, events, clock = bundle
     flags = prepare(bundle, monkeypatch)
     old = robot.move_forward
@@ -224,6 +231,11 @@ def test_normal_mission_reconfirms_new_identity_before_replacement(tmp_path, mon
     first, replacement = outcome["history"]
     assert not first["result"]["full_step_completed"] and first["result"]["source_stamp_consumed"]
     assert first["source_frame_stamp_ns"] < replacement["observation"]["identity_source_frame_stamp_ns"] < replacement["source_frame_stamp_ns"]
+    boundary, = outcome["collision_boundary_observations"]
+    assert boundary["camera_recheck_performed"] and boundary["marvin_confirmed_forward"]
+    assert not boundary["safe_approach_complete"] and not boundary["motion_authorized"]
+    assert (first["source_frame_stamp_ns"] < boundary["observation"]["source_frame_stamp_ns"]
+        < replacement["observation"]["identity_source_frame_stamp_ns"])
     assert b.identity_sources[:2] == ["gemini_marvin_candidate_selection"]*2
     assert len(motions(events)) == 2 and r.mission_manager.get_active_mission() is None
     assert outcome["lidar_recovery_history"][0]["transported_interruption"]

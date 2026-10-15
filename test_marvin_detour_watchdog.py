@@ -335,7 +335,7 @@ def test_safe_pass_becomes_unsafe_and_repairs_then_rejoins(tmp_path,monkeypatch)
 def test_no_safe_action_still_uses_existing_blocked_wait(tmp_path,monkeypatch):
     b,_,_=strafe_runtime(tmp_path,monkeypatch,[(0,1.1)]*3,[OPEN_LEFT+[(0,.3)]])
     result=run(b[0])
-    assert result['reason']=='marvin_visual_arrival_unverified_at_lidar_safety_boundary' and result['blocked_wait_recheck_count']==12
+    assert result['reason']=='marvin_collision_boundary_association_unverified' and result['blocked_wait_recheck_count']==12
     assert not motions(b[3])
 
 

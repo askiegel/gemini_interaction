@@ -524,7 +524,7 @@ def test_live_status_projection_exposes_stationary_wait_diagnostics(tmp_path,mon
     seen=[]
     f['on_wait']=lambda:seen.append(bundle[0].get_status_summary()['tracking'])
     result=run(bundle[0])
-    assert result['reason']=='marvin_visual_arrival_unverified_at_lidar_safety_boundary'
+    assert result['reason']=='marvin_collision_boundary_association_unverified'
     assert seen and all(d['state']=='BLOCKED_WAIT' and d['blocked_wait_active'] for d in seen)
     assert all(d['blocked_wait_reason']=='find_marvin_lidar_motion_obstructed' for d in seen)
     assert all(k in seen[-1] for k in blocked_wait_diagnostics())

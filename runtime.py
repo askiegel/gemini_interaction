@@ -2088,10 +2088,11 @@ class CognitiveRuntime:
             and interlock.get("stop_pending") is False and interlock.get("last_stop_error") is None)
 
     def _wait_for_marvin_blocked_route(self, *, expected_session, lidar, association,
-                                     execution_guard, diagnostics, history, detour_context=None, interruption=None):
+                                     execution_guard, diagnostics, history, detour_context=None, interruption=None,
+                                     camera_source_floor=None):
         """Production-only stationary re-sensing. Returns a wakeup, never authority.
 
-        The historical target bearing/range only selects when to acquire fresh
+        The historical camera bearing only selects when to acquire fresh
         identity. It cannot authorize movement, arrival or reuse a camera stamp.
         Counters/time are cumulative across every blocked episode in a mission.
         """
@@ -2124,7 +2125,8 @@ class CognitiveRuntime:
             publish()
             diagnostics["blocked_wait_active"] = False
             diagnostics["blocked_wait_resume_reason"] = reason if ok else None
-            return {"ok": ok, "reason": reason, "entry_route": entry_route, "route": route}
+            return {"ok": ok, "reason": reason, "entry_route": entry_route, "route": route,
+                    "camera_floor": camera_source_floor}
 
         if (interruption is None and (entry_route.get("valid") is not True
                 or (entry_route.get("route_to_marvin_obstructed") is not True
@@ -2165,6 +2167,73 @@ class CognitiveRuntime:
                     return False
             return True
         execution_guard = stopped_guard
+
+        boundary_checked = False
+        def observe_occupied_boundary(snapshot):
+            """One stopped camera check, never object-depth or completion authority.
+
+            Seeing Marvin ahead cannot identify the cause of a LiDAR intrusion:
+            a foreground object can occupy that same projected camera region.
+            Keep the ordinary bounded wait until that ambiguity is resolved.
+            """
+            nonlocal boundary_checked, camera_source_floor, failure
+            if (boundary_checked or type(camera_source_floor) is not int
+                    or self._marvin_interrupted_envelope_clear(snapshot,
+                        {"axes": (0., 0., .25), "duration": .50})):
+                return
+            boundary_checked = True
+            record = {"lidar_sequence": snapshot["acquisition_sequence"],
+                "producer_session": expected_session, "protected_envelope_occupied": True,
+                "bridge_scan_identity": snapshot.get("bridge_scan_identity"),
+                "camera_recheck_performed": False, "marvin_confirmed_forward": False,
+                "boundary_object_identity_verified": False, "safe_approach_complete": False,
+                "motion_authorized": False, "arrived_at_marvin": False,
+                "reason": "marvin_collision_boundary_controller_unverified"}
+            diagnostics.setdefault("collision_boundary_observations", []).append(record)
+            state = self._marvin_bridge_ready_and_stopped()
+            owner = state.get("guarded_controller") or {}
+            if (any(not isinstance(owner.get(k), str) or not owner[k] for k in
+                    ("controller_session", "bridge_epoch"))
+                    or not self._marvin_interruption_stationary(state, owner)):
+                return
+            revision = tuple(owner.get(k) for k in revision_fields)
+            if not execution_guard():
+                return
+            try:
+                observation = self._observe_find_marvin_v2(
+                    reacquisition_source_floor=camera_source_floor)
+            finally:
+                # This diagnostic must never leave a dispatchable observation.
+                self._reset_marvin_alignment_consensus()
+            record["camera_recheck_performed"] = True
+            record["observation"] = observation
+            identity = observation.get("identity_source_frame_stamp_ns")
+            stamp = observation.get("source_frame_stamp_ns")
+            fresh = (type(identity) is int and type(stamp) is int
+                and camera_source_floor < identity < stamp
+                and self._marvin_motion_stamp_is_fresh(stamp,
+                    observation.get("received_monotonic_seconds")))
+            if type(stamp) is int and stamp > camera_source_floor:
+                camera_source_floor = stamp  # Replacement needs another independent frame.
+            after = self._marvin_bridge_ready_and_stopped()
+            if (not execution_guard() or not self._marvin_interruption_stationary(after, owner)
+                    or tuple((after.get("guarded_controller") or {}).get(k)
+                             for k in revision_fields) != revision
+                    or (after.get("motion") or {}).get("last_command_at") != command_at):
+                failure = "find_marvin_interruption_stationary_unverified"
+                record["reason"] = failure
+                return
+            tracker = observation.get("opencv_tracker") or {}
+            error = tracker.get("horizontal_error")
+            confirmed = (fresh and observation.get("ok") is True
+                and observation.get("identity_confirmed") is True
+                and tracker.get("active") is True and tracker.get("matched") is True
+                and type(error) in (int, float) and math.isfinite(error)
+                and abs(error) <= FIND_CENTER_TOLERANCE_PIXELS)
+            record.update(marvin_confirmed_forward=confirmed,
+                reason=("marvin_collision_boundary_association_unverified" if confirmed
+                        else "marvin_collision_boundary_fresh_forward_identity_unverified"))
+
         _marvin_navigation_shadow_wait_stationary = True
         publish()
         while execution_guard():
@@ -2221,6 +2290,14 @@ class CognitiveRuntime:
                 envelope_clear = (native["acquisition_sequence"] > native_floor["acquisition_sequence"]
                     and native["source_stamp_ns"] > native_floor["source_stamp_ns"]
                     and self._marvin_interrupted_envelope_clear(snapshot, interruption))
+            if (interruption is None or
+                    native_seen["acquisition_sequence"] > native_floor["acquisition_sequence"]
+                    and native_seen["source_stamp_ns"] > native_floor["source_stamp_ns"]):
+                observe_occupied_boundary(snapshot)
+            if failure is not None or not execution_guard():
+                return done(failure or "find_marvin_mission_preempted")
+            if prior_total + time.monotonic() - started >= self.MARVIN_BLOCKED_WAIT_MAX_SECONDS:
+                return done("find_marvin_blocked_wait_exhausted")
             changed = material_route_change(entry_route, route) if route.get("valid") else False
             direct = evaluate_local_motion_safety(snapshot, expected_session=expected_session,
                 linear_x=FIND_MARVIN_FORWARD_SPEED_MPS, duration=.50)
@@ -3132,14 +3209,15 @@ class CognitiveRuntime:
                     waited = self._wait_for_marvin_blocked_route(
                         expected_session=session, lidar=lidar, association=collision,
                         execution_guard=current, diagnostics=blocked_wait,
-                        history=blocked_wait_history, detour_context=detour_context)
+                        history=blocked_wait_history, detour_context=detour_context,
+                        camera_source_floor=stamp)
                     retain("blocked_wait", blocked_wait, waited)
                     if waited["ok"] is not True:
                         reason = waited["reason"]
                         if reason == "find_marvin_blocked_wait_exhausted":
-                            reason = "marvin_visual_arrival_unverified_at_lidar_safety_boundary"
+                            reason = "marvin_collision_boundary_association_unverified"
                         return finish("STOPPED" if not current() else "BLOCKED", reason)
-                    blocked_resume_context = {"camera_floor":stamp, "session":session,
+                    blocked_resume_context = {"camera_floor":waited["camera_floor"], "session":session,
                         "lidar_sequence":blocked_wait["blocked_wait_latest_lidar_sequence"],
                         "entry_route":waited["entry_route"]}
                     continue  # Retire old frame; fresh camera identity and JIT must pass.
@@ -3334,12 +3412,13 @@ class CognitiveRuntime:
                                         waited = self._wait_for_marvin_blocked_route(
                                             expected_session=session, lidar=lidar, association=standoff,
                                             execution_guard=current, diagnostics=blocked_wait,
-                                            history=blocked_wait_history, detour_context=detour_context)
+                                            history=blocked_wait_history, detour_context=detour_context,
+                                            camera_source_floor=stamp)
                                         retain("blocked_wait", blocked_wait, waited)
                                         if waited["ok"] is not True:
                                             return finish("STOPPED" if not current() else "BLOCKED", waited["reason"])
                                         blocked_resume_context = {
-                                            "camera_floor": stamp, "session": session,
+                                            "camera_floor": waited["camera_floor"], "session": session,
                                             "lidar_sequence": blocked_wait["blocked_wait_latest_lidar_sequence"],
                                             "entry_route": waited["entry_route"],
                                         }
@@ -3541,11 +3620,12 @@ class CognitiveRuntime:
                 waited = self._wait_for_marvin_blocked_route(expected_session=session,
                     lidar=lidar, association=association, execution_guard=current,
                     diagnostics=blocked_wait, history=blocked_wait_history,
-                    detour_context=detour_context, interruption=interruption)
+                    detour_context=detour_context, interruption=interruption,
+                    camera_source_floor=stamp)
                 recovery["wait_result"] = waited
                 if waited["ok"] is not True:
                     return finish("STOPPED" if not current() else "BLOCKED", waited["reason"])
-                blocked_resume_context = {"camera_floor": stamp, "session": session,
+                blocked_resume_context = {"camera_floor": waited["camera_floor"], "session": session,
                     "lidar_sequence": blocked_wait["blocked_wait_latest_lidar_sequence"],
                     "entry_route": waited["entry_route"]}
                 lidar_currentness_reobserve_pending = True
@@ -3580,14 +3660,14 @@ class CognitiveRuntime:
                     waited = self._wait_for_marvin_blocked_route(
                         expected_session=session,lidar=veto["snapshot"],association=veto["association"],
                         execution_guard=current,diagnostics=blocked_wait,history=blocked_wait_history,
-                        detour_context=detour_context)
+                        detour_context=detour_context, camera_source_floor=stamp)
                     retain("blocked_wait",blocked_wait,waited)
                     if waited["ok"] is not True:
                         reason = waited["reason"]
                         if reason == "find_marvin_blocked_wait_exhausted":
-                            reason = "marvin_visual_arrival_unverified_at_lidar_safety_boundary"
+                            reason = "marvin_collision_boundary_association_unverified"
                         return finish("STOPPED" if not current() else "BLOCKED",reason)
-                    blocked_resume_context = {"camera_floor":stamp,"session":session,
+                    blocked_resume_context = {"camera_floor":waited["camera_floor"],"session":session,
                         "lidar_sequence":blocked_wait["blocked_wait_latest_lidar_sequence"],
                         "entry_route":waited["entry_route"]}
                     continue
@@ -3687,10 +3767,11 @@ class CognitiveRuntime:
                             waited = self._wait_for_marvin_blocked_route(
                                 expected_session=session, lidar=veto["snapshot"], association=veto["association"],
                                 execution_guard=current, diagnostics=blocked_wait,
-                                history=blocked_wait_history, detour_context=detour_context)
+                                history=blocked_wait_history, detour_context=detour_context,
+                                camera_source_floor=stamp)
                             if waited["ok"] is not True:
                                 return finish("STOPPED" if not current() else "BLOCKED", waited["reason"])
-                            blocked_resume_context = {"camera_floor": stamp, "session": session,
+                            blocked_resume_context = {"camera_floor": waited["camera_floor"], "session": session,
                                 "lidar_sequence": blocked_wait["blocked_wait_latest_lidar_sequence"],
                                 "entry_route": waited["entry_route"]}
                         continue  # Fresh stopped LiDAR and strict observation, never veto stamp.

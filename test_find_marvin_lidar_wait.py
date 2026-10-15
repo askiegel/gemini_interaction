@@ -234,7 +234,7 @@ def test_new_valid_scan_with_unsafe_geometry_still_hits_forward_safety_veto(tmp_
     assert len(motions(events)) == 1
     # Collision-only admission catches the persistent intrusion before another
     # dispatch attempt. Do not require a rejected second command to exist.
-    assert result["reason"] == "marvin_visual_arrival_unverified_at_lidar_safety_boundary"
+    assert result["reason"] == "marvin_collision_boundary_association_unverified"
     probe = result["final_observation"]["arrival"]["association_forward_probe"]
     assert not probe["permitted"] and probe["protected_radius_m"] == .45
     assert result["blocked_wait_history"] and not result["avoidance_lidar_refresh_history"]

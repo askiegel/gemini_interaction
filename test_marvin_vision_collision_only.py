@@ -39,6 +39,28 @@ def retained(tmp_path, monkeypatch):
     return r,v
 
 
+@pytest.mark.parametrize('group,index',
+    [('preceding_actions', i) for i in range(4)]
+    + [('october6_forward_actions', i) for i in range(24)]
+    + [('october6_arrival', 0)])
+def test_retained_pursuit_geometry_remains_clear_without_historical_range_authority(
+        tmp_path, monkeypatch, group, index):
+    r, _ = retained(tmp_path, monkeypatch)
+    rows = FIXTURE[group]
+    row = copy.deepcopy(rows[index] if isinstance(rows, list) else rows)
+    snapshot = row['lidar']
+    # Explicit offline receipt, never presented as fresh live sensing.
+    snapshot.update(received_monotonic_seconds=time.monotonic(),
+                    effective_age_seconds=0., age_at_receipt_seconds=0.)
+    r.lidar_worker = SimpleNamespace(session=snapshot['producer_session'], running=True)
+    result = r._marvin_v2_motion_clearance(row['tracker'], snapshot)
+    assert result['ok'] and result['authority'] == 'visual_tracking'
+    assert not result['direct_path_blocked'] and not result['route_to_marvin_obstructed']
+    assert not result['arrived_at_marvin']  # Historical LiDAR arrival is not a visual policy.
+    assert result['association_forward_probe']['protected_radius_m'] == .45
+    assert result['route']['route_lookahead_m'] == .05
+
+
 @pytest.mark.parametrize('support',[0,1,3,4,5])
 def test_exact_four_return_case_and_other_support_counts_do_not_gate_pursuit(tmp_path,monkeypatch,support):
     r,v = retained(tmp_path,monkeypatch)
@@ -174,7 +196,7 @@ def test_uncalibrated_arrival_stops_safely_at_collision_boundary(tmp_path,monkey
     result=run(r)
     assert state['wait_frames'] and not state['resumes'] and not motions(events)
     assert result['state']=='BLOCKED' and not result['arrived_at_marvin']
-    assert result['reason']=='marvin_visual_arrival_unverified_at_lidar_safety_boundary'
+    assert result['reason']=='marvin_collision_boundary_association_unverified'
     assert result['stop_result']['ok'] and events[-1]=='stop'
 
 

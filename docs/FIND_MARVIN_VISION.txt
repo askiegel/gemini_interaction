@@ -68,9 +68,70 @@ the retained mission-930a9281 four-return scan (sequence 7104), camera bearing
 is -3.7232552286 degrees and the bounded forward swept region is clear. The
 return count does not affect that decision and cannot establish arrival.
 At an uncleared collision boundary, the bounded stationary wait terminates
-safely with marvin_visual_arrival_unverified_at_lidar_safety_boundary.
+safely with marvin_collision_boundary_association_unverified.
 No replacement arrival values have been invented. This branch cannot claim
 successful arrival until a separately justified visual policy is implemented.
+
+Stopped collision-boundary observation
+-------------------------------------
+After the existing STOP, a fresh validated scan occupying the full 0.45 m
+body envelope triggers at most one camera reacquisition per blocked episode.
+The existing native controller/interlock checks must verify READY, inactive,
+gait-zero, zero axes and stable ownership before and after that observation.
+Camera evidence requires a newer semantic identity and strict tracker frame,
+fresh local receipt and the existing forward alignment tolerance. This reuses
+the existing fresh YOLO/Gemini/OpenCV reacquisition, without motion or a new
+tracker. Its temporary dispatch authorization is immediately expired.
+
+collision_boundary_observations records native scan identity and the stopped
+camera evidence. It is diagnostic only: marvin_confirmed_forward does NOT
+identify the object causing the intrusion. All successful wait wakeups still
+require another independent camera observation, ordinary planning and final
+JIT before any replacement command. The wait's existing cumulative bounds,
+scoped interruption evidence and owner/STOP checks remain in force.
+
+ARRIVED still requires independently calibrated arrival evidence. No positive
+SAFE_APPROACH_COMPLETE rule is enabled: the retained recordings cannot
+distinguish Marvin at the boundary from another foreground object with Marvin
+behind it. Such scenes retain BLOCKED_WAIT and safe_incomplete. Seeing Marvin
+ahead, a large box, or a LiDAR point in the projected patch is insufficient;
+the latter would also reintroduce target-specific LiDAR surface association.
+No further motion may be used to disambiguate an occupied protected envelope.
+
+Fresh archived detector analysis (2026-10-14)
+--------------------------------------------
+Evidence: /home/tkieg/mayday_acceptance_runs/
+find-marvin-simplified-offline-20261014T232335835105Z/
+All 1,378 native 640x480 JPEGs were independently inferred using the existing
+yolov8n.pt weights and proposal confidence 0.02, with production box conversion.
+Of 1,320 frames with a recorded accepted same-window patch, 1,263 best-overlap
+padded proposals meet the existing 0.70 diagnostic association gate; only 18
+best-overlap proposals meet publication confidence 0.40. The other 58 frames
+were inferred but have no accepted same-window reference patch. Overlap with
+a recorded patch is not independently labelled Marvin detection ground truth.
+
+Fresh proposals change scale, unlike the fixed-template OpenCV tracker. Median
+proposal heights for frontal 0.47/0.52/0.80 m camera-reference placements are
+311/281/182 pixels. However, the held-out 0.47 m return has height 291-364 pixels,
+overlapping the 0.42 m frontal range 324-373 pixels. Best-overlap labels vary
+among teddy bear, person, traffic light, motorcycle and airplane. All physical
+distances are operator measurements, not detector/Gemini estimates.
+
+These proposals can refresh geometry only under existing Gemini identity and
+strict association. This replay does not justify a new automatic reseed rule,
+absolute range, visual-arrival threshold or collision-object classification.
+The unchanged OpenCV algorithm was also replayed with archived accepted seed
+patches, expiring continuity on a failed match. Original hidden seed templates
+are unavailable, so this is diagnostic replay rather than an exact recreation
+of live tracker memory. The stationary calibration procedure remains intact.
+
+Deployment remains NO-GO for an automatic successful-completion demonstration.
+The smallest missing evidence is stationary, independently labelled boundary
+scenes: Marvin itself versus an unrelated front object with Marvin behind,
+side/rear intrusion, occlusion and fresh strict identity loss. Demonstrate a
+discriminating cue available in the current camera pipeline on held-out scenes
+before enabling safe-approach success. If those observations are indistinguish-
+able, preserve safe_incomplete; do not fit a threshold or add a depth subsystem.
 
 Minimum measurements to finish visual arrival
 ---------------------------------------------
