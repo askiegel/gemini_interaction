@@ -4441,7 +4441,11 @@ class BehaviorManager:
                         error=str(exc), error_type=type(exc).__name__)
         base["forward_safety"] = safety
         if not self._marvin_pursuit_lidar_is_trusted(lidar, safety, expected_lidar_session):
-            return dict(base, reason="marvin_single_approach_lidar_not_trusted")
+            # This boundary precedes the robot client and all transport. Keep
+            # the failed scan so Runtime can distinguish aging from obstruction
+            # and require genuinely newer evidence; this grants no authority.
+            return dict(base, reason="marvin_single_approach_lidar_not_trusted",
+                        lidar=lidar, transport_attempted=False, delivery_resolved=True)
         if getattr(self, "_marvin_shadow_capture_enabled", False) is True:
             self._capture_marvin_shadow_lidar_reference(lidar)
         if safety.get("permitted") is not True:

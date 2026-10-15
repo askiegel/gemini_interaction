@@ -1,0 +1,37 @@
+{
+  "mission_id": "mission-69555d95",
+  "source_evidence": "/home/tkieg/mayday_acceptance_runs/find-marvin-after-bridge-repair-live-20261015T020015869994Z",
+  "failed_action_lidar_evidence": {
+    "producer_session": "0e237b7906654937a5d5b6d9096504e9",
+    "acquisition_sequence": 83300,
+    "received_monotonic_seconds": 15734.243051489,
+    "effective_age_seconds": 0.3022260079924308,
+    "source": {
+      "frame_id": "lidar_link",
+      "stamp_seconds": 1792029695.6530788,
+      "received_at": "2026-10-15T02:01:35.658169+00:00",
+      "age_seconds": 0.16956700291484594,
+      "rotation_to_robot_radians": 1.5707963267948966
+    }
+  },
+  "preceding_actions": [
+    {
+      "action": "turn",
+      "direction": "RIGHT",
+      "speed": 0.25,
+      "duration": 0.5
+    },
+    {
+      "action": "turn",
+      "direction": "RIGHT",
+      "speed": 0.25,
+      "duration": 0.5
+    }
+  ],
+  "camera_horizontal_errors_pixels": [
+    69.5,
+    69.5,
+    18.5
+  ],
+  "scope": "Retained compact metadata only. Raw failing scan, native Bridge identity, receipt age and transport RTT were not retained. Tests supply explicitly synthetic complete geometry/native identities and rebase the clock; this is not a raw-scan replay."
+}
