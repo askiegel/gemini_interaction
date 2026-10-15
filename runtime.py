@@ -2087,10 +2087,33 @@ class CognitiveRuntime:
             and interlock.get("active_forward") is False and interlock.get("pending_forward") is False
             and interlock.get("stop_pending") is False and interlock.get("last_stop_error") is None)
 
+    @staticmethod
+    def _marvin_forward_collision_boundary(snapshot, expected_session):
+        """Classify the stopped command's footprint, never a Marvin surface.
+
+        Completion excludes rear/side intrusions using the existing front
+        octant. No LiDAR point is associated with a camera box or target range.
+        """
+        if not _marvin_complete_lidar_is_current(snapshot, expected_session):
+            return False  # Preserve an advertised stale age as well as receipt age.
+        current = read_lidar_state(snapshot, expected_session=expected_session)
+        if not _marvin_complete_lidar_is_current(current, expected_session):
+            return False
+        probe = evaluate_local_motion_safety(current, expected_session=expected_session,
+            linear_x=FIND_MARVIN_FORWARD_SPEED_MPS, duration=.50)
+        if probe.get("reason") != "translation_protected_region_violated":
+            return False
+        points = current["local_motion_geometry"]["points"]
+        occupied = [p for p in points if _distance_to_segment(p["x_m"], p["y_m"],
+            FIND_MARVIN_FORWARD_SPEED_MPS * .50, 0.) <= LOCAL_LIDAR_PROTECTED_RADIUS_M]
+        _, lower, upper = next(s for s in OCTANT_SECTORS if s[0] == "front")
+        return bool(occupied) and all(lower <= math.degrees(math.atan2(p["y_m"], p["x_m"])) < upper
+                                      for p in occupied)
+
     def _wait_for_marvin_blocked_route(self, *, expected_session, lidar, association,
                                      execution_guard, diagnostics, history, detour_context=None, interruption=None,
-                                     camera_source_floor=None):
-        """Production-only stationary re-sensing. Returns a wakeup, never authority.
+                                     camera_source_floor=None, open_space_confirmed=False):
+        """Stationary wakeup or conditional terminal evidence, never motion authority.
 
         The historical camera bearing only selects when to acquire fresh
         identity. It cannot authorize movement, arrival or reuse a camera stamp.
@@ -2121,12 +2144,12 @@ class CognitiveRuntime:
                 self._emit_marvin_navigation_shadow("BLOCKED_WAIT", diagnostics=diagnostics,
                     producer_session=expected_session, acquisition_sequence=sequence)
 
-        def done(reason, *, ok=False, route=None):
+        def done(reason, *, ok=False, route=None, completion=None):
             publish()
             diagnostics["blocked_wait_active"] = False
             diagnostics["blocked_wait_resume_reason"] = reason if ok else None
             return {"ok": ok, "reason": reason, "entry_route": entry_route, "route": route,
-                    "camera_floor": camera_source_floor}
+                    "camera_floor": camera_source_floor, "safe_approach_evidence": completion}
 
         if (interruption is None and (entry_route.get("valid") is not True
                 or (entry_route.get("route_to_marvin_obstructed") is not True
@@ -2169,22 +2192,27 @@ class CognitiveRuntime:
         execution_guard = stopped_guard
 
         boundary_checked = False
+        completion = None
         def observe_occupied_boundary(snapshot):
-            """One stopped camera check, never object-depth or completion authority.
+            """One stopped camera check, never object-depth or motion authority.
 
-            Seeing Marvin ahead cannot identify the cause of a LiDAR intrusion:
-            a foreground object can occupy that same projected camera region.
-            Keep the ordinary bounded wait until that ambiguity is resolved.
+            Completion is conditional on the operator's mission-start open-space
+            contract. Identity alone never establishes the intruding object's
+            identity, physical target distance or ARRIVED.
             """
-            nonlocal boundary_checked, camera_source_floor, failure
-            if (boundary_checked or type(camera_source_floor) is not int
-                    or self._marvin_interrupted_envelope_clear(snapshot,
-                        {"axes": (0., 0., .25), "duration": .50})):
+            nonlocal boundary_checked, camera_source_floor, failure, completion
+            if boundary_checked or type(camera_source_floor) is not int:
+                return
+            forward_boundary = self._marvin_forward_collision_boundary(snapshot, expected_session)
+            if (self._marvin_interrupted_envelope_clear(snapshot,
+                        {"axes": (0., 0., .25), "duration": .50})
+                        and not (open_space_confirmed is True and forward_boundary)):
                 return
             boundary_checked = True
             record = {"lidar_sequence": snapshot["acquisition_sequence"],
                 "producer_session": expected_session, "protected_envelope_occupied": True,
                 "bridge_scan_identity": snapshot.get("bridge_scan_identity"),
+                "forward_swept_boundary_only": forward_boundary,
                 "camera_recheck_performed": False, "marvin_confirmed_forward": False,
                 "boundary_object_identity_verified": False, "safe_approach_complete": False,
                 "motion_authorized": False, "arrived_at_marvin": False,
@@ -2233,6 +2261,55 @@ class CognitiveRuntime:
             record.update(marvin_confirmed_forward=confirmed,
                 reason=("marvin_collision_boundary_association_unverified" if confirmed
                         else "marvin_collision_boundary_fresh_forward_identity_unverified"))
+            if open_space_confirmed is not True or not forward_boundary:
+                return
+            if not confirmed:
+                failure = record["reason"]
+                return
+            remaining = self.MARVIN_BLOCKED_WAIT_MAX_SECONDS - (prior_total + time.monotonic() - started)
+            if remaining <= 0:
+                failure = "find_marvin_blocked_wait_exhausted"
+                return
+            # Semantic acquisition can outlast scan freshness. Obtain a newer
+            # scan after the camera check; never complete on the old intrusion.
+            waited = self._wait_for_new_marvin_lidar_evidence(expected_session=expected_session,
+                previous_sequence=snapshot["acquisition_sequence"], execution_guard=execution_guard,
+                timeout_seconds=min(self.MARVIN_NEW_LIDAR_TIMEOUT_SECONDS, remaining))
+            record["completion_lidar_wait"] = waited
+            if not waited["ok"]:
+                failure = waited["reason"]
+                return
+            fresh_scan = waited["snapshot"]
+            before_native = snapshot.get("bridge_scan_identity") or {}
+            after_native = fresh_scan.get("bridge_scan_identity") or {}
+            if (not isinstance(before_native, dict) or not isinstance(after_native, dict)
+                    or not isinstance(before_native.get("producer_session"), str)
+                    or not before_native["producer_session"]
+                    or before_native.get("producer_session") != after_native.get("producer_session")
+                    or any(type(n.get(k)) is not int or n[k] < 0
+                           for n in (before_native, after_native)
+                           for k in ("acquisition_sequence", "source_stamp_ns"))
+                    or any(after_native[k] <= before_native[k]
+                           for k in ("acquisition_sequence", "source_stamp_ns"))):
+                failure = "find_marvin_open_space_scan_identity_unverified"
+                return
+            final_controller = self._marvin_bridge_ready_and_stopped()
+            if (not execution_guard() or not self._marvin_interruption_stationary(final_controller, owner)
+                    or tuple((final_controller.get("guarded_controller") or {}).get(k)
+                             for k in revision_fields) != revision
+                    or (final_controller.get("motion") or {}).get("last_command_at") != command_at):
+                failure = "find_marvin_interruption_stationary_unverified"
+                return
+            if (not self._marvin_motion_stamp_is_fresh(stamp, observation.get("received_monotonic_seconds"))
+                    or not self._marvin_forward_collision_boundary(fresh_scan, expected_session)):
+                failure = "find_marvin_open_space_boundary_unverified"
+                return
+            record.update(safe_approach_complete=True,
+                open_space_confirmed_at_mission_start=True,
+                completion_conditional_on="operator_confirmed_open_space",
+                completion_lidar=fresh_scan, controller_owner=dict(owner),
+                reason="find_marvin_open_space_safe_approach_complete")
+            completion = record  # Terminal stop only, never a wakeup or motion permission.
 
         _marvin_navigation_shadow_wait_stationary = True
         publish()
@@ -2298,6 +2375,8 @@ class CognitiveRuntime:
                 return done(failure or "find_marvin_mission_preempted")
             if prior_total + time.monotonic() - started >= self.MARVIN_BLOCKED_WAIT_MAX_SECONDS:
                 return done("find_marvin_blocked_wait_exhausted")
+            if completion is not None:
+                return done(completion["reason"], completion=completion)
             changed = material_route_change(entry_route, route) if route.get("valid") else False
             direct = evaluate_local_motion_safety(snapshot, expected_session=expected_session,
                 linear_x=FIND_MARVIN_FORWARD_SPEED_MPS, duration=.50)
@@ -2408,6 +2487,8 @@ class CognitiveRuntime:
         proof_post_action_evidence = None
         proof_semantic_miss = None
         behavior = self.behavior_manager
+        open_space_confirmed = (getattr(mission, "marvin_open_space_confirmed", False) is True
+                                and proof_max_physical_actions is None)
         if control_generation is None:
             control_generation = self._control_generation
         history = []
@@ -2606,7 +2687,7 @@ class CognitiveRuntime:
                     meaningful_progress=improved,
                     meaningful_progress_reason=progress["meaningful_progress_reason"], progress=progress)
 
-        def finish(state, reason):
+        def finish(state, reason, *, safe_approach=None):
             exhausted = detour_context.watchdog.exhaustion(time.monotonic(), include_phase=False)
             if ((exhausted or watchdog_dispatch_deadline_reached)
                     and self._marvin_mission_context_is_current(mission, control_generation)
@@ -2638,6 +2719,43 @@ class CognitiveRuntime:
                     and zero.get("ok") is True and zero.get("status") == "READY")
             if not safe:
                 state, reason = "BLOCKED", "find_marvin_stop_or_bridge_failed"
+            if state == "SAFE_APPROACH_COMPLETE":
+                owner = zero.get("guarded_controller") or {}
+                prior_owner = (safe_approach or {}).get("controller_owner") or {}
+                expected_session = safe_approach["producer_session"]
+                try:
+                    latest = self.world_model.get_lidar_obstacles(expected_session=expected_session)
+                except Exception:
+                    latest = {}
+                if not isinstance(latest, dict):
+                    latest = {}
+                native = latest.get("bridge_scan_identity") or {}
+                if not isinstance(native, dict):
+                    native = {}
+                floor = safe_approach["completion_lidar"]["bridge_scan_identity"]
+                native_current = (native.get("producer_session") == floor["producer_session"]
+                    and all(type(native.get(k)) is int and native[k] >= floor[k]
+                            for k in ("acquisition_sequence", "source_stamp_ns"))
+                    and (native["acquisition_sequence"] == floor["acquisition_sequence"]) ==
+                        (native["source_stamp_ns"] == floor["source_stamp_ns"]))
+                safe_approach["final_lidar"] = latest
+                if (not self._marvin_interruption_stationary(zero, owner)
+                        or any(owner.get(k) != prior_owner.get(k)
+                               for k in ("controller_session", "bridge_epoch"))):
+                    safe = False
+                    state, reason = "BLOCKED", "find_marvin_open_space_final_stop_unverified"
+                elif (not open_space_confirmed or not current()
+                        or self.lidar_worker.running is not True
+                        or self.lidar_worker.session != expected_session or not native_current
+                        or not self._marvin_forward_collision_boundary(latest, expected_session)
+                        or not self._marvin_motion_stamp_is_fresh(
+                            safe_approach["observation"].get("source_frame_stamp_ns"),
+                            safe_approach["observation"].get("received_monotonic_seconds"))
+                        or not self._marvin_forward_collision_boundary(
+                            safe_approach["completion_lidar"], safe_approach["producer_session"])):
+                    state, reason = "BLOCKED", "find_marvin_open_space_final_evidence_unverified"
+            if safe_approach is not None and state != "SAFE_APPROACH_COMPLETE":
+                safe_approach.update(safe_approach_complete=False, reason=reason)
             resumable = (proof_max_physical_actions is not None and safe
                          and state == "PROOF_COMPLETE" and acquired)
             if not resumable and callable(clear_episode):
@@ -2654,7 +2772,12 @@ class CognitiveRuntime:
                 "target": "marvin", "mission_id": mission.mission_id,
                 "mission_route": "marvin_v2_closed_loop", "state": state,
                 "reason": reason, "arrived_at_marvin": state == "ARRIVED",
+                "safe_approach_complete": state == "SAFE_APPROACH_COMPLETE",
+                "completion_conditional_on": ("operator_confirmed_open_space"
+                    if state == "SAFE_APPROACH_COMPLETE" else None),
+                "safe_approach_evidence": safe_approach,
                 "mission_outcome": ("arrived_at_marvin" if state == "ARRIVED"
+                                    else "safe_approach_complete" if state == "SAFE_APPROACH_COMPLETE"
                                     else "safe_incomplete" if safe else "safe_failure"),
                 "search_turns": search_turns, "max_search_turns": MAX_SCAN_TURNS,
                 "actions_executed": sum(row.get("motion_executed") is True for row in history),
@@ -3210,8 +3333,12 @@ class CognitiveRuntime:
                         expected_session=session, lidar=lidar, association=collision,
                         execution_guard=current, diagnostics=blocked_wait,
                         history=blocked_wait_history, detour_context=detour_context,
-                        camera_source_floor=stamp)
+                        camera_source_floor=stamp,
+                        open_space_confirmed=open_space_confirmed and decision in {"FORWARD", "AVOID"})
                     retain("blocked_wait", blocked_wait, waited)
+                    if waited.get("safe_approach_evidence") is not None:
+                        return finish("SAFE_APPROACH_COMPLETE", waited["reason"],
+                                      safe_approach=waited["safe_approach_evidence"])
                     if waited["ok"] is not True:
                         reason = waited["reason"]
                         if reason == "find_marvin_blocked_wait_exhausted":
@@ -3621,8 +3748,15 @@ class CognitiveRuntime:
                     lidar=lidar, association=association, execution_guard=current,
                     diagnostics=blocked_wait, history=blocked_wait_history,
                     detour_context=detour_context, interruption=interruption,
-                    camera_source_floor=stamp)
+                    camera_source_floor=stamp,
+                    open_space_confirmed=(open_space_confirmed and state == "ADVANCING"
+                        and interruption["reason"] == "active_lidar_intrusion"
+                        and interruption["axes"][0] > 0
+                        and interruption["axes"][1:] == (0., 0.)))
                 recovery["wait_result"] = waited
+                if waited.get("safe_approach_evidence") is not None:
+                    return finish("SAFE_APPROACH_COMPLETE", waited["reason"],
+                                  safe_approach=waited["safe_approach_evidence"])
                 if waited["ok"] is not True:
                     return finish("STOPPED" if not current() else "BLOCKED", waited["reason"])
                 blocked_resume_context = {"camera_floor": waited["camera_floor"], "session": session,
@@ -3660,8 +3794,12 @@ class CognitiveRuntime:
                     waited = self._wait_for_marvin_blocked_route(
                         expected_session=session,lidar=veto["snapshot"],association=veto["association"],
                         execution_guard=current,diagnostics=blocked_wait,history=blocked_wait_history,
-                        detour_context=detour_context, camera_source_floor=stamp)
+                        detour_context=detour_context, camera_source_floor=stamp,
+                        open_space_confirmed=open_space_confirmed and state == "ADVANCING")
                     retain("blocked_wait",blocked_wait,waited)
+                    if waited.get("safe_approach_evidence") is not None:
+                        return finish("SAFE_APPROACH_COMPLETE", waited["reason"],
+                                      safe_approach=waited["safe_approach_evidence"])
                     if waited["ok"] is not True:
                         reason = waited["reason"]
                         if reason == "find_marvin_blocked_wait_exhausted":

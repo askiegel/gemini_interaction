@@ -27,6 +27,7 @@ class Mission:
     marvin_one_step_test: bool = False
     marvin_centering_test: bool = False
     marvin_guarded_approach_test: bool = False
+    marvin_open_space_confirmed: bool = False
 
     def to_dict(self):
         return asdict(self)
@@ -46,6 +47,7 @@ def create_mission(
     marvin_one_step_test=False,
     marvin_centering_test=False,
     marvin_guarded_approach_test=False,
+    marvin_open_space_confirmed=False,
 ):
     started_at = now() if status == MISSION_ACTIVE else None
 
@@ -63,4 +65,5 @@ def create_mission(
         marvin_one_step_test=marvin_one_step_test,
         marvin_centering_test=marvin_centering_test,
         marvin_guarded_approach_test=marvin_guarded_approach_test,
+        marvin_open_space_confirmed=marvin_open_space_confirmed,
     )

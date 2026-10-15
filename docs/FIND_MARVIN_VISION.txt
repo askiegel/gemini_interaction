@@ -2,8 +2,8 @@ Find Marvin: vision pursuit, independent collision sensing (offline feature)
 Base Cognitive: 17ad5970e3c443ae801713def8d566e8788ef939
 Branch: mayday/vision-led-find-marvin
 
-This branch is NOT deployed. It is NOT ready for deployment or a successful
-visual-arrival demonstration. No service restart, robot access or physical
+This branch is NOT deployed. Conditional open-space safe stopping is distinct
+from calibrated visual arrival. No service restart, robot access or physical
 movement is authorized by this offline change.
 
 Normal Runtime Find Marvin changes
@@ -76,6 +76,8 @@ Stopped collision-boundary observation
 -------------------------------------
 After the existing STOP, a fresh validated scan occupying the full 0.45 m
 body envelope triggers at most one camera reacquisition per blocked episode.
+The opt-in open-space policy also checks the existing forward command's swept
+envelope: 0.10 m/s for 0.50 seconds with the same 0.45 m protected radius.
 The existing native controller/interlock checks must verify READY, inactive,
 gait-zero, zero axes and stable ownership before and after that observation.
 Camera evidence requires a newer semantic identity and strict tracker frame,
@@ -84,19 +86,70 @@ the existing fresh YOLO/Gemini/OpenCV reacquisition, without motion or a new
 tracker. Its temporary dispatch authorization is immediately expired.
 
 collision_boundary_observations records native scan identity and the stopped
-camera evidence. It is diagnostic only: marvin_confirmed_forward does NOT
+camera evidence. marvin_confirmed_forward does NOT
 identify the object causing the intrusion. All successful wait wakeups still
 require another independent camera observation, ordinary planning and final
 JIT before any replacement command. The wait's existing cumulative bounds,
 scoped interruption evidence and owner/STOP checks remain in force.
 
-ARRIVED still requires independently calibrated arrival evidence. No positive
-SAFE_APPROACH_COMPLETE rule is enabled: the retained recordings cannot
-distinguish Marvin at the boundary from another foreground object with Marvin
-behind it. Such scenes retain BLOCKED_WAIT and safe_incomplete. Seeing Marvin
-ahead, a large box, or a LiDAR point in the projected patch is insufficient;
-the latter would also reintroduce target-specific LiDAR surface association.
-No further motion may be used to disambiguate an occupied protected envelope.
+ARRIVED still requires independently calibrated arrival evidence. Without an
+explicit mission-start operator confirmation, no SAFE_APPROACH_COMPLETE rule
+is enabled: the retained recordings cannot distinguish Marvin at the boundary
+from another foreground object with Marvin behind it. Such scenes retain
+BLOCKED_WAIT and safe_incomplete. Seeing Marvin ahead, a large box, or a LiDAR
+point in the projected patch is insufficient. No further motion may be used
+to disambiguate an occupied protected envelope.
+
+Operator-controlled open-space mission contract
+------------------------------------------------
+The operator explicitly selected mission-start confirmation, with completion
+reported as CONDITIONAL on that setup. Marvin must be placed in open space,
+with no unrelated object between Mayday and Marvin, for the whole demonstration.
+This is trusted operator input, not something YOLO or LiDAR has proved.
+
+The existing parsed intent accepts marvin_open_space_confirmed: true only for
+a normal FIND_OBJECT / Marvin mission. Default is false. Non-booleans, other
+targets/intents and one-step/centering/guarded-approach test combinations are
+rejected. The value is retained on that mission and never enables later ones.
+No new endpoint, configuration service, depth system or navigation component
+is added. Natural-language text alone does not set the confirmation field.
+
+Prepared parsed-intent example for a separately authorized future mission:
+{"intent":{"intent":"FIND_OBJECT","target":"marvin",
+           "marvin_open_space_confirmed":true}}
+This document does not submit that request or authorize physical motion.
+
+Completion requires a genuine forward collision veto, either before transport
+or through the existing certified command-scoped STOP. Turn/strafe/reverse and
+sensing-failure interruptions cannot complete. Existing collision geometry must
+show that the stopped forward command is blocked and that occupied parts of its
+swept capsule lie only in the existing front octant. Side/rear/inner-footprint
+intrusions cannot be relabelled target stopping. This is command-safety
+classification, with no target-camera/scan association or return-count rule.
+
+After verified stationary STOP, require a newer Gemini identity and strict
+OpenCV frame, fresh receipt and centered target within the existing tolerance.
+Then obtain another advancing producer-bound native scan AFTER the camera
+check, with unchanged freshness and all-octant coverage. The same forward
+boundary must still block motion. Recheck controller ownership, inactive,
+gait-zero, zero axes and interlock state. Finally execute ordinary terminal
+STOP and reverify controller zero and evidence freshness before reporting:
+  state: SAFE_APPROACH_COMPLETE
+  mission_outcome: safe_approach_complete
+  completion_conditional_on: operator_confirmed_open_space
+  arrived_at_marvin: false
+There is no subsequent movement, retry, target distance or calibrated-arrival
+claim. boundary_object_identity_verified remains false. Missing/invalid camera,
+LiDAR, controller, owner or STOP evidence prevents successful completion.
+
+Unexpected foreground obstruction remains a negative case. Visible occlusion,
+identity/quality loss or changed target alignment prevents completion. The
+operator must STOP if the controlled setup is violated. A hidden object that
+leaves the same strict Marvin and scan evidence is not observable here: it can
+still produce CONDITIONAL completion if the operator's declaration is false.
+This limit is explicitly tested, not described as automatic obstacle identity
+verification. Unconditional completion remains disabled. Physical collision
+protection and STOP are identical regardless of the declaration's truth.
 
 Fresh archived detector analysis (2026-10-14)
 --------------------------------------------
@@ -125,13 +178,12 @@ patches, expiring continuity on a failed match. Original hidden seed templates
 are unavailable, so this is diagnostic replay rather than an exact recreation
 of live tracker memory. The stationary calibration procedure remains intact.
 
-Deployment remains NO-GO for an automatic successful-completion demonstration.
-The smallest missing evidence is stationary, independently labelled boundary
-scenes: Marvin itself versus an unrelated front object with Marvin behind,
-side/rear intrusion, occlusion and fresh strict identity loss. Demonstrate a
-discriminating cue available in the current camera pipeline on held-out scenes
-before enabling safe-approach success. If those observations are indistinguish-
-able, preserve safe_incomplete; do not fit a threshold or add a depth subsystem.
+The operator-controlled conditional policy can be reviewed for deployment after
+offline regressions pass. It does not remove the documented hidden-obstruction
+limit or supply ARRIVED calibration. Do not add target-depth estimation or fit
+an image-size threshold to conceal that limit. Live demonstrations still need
+their existing fresh preflight, explicit physical authorization and per-mission
+open-space confirmation; this offline task performs none.
 
 Minimum measurements to finish visual arrival
 ---------------------------------------------
