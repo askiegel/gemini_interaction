@@ -375,6 +375,7 @@ class CognitiveRuntime:
                 self.world_model.get_lidar_obstacles,
                 expected_session=self.lidar_worker.session,
                 stop_callback=self.robot_client.stop,
+                bridge_guarded_bounded=type(self.robot_client) is RobotBridgeClient,
             )
             self.behavior_manager.lidar_session_provider = (
                 lambda: self.lidar_worker.session

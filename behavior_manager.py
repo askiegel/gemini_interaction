@@ -110,6 +110,13 @@ class _GuardedTurnMonitor:
         self.now = now
         self.target_directed = bool(target_directed)
         self.safety_mode = safety_mode
+        # Only the native bounded route with equivalent full-circle protection
+        # replaces continuous HTTP revalidation. Legacy broad-sector policy and
+        # custom transports retain their additional checks.
+        self._bridge_guarded = (
+            type(robot) is RobotBridgeClient
+            and safety_mode == ROTATIONAL_SWEPT_FOOTPRINT
+        )
         self._lock = threading.RLock()
         self._stop = threading.Event()
         self._thread = None
@@ -240,6 +247,9 @@ class _GuardedTurnMonitor:
         return False
 
     def _read_validation(self):
+        with self._lock:
+            if self._bridge_guarded and self._transport_began:
+                return dict(self._validation)  # Pre-dispatch evidence, not a new scan.
         try:
             state = self.world_model.get_lidar_obstacles(
                 expected_session=self.expected_session,
@@ -279,6 +289,7 @@ class _GuardedTurnMonitor:
             deadline_stop = False
             with self._lock:
                 self._validation = validation
+                active_lidar_veto = not (self._bridge_guarded and self._transport_began)
                 now_monotonic = time.monotonic()
                 deadline_expired = (
                     self._active
@@ -311,11 +322,11 @@ class _GuardedTurnMonitor:
                 if deadline_expired:
                     self._window_complete = True
                     self._physical_deadline_reached = True
-                if stale_transient:
+                if active_lidar_veto and stale_transient:
                     # Keep the initial successful validation reason while a
                     # single continuous stale interval is within grace.
                     pass
-                elif not validation.get("permitted"):
+                elif active_lidar_veto and not validation.get("permitted"):
                     if not self._invalidated:
                         self._first_invalidating_validation = dict(validation)
                         self._reason = validation.get("reason")
@@ -441,6 +452,8 @@ class _GuardedTurnMonitor:
             return {
                 "monitor_configured": self.world_model is not None,
                 "monitor_running": self.running,
+                "active_lidar_safety_owner": (
+                    "robot_bridge" if self._bridge_guarded else "cognitive"),
                 "direction": self.direction,
                 "pending_turn": self._pending,
                 "active_turn": self._active,

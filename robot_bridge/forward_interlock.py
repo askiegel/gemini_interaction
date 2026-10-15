@@ -1,11 +1,11 @@
-"""Fail-closed LiDAR health watchdog for guarded translation.
+"""LiDAR admission and command/STOP fencing for guarded motion.
 
 Legacy forward method/state names cover all configured bounded dispatches. Collision
 geometry is deliberately not decided here. Guarded forward and lateral motion
 perform their just-in-time base-frame swept-path checks before reaching
-the Robot Bridge client.  This interlock independently watches whether the
-producer-bound LiDAR state remains readable, valid, and fresh while translation
-is pending or active.
+the Robot Bridge client. Native bounded Bridge commands own continuous sensing;
+HTTP observations gate their next dispatch, not their active command. Other
+transports retain the existing continuous health veto.
 """
 
 import copy
@@ -50,12 +50,14 @@ class ForwardMotionInterlock:
     """Monitor a supplied cached-state reader; never performs acquisition."""
 
     def __init__(self, reader, *, expected_session, stop_callback,
-                 monotonic=time.monotonic, interval=MONITOR_INTERVAL_SECONDS):
+                 monotonic=time.monotonic, interval=MONITOR_INTERVAL_SECONDS,
+                 bridge_guarded_bounded=False):
         self.reader = reader
         self.expected_session = expected_session
         self.stop_callback = stop_callback
         self.monotonic = monotonic
         self.interval = float(interval)
+        self.bridge_guarded_bounded = bridge_guarded_bounded is True
         self._lock = threading.RLock()
         self._stop = threading.Event()
         self._thread = None
@@ -95,13 +97,23 @@ class ForwardMotionInterlock:
         should_stop = False
         pending = []
         with self._lock:
-            was_active = self._active_forward or bool(self._pending_dispatches.get(self._generation))
+            native_pending = self.bridge_guarded_bounded and any(
+                not streaming for streaming in self._dispatch_modes.values())
+            watched_pending = any(
+                epoch == self._generation
+                and (not self.bridge_guarded_bounded or self._dispatch_modes[dispatch])
+                for dispatch, epoch in self._dispatch_epochs.items())
+            was_active = self._active_forward or watched_pending
             self._state = copy.deepcopy(state) if isinstance(state, dict) else None
             self._permitted = permitted
             if not permitted:
                 self._inhibited = True
-                self._invalidation_reasons[self._generation] = reason
-                self._generation += 1
+                # A delayed HTTP observation cannot revoke a native bounded
+                # command. Keep admission inhibited until fresh evidence returns.
+                # Actual STOP/shutdown still advances the shared owner fence.
+                if was_active or not native_pending:
+                    self._invalidation_reasons[self._generation] = reason
+                    self._generation += 1
                 self._reason = reason
                 should_stop = was_active
                 self._active_forward = False
@@ -207,10 +219,15 @@ class ForwardMotionInterlock:
         with self._lock:
             epoch = self._dispatch_epochs.pop(generation, generation)
             streaming = self._dispatch_modes.pop(generation, True)
-            transport_uncertain = transport_result is None
+            native_bounded = self.bridge_guarded_bounded and not streaming
+            transport_uncertain = transport_result is None or (native_bounded and (
+                not isinstance(transport_result, dict)
+                or transport_result.get("evidence_valid") is not True
+                or transport_result.get("delivery_uncertain") is True))
             invalidated = (
                 epoch != self._generation
-                or self._inhibited
+                or (self._inhibited and not native_bounded)
+                or self._stopped or self._stops_inflight > 0 or self._last_stop_error is not None
                 or transport_uncertain
             )
             invalidation_reason = self._invalidation_reasons.pop(
@@ -225,7 +242,8 @@ class ForwardMotionInterlock:
                 if transport_uncertain and epoch == self._generation:
                     self._reason = "transport_exception"
                     self._generation += 1
-            elif isinstance(transport_result, dict) and transport_result.get("ok") is True:
+            elif (not native_bounded and isinstance(transport_result, dict)
+                  and transport_result.get("ok") is True):
                 self._active_forward = True
             if not streaming:
                 self._bounded_authorization_consumed = True
@@ -303,6 +321,8 @@ class ForwardMotionInterlock:
             return {
                 "configured": self._configured,
                 "monitor_running": self.running,
+                "bounded_active_lidar_owner": (
+                    "robot_bridge" if self.bridge_guarded_bounded else "cognitive"),
                 "forward_permitted": self._permitted and not self._inhibited,
                 "inhibited": self._inhibited,
                 "reason": self._reason,

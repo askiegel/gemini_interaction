@@ -108,11 +108,10 @@ class RobotBridgeClient:
                 try:
                     if method == "POST" and path == "/motion":
                         result = decode_error_body(response.read(MAX_ERROR_BODY_BYTES + 1))
-                        if isinstance(result, dict) and any(k in result for k in ("state", "completed_progress_credit", "controller_session", "generation")):
-                            return completed_response(response.status, result, payload)
-                        if not isinstance(result, dict) or type(result.get("ok")) is not bool:
-                            return server_error(response.status)
-                        return result  # Existing legacy bounded success contract.
+                        # This client targets the native guarded bounded route.
+                        # A legacy success without its command certificate cannot
+                        # establish completion under Bridge-owned protection.
+                        return completed_response(response.status, result, payload)
                     return json.loads(response.read().decode("utf-8"))
                 except (ValueError, UnicodeError, RecursionError):
                     result = server_error(response.status)
@@ -277,6 +276,7 @@ class RobotBridgeClient:
                                 )
                             ),
                             "confirmed_forwarded": False,
+                            "completed_progress_credit": False,
                             "transport_attempted": True,
                             "bounded_forward_invalidated": linear_x > 0 and linear_y == 0,
                             "bounded_lateral_invalidated": linear_y != 0,
