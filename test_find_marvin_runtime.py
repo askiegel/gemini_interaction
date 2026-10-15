@@ -722,6 +722,8 @@ def test_behavior_manager_locked_post_action_tracker_flows_to_runtime_authorizat
     bbox = {"x1": 380, "y1": 150, "x2": 500, "y2": 250}
     stamp = 9001
     manager = object.__new__(BehaviorManager)
+    manager._marvin_v2_tracker_episode_lock = threading.RLock()
+    manager._marvin_v2_tracker_episode = None
     manager._continue_strict_v2_tracker_after_action = lambda: {
         "found": True, "stale": False, "target": "marvin", "label": "marvin",
         "source": "marvin_local_tracker",

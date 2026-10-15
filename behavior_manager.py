@@ -2609,7 +2609,14 @@ class BehaviorManager:
         for operator inspection only, never for execution.
         """
         continuity = self._continue_strict_v2_tracker_after_action()
-        if continuity is not None:
+        # An empty-response bridge buys one observation, not an indefinitely
+        # renewable identity lease. Refresh after self-motion, then reverify.
+        with self._marvin_v2_tracker_episode_lock:
+            semantic_refresh_due = bool(
+                (self._marvin_v2_tracker_episode or {}).get("semantic_gap_used")
+            )
+        if continuity is not None and not (
+                continuity.get("found") is True and semantic_refresh_due):
             if continuity.get("found") is not True:
                 preview = {
                     "ok": False, "preview": True, "authoritative": False,
@@ -3942,6 +3949,38 @@ class BehaviorManager:
         return "paused_for_search"
 
     @staticmethod
+    def _marvin_v2_locked_tracker_source_is_valid(preview, tracker):
+        """Validate the provenance of the two bounded locked-tracker paths."""
+        if not isinstance(preview, dict) or not isinstance(tracker, dict):
+            return False
+        stamp = tracker.get("source_frame_stamp_ns")
+        if type(stamp) is not int:
+            return False
+        if preview.get("post_action_tracker_continuity") is True:
+            floor = preview.get("post_action_source_frame_stamp_ns")
+            return type(floor) is int and stamp > floor
+        gap = preview.get("semantic_gap_tracker_continuity")
+        if not isinstance(gap, dict):
+            return False
+        floor = gap.get("previous_tracker_source_frame_stamp_ns")
+        semantic = gap.get("empty_selection_source_frame_stamp_ns")
+        identity = preview.get("identity_source_frame_stamp_ns")
+        elapsed = gap.get("elapsed_since_previous_tracker_seconds")
+        iou = gap.get("minimum_tracker_iou")
+        return bool(
+            type(floor) is int and type(semantic) is int
+            and type(identity) is int and identity < floor
+            and stamp > max(floor, semantic)
+            and type(gap.get("empty_response_count")) is int
+            and gap["empty_response_count"] == 1
+            and gap.get("semantic_refresh_required") is True
+            and type(elapsed) in (int, float) and math.isfinite(elapsed)
+            and 0 <= elapsed <= BehaviorManager.TARGET_MAX_AGE_SECONDS
+            and type(iou) in (int, float) and math.isfinite(iou)
+            and iou >= BehaviorManager.MARVIN_V2_TRACKER_ASSOCIATION_MIN_IOU
+        )
+
+    @staticmethod
     def _marvin_v2_preview_is_verified(preview):
         """Validate fresh semantic acquisition or locked post-action tracking."""
         if not isinstance(preview, dict):
@@ -3993,17 +4032,22 @@ class BehaviorManager:
             and validated_bbox is not None
             and tracker_bbox_matches
         )
-        if (preview.get("identity_source") == "marvin_locked_tracker_continuity"
-                and preview.get("post_action_tracker_continuity") is True):
+        if preview.get("identity_source") == "marvin_locked_tracker_continuity":
             episode = preview.get("marvin_tracking_episode")
+            post_action = preview.get("post_action_tracker_continuity") is True
             return bool(
                 preview.get("identity_confirmed") is True
                 and isinstance(episode, dict)
-                and episode.get("state") == "POST_ACTION_TRACKED"
+                and (
+                    post_action and episode.get("state") == "POST_ACTION_TRACKED"
+                    and type(episode.get("post_action_source_frame_stamp_ns")) is int
+                    and type(tracker_stamp) is int
+                    and tracker_stamp > episode["post_action_source_frame_stamp_ns"]
+                    or not post_action and episode.get("state") == "SEMANTIC_GAP_TRACKED"
+                )
                 and type(identity_stamp) is int
                 and tracker_stamp is not None and tracker_stamp > identity_stamp
-                and type(episode.get("post_action_source_frame_stamp_ns")) is int
-                and tracker_stamp > episode["post_action_source_frame_stamp_ns"]
+                and BehaviorManager._marvin_v2_locked_tracker_source_is_valid(preview, tracker)
                 and common_current_tracker
             )
         return bool(
@@ -6164,6 +6208,7 @@ class BehaviorManager:
                 "opencv_tracker", "identity_source_frame_stamp_ns",
                 "marvin_tracking_episode", "strict_tracker_episode",
                 "identity_selection", "coverage_candidate_bbox",
+                "semantic_gap_tracker_continuity",
             ):
                 if key in observation:
                     result[key] = observation[key]
@@ -6796,7 +6841,23 @@ class BehaviorManager:
             "provisional_tracker_initialized": False,
             "final_identity_rejection_reason": None,
         }
-        identity = semantic_vision.select_marvin_candidate(frame, candidates)
+        try:
+            identity = semantic_vision.select_marvin_candidate(frame, candidates)
+        except ValueError as exc:
+            # Empty SDK output is unknown, not an explicit negative identity.
+            # Tagged safety/token-limit refusals, malformed output and transport errors
+            # never enter this narrow continuation path.
+            if require_fresh_gemini and str(exc) == "marvin_candidate_selection_response_empty":
+                return self._continue_marvin_tracker_through_empty_selection(
+                    frame, execution_guard=execution_guard,
+                )
+            if require_fresh_gemini:
+                self._clear_marvin_v2_tracker_episode()
+            raise
+        except Exception:
+            if require_fresh_gemini:
+                self._clear_marvin_v2_tracker_episode()
+            raise
         if execution_guard is not None:
             execution_guard()
         if not isinstance(identity, dict) or identity.get("confirmed") is not True:
@@ -6933,6 +6994,130 @@ class BehaviorManager:
             return negative
 
     MARVIN_V2_TRACKER_ASSOCIATION_MIN_IOU = 0.70
+
+    def _marvin_semantic_gap_episode_is_current(self, episode):
+        if not isinstance(episode, dict):
+            return False
+        tracker = episode.get("last_tracker_diagnostics") or {}
+        receipt = episode.get("last_tracker_received_monotonic_seconds")
+        identity = episode.get("identity_source_frame_stamp_ns")
+        stamp = episode.get("last_tracker_source_frame_stamp_ns")
+        quality, threshold = tracker.get("quality"), tracker.get("threshold")
+        return bool(
+            episode.get("identity_source") == "gemini_marvin_candidate_selection"
+            and episode.get("marvin_tracker") is not None
+            and not episode.get("post_action_pending")
+            and not episode.get("semantic_gap_used")
+            and not episode.get("semantic_gap_in_progress")
+            and type(identity) is int and type(stamp) is int and identity < stamp
+            and tracker.get("source_frame_stamp_ns") == stamp
+            and tracker.get("active") is True and tracker.get("matched") is True
+            and type(quality) in (int, float) and math.isfinite(quality)
+            and type(threshold) in (int, float) and math.isfinite(threshold)
+            and quality >= max(threshold, MarvinLocalTracker.MIN_MATCH_QUALITY)
+            and type(receipt) in (int, float) and math.isfinite(receipt)
+            and 0 <= time.monotonic() - receipt <= self.TARGET_MAX_AGE_SECONDS
+        )
+
+    def prepare_find_marvin_tracker_handoff(self):
+        """Retain only a recent strict episode; this grants no motion authority."""
+        with self._marvin_v2_tracker_episode_lock:
+            if not self._marvin_semantic_gap_episode_is_current(self._marvin_v2_tracker_episode):
+                self._marvin_v2_tracker_episode = None
+
+    def _continue_marvin_tracker_through_empty_selection(self, frame, *, execution_guard):
+        """One empty response may bridge the same tracker on two newer frames.
+
+        The entire hiatus is bounded by the existing 3 s target freshness
+        window. No reseeding, proposal switching or semantic retry occurs.
+        """
+        negative = {"found": False, "reason": "marvin_empty_selection_reacquisition_required"}
+        with self._marvin_v2_tracker_episode_lock:
+            current = self._marvin_v2_tracker_episode
+            if not self._marvin_semantic_gap_episode_is_current(current):
+                self._marvin_v2_tracker_episode = None
+                return negative
+            episode = dict(current)
+            current["semantic_gap_in_progress"] = True
+        tracker = episode["marvin_tracker"]
+        previous_stamp = episode["last_tracker_source_frame_stamp_ns"]
+        empty_stamp = _valid_source_frame_stamp(getattr(frame, "source_frame_stamp_ns", None))
+        diagnostics = {}
+        try:
+            if empty_stamp is None or empty_stamp <= previous_stamp:
+                raise ValueError("empty_selection_camera_not_newer")
+            boundary = time.monotonic()
+            deadline = episode["last_tracker_received_monotonic_seconds"] + self.TARGET_MAX_AGE_SECONDS
+            floor = max(previous_stamp, empty_stamp)
+
+            def fresh_frame():
+                nonlocal floor
+                fresh = self._fetch_strict_v2_frame_after(
+                    floor, execution_guard=execution_guard,
+                    minimum_received_monotonic_seconds=boundary, deadline=deadline,
+                )
+                floor = fresh.source_frame_stamp_ns
+                return fresh
+
+            confirmed = self._confirm_marvin_local_tracker_frames(
+                tracker, minimum_timestamp=episode.get("last_tracker_received_at"),
+                minimum_source_frame_stamp_ns=previous_stamp, fetch_frame=fresh_frame,
+                check_current=execution_guard, diagnostics=diagnostics,
+            )
+            if (confirmed is None or time.monotonic() > deadline
+                    or len(diagnostics.get("frames", [])) < self.MARVIN_LOCAL_TRACKER_MIN_SUPPORT):
+                raise ValueError("empty_selection_tracker_continuity_lost")
+            boxes = [episode["tracker_bbox"]]
+            for sample in diagnostics["frames"]:
+                opencv = sample.get("opencv_tracker") or {}
+                quality, threshold = opencv.get("quality"), opencv.get("threshold")
+                receipt = opencv.get("received_monotonic_seconds")
+                if (opencv.get("active") is not True or opencv.get("matched") is not True
+                        or type(quality) not in (int, float) or not math.isfinite(quality)
+                        or type(threshold) not in (int, float) or not math.isfinite(threshold)
+                        or quality < max(threshold, MarvinLocalTracker.MIN_MATCH_QUALITY)
+                        or type(receipt) not in (int, float) or not math.isfinite(receipt)
+                        or not boundary <= receipt <= time.monotonic()
+                        or time.monotonic() - receipt > 1.0):
+                    raise ValueError("empty_selection_tracker_evidence_invalid")
+                boxes.append(opencv["bbox"])
+            iou = min(self._target_bbox_iou({"bbox": a}, {"bbox": b})
+                      for a, b in zip(boxes, boxes[1:]))
+            if iou < self.MARVIN_V2_TRACKER_ASSOCIATION_MIN_IOU:
+                raise ValueError("empty_selection_tracker_identity_discontinuity")
+            opencv = confirmed["opencv_tracker"]
+            gap = {"previous_tracker_source_frame_stamp_ns": previous_stamp,
+                   "empty_selection_source_frame_stamp_ns": empty_stamp,
+                   "elapsed_since_previous_tracker_seconds": time.monotonic() - episode["last_tracker_received_monotonic_seconds"],
+                   "minimum_tracker_iou": iou, "empty_response_count": 1,
+                   "semantic_refresh_required": True}
+            confirmed.update(identity_confirmed=True, identity_source="marvin_locked_tracker_continuity",
+                identity_source_frame_stamp_ns=episode["identity_source_frame_stamp_ns"],
+                motion_authorized_marvin_candidate=True, source_frame_stamp_ns=opencv["source_frame_stamp_ns"],
+                semantic_gap_tracker_continuity=gap,
+                marvin_tracking_episode={"episode_id": episode["episode_id"], "state": "SEMANTIC_GAP_TRACKED"},
+                strict_tracker_episode=self._strict_v2_tracker_diagnostic(
+                    active=True, continued=True, initialized=False, accepted=True, iou=iou,
+                    reason="empty_selection_tracker_continuity_matched"))
+            if execution_guard is not None:
+                execution_guard()
+            with self._marvin_v2_tracker_episode_lock:
+                if self._marvin_v2_tracker_episode is not current:
+                    return negative  # Never resurrect a cleared/replaced episode.
+                episode.update(tracker_bbox=dict(opencv["bbox"]), last_tracker_diagnostics=dict(opencv),
+                    last_tracker_source_frame_stamp_ns=opencv["source_frame_stamp_ns"],
+                    last_tracker_received_at=confirmed["source_timestamp"],
+                    last_tracker_received_monotonic_seconds=confirmed["received_monotonic_seconds"],
+                    semantic_gap_used=True, semantic_gap_in_progress=False)
+                self._marvin_v2_tracker_episode = episode
+            return confirmed
+        except _SemanticPreempted:
+            self._clear_marvin_v2_tracker_episode()
+            raise
+        except Exception as exc:
+            negative["continuity_failure"] = str(exc)
+            self._clear_marvin_v2_tracker_episode()
+            return negative
 
     def _clear_marvin_v2_tracker_episode(self):
         with self._marvin_v2_tracker_episode_lock:
@@ -7080,6 +7265,7 @@ class BehaviorManager:
                 last_tracker_received_monotonic_seconds=result.get("received_monotonic_seconds"),
                 identity_source=identity_source,
                 identity_source_frame_stamp_ns=identity_source_frame_stamp_ns,
+                semantic_gap_used=False,
                 episode_id=(episode.get("episode_id") or
                             "marvin-v2-" + str(identity_source_frame_stamp_ns)),
             )

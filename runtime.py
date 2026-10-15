@@ -648,6 +648,7 @@ class CognitiveRuntime:
             session_continuity_used=(identity_source == "marvin_session_continuity"),
             marvin_tracking_episode=preview.get("marvin_tracking_episode"),
             post_action_tracker_diagnostics=preview.get("post_action_tracker_diagnostics"),
+            semantic_gap_tracker_continuity=preview.get("semantic_gap_tracker_continuity"),
             identity_selection=(dict(preview["identity_selection"])
                 if isinstance(preview.get("identity_selection"), dict) else None),
         )
@@ -655,6 +656,8 @@ class CognitiveRuntime:
             preview.get("post_action_tracker_continuity") is True
             and identity_source == "marvin_locked_tracker_continuity"
         )
+        if isinstance(common["semantic_gap_tracker_continuity"], dict):
+            common["fresh_gemini_required"] = False
         if post_action_continuity:
             common["fresh_gemini_required"] = False
             common["post_action_tracker_continuity"] = True
@@ -849,12 +852,7 @@ class CognitiveRuntime:
                 "marvin_locked_tracker_continuity",
             }
             or (result.get("identity_source") == "marvin_locked_tracker_continuity"
-                and (result.get("post_action_tracker_continuity") is not True
-                     or type(result.get("post_action_source_frame_stamp_ns")) is not int
-                     or not isinstance(tracker, dict)
-                     or type(tracker.get("source_frame_stamp_ns")) is not int
-                     or tracker["source_frame_stamp_ns"]
-                     <= result["post_action_source_frame_stamp_ns"]))
+                and not BehaviorManager._marvin_v2_locked_tracker_source_is_valid(result, tracker))
             or state != VISUAL_READY_TO_ALIGN
             or decision not in {"TURN_LEFT", "TURN_RIGHT"}
             or not isinstance(tracker, dict)
@@ -917,12 +915,7 @@ class CognitiveRuntime:
                 "marvin_locked_tracker_continuity",
             }
             or (result.get("identity_source") == "marvin_locked_tracker_continuity"
-                and (result.get("post_action_tracker_continuity") is not True
-                     or type(result.get("post_action_source_frame_stamp_ns")) is not int
-                     or not isinstance(tracker, dict)
-                     or type(tracker.get("source_frame_stamp_ns")) is not int
-                     or tracker["source_frame_stamp_ns"]
-                     <= result["post_action_source_frame_stamp_ns"]))
+                and not BehaviorManager._marvin_v2_locked_tracker_source_is_valid(result, tracker))
             or not isinstance(tracker, dict)
             or tracker.get("active") is not True
             or tracker.get("matched") is not True
@@ -975,12 +968,14 @@ class CognitiveRuntime:
             "received_monotonic_seconds": tracker.get("received_monotonic_seconds"),
             "identity_confirmed": True,
             "identity_source": result["identity_source"],
+            "identity_source_frame_stamp_ns": result.get("identity_source_frame_stamp_ns"),
             "post_action_tracker_continuity": (
                 result.get("post_action_tracker_continuity") is True
             ),
             "post_action_source_frame_stamp_ns": result.get(
                 "post_action_source_frame_stamp_ns"
             ),
+            "semantic_gap_tracker_continuity": result.get("semantic_gap_tracker_continuity"),
             "opencv_tracker": dict(tracker),
             "controller_state": state,
             "controller_decision": decision,
@@ -2660,7 +2655,11 @@ class CognitiveRuntime:
         self._reset_marvin_alignment_consensus()
         clear_episode = getattr(behavior, "_clear_marvin_v2_tracker_episode", None)
         if proof_continuation is None and callable(clear_episode):
-            clear_episode()  # A new mission requires fresh semantic acquisition.
+            handoff = getattr(behavior, "prepare_find_marvin_tracker_handoff", None)
+            if proof_max_physical_actions is None and callable(handoff):
+                handoff()  # Retains recent identity only; fresh semantics/frames still required.
+            else:
+                clear_episode()  # Proof boundaries still require new semantic acquisition.
 
         def current():
             mission_current = self._marvin_mission_context_is_current(mission, control_generation)
@@ -3266,6 +3265,8 @@ class CognitiveRuntime:
                 "find_marvin_search_fresh_frame_unavailable",
             }:
                 return finish("REVERIFY_REQUIRED", observation["perception_reason"])
+            if observation.get("perception_reason") == "marvin_empty_selection_reacquisition_required":
+                return finish("REVERIFY_REQUIRED", "marvin_empty_selection_reacquisition_required")
             receipt = observation.get("received_monotonic_seconds")
             if not self._marvin_motion_stamp_is_fresh(stamp, receipt):
                 return finish("BLOCKED", "marvin_motion_observation_stale")
@@ -5548,11 +5549,7 @@ class CognitiveRuntime:
                     or (
                         observation.get("identity_source")
                         == "marvin_locked_tracker_continuity"
-                        and observation.get("post_action_tracker_continuity") is True
-                        and type(observation.get("post_action_source_frame_stamp_ns")) is int
-                        and type(source_frame_stamp_ns) is int
-                        and source_frame_stamp_ns
-                        > observation["post_action_source_frame_stamp_ns"]
+                        and BehaviorManager._marvin_v2_locked_tracker_source_is_valid(observation, tracker)
                     )
                 )
                 and observation.get("controller_state") == (
@@ -5769,11 +5766,7 @@ class CognitiveRuntime:
                     or (
                         observation.get("identity_source")
                         == "marvin_locked_tracker_continuity"
-                        and observation.get("post_action_tracker_continuity") is True
-                        and type(observation.get("post_action_source_frame_stamp_ns")) is int
-                        and type(source_frame_stamp_ns) is int
-                        and source_frame_stamp_ns
-                        > observation["post_action_source_frame_stamp_ns"]
+                        and BehaviorManager._marvin_v2_locked_tracker_source_is_valid(observation, tracker)
                     )
                 )
                 and observation.get("controller_state") == VISUAL_READY_TO_APPROACH
