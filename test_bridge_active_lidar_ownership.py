@@ -265,17 +265,18 @@ def test_non_equivalent_legacy_turn_policy_is_retained():
     assert turn.status()['active_lidar_safety_owner'] == 'cognitive'
 
 
-def test_native_turn_retains_deadline_and_operator_stop_fences():
+def test_native_turn_delegates_deadline_and_retains_operator_stop_fences():
     client = RobotBridgeClient(base_url='http://offline.invalid')
     client.stop = Mock(return_value={'ok': True})
     turn, _ = monitor(client)
     turn.begin_transport(time.monotonic()-.55)
     tick(turn)
-    assert turn.status()['deadline_stop_attempted'] and client.stop.called
+    assert not turn.status()['deadline_stop_attempted'] and not client.stop.called
+    assert turn.status()['bounded_duration_owner'] == 'robot_bridge'
     assert turn.cancel('operator_stop')
     invalidated, _, stop = turn.finalize()
     assert invalidated and stop[0]['ok']
-    assert client.stop.call_count == 2
+    assert client.stop.call_count == 1
 
 
 def test_legacy_success_cannot_claim_native_guarded_completion(monkeypatch):

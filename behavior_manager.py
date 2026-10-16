@@ -72,14 +72,14 @@ LOCAL_AVOIDANCE_LIDAR_POLL_INTERVAL_SECONDS = 0.05
 
 
 class _GuardedTurnMonitor:
-    """Monitor one explicit bounded turn without owning transport locks."""
+    """Fence turn cancellation; native bounded transport owns motion duration."""
 
     INTERVAL_SECONDS = 0.05
     # A short producer scheduling gap is tolerated only after the turn has
     # already passed its initial LiDAR validation.  This does not change the
     # global LiDAR freshness contract or any forward-motion authorization.
     TRANSIENT_STALE_GRACE_SECONDS = 0.15
-    # Allow the synchronous bounded Robot Bridge request to return after the
+    # Legacy/custom transports allow their synchronous request to return after the
     # physical window.  This covers the bridge's documented post-zero delay
     # and ordinary scheduling/HTTP overhead; it never changes the requested
     # motion duration.
@@ -113,8 +113,9 @@ class _GuardedTurnMonitor:
         # Only the native bounded route with equivalent full-circle protection
         # replaces continuous HTTP revalidation. Legacy broad-sector policy and
         # custom transports retain their additional checks.
+        self._native_bounded = type(robot) is RobotBridgeClient
         self._bridge_guarded = (
-            type(robot) is RobotBridgeClient
+            self._native_bounded
             and safety_mode == ROTATIONAL_SWEPT_FOOTPRINT
         )
         self._lock = threading.RLock()
@@ -176,10 +177,15 @@ class _GuardedTurnMonitor:
             self._pending = False
             self._active = True
             self._dispatch_started = dispatch_started
-            self._deadline = dispatch_started + self.duration
-            self._completion_deadline = (
-                self._deadline + self.TRANSPORT_COMPLETION_ALLOWANCE_SECONDS
-            )
+            # Native /motion assigns its immutable deadline after admission.
+            # Starting a second motion clock before HTTP would include transport
+            # latency and cancel valid native execution. Its existing HTTP
+            # timeout/uncertain-result STOP fence remains in RobotBridgeClient.
+            if not self._native_bounded:
+                self._deadline = dispatch_started + self.duration
+                self._completion_deadline = (
+                    self._deadline + self.TRANSPORT_COMPLETION_ALLOWANCE_SECONDS
+                )
             self._transport_began = True
             return True
 
@@ -209,6 +215,8 @@ class _GuardedTurnMonitor:
             if after_deadline:
                 self._physical_deadline_reached = True
             self._normal_completion = bool(accepted and not self._invalidated)
+            if self._native_bounded:
+                self._window_complete = self._normal_completion
             self._completed_after_deadline = bool(
                 self._normal_completion
                 and after_deadline
@@ -231,6 +239,8 @@ class _GuardedTurnMonitor:
 
     def wait_for_window(self):
         """Keep the monitor alive through the approved monotonic window."""
+        if self._native_bounded:
+            return not self.is_invalidated()  # Completion already came from Bridge.
         while not self._stop.is_set():
             with self._lock:
                 if self._invalidated:
@@ -454,6 +464,8 @@ class _GuardedTurnMonitor:
                 "monitor_running": self.running,
                 "active_lidar_safety_owner": (
                     "robot_bridge" if self._bridge_guarded else "cognitive"),
+                "bounded_duration_owner": (
+                    "robot_bridge" if self._native_bounded else "cognitive"),
                 "direction": self.direction,
                 "pending_turn": self._pending,
                 "active_turn": self._active,
