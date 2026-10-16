@@ -3031,7 +3031,8 @@ class CognitiveRuntime:
                 detour_context = detour_context.retire(Frontier(recovery["producer_session"],
                     recovery["selected_sequence_floor"], old_stamp))
             camera_floor_stamp = max(camera_floor_stamp or 0, old_stamp)
-            self._marvin_alignment_observation = None
+            # Fresh semantic reacquisition starts a new geometry episode too.
+            self._reset_marvin_alignment_consensus()
             if callable(clear_episode):
                 clear_episode()
             if not recovery["ok"]:

@@ -1,0 +1,110 @@
+{
+  "mission_id": "mission-0c6f3f1b",
+  "source_file": "/home/tkieg/mayday_acceptance_runs/find-marvin-native-turn-owner-live-20261016T002658Z/final-details.json",
+  "source_sha256": "d6fce26bf7ead5289444ff5c1ff4b011036731c25be7924434712b38ef018c5b",
+  "completed_prefix": [
+    {
+      "action": 1,
+      "kind": "alignment",
+      "error_px": 173.5,
+      "frame_ns": "1792110466289109004"
+    },
+    {
+      "action": 2,
+      "kind": "alignment",
+      "error_px": 155.5,
+      "frame_ns": "1792110467261162294"
+    },
+    {
+      "action": 3,
+      "kind": "alignment",
+      "error_px": 172.5,
+      "frame_ns": "1792110468069648738"
+    },
+    {
+      "action": 4,
+      "kind": "alignment",
+      "error_px": 170.5,
+      "frame_ns": "1792110468818493755"
+    },
+    {
+      "action": 5,
+      "kind": "alignment",
+      "error_px": 150.5,
+      "frame_ns": "1792110469528407498"
+    },
+    {
+      "action": 6,
+      "kind": "alignment",
+      "error_px": 126.5,
+      "frame_ns": "1792110470364612592"
+    },
+    {
+      "action": 7,
+      "kind": "alignment",
+      "error_px": 83.5,
+      "frame_ns": "1792110471233655331"
+    },
+    {
+      "action": 8,
+      "kind": "alignment",
+      "error_px": 96.5,
+      "frame_ns": "1792110472064963800"
+    },
+    {
+      "action": 9,
+      "kind": "alignment",
+      "error_px": 65.0,
+      "frame_ns": "1792110477390615387"
+    },
+    {
+      "action": 10,
+      "kind": "forward",
+      "error_px": 25.0,
+      "frame_ns": "1792110483825497964"
+    },
+    {
+      "action": 11,
+      "kind": "forward",
+      "error_px": 18.0,
+      "frame_ns": "1792110484667225990"
+    },
+    {
+      "action": 12,
+      "kind": "forward",
+      "error_px": 42.0,
+      "frame_ns": "1792110485490035715"
+    },
+    {
+      "action": 13,
+      "kind": "forward",
+      "error_px": 48.0,
+      "frame_ns": "1792110486290171164"
+    },
+    {
+      "action": 14,
+      "kind": "alignment",
+      "error_px": 88.5,
+      "frame_ns": "1792110491432771775"
+    }
+  ],
+  "tracker_loss_after_actions": [
+    8,
+    13
+  ],
+  "post_tenth_turn": {
+    "error_px": 88.5,
+    "frame_ns": "1792110492177751031",
+    "quality": 0.9907189607620239,
+    "identity_source": "marvin_locked_tracker_continuity"
+  },
+  "stationary_scan_age_seconds": 0.30973532499046996,
+  "reacquired": {
+    "error_px": 76.5,
+    "semantic_frame_ns": "1792110494141172323",
+    "tracker_frame_ns": "1792110497047162087",
+    "quality": 0.9637491703033447
+  },
+  "old_geometry_reason": "geometry_identity_source_changed",
+  "old_terminal_reason": "marvin_alignment_observation_not_current"
+}
