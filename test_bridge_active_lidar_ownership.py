@@ -532,3 +532,48 @@ def test_current_client_through_unchanged_flask_routes(rig, monkeypatch, axes, i
     assert result['controller_gait_zero'] and not g.last['active']
     assert not any(path == '/stop' for _, path in requests)
     assert sum(path == '/motion' for _, path in requests) == 1
+
+
+@pytest.mark.parametrize('fault', ['intrusion', 'missing_guard'])
+def test_late_stationary_recovery_cannot_bypass_native_guard(tmp_path, monkeypatch, rig, fault):
+    from test_marvin_late_clearance_recovery import episode
+    from test_find_marvin_closed_loop import run
+    bundle, state = episode(tmp_path, monkeypatch)
+    rt, _, robot, _, _ = bundle
+    g, node, _, manager = rig
+    native, _, _, requests = connected(rig, monkeypatch)
+    forward = robot.move_forward
+    def guarded_forward(**kwargs):
+        if not state['injected']:
+            return forward(**kwargs)
+        if fault == 'missing_guard':
+            manager.lidar_reader = None
+        else:
+            start = g.clock()
+            def native_scan():
+                sample = clear_lidar(g.clock)
+                if g.clock() - start > 90_000_000:
+                    sample['scan']['ranges'][20] = .4
+                return sample
+            manager.lidar_reader = native_scan
+        state['native_result'] = native.move_forward(**kwargs)
+        return state['native_result']
+    robot.move_forward = guarded_forward
+    result = run(rt)
+    native_result = state['native_result']
+    assert result['state'] != 'ARRIVED'
+    assert state['waits'][0]['ok'] and state['waits'][0]['entry_point'] == 'late_pre_dispatch_clearance'
+    assert not native_result['ok'] and not native_result['completed_progress_credit']
+    assert result['actions_executed'] == result['completed_forward_actions'] == 1
+    if fault == 'intrusion':
+        assert native_result['evidence_valid'] and native_result['state'] == 'interrupted'
+        assert native_result['reason'].startswith('active_lidar_')
+        assert native_result['stop_certificate']['gait_zero']
+        assert node.messages[-1]['operation'] == STOP
+        assert result['interrupted_forward_attempts'] == 1
+    else:
+        assert native_result['reason'] == 'active_lidar_unavailable'
+        assert not native_result['transport_attempted']
+        assert not any(packet['operation'] == START for packet in node.messages)
+    assert not g.last['active'] and g.last['gait_zero']
+    assert sum(path == '/motion' for _, path in requests) == 1

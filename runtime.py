@@ -67,6 +67,7 @@ from local_reactive_obstacle_avoidance import (
     decide_forward_reaction,
 )
 from local_motion_safety_envelope import (
+    EXPECTED_LIDAR_FRAME,
     MINIMUM_VALID_SAMPLES_PER_REQUIRED_SECTOR,
     OCTANT_SECTORS,
     evaluate_local_motion_safety, _distance_to_segment, LOCAL_LIDAR_PROTECTED_RADIUS_M,
@@ -779,6 +780,17 @@ class CognitiveRuntime:
             return dict(base, reason="find_marvin_lidar_not_current")
         state = read_lidar_state(lidar, expected_session=session)
         if not _marvin_alignment_lidar_is_current(state, session):
+            # Retain the actual aged copy only for a previously complete, clear
+            # planning snapshot that expired here. This is sensing-recovery
+            # eligibility, never motion authority or a refreshed timestamp.
+            if (state.get("reason") == "stale"
+                    and _marvin_complete_lidar_is_current(lidar, session)
+                    and state.get("effective_age_seconds", 0) > MAXIMUM_EFFECTIVE_AGE_SECONDS
+                    and lidar["local_motion_geometry"].get("frame_id") == EXPECTED_LIDAR_FRAME
+                    and self._marvin_interrupted_envelope_clear(lidar, {
+                        "axes": (FIND_MARVIN_FORWARD_SPEED_MPS, 0., 0.), "duration": .50})):
+                return dict(base, reason="find_marvin_lidar_not_current",
+                            expired_planning_snapshot=state)
             return dict(base, reason="find_marvin_lidar_not_current")
         sequence = state["acquisition_sequence"]
         base["acquisition_sequence"] = sequence
@@ -1680,7 +1692,7 @@ class CognitiveRuntime:
                 evidence.update(wait_poll_count=wait["poll_count"],
                     wait_elapsed_seconds=wait["wait_elapsed_seconds"],
                     new_sequence=(wait.get("snapshot") or {}).get("acquisition_sequence") if ok else None)
-                if entry_point == "pre_dispatch_forward_currentness":
+                if entry_point in {"pre_dispatch_forward_currentness", "late_pre_dispatch_clearance"}:
                     evidence["new_native_identity"] = _marvin_native_lidar_identity(wait.get("snapshot")) if ok else None
             return evidence
 
@@ -1730,7 +1742,7 @@ class CognitiveRuntime:
         if not floors:
             return done("find_marvin_lidar_acquisition_sequence_invalid")
         native_floor = None
-        if entry_point == "pre_dispatch_forward_currentness":
+        if entry_point in {"pre_dispatch_forward_currentness", "late_pre_dispatch_clearance"}:
             native_floor = _marvin_native_lidar_identity(sample)
             evidence["previous_native_identity"] = native_floor
             if native_floor is None:
@@ -3472,6 +3484,15 @@ class CognitiveRuntime:
                     # direct-path check and both advisory escape candidates.
                     standoff = self._marvin_v2_motion_clearance(tracker, lidar)
                     if standoff.get("ok") is not True:
+                        expired = standoff.get("expired_planning_snapshot")
+                        if isinstance(expired, dict):
+                            floors = [("planning_snapshot", session, sequence)]
+                            if prior:
+                                floors.append(("last_action_jit", prior[0], prior[1]))
+                            reason = recover_stationary(expired, "late_pre_dispatch_clearance", floors)
+                            if reason is None:
+                                continue
+                            return finish("BLOCKED", reason)
                         return finish("BLOCKED", standoff.get("reason"))
                     if not standoff.get("arrived_at_marvin"):
                         forward_duration = .50
